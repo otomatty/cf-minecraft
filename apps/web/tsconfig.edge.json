@@ -1,0 +1,29 @@
+{
+	"compilerOptions": {
+		"target": "es2024",
+		"lib": [
+			"es2024"
+		],
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"types": [],
+		"strict": true,
+		"noEmit": true,
+		"noUncheckedIndexedAccess": false,
+		"allowImportingTsExtensions": true,
+		"erasableSyntaxOnly": true,
+		"isolatedModules": true,
+		"verbatimModuleSyntax": true,
+		"skipLibCheck": true
+	},
+	"include": [
+		"src/edge",
+		"src/shared",
+		"src/wasm-module.d.ts",
+		"cloudflare.config.ts",
+		".cloudflare/types"
+	],
+	"exclude": [
+		"src/**/*.test.ts"
+	]
+}

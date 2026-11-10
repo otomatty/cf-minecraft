@@ -1,0 +1,13 @@
+[package]
+name = "wasm-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sim.workspace = true
+worldgen.workspace = true
+world.workspace = true

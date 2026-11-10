@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+jmath = { path = "crates/jmath" }
+world = { path = "crates/world" }
+worldgen = { path = "crates/worldgen" }
+protocol = { path = "crates/protocol" }
+sim = { path = "crates/sim" }
+mesher = { path = "crates/mesher" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

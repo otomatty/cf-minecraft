@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>maincraft M0</title>
+		<link rel="icon" href="data:," />
+		<style>
+			html,
+			body {
+				margin: 0;
+				height: 100%;
+				overflow: hidden;
+				background: #c0d8ff;
+				font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+			}
+			#view {
+				position: fixed;
+				inset: 0;
+				width: 100%;
+				height: 100%;
+				display: block;
+			}
+			#hud {
+				position: fixed;
+				top: 6px;
+				left: 6px;
+				margin: 0;
+				padding: 4px 6px;
+				font-size: 13px;
+				line-height: 1.35;
+				color: #fff;
+				background: rgba(0, 0, 0, 0.45);
+				white-space: pre;
+				pointer-events: none;
+			}
+			#crosshair {
+				position: fixed;
+				left: 50%;
+				top: 50%;
+				width: 18px;
+				height: 18px;
+				transform: translate(-50%, -50%);
+				pointer-events: none;
+				mix-blend-mode: difference;
+			}
+			#crosshair::before,
+			#crosshair::after {
+				content: "";
+				position: absolute;
+				background: #fff;
+			}
+			#crosshair::before {
+				left: 8px;
+				top: 0;
+				width: 2px;
+				height: 18px;
+			}
+			#crosshair::after {
+				left: 0;
+				top: 8px;
+				width: 18px;
+				height: 2px;
+			}
+			#hotbar {
+				position: fixed;
+				left: 50%;
+				bottom: 10px;
+				transform: translateX(-50%);
+				display: flex;
+				gap: 2px;
+				padding: 2px;
+				background: rgba(0, 0, 0, 0.5);
+				pointer-events: none;
+			}
+			#hotbar canvas {
+				width: 40px;
+				height: 40px;
+				image-rendering: pixelated;
+				border: 3px solid #555;
+				box-sizing: content-box;
+			}
+			#hotbar canvas.selected {
+				border-color: #fff;
+			}
+			#overlay {
+				position: fixed;
+				inset: 0;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				background: rgba(0, 0, 0, 0.55);
+				color: #fff;
+				cursor: pointer;
+			}
+			#overlay[hidden] {
+				display: none;
+			}
+			#panel {
+				max-width: 520px;
+				padding: 20px 26px;
+				background: rgba(20, 20, 20, 0.85);
+				border: 2px solid #888;
+				font-size: 14px;
+				line-height: 1.7;
+			}
+			#panel h1 {
+				margin: 0 0 8px;
+				font-size: 20px;
+				font-weight: 600;
+			}
+			#panel p {
+				margin: 6px 0;
+			}
+			#panel .error {
+				color: #ff9a9a;
+				white-space: pre-wrap;
+			}
+			kbd {
+				padding: 0 5px;
+				border: 1px solid #aaa;
+				border-radius: 3px;
+				background: #333;
+			}
+		</style>
+	</head>
+	<body>
+		<canvas id="view"></canvas>
+		<pre id="hud">読み込み中…</pre>
+		<div id="crosshair"></div>
+		<div id="hotbar"></div>
+		<div id="overlay">
+			<div id="panel">
+				<h1>maincraft M0</h1>
+				<p id="status">読み込み中…</p>
+				<p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動（<kbd>W</kbd>を2回でダッシュ）　<kbd>Space</kbd> 上昇　<kbd>Shift</kbd> 下降</p>
+				<p>左クリック 破壊　右クリック 設置　中クリック ブロック選択　<kbd>1</kbd>〜<kbd>9</kbd> / ホイール 切替</p>
+				<p><kbd>F8</kbd> 決定論チェック　<kbd>Esc</kbd> 一時停止</p>
+			</div>
+		</div>
+		<script type="module" src="/src/client/main.ts"></script>
+	</body>
+</html>

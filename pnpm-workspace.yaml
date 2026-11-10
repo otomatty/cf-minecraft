@@ -1,0 +1,7 @@
+packages:
+  - "apps/*"
+
+# Approve build scripts needed by the Worker toolchain.
+allowBuilds:
+  esbuild: true
+  workerd: true

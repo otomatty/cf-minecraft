@@ -1,0 +1,9 @@
+[package]
+name = "worldgen"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+jmath.workspace = true
+world.workspace = true

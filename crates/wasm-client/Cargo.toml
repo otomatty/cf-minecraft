@@ -1,0 +1,13 @@
+[package]
+name = "wasm-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+world.workspace = true
+protocol.workspace = true
+mesher.workspace = true

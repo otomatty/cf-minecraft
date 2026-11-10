@@ -1,0 +1,22 @@
+{
+  "name": "maincraft",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "build:wasm": "node tools/build-wasm.mjs",
+    "dev": "pnpm build:wasm && pnpm --filter web dev",
+    "build": "pnpm build:wasm && pnpm --filter web build",
+    "deploy": "pnpm build:wasm && pnpm --filter web run deploy",
+    "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm test:core && pnpm test:host",
+    "test:core": "cargo test --workspace",
+    "test:host": "node --test apps/web/src/shared/tick-pacer.test.ts",
+    "check:determinism": "node tools/determinism.mjs",
+    "check:ticks": "node tools/tick-probe.mjs",
+    "test:e2e": "node tools/e2e.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.16.0"
+  }
+}
