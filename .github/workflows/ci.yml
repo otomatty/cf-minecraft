@@ -11,10 +11,11 @@ permissions:
   contents: read
 
 # A new commit on a pull request cancels the run for the previous one.
-# Runs on main are not interrupted and run one at a time, but GitHub does not
-# guarantee their order: the `deploy` job checks that again for itself.
+# Every other run (a push to main, a run started by hand) gets a group of its
+# own, so it never waits for, or is cancelled by, another run. CI changes
+# nothing, so its runs may overlap; deploy.yml does its own ordering.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -102,13 +103,15 @@ jobs:
       - name: Production build
         run: pnpm --filter web build
 
-      # Validates the Build Output that the `deploy` job uploads on main.
-      # Sends nothing and needs no credentials, so it also runs for forks.
+      # Validates the Build Output that deploy.yml publishes. Sends nothing and
+      # needs no credentials, so it also runs for forks.
       - name: Deploy check (dry run)
         working-directory: apps/web
         run: pnpm exec cf deploy --prebuilt --mode production --dry-run
 
-      # Uploaded before the dev server starts, so it is exactly the production build.
+      # This artifact is what deploy.yml publishes: built once, here. Uploaded
+      # before the dev server starts, so it is exactly the production build.
+      # Kept for 30 days so that an earlier build can be deployed again.
       - name: Upload Build Output
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -117,7 +120,7 @@ jobs:
           # .cloudflare is a hidden directory; without this nothing is uploaded.
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
       - name: Start dev server
         run: .github/scripts/start-dev-server.sh
@@ -192,65 +195,3 @@ jobs:
           for result in $RESULTS; do
             [ "$result" = "success" ] || exit 1
           done
-
-  # Deploys the Build Output from the `build` job: built once, checked by every
-  # required job, then uploaded as it is. Nothing is rebuilt here.
-  #
-  # Off until the repository variable DEPLOY_ENABLED is set to "true"
-  # (Settings > Secrets and variables > Actions > Variables), so merging this
-  # workflow deploys nothing by itself. See "自動公開" in README.md.
-  deploy:
-    name: Deploy to Cloudflare
-    needs: [required]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    # Secrets stored on this environment reach only this job.
-    environment: production
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-
-      # Installs the cf CLI at the version in the lockfile.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Download Build Output
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: build-output
-          path: apps/web/.cloudflare/output
-
-      # Runs in a concurrency group can start out of order, and an old run can
-      # be re-run by hand. Either would put older code back into production, so
-      # deploy only while this commit is still what main points at.
-      - name: Check that this commit is the tip of main
-        id: tip
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$tip" = "$GITHUB_SHA" ]; then
-            echo "current=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Deploy skipped: main is at $tip, this run built $GITHUB_SHA."
-          fi
-
-      # --mode must be the mode the build recorded (production). The tag and
-      # message make the Worker version traceable to the commit and the run.
-      - name: Deploy
-        if: ${{ steps.tip.outputs.current == 'true' }}
-        working-directory: apps/web
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec cf deploy --prebuilt --mode production --tag "${GITHUB_SHA::7}" --message "GitHub Actions run $GITHUB_RUN_ID, commit $GITHUB_SHA"

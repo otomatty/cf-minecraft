@@ -1,0 +1,222 @@
+name: Deploy
+
+# Publishes a build that CI has already checked. CI (ci.yml) answers "is this
+# commit good?" and changes nothing; this workflow changes production. It never
+# runs the code of a pull request, and it is the only workflow that reads the
+# Cloudflare credentials.
+
+on:
+  # After the CI workflow finishes. The job only goes on for a successful run
+  # for a push to main.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # By hand: deploy the build of a successful CI run on main again, for example
+  # to go back to an earlier one. Not affected by DEPLOY_ENABLED.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID of the CI run whose build to deploy (the number in its URL)"
+        required: true
+        type: string
+      dry_run:
+        description: "Only check the build (cf deploy --dry-run); deploy nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # To read the CI run and download its Build Output.
+  actions: read
+
+# Real deploys run one at a time, and one that has started is never cancelled.
+# One that is still waiting is cancelled when another is queued. That loses
+# nothing: an automatic deploy does not publish "its" CI run but whatever main
+# points at when it runs (see the `plan` job), so the run that takes the place
+# of a cancelled one deploys the latest build. Only runs that can deploy share
+# the queue; a dry run, and a run that the `plan` job's `if` skips, each get a
+# group of their own. Keep the condition in step with that `if`.
+concurrency:
+  group: >-
+    ${{
+      ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) ||
+       (github.event_name == 'workflow_run' &&
+        vars.DEPLOY_ENABLED == 'true' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'))
+      && 'deploy-production' || format('deploy-idle-{0}', github.run_id)
+    }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Naming bash explicitly turns on `-eo pipefail`.
+    shell: bash
+
+env:
+  # Keep in step with ci.yml.
+  NODE_VERSION: "22"
+  # No usage telemetry from the cf CLI.
+  CF_SEND_TELEMETRY: "false"
+
+jobs:
+  # Chooses the build. Reads no secret and changes nothing.
+  plan:
+    name: Choose the build
+    # Automatic deploys stay off until the repository variable DEPLOY_ENABLED is
+    # "true" (Settings > Secrets and variables > Actions > Variables).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.DEPLOY_ENABLED == 'true' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.ci.outputs.run_id }}
+      sha: ${{ steps.ci.outputs.sha }}
+      attempt: ${{ steps.ci.outputs.attempt }}
+    steps:
+      # By hand: the CI run that was asked for.
+      # Automatic: the successful CI run for the commit main points at now,
+      # whichever CI run started this workflow. If CI has not passed for that
+      # commit, there is nothing to deploy; its own CI run starts this
+      # workflow again when it finishes.
+      #
+      # Either way nothing is taken on trust: the run must be CI, for a push
+      # to main, and successful. workflow_run also fires for a pull request
+      # whose branch is called main, and run_id is typed by hand.
+      - name: Find the CI run to deploy
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          ci_workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml" --jq .id)"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            run_id="$INPUT_RUN_ID"
+            case "$run_id" in
+              '' | *[!0-9]*)
+                echo "::error::run_id must be a number, got '$run_id'."
+                exit 1
+                ;;
+            esac
+          else
+            tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=$tip&per_page=1" --jq '.workflow_runs[0].id // empty')"
+            if [ -z "$run_id" ]; then
+              echo "::notice::Nothing to deploy: CI has not passed for the tip of main ($tip)."
+              exit 0
+            fi
+          fi
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          field() { jq -r "$1 // \"\"" <<< "$run"; }
+          workflow_id="$(field .workflow_id)"
+          event="$(field .event)"
+          branch="$(field .head_branch)"
+          conclusion="$(field .conclusion)"
+          sha="$(field .head_sha)"
+          attempt="$(field .run_attempt)"
+          if [ -z "$ci_workflow_id" ] || [ "$workflow_id" != "$ci_workflow_id" ] || [ "$event" != "push" ] ||
+            [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ] || [ -z "$attempt" ]; then
+            echo "::error::Run $run_id is not a successful CI run for a push to main (workflow id '$workflow_id', expected '$ci_workflow_id'; event '$event', branch '$branch', conclusion '$conclusion')."
+            exit 1
+          fi
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$sha" != "$tip" ]; then
+            echo "::error::Run $run_id built $sha, not the tip of main ($tip)."
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "Build to deploy: CI run $run_id (attempt $attempt), commit $sha."
+
+  deploy:
+    name: Deploy to Cloudflare
+    needs: plan
+    if: ${{ needs.plan.outputs.run_id != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Secrets stored on `production` reach only real deploys. A dry run gets its
+    # own environment, which has none.
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'production-dry-run' || 'production' }}
+    steps:
+      # The commit that was built, so the cf CLI is the version its lockfile names.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The Build Output of that CI run, as it is. Nothing is rebuilt here.
+      - name: Download Build Output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-output
+          path: apps/web/.cloudflare/output
+          run-id: ${{ needs.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # A re-run of that CI run uploads a new Build Output under the same name
+      # before its own checks have finished. Go on only if the run is still the
+      # successful attempt that `plan` chose, so what was downloaded is what
+      # passed. A re-run that finishes starts this workflow again.
+      - name: Check that the CI run was not re-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.plan.outputs.run_id }}
+          ATTEMPT: ${{ needs.plan.outputs.attempt }}
+        run: |
+          now="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" --jq '"\(.run_attempt) \(.conclusion)"')"
+          if [ -z "$ATTEMPT" ] || [ "$now" != "$ATTEMPT success" ]; then
+            echo "::error::CI run $CI_RUN_ID changed after it was chosen (attempt and conclusion now: '$now'; chosen: attempt '$ATTEMPT', success). Not deploying its Build Output."
+            exit 1
+          fi
+
+      # main can move between `plan` and here, for example while this job waits
+      # for approval. An automatic deploy then stops: the new commit's CI run
+      # starts this workflow again. A deploy by hand is deliberate and skips
+      # this check.
+      - name: Check that this build is still the tip of main
+        id: tip
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$tip" = "$SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy skipped: main is at $tip, this build is $SHA."
+          fi
+
+      - name: Deploy check (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        working-directory: apps/web
+        run: pnpm exec cf deploy --prebuilt --mode production --dry-run
+
+      # --mode must be the mode the build recorded (production). The tag and
+      # message make the Worker version traceable to the commit and the CI run.
+      - name: Deploy
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.dry_run) || steps.tip.outputs.current == 'true' }}
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          CI_RUN_ID: ${{ needs.plan.outputs.run_id }}
+        run: pnpm exec cf deploy --prebuilt --mode production --tag "${SHA::7}" --message "CI run $CI_RUN_ID, commit $SHA"

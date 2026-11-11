@@ -90,7 +90,9 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 
 ### 自動公開
 
-`main` へのプッシュで CI がすべて通ると、GitHub Actions が Cloudflare に公開します。公開するのは CI の `build` ジョブが作ったビルド出力そのもので、公開の前に作り直しません。プルリクエストでは `cf deploy --dry-run` による確認までで、公開はしません。公開するのは `main` の先頭のコミットだけです。CI が終わるまでに新しいコミットが入った場合と、古い実行をやり直した場合は、公開しません。
+公開は、CI（`.github/workflows/ci.yml`）とは別のワークフロー（`.github/workflows/deploy.yml`）が行います。CI は変更を検査するだけで、本番には触れません。
+
+`main` へのプッシュで CI がすべて通ると、`deploy.yml` が起動し、CI が作ったビルド出力をそのまま Cloudflare に公開します。公開の前に作り直しません。自動で公開するのは、そのときの `main` の先頭のコミットのビルドです。先頭のコミットの CI がまだ通っていなければ、何も公開しません。その CI が通ったときに、あらためて起動します。プルリクエストでは、CI が `cf deploy --dry-run` で確認するところまでです。
 
 自動公開は、次の設定が済むまで動きません。
 
@@ -99,7 +101,17 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 3. 上の手順で、Worker に `ACCESS_TOKEN` を登録しておきます。
 4. Settings → Secrets and variables → Actions → Variables で、`DEPLOY_ENABLED` を `true` にします。
 
-止めるときは、`DEPLOY_ENABLED` を消すか `true` 以外にします。手元からの公開（`pnpm run deploy`）は、これまでどおり使えます。
+自動公開を止めるときは、`DEPLOY_ENABLED` を消すか `true` 以外にします。
+
+### 手動での公開と出し直し
+
+Actions の「Deploy」から「Run workflow」を選び、`run_id` に公開したい CI の実行の番号（その実行の URL の末尾の数字）を入れます。`main` へのプッシュで成功した CI の実行だけを受け付けます。前の版に戻すときも、この方法で前の実行を指定します。ビルド出力は30日間残ります。
+
+- `dry_run` にチェックを入れると、ビルド出力を取り出して `cf deploy --dry-run` で確認するだけで、公開はしません。設定の確認に使えます。
+- 手動での公開は、`DEPLOY_ENABLED` に関係なく動きます。
+- 前の版に戻すときは、先に `DEPLOY_ENABLED` を止めてください。有効なままだと、次に `main` の CI が通ったときに、最新のコミットで上書きされます。
+
+手元からの公開（`pnpm run deploy`）も、これまでどおり使えます。
 
 ## 設計上のルール
 
