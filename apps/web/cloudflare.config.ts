@@ -11,6 +11,8 @@ export default defineConfig(({ mode }) => ({
 		env: {
 			// Debug endpoints burn CPU on request; they exist in development only.
 			DEBUG: bindings.text(mode === "development" ? "1" : "0"),
+			// Production refuses to create a world until this matches. Not set in dev.
+			ACCESS_TOKEN: bindings.secret(),
 		},
 		exports: {
 			WorldDO: exports.durableObject({ storage: "sqlite" }),

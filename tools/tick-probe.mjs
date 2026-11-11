@@ -28,6 +28,7 @@ const players = Number(arg("players", "1"));
 const seconds = Number(arg("seconds", "30"));
 const view = Number(arg("view", "6"));
 const mode = arg("mode", "measure");
+const accessToken = process.env.MC_ACCESS_TOKEN ?? "";
 
 const clientModule = new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/client.wasm")));
 const MARKER = { dx: 2, dy: 3, dz: 1, block: 9 };
@@ -35,7 +36,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function connect(index) {
 	const core = new ClientCore(new WebAssembly.Instance(clientModule, {}));
-	const ws = new WebSocket(`${edge.replace(/^http/, "ws")}/ws/${world}`);
+	const wsUrl = `${edge.replace(/^http/, "ws")}/ws/${world}`;
+	const ws = accessToken
+		? new WebSocket(wsUrl, { headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` } })
+		: new WebSocket(wsUrl);
 	ws.binaryType = "arraybuffer";
 	const p = {
 		index,
@@ -84,7 +88,8 @@ async function waitFor(check, label, timeoutMs = 15000) {
 }
 
 async function metrics() {
-	return (await fetch(`${edge}/api/worlds/${world}/metrics`)).json();
+	const headers = accessToken ? { cookie: `mc_session=${encodeURIComponent(accessToken)}` } : undefined;
+	return (await fetch(`${edge}/api/worlds/${world}/metrics`, { headers })).json();
 }
 
 async function measure() {

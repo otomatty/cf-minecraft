@@ -70,6 +70,54 @@ declare global {
 	}
 }
 
+async function ensureEdgeSession(): Promise<void> {
+	const current = await fetch("/api/session");
+	if (current.ok) return;
+	if (current.status === 503) throw new Error("本番の入場トークンが未設定です");
+	if (current.status !== 401) throw new Error(`入場確認に失敗しました (${current.status})`);
+
+	const panel = document.getElementById("panel");
+	if (!panel) throw new Error("入場フォームを置けません");
+	statusLine.textContent = "マルチプレイには入場トークンが必要です";
+	const form = document.createElement("form");
+	const input = document.createElement("input");
+	input.type = "password";
+	input.required = true;
+	input.autocomplete = "current-password";
+	input.placeholder = "入場トークン";
+	const button = document.createElement("button");
+	button.type = "submit";
+	button.textContent = "接続";
+	form.append(input, button);
+	panel.append(form);
+	input.focus();
+
+	await new Promise<void>((resolve, reject) => {
+		form.addEventListener("submit", (event) => {
+			event.preventDefault();
+			button.disabled = true;
+			fetch("/api/session", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ token: input.value }),
+			})
+				.then((res) => {
+					if (res.ok) {
+						form.remove();
+						statusLine.textContent = "読み込み中…";
+						statusLine.className = "";
+						resolve();
+						return;
+					}
+					button.disabled = false;
+					statusLine.textContent = res.status === 401 ? "トークンが違います" : `接続できません (${res.status})`;
+					statusLine.className = "error";
+				})
+				.catch((err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
+		});
+	});
+}
+
 async function runScenario(seed: string, ticks: number): Promise<string> {
 	const { instance } = await WebAssembly.instantiateStreaming(fetch(serverWasmUrl), {});
 	return new ServerCore(instance).runScenario(BigInt(seed), ticks);
@@ -118,6 +166,7 @@ async function main(): Promise<void> {
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
 	};
+	if (serverKind === "ws") await ensureEdgeSession();
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
