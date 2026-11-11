@@ -1,0 +1,155 @@
+name: Deploy
+
+# Publishes a build that CI has already checked. CI (ci.yml) answers "is this
+# commit good?" and changes nothing; this workflow changes production. It never
+# runs the code of a pull request, and it is the only workflow that reads the
+# Cloudflare credentials.
+
+on:
+  # After the CI workflow finishes. The job only goes on for a successful run
+  # for a push to main.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # By hand: deploy the build of a successful CI run on main again, for example
+  # to go back to an earlier one. Not affected by DEPLOY_ENABLED.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID of the CI run whose build to deploy (the number in its URL)"
+        required: true
+        type: string
+      dry_run:
+        description: "Only check the build (cf deploy --dry-run); deploy nothing"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # To read the CI run and download its Build Output.
+  actions: read
+
+# One deploy at a time. A deploy that has started is never cancelled.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Naming bash explicitly turns on `-eo pipefail`.
+    shell: bash
+
+env:
+  # Keep in step with ci.yml.
+  NODE_VERSION: "22"
+  # No usage telemetry from the cf CLI.
+  CF_SEND_TELEMETRY: "false"
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare
+    # Automatic deploys stay off until the repository variable DEPLOY_ENABLED is
+    # "true" (Settings > Secrets and variables > Actions > Variables).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.DEPLOY_ENABLED == 'true' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Secrets stored on `production` reach only real deploys. A dry run gets its
+    # own environment, which has none.
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'production-dry-run' || 'production' }}
+    steps:
+      # Nothing is taken on trust: workflow_run also fires for a pull request
+      # whose branch is called main, and run_id is typed by hand. The run must
+      # be CI, for a push to main, and successful.
+      - name: Find the CI run to deploy
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+        run: |
+          case "$RUN_ID" in
+            '' | *[!0-9]*)
+              echo "::error::run_id must be a number, got '$RUN_ID'."
+              exit 1
+              ;;
+          esac
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          field() { jq -r "$1 // \"\"" <<< "$run"; }
+          path="$(field .path)"
+          event="$(field .event)"
+          branch="$(field .head_branch)"
+          conclusion="$(field .conclusion)"
+          sha="$(field .head_sha)"
+          if [ "$path" != ".github/workflows/ci.yml" ] || [ "$event" != "push" ] ||
+            [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ]; then
+            echo "::error::Run $RUN_ID is not a successful CI run for a push to main (workflow '$path', event '$event', branch '$branch', conclusion '$conclusion')."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Build to deploy: CI run $RUN_ID, commit $sha."
+
+      # The commit that was built, so the cf CLI is the version its lockfile names.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ci.outputs.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The Build Output of that CI run, as it is. Nothing is rebuilt here.
+      - name: Download Build Output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-output
+          path: apps/web/.cloudflare/output
+          run-id: ${{ steps.ci.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # Runs can finish out of order. An automatic deploy goes ahead only while
+      # its commit is still what main points at. A deploy by hand is deliberate
+      # and skips this check.
+      - name: Check that this build is the tip of main
+        id: tip
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.ci.outputs.sha }}
+        run: |
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$tip" = "$SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy skipped: main is at $tip, this build is $SHA."
+          fi
+
+      - name: Deploy check (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        working-directory: apps/web
+        run: pnpm exec cf deploy --prebuilt --mode production --dry-run
+
+      # --mode must be the mode the build recorded (production). The tag and
+      # message make the Worker version traceable to the commit and the CI run.
+      - name: Deploy
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.dry_run) || steps.tip.outputs.current == 'true' }}
+        working-directory: apps/web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SHA: ${{ steps.ci.outputs.sha }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+        run: pnpm exec cf deploy --prebuilt --mode production --tag "${SHA::7}" --message "CI run $CI_RUN_ID, commit $SHA"
