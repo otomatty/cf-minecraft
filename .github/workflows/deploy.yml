@@ -32,11 +32,12 @@ permissions:
   actions: read
 
 # Real deploys run one at a time, and one that has started is never cancelled.
-# One that is still waiting is replaced when another is queued; for automatic
-# deploys that is the deploy of a newer commit. Only runs that really deploy
-# share that queue. A dry run, and a run that the job's `if` below skips, each
-# get a group of their own, so they can never push a waiting deploy out.
-# Keep the condition in step with that `if`.
+# One that is still waiting is cancelled when another is queued. That loses
+# nothing: an automatic deploy does not publish "its" CI run but whatever main
+# points at when it runs (see the `plan` job), so the run that takes the place
+# of a cancelled one deploys the latest build. Only runs that can deploy share
+# the queue; a dry run, and a run that the `plan` job's `if` skips, each get a
+# group of their own. Keep the condition in step with that `if`.
 concurrency:
   group: >-
     ${{
@@ -61,8 +62,9 @@ env:
   CF_SEND_TELEMETRY: "false"
 
 jobs:
-  deploy:
-    name: Deploy to Cloudflare
+  # Chooses the build. Reads no secret and changes nothing.
+  plan:
+    name: Choose the build
     # Automatic deploys stay off until the repository variable DEPLOY_ENABLED is
     # "true" (Settings > Secrets and variables > Actions > Variables).
     if: >-
@@ -71,27 +73,44 @@ jobs:
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    # Secrets stored on `production` reach only real deploys. A dry run gets its
-    # own environment, which has none.
-    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'production-dry-run' || 'production' }}
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.ci.outputs.run_id }}
+      sha: ${{ steps.ci.outputs.sha }}
     steps:
-      # Nothing is taken on trust: workflow_run also fires for a pull request
-      # whose branch is called main, and run_id is typed by hand. The run must
-      # be CI, for a push to main, and successful.
+      # By hand: the CI run that was asked for.
+      # Automatic: the successful CI run for the commit main points at now,
+      # whichever CI run started this workflow. If CI has not passed for that
+      # commit, there is nothing to deploy; its own CI run starts this
+      # workflow again when it finishes.
+      #
+      # Either way nothing is taken on trust: the run must be CI, for a push
+      # to main, and successful. workflow_run also fires for a pull request
+      # whose branch is called main, and run_id is typed by hand.
       - name: Find the CI run to deploy
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
         run: |
-          case "$RUN_ID" in
-            '' | *[!0-9]*)
-              echo "::error::run_id must be a number, got '$RUN_ID'."
-              exit 1
-              ;;
-          esac
-          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            run_id="$INPUT_RUN_ID"
+            case "$run_id" in
+              '' | *[!0-9]*)
+                echo "::error::run_id must be a number, got '$run_id'."
+                exit 1
+                ;;
+            esac
+          else
+            tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=$tip&per_page=1" --jq '.workflow_runs[0].id // empty')"
+            if [ -z "$run_id" ]; then
+              echo "::notice::Nothing to deploy: CI has not passed for the tip of main ($tip)."
+              exit 0
+            fi
+          fi
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
           field() { jq -r "$1 // \"\"" <<< "$run"; }
           path="$(field .path)"
           event="$(field .event)"
@@ -100,17 +119,31 @@ jobs:
           sha="$(field .head_sha)"
           if [ "$path" != ".github/workflows/ci.yml" ] || [ "$event" != "push" ] ||
             [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ]; then
-            echo "::error::Run $RUN_ID is not a successful CI run for a push to main (workflow '$path', event '$event', branch '$branch', conclusion '$conclusion')."
+            echo "::error::Run $run_id is not a successful CI run for a push to main (workflow '$path', event '$event', branch '$branch', conclusion '$conclusion')."
             exit 1
           fi
-          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$sha" != "$tip" ]; then
+            echo "::error::Run $run_id built $sha, not the tip of main ($tip)."
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Build to deploy: CI run $RUN_ID, commit $sha."
+          echo "Build to deploy: CI run $run_id, commit $sha."
 
+  deploy:
+    name: Deploy to Cloudflare
+    needs: plan
+    if: ${{ needs.plan.outputs.run_id != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Secrets stored on `production` reach only real deploys. A dry run gets its
+    # own environment, which has none.
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'production-dry-run' || 'production' }}
+    steps:
       # The commit that was built, so the cf CLI is the version its lockfile names.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.ci.outputs.sha }}
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -129,18 +162,19 @@ jobs:
         with:
           name: build-output
           path: apps/web/.cloudflare/output
-          run-id: ${{ steps.ci.outputs.run_id }}
+          run-id: ${{ needs.plan.outputs.run_id }}
           github-token: ${{ github.token }}
 
-      # Runs can finish out of order. An automatic deploy goes ahead only while
-      # its commit is still what main points at. A deploy by hand is deliberate
-      # and skips this check.
-      - name: Check that this build is the tip of main
+      # main can move between `plan` and here, for example while this job waits
+      # for approval. An automatic deploy then stops: the new commit's CI run
+      # starts this workflow again. A deploy by hand is deliberate and skips
+      # this check.
+      - name: Check that this build is still the tip of main
         id: tip
         if: ${{ github.event_name == 'workflow_run' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.ci.outputs.sha }}
+          SHA: ${{ needs.plan.outputs.sha }}
         run: |
           tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           if [ "$tip" = "$SHA" ]; then
@@ -163,6 +197,6 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          SHA: ${{ steps.ci.outputs.sha }}
-          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          CI_RUN_ID: ${{ needs.plan.outputs.run_id }}
         run: pnpm exec cf deploy --prebuilt --mode production --tag "${SHA::7}" --message "CI run $CI_RUN_ID, commit $SHA"

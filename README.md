@@ -92,7 +92,7 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 
 公開は、CI（`.github/workflows/ci.yml`）とは別のワークフロー（`.github/workflows/deploy.yml`）が行います。CI は変更を検査するだけで、本番には触れません。
 
-`main` へのプッシュで CI がすべて通ると、`deploy.yml` が起動し、その CI が作ったビルド出力をそのまま Cloudflare に公開します。公開の前に作り直しません。公開するのは `main` の先頭のコミットだけです。CI が終わるまでに新しいコミットが入った場合は、公開しません。プルリクエストでは、CI が `cf deploy --dry-run` で確認するところまでです。
+`main` へのプッシュで CI がすべて通ると、`deploy.yml` が起動し、CI が作ったビルド出力をそのまま Cloudflare に公開します。公開の前に作り直しません。自動で公開するのは、そのときの `main` の先頭のコミットのビルドです。先頭のコミットの CI がまだ通っていなければ、何も公開しません。その CI が通ったときに、あらためて起動します。プルリクエストでは、CI が `cf deploy --dry-run` で確認するところまでです。
 
 自動公開は、次の設定が済むまで動きません。
 
