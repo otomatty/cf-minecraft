@@ -99,11 +99,23 @@ async function ensureAccess() {
 		process.exit(1);
 	}
 	if (!accessToken) return;
+	if (!edgeIsLocal(edge) && new URL(edge).protocol !== "https:") {
+		console.error("リモート接続先には HTTPS が必要です");
+		process.exit(1);
+	}
 	const res = await fetch(`${edge}/api/session`, {
 		headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` },
 	});
 	if (res.status === 401) {
 		console.error("MC_ACCESS_TOKEN が必要です");
+		process.exit(1);
+	}
+	if (res.status === 503) {
+		console.error("本番の ACCESS_TOKEN が未設定です");
+		process.exit(1);
+	}
+	if (!res.ok) {
+		console.error(`入場確認に失敗しました (${res.status})`);
 		process.exit(1);
 	}
 }
