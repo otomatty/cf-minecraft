@@ -31,9 +31,12 @@ permissions:
   # To read the CI run and download its Build Output.
   actions: read
 
-# One deploy at a time. A deploy that has started is never cancelled.
+# Real deploys run one at a time, and one that has started is never cancelled.
+# One that is still waiting is replaced when another is queued; for automatic
+# deploys that is the deploy of a newer commit. A dry run changes nothing, so
+# each gets a group of its own and can never push a waiting deploy out.
 concurrency:
-  group: deploy-production
+  group: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && format('deploy-dry-run-{0}', github.run_id) || 'deploy-production' }}
   cancel-in-progress: false
 
 defaults:

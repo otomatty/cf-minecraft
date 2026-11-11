@@ -109,6 +109,7 @@ Actions の「Deploy」から「Run workflow」を選び、`run_id` に公開し
 
 - `dry_run` にチェックを入れると、ビルド出力を取り出して `cf deploy --dry-run` で確認するだけで、公開はしません。設定の確認に使えます。
 - 手動での公開は、`DEPLOY_ENABLED` に関係なく動きます。
+- 前の版に戻すときは、先に `DEPLOY_ENABLED` を止めてください。有効なままだと、次に `main` の CI が通ったときに、最新のコミットで上書きされます。
 
 手元からの公開（`pnpm run deploy`）も、これまでどおり使えます。
 
