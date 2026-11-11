@@ -77,6 +77,7 @@ jobs:
     outputs:
       run_id: ${{ steps.ci.outputs.run_id }}
       sha: ${{ steps.ci.outputs.sha }}
+      attempt: ${{ steps.ci.outputs.attempt }}
     steps:
       # By hand: the CI run that was asked for.
       # Automatic: the successful CI run for the commit main points at now,
@@ -118,8 +119,9 @@ jobs:
           branch="$(field .head_branch)"
           conclusion="$(field .conclusion)"
           sha="$(field .head_sha)"
+          attempt="$(field .run_attempt)"
           if [ -z "$ci_workflow_id" ] || [ "$workflow_id" != "$ci_workflow_id" ] || [ "$event" != "push" ] ||
-            [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ]; then
+            [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ] || [ -z "$attempt" ]; then
             echo "::error::Run $run_id is not a successful CI run for a push to main (workflow id '$workflow_id', expected '$ci_workflow_id'; event '$event', branch '$branch', conclusion '$conclusion')."
             exit 1
           fi
@@ -129,7 +131,8 @@ jobs:
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Build to deploy: CI run $run_id, commit $sha."
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "Build to deploy: CI run $run_id (attempt $attempt), commit $sha."
 
   deploy:
     name: Deploy to Cloudflare
@@ -165,6 +168,22 @@ jobs:
           path: apps/web/.cloudflare/output
           run-id: ${{ needs.plan.outputs.run_id }}
           github-token: ${{ github.token }}
+
+      # A re-run of that CI run uploads a new Build Output under the same name
+      # before its own checks have finished. Go on only if the run is still the
+      # successful attempt that `plan` chose, so what was downloaded is what
+      # passed. A re-run that finishes starts this workflow again.
+      - name: Check that the CI run was not re-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.plan.outputs.run_id }}
+          ATTEMPT: ${{ needs.plan.outputs.attempt }}
+        run: |
+          now="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" --jq '"\(.run_attempt) \(.conclusion)"')"
+          if [ -z "$ATTEMPT" ] || [ "$now" != "$ATTEMPT success" ]; then
+            echo "::error::CI run $CI_RUN_ID changed after it was chosen (attempt and conclusion now: '$now'; chosen: attempt '$ATTEMPT', success). Not deploying its Build Output."
+            exit 1
+          fi
 
       # main can move between `plan` and here, for example while this job waits
       # for approval. An automatic deploy then stops: the new commit's CI run
