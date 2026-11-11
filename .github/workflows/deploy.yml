@@ -33,10 +33,20 @@ permissions:
 
 # Real deploys run one at a time, and one that has started is never cancelled.
 # One that is still waiting is replaced when another is queued; for automatic
-# deploys that is the deploy of a newer commit. A dry run changes nothing, so
-# each gets a group of its own and can never push a waiting deploy out.
+# deploys that is the deploy of a newer commit. Only runs that really deploy
+# share that queue. A dry run, and a run that the job's `if` below skips, each
+# get a group of their own, so they can never push a waiting deploy out.
+# Keep the condition in step with that `if`.
 concurrency:
-  group: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && format('deploy-dry-run-{0}', github.run_id) || 'deploy-production' }}
+  group: >-
+    ${{
+      ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) ||
+       (github.event_name == 'workflow_run' &&
+        vars.DEPLOY_ENABLED == 'true' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'))
+      && 'deploy-production' || format('deploy-idle-{0}', github.run_id)
+    }}
   cancel-in-progress: false
 
 defaults:
