@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only by default. A job that needs more asks for it itself.
+permissions:
+  contents: read
+
+# A new commit on a pull request cancels the run for the previous one.
+# Runs on main are never cancelled, so every commit there gets a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Naming bash explicitly turns on `-eo pipefail`.
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # README: Node.js 22.18 or later.
+  NODE_VERSION: "22"
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs the version, components and targets named in rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc -Vv
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      # Later steps still run after a failure, so one push reports everything.
+      - name: cargo clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked
+
+  build:
+    name: Build (WASM, TypeScript, determinism)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc -Vv
+          rustup target list --installed
+
+      # Reads the pnpm version from `packageManager` in package.json.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM
+        run: pnpm build:wasm
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Host tests
+        run: pnpm test:host
+
+      - name: Build native server
+        run: cargo build --release --locked -p native-server
+
+      - name: Determinism (native, Node)
+        run: pnpm check:determinism
+
+      - name: Production build
+        run: pnpm --filter web build
+
+      - name: Start dev server
+        run: .github/scripts/start-dev-server.sh
+
+      - name: Determinism (native, Node, workerd Durable Object)
+        run: pnpm check:determinism --edge http://localhost:5173
+
+      - name: Dev server log
+        if: ${{ failure() }}
+        run: cat "$RUNNER_TEMP/dev-server.log" || true
+
+  e2e:
+    name: E2E (browser)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc -Vv
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM
+        run: pnpm build:wasm
+
+      - name: Start dev server
+        run: .github/scripts/start-dev-server.sh
+
+      # Chrome needs a window for WebGPU on a software rasterizer; see tools/e2e.mjs.
+      - name: End-to-end checks
+        run: xvfb-run -a -s "-screen 0 1280x720x24" node tools/e2e.mjs --shots "$RUNNER_TEMP/shots"
+
+      - name: Upload screenshots and dev server log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e
+          path: |
+            ${{ runner.temp }}/shots
+            ${{ runner.temp }}/dev-server.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The one check to mark as required in branch protection. It stays the same
+  # when jobs are added or renamed. `always()` matters: without it this job is
+  # skipped when a needed job fails, and a skipped check counts as passing.
+  required:
+    name: required
+    if: ${{ always() }}
+    needs: [rust, build, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check that every required job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = "success" ] || exit 1
+          done

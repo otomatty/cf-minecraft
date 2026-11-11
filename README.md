@@ -34,7 +34,7 @@ docs/             M0レポート、ADR
 
 ## 必要なもの
 
-- Rust（stable）と `wasm32-unknown-unknown` ターゲット: `rustup target add wasm32-unknown-unknown`
+- Rust は rustup で入れます。版、rustfmt、clippy、`wasm32-unknown-unknown` ターゲットは `rust-toolchain.toml` に書いてあり、このリポジトリで最初に `cargo` を実行したときに rustup が入れます（先に入れておくなら `rustup toolchain install`）。
 - Node.js 22.18 以降、pnpm 10
 - WebGPU 対応ブラウザ
 
@@ -63,6 +63,15 @@ pnpm dev                  # 以下は開発サーバーを起動した状態で�
 node tools/determinism.mjs --edge http://localhost:5173
 node tools/tick-probe.mjs --players 8 --seconds 60 --view 8
 node tools/e2e.mjs        # ディスプレイのない環境では xvfb-run -a を前に付ける
+```
+
+プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルド、ブラウザの E2E を実行します。
+
+手元で同じ lint を走らせるには:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 JDK の乱数実値を取り直す場合は `tools/oracle/JdkVectors.java` の先頭コメントの手順を使います。

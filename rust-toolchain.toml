@@ -1,0 +1,8 @@
+# One toolchain for CI and local builds. rustup installs it, the components and
+# the wasm32 target on the first cargo command run inside this repository.
+# To upgrade: change `channel`, then check fmt, clippy and the tests.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

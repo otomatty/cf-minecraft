@@ -58,22 +58,31 @@ async function open(query) {
 	return { page, errors };
 }
 
-/** Waits until the world is joined and every received section has been meshed. */
-async function settle(page, label) {
+/** Chunks the server keeps loaded around a player: a square of side 2 * view + 1. */
+const chunksInView = (view) => (2 * view + 1) ** 2;
+
+/**
+ * Waits until the world is joined, every chunk in view has arrived, and every received section has been meshed.
+ * The server sends a few chunks per tick, so an empty mesh queue alone can be seen between two batches.
+ */
+async function settle(page, label, chunks) {
+	let settled;
 	try {
-		await page.waitForFunction(
-			() => {
+		settled = await page.waitForFunction(
+			(chunks) => {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
-				return s.joined && s.chunks > 0 && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5;
+				return s.joined && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
 			{ timeout: 120000, polling: 250 },
+			chunks,
 		);
 	} catch (err) {
 		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
 		throw new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify(state)}`);
 	}
-	return page.evaluate(() => window.__mc.stats());
+	// The stats the wait accepted, not a later reading: the world keeps changing.
+	return settled.jsonValue();
 }
 
 /** Number of distinct colours on a coarse grid of the screenshot: a blank frame has one. */
@@ -97,27 +106,66 @@ async function distinctColours(page, file) {
 	}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
 }
 
+/**
+ * Server tick rate as the page sees it, from the arrival of TimeUpdate packets.
+ *
+ * The client's game time only moves when a TimeUpdate is handled: 20 ticks at
+ * once, once per second. Reading it at two arbitrary moments counts those
+ * steps, and one step more or less in a 4 s window reads as 25 or 15 TPS. This
+ * times the steps themselves: ticks advanced divided by the time between the
+ * first and the last step kept. The first step seen is dropped, because a
+ * packet that waited while the page was busy is handled late.
+ */
+async function tickRate(page, intervals = 4) {
+	const steps = await page.evaluate(
+		(count) =>
+			new Promise((resolve) => {
+				const seen = [];
+				let last = window.__mc.stats().gameTime;
+				const finish = () => {
+					clearInterval(poll);
+					clearTimeout(giveUp);
+					resolve(seen);
+				};
+				const poll = setInterval(() => {
+					const now = window.__mc.stats().gameTime;
+					if (now === last) return;
+					last = now;
+					seen.push([performance.now(), now]);
+					if (seen.length === count) finish();
+				}, 5);
+				// A stopped clock must fail the check, not hang the run.
+				const giveUp = setTimeout(finish, 15000);
+			}),
+		intervals + 2,
+	);
+	const kept = steps.slice(1);
+	if (kept.length < intervals + 1) return { tps: 0, packets: kept.length };
+	const [t0, g0] = kept[0];
+	const [t1, g1] = kept[kept.length - 1];
+	return { tps: ((g1 - g0) / (t1 - t0)) * 1000, packets: kept.length };
+}
+
+/** One full session against the given server kind: load, draw, tick rate, place a block, reload and find it again. */
 async function playthrough(kind) {
+	const view = 5;
 	const world = `e2e-${kind}-${run}`;
-	const query = `server=${kind}&world=${world}&view=5&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
+	const query = `server=${kind}&world=${world}&view=${view}&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
 	const { page, errors } = await open(query);
-	const stats = await settle(page, kind);
+	const stats = await settle(page, kind, chunksInView(view));
 	check(stats.sections > 20, `${kind}: terrain meshed`, `${stats.sections} sections, ${stats.chunks} chunks, adapter ${stats.adapter}`);
-	check(stats.chunks === 11 * 11, `${kind}: all ${11 * 11} chunks in view arrived`, `${stats.chunks}`);
+	check(stats.chunks === chunksInView(view), `${kind}: all ${chunksInView(view)} chunks in view arrived`, `${stats.chunks}`);
 
 	// Let the orbiting camera draw a few frames, then look at what is on screen.
 	await new Promise((r) => setTimeout(r, 1500));
 	const drawn = await page.evaluate(() => window.__mc.stats());
 	check(drawn.drawn > 0 && drawn.quads > 1000, `${kind}: sections drawn`, `${drawn.drawn} sections, ${drawn.quads} quads`);
+	// Server clock is advancing at 20 ticks per second. Measured before the
+	// screenshot below, which blocks the page for more than a second.
+	const rate = await tickRate(page);
+	check(Math.abs(rate.tps - 20) < 1.5, `${kind}: server ticks at 20 TPS`, `${rate.tps.toFixed(2)} measured between ${rate.packets} time packets`);
 	const colours = await distinctColours(page, join(shots, `${kind}.png`));
 	check(colours >= 12, `${kind}: frame is not blank`, `${colours} distinct colours`);
-
-	// Server clock is advancing at 20 ticks per second.
-	const t0 = await page.evaluate(() => [performance.now(), window.__mc.stats().gameTime]);
-	await new Promise((r) => setTimeout(r, 4000));
-	const t1 = await page.evaluate(() => [performance.now(), window.__mc.stats().gameTime]);
-	const tps = ((t1[1] - t0[1]) / (t1[0] - t0[0])) * 1000;
-	check(Math.abs(tps - 20) < 1.5, `${kind}: server ticks at 20 TPS`, `${tps.toFixed(2)} measured from time packets`);
 
 	// Place a block through the same path a mouse click takes.
 	const [sx, sy, sz] = drawn.spawn.map(Math.floor);
@@ -132,15 +180,18 @@ async function playthrough(kind) {
 	check(before === 0 && placed === 9, `${kind}: block placed`, `${before} -> ${placed} at ${pos.join(",")}`);
 
 	// Wait past one autosave (5 s), then reload: the world must come back from storage.
-	await page.evaluate(() => window.__mc.flush());
+	const timeBefore = await page.evaluate(() => {
+		window.__mc.flush();
+		return window.__mc.stats().gameTime;
+	});
 	await new Promise((r) => setTimeout(r, 6500));
 	const seedBefore = drawn.seed;
 	await page.reload({ waitUntil: "load" });
-	const after = await settle(page, `${kind} after reload`);
+	const after = await settle(page, `${kind} after reload`, chunksInView(view));
 	const kept = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	check(after.seed === seedBefore, `${kind}: seed kept across reload`, after.seed);
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
-	check(after.gameTime > 100, `${kind}: clock continued instead of restarting`, `tick ${after.gameTime}`);
+	check(after.gameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.gameTime}`);
 
 	check(errors.length === 0, `${kind}: no page errors`, errors.slice(0, 3).join(" | "));
 	return page;
@@ -148,8 +199,9 @@ async function playthrough(kind) {
 
 /** Real input events: pointer lock, keyboard movement, mouse look, break and place by clicking. */
 async function inputs() {
-	const { page, errors } = await open(`world=e2e-input-${run}&view=3&seed=7`);
-	const stats = await settle(page, "input");
+	const view = 3;
+	const { page, errors } = await open(`world=e2e-input-${run}&view=${view}&seed=7`);
+	const stats = await settle(page, "input", chunksInView(view));
 	const [sx, sy, sz] = stats.spawn.map(Math.floor);
 
 	await page.mouse.click(640, 360);
