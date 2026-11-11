@@ -4,6 +4,7 @@
 //   node tools/tick-probe.mjs [--edge http://localhost:5173] [--world probe]
 //                             [--players 1] [--seconds 30] [--view 6]
 //                             [--mode measure|edit|verify]
+//   MC_ACCESS_TOKEN=... node tools/tick-probe.mjs --edge https://<デプロイ先>
 //
 // measure  players walk and edit blocks; reports tick cadence and traffic
 // edit     one player places a marker block, then leaves
@@ -28,6 +29,7 @@ const players = Number(arg("players", "1"));
 const seconds = Number(arg("seconds", "30"));
 const view = Number(arg("view", "6"));
 const mode = arg("mode", "measure");
+const accessToken = process.env.MC_ACCESS_TOKEN ?? "";
 
 const clientModule = new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/client.wasm")));
 const MARKER = { dx: 2, dy: 3, dz: 1, block: 9 };
@@ -35,7 +37,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function connect(index) {
 	const core = new ClientCore(new WebAssembly.Instance(clientModule, {}));
-	const ws = new WebSocket(`${edge.replace(/^http/, "ws")}/ws/${world}`);
+	const wsUrl = `${edge.replace(/^http/, "ws")}/ws/${world}`;
+	const ws = accessToken
+		? new WebSocket(wsUrl, { headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` } })
+		: new WebSocket(wsUrl);
 	ws.binaryType = "arraybuffer";
 	const p = {
 		index,
@@ -83,8 +88,41 @@ async function waitFor(check, label, timeoutMs = 15000) {
 	}
 }
 
+function edgeIsLocal(url) {
+	const host = new URL(url).hostname;
+	return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+async function ensureAccess() {
+	if (!accessToken && !edgeIsLocal(edge)) {
+		console.error("MC_ACCESS_TOKEN が必要です");
+		process.exit(1);
+	}
+	if (!accessToken) return;
+	if (!edgeIsLocal(edge) && new URL(edge).protocol !== "https:") {
+		console.error("リモート接続先には HTTPS が必要です");
+		process.exit(1);
+	}
+	const res = await fetch(`${edge}/api/session`, {
+		headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` },
+	});
+	if (res.status === 401) {
+		console.error("MC_ACCESS_TOKEN が必要です");
+		process.exit(1);
+	}
+	if (res.status === 503) {
+		console.error("本番の ACCESS_TOKEN が未設定です");
+		process.exit(1);
+	}
+	if (!res.ok) {
+		console.error(`入場確認に失敗しました (${res.status})`);
+		process.exit(1);
+	}
+}
+
 async function metrics() {
-	return (await fetch(`${edge}/api/worlds/${world}/metrics`)).json();
+	const headers = accessToken ? { cookie: `mc_session=${encodeURIComponent(accessToken)}` } : undefined;
+	return (await fetch(`${edge}/api/worlds/${world}/metrics`, { headers })).json();
 }
 
 async function measure() {
@@ -157,5 +195,6 @@ async function marker(write) {
 	console.log(write ? "OK: marker placed and confirmed" : "OK: marker survived");
 }
 
+await ensureAccess();
 if (mode === "measure") await measure();
 else await marker(mode === "edit");
