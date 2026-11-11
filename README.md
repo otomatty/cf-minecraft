@@ -65,7 +65,7 @@ node tools/tick-probe.mjs --players 8 --seconds 60 --view 8
 node tools/e2e.mjs        # ディスプレイのない環境では xvfb-run -a を前に付ける
 ```
 
-プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルド、ブラウザの E2E を実行します。
+プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルドと公開前の確認（`cf deploy --dry-run`）、ブラウザの E2E を実行します。
 
 手元で同じ lint を走らせるには:
 
@@ -87,6 +87,19 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 ```
 
 本番は `ACCESS_TOKEN` が一致しないとワールドを作れません。試行回数の制限はないので、上の `openssl rand -base64 32` の長さを使ってください。短い値は当たることがあります。値はリポジトリに入れません。ローカルの `pnpm dev` はトークン不要です。`pnpm deploy` は pnpm 本体のコマンドなので、デプロイは `pnpm run deploy` です。
+
+### 自動公開
+
+`main` へのプッシュで CI がすべて通ると、GitHub Actions が Cloudflare に公開します。公開するのは CI の `build` ジョブが作ったビルド出力そのもので、公開の前に作り直しません。プルリクエストでは `cf deploy --dry-run` による確認までで、公開はしません。公開するのは `main` の先頭のコミットだけです。CI が終わるまでに新しいコミットが入った場合と、古い実行をやり直した場合は、公開しません。
+
+自動公開は、次の設定が済むまで動きません。
+
+1. Cloudflare で API トークンを作ります。権限は Worker の公開に必要なものだけにし、対象のアカウントを1つに絞ります（[作り方](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)）。
+2. GitHub の Settings → Environments で `production` を作り、その secret に `CLOUDFLARE_API_TOKEN` と `CLOUDFLARE_ACCOUNT_ID` を置きます。公開できるブランチは `main` だけにします。値はリポジトリにも issue にも書きません。
+3. 上の手順で、Worker に `ACCESS_TOKEN` を登録しておきます。
+4. Settings → Secrets and variables → Actions → Variables で、`DEPLOY_ENABLED` を `true` にします。
+
+止めるときは、`DEPLOY_ENABLED` を消すか `true` 以外にします。手元からの公開（`pnpm run deploy`）は、これまでどおり使えます。
 
 ## 設計上のルール
 
