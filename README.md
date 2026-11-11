@@ -65,7 +65,7 @@ node tools/tick-probe.mjs --players 8 --seconds 60 --view 8
 node tools/e2e.mjs        # ディスプレイのない環境では xvfb-run -a を前に付ける
 ```
 
-プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルドを実行します。ブラウザの E2E も走りますが、tick レートの検査が不安定なので、落ちても全体は失敗にしません。
+プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルド、ブラウザの E2E を実行します。
 
 手元で同じ lint を走らせるには:
 

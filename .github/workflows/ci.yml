@@ -110,14 +110,9 @@ jobs:
         run: cat "$RUNNER_TEMP/dev-server.log" || true
 
   e2e:
-    name: E2E (browser, not required)
+    name: E2E (browser)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # The tick-rate check against the Durable Object fails intermittently
-    # (about 25 TPS measured instead of 20). Until that is fixed, a failure here
-    # is shown on the job but does not fail the run. Once stable: delete this
-    # line and add `e2e` to `needs` of the `required` job.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,7 +160,7 @@ jobs:
   required:
     name: required
     if: ${{ always() }}
-    needs: [rust, build]
+    needs: [rust, build, e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

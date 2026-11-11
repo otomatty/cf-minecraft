@@ -97,6 +97,46 @@ async function distinctColours(page, file) {
 	}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
 }
 
+/**
+ * Server tick rate as the page sees it, from the arrival of TimeUpdate packets.
+ *
+ * The client's game time only moves when a TimeUpdate is handled: 20 ticks at
+ * once, once per second. Reading it at two arbitrary moments counts those
+ * steps, and one step more or less in a 4 s window reads as 25 or 15 TPS. This
+ * times the steps themselves: ticks advanced divided by the time between the
+ * first and the last step kept. The first step seen is dropped, because a
+ * packet that waited while the page was busy is handled late.
+ */
+async function tickRate(page, intervals = 4) {
+	const steps = await page.evaluate(
+		(count) =>
+			new Promise((resolve) => {
+				const seen = [];
+				let last = window.__mc.stats().gameTime;
+				const finish = () => {
+					clearInterval(poll);
+					clearTimeout(giveUp);
+					resolve(seen);
+				};
+				const poll = setInterval(() => {
+					const now = window.__mc.stats().gameTime;
+					if (now === last) return;
+					last = now;
+					seen.push([performance.now(), now]);
+					if (seen.length === count) finish();
+				}, 5);
+				// A stopped clock must fail the check, not hang the run.
+				const giveUp = setTimeout(finish, 15000);
+			}),
+		intervals + 2,
+	);
+	const kept = steps.slice(1);
+	if (kept.length < intervals + 1) return { tps: 0, packets: kept.length };
+	const [t0, g0] = kept[0];
+	const [t1, g1] = kept[kept.length - 1];
+	return { tps: ((g1 - g0) / (t1 - t0)) * 1000, packets: kept.length };
+}
+
 async function playthrough(kind) {
 	const world = `e2e-${kind}-${run}`;
 	const query = `server=${kind}&world=${world}&view=5&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
@@ -109,15 +149,12 @@ async function playthrough(kind) {
 	await new Promise((r) => setTimeout(r, 1500));
 	const drawn = await page.evaluate(() => window.__mc.stats());
 	check(drawn.drawn > 0 && drawn.quads > 1000, `${kind}: sections drawn`, `${drawn.drawn} sections, ${drawn.quads} quads`);
+	// Server clock is advancing at 20 ticks per second. Measured before the
+	// screenshot below, which blocks the page for more than a second.
+	const rate = await tickRate(page);
+	check(Math.abs(rate.tps - 20) < 1.5, `${kind}: server ticks at 20 TPS`, `${rate.tps.toFixed(2)} measured between ${rate.packets} time packets`);
 	const colours = await distinctColours(page, join(shots, `${kind}.png`));
 	check(colours >= 12, `${kind}: frame is not blank`, `${colours} distinct colours`);
-
-	// Server clock is advancing at 20 ticks per second.
-	const t0 = await page.evaluate(() => [performance.now(), window.__mc.stats().gameTime]);
-	await new Promise((r) => setTimeout(r, 4000));
-	const t1 = await page.evaluate(() => [performance.now(), window.__mc.stats().gameTime]);
-	const tps = ((t1[1] - t0[1]) / (t1[0] - t0[0])) * 1000;
-	check(Math.abs(tps - 20) < 1.5, `${kind}: server ticks at 20 TPS`, `${tps.toFixed(2)} measured from time packets`);
 
 	// Place a block through the same path a mouse click takes.
 	const [sx, sy, sz] = drawn.spawn.map(Math.floor);
