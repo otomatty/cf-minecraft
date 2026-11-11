@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 # A new commit on a pull request cancels the run for the previous one.
-# Runs on main are not interrupted and run one at a time, in order, so one
-# deploy cannot overtake another.
+# Runs on main are not interrupted and run one at a time, but GitHub does not
+# guarantee their order: the `deploy` job checks that again for itself.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -229,9 +229,26 @@ jobs:
           name: build-output
           path: apps/web/.cloudflare/output
 
+      # Runs in a concurrency group can start out of order, and an old run can
+      # be re-run by hand. Either would put older code back into production, so
+      # deploy only while this commit is still what main points at.
+      - name: Check that this commit is the tip of main
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$tip" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy skipped: main is at $tip, this run built $GITHUB_SHA."
+          fi
+
       # --mode must be the mode the build recorded (production). The tag and
       # message make the Worker version traceable to the commit and the run.
       - name: Deploy
+        if: ${{ steps.tip.outputs.current == 'true' }}
         working-directory: apps/web
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

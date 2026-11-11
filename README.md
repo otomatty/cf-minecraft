@@ -90,7 +90,7 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 
 ### 自動公開
 
-`main` へのプッシュで CI がすべて通ると、GitHub Actions が Cloudflare に公開します。公開するのは CI の `build` ジョブが作ったビルド出力そのもので、公開の前に作り直しません。プルリクエストでは `cf deploy --dry-run` による確認までで、公開はしません。
+`main` へのプッシュで CI がすべて通ると、GitHub Actions が Cloudflare に公開します。公開するのは CI の `build` ジョブが作ったビルド出力そのもので、公開の前に作り直しません。プルリクエストでは `cf deploy --dry-run` による確認までで、公開はしません。公開するのは `main` の先頭のコミットだけです。CI が終わるまでに新しいコミットが入った場合と、古い実行をやり直した場合は、公開しません。
 
 自動公開は、次の設定が済むまで動きません。
 
