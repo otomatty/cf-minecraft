@@ -94,6 +94,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_RUN_ID: ${{ inputs.run_id }}
         run: |
+          ci_workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml" --jq .id)"
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             run_id="$INPUT_RUN_ID"
             case "$run_id" in
@@ -112,14 +113,14 @@ jobs:
           fi
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
           field() { jq -r "$1 // \"\"" <<< "$run"; }
-          path="$(field .path)"
+          workflow_id="$(field .workflow_id)"
           event="$(field .event)"
           branch="$(field .head_branch)"
           conclusion="$(field .conclusion)"
           sha="$(field .head_sha)"
-          if [ "$path" != ".github/workflows/ci.yml" ] || [ "$event" != "push" ] ||
+          if [ -z "$ci_workflow_id" ] || [ "$workflow_id" != "$ci_workflow_id" ] || [ "$event" != "push" ] ||
             [ "$branch" != "main" ] || [ "$conclusion" != "success" ] || [ -z "$sha" ]; then
-            echo "::error::Run $run_id is not a successful CI run for a push to main (workflow '$path', event '$event', branch '$branch', conclusion '$conclusion')."
+            echo "::error::Run $run_id is not a successful CI run for a push to main (workflow id '$workflow_id', expected '$ci_workflow_id'; event '$event', branch '$branch', conclusion '$conclusion')."
             exit 1
           fi
           if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$sha" != "$tip" ]; then

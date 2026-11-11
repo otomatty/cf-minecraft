@@ -11,9 +11,11 @@ permissions:
   contents: read
 
 # A new commit on a pull request cancels the run for the previous one.
-# Runs on main are not interrupted and run one at a time.
+# Every other run (a push to main, a run started by hand) gets a group of its
+# own, so it never waits for, or is cancelled by, another run. CI changes
+# nothing, so its runs may overlap; deploy.yml does its own ordering.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
