@@ -4,6 +4,7 @@
 //   node tools/tick-probe.mjs [--edge http://localhost:5173] [--world probe]
 //                             [--players 1] [--seconds 30] [--view 6]
 //                             [--mode measure|edit|verify]
+//   MC_ACCESS_TOKEN=... node tools/tick-probe.mjs --edge https://<デプロイ先>
 //
 // measure  players walk and edit blocks; reports tick cadence and traffic
 // edit     one player places a marker block, then leaves
@@ -87,6 +88,26 @@ async function waitFor(check, label, timeoutMs = 15000) {
 	}
 }
 
+function edgeIsLocal(url) {
+	const host = new URL(url).hostname;
+	return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+async function ensureAccess() {
+	if (!accessToken && !edgeIsLocal(edge)) {
+		console.error("MC_ACCESS_TOKEN が必要です");
+		process.exit(1);
+	}
+	if (!accessToken) return;
+	const res = await fetch(`${edge}/api/session`, {
+		headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` },
+	});
+	if (res.status === 401) {
+		console.error("MC_ACCESS_TOKEN が必要です");
+		process.exit(1);
+	}
+}
+
 async function metrics() {
 	const headers = accessToken ? { cookie: `mc_session=${encodeURIComponent(accessToken)}` } : undefined;
 	return (await fetch(`${edge}/api/worlds/${world}/metrics`, { headers })).json();
@@ -162,5 +183,6 @@ async function marker(write) {
 	console.log(write ? "OK: marker placed and confirmed" : "OK: marker survived");
 }
 
+await ensureAccess();
 if (mode === "measure") await measure();
 else await marker(mode === "edit");

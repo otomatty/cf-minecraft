@@ -92,7 +92,7 @@ async function ensureEdgeSession(): Promise<void> {
 	panel.append(form);
 	input.focus();
 
-	await new Promise<void>((resolve, reject) => {
+	await new Promise<void>((resolve) => {
 		form.addEventListener("submit", (event) => {
 			event.preventDefault();
 			button.disabled = true;
@@ -113,7 +113,11 @@ async function ensureEdgeSession(): Promise<void> {
 					statusLine.textContent = res.status === 401 ? "トークンが違います" : `接続できません (${res.status})`;
 					statusLine.className = "error";
 				})
-				.catch((err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
+				.catch(() => {
+					button.disabled = false;
+					statusLine.textContent = "通信できません。再度お試しください";
+					statusLine.className = "error";
+				});
 		});
 	});
 }

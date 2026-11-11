@@ -71,11 +71,13 @@ JDK の乱数実値を取り直す場合は `tools/oracle/JdkVectors.java` の�
 
 ```sh
 cf auth login
-pnpm deploy
-node tools/tick-probe.mjs --edge https://<デプロイ先> --players 8 --seconds 60
+openssl rand -base64 32
+cf workers secrets update ACCESS_TOKEN --worker maincraft --type secret_text --text '<上で出した値>'
+pnpm run deploy
+MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロイ先> --players 8 --seconds 60
 ```
 
-**公開前の注意:** M0 には認証がありません。URLを知っていれば誰でも任意の名前でワールドを作成でき、Durable Object の稼働時間とストレージが課金対象になります。認証は M4 で入れる予定なので、それまでは URL を共有しないか、Cloudflare Access などで保護してください。
+本番は `ACCESS_TOKEN` が一致しないとワールドを作れません。試行回数の制限はないので、上の `openssl rand -base64 32` の長さを使ってください。短い値は当たることがあります。値はリポジトリに入れません。ローカルの `pnpm dev` はトークン不要です。`pnpm deploy` は pnpm 本体のコマンドなので、デプロイは `pnpm run deploy` です。
 
 ## 設計上のルール
 
