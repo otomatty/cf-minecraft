@@ -58,16 +58,23 @@ async function open(query) {
 	return { page, errors };
 }
 
-/** Waits until the world is joined and every received section has been meshed. */
-async function settle(page, label) {
+/** Chunks the server keeps loaded around a player: a square of side 2 * view + 1. */
+const chunksInView = (view) => (2 * view + 1) ** 2;
+
+/**
+ * Waits until the world is joined, every chunk in view has arrived, and every received section has been meshed.
+ * The server sends a few chunks per tick, so an empty mesh queue alone can be seen between two batches.
+ */
+async function settle(page, label, chunks) {
 	try {
 		await page.waitForFunction(
-			() => {
+			(chunks) => {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
-				return s.joined && s.chunks > 0 && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5;
+				return s.joined && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5;
 			},
 			{ timeout: 120000, polling: 250 },
+			chunks,
 		);
 	} catch (err) {
 		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
@@ -138,12 +145,13 @@ async function tickRate(page, intervals = 4) {
 }
 
 async function playthrough(kind) {
+	const view = 5;
 	const world = `e2e-${kind}-${run}`;
-	const query = `server=${kind}&world=${world}&view=5&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
+	const query = `server=${kind}&world=${world}&view=${view}&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
 	const { page, errors } = await open(query);
-	const stats = await settle(page, kind);
+	const stats = await settle(page, kind, chunksInView(view));
 	check(stats.sections > 20, `${kind}: terrain meshed`, `${stats.sections} sections, ${stats.chunks} chunks, adapter ${stats.adapter}`);
-	check(stats.chunks === 11 * 11, `${kind}: all ${11 * 11} chunks in view arrived`, `${stats.chunks}`);
+	check(stats.chunks === chunksInView(view), `${kind}: all ${chunksInView(view)} chunks in view arrived`, `${stats.chunks}`);
 
 	// Let the orbiting camera draw a few frames, then look at what is on screen.
 	await new Promise((r) => setTimeout(r, 1500));
@@ -173,7 +181,7 @@ async function playthrough(kind) {
 	await new Promise((r) => setTimeout(r, 6500));
 	const seedBefore = drawn.seed;
 	await page.reload({ waitUntil: "load" });
-	const after = await settle(page, `${kind} after reload`);
+	const after = await settle(page, `${kind} after reload`, chunksInView(view));
 	const kept = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	check(after.seed === seedBefore, `${kind}: seed kept across reload`, after.seed);
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
@@ -185,8 +193,9 @@ async function playthrough(kind) {
 
 /** Real input events: pointer lock, keyboard movement, mouse look, break and place by clicking. */
 async function inputs() {
-	const { page, errors } = await open(`world=e2e-input-${run}&view=3&seed=7`);
-	const stats = await settle(page, "input");
+	const view = 3;
+	const { page, errors } = await open(`world=e2e-input-${run}&view=${view}&seed=7`);
+	const stats = await settle(page, "input", chunksInView(view));
 	const [sx, sy, sz] = stats.spawn.map(Math.floor);
 
 	await page.mouse.click(640, 360);
