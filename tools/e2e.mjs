@@ -66,12 +66,13 @@ const chunksInView = (view) => (2 * view + 1) ** 2;
  * The server sends a few chunks per tick, so an empty mesh queue alone can be seen between two batches.
  */
 async function settle(page, label, chunks) {
+	let settled;
 	try {
-		await page.waitForFunction(
+		settled = await page.waitForFunction(
 			(chunks) => {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
-				return s.joined && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5;
+				return s.joined && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
 			{ timeout: 120000, polling: 250 },
 			chunks,
@@ -80,7 +81,8 @@ async function settle(page, label, chunks) {
 		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
 		throw new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify(state)}`);
 	}
-	return page.evaluate(() => window.__mc.stats());
+	// The stats the wait accepted, not a later reading: the world keeps changing.
+	return settled.jsonValue();
 }
 
 /** Number of distinct colours on a coarse grid of the screenshot: a blank frame has one. */
@@ -144,6 +146,7 @@ async function tickRate(page, intervals = 4) {
 	return { tps: ((g1 - g0) / (t1 - t0)) * 1000, packets: kept.length };
 }
 
+/** One full session against the given server kind: load, draw, tick rate, place a block, reload and find it again. */
 async function playthrough(kind) {
 	const view = 5;
 	const world = `e2e-${kind}-${run}`;
@@ -177,7 +180,10 @@ async function playthrough(kind) {
 	check(before === 0 && placed === 9, `${kind}: block placed`, `${before} -> ${placed} at ${pos.join(",")}`);
 
 	// Wait past one autosave (5 s), then reload: the world must come back from storage.
-	await page.evaluate(() => window.__mc.flush());
+	const timeBefore = await page.evaluate(() => {
+		window.__mc.flush();
+		return window.__mc.stats().gameTime;
+	});
 	await new Promise((r) => setTimeout(r, 6500));
 	const seedBefore = drawn.seed;
 	await page.reload({ waitUntil: "load" });
@@ -185,7 +191,7 @@ async function playthrough(kind) {
 	const kept = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	check(after.seed === seedBefore, `${kind}: seed kept across reload`, after.seed);
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
-	check(after.gameTime > 100, `${kind}: clock continued instead of restarting`, `tick ${after.gameTime}`);
+	check(after.gameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.gameTime}`);
 
 	check(errors.length === 0, `${kind}: no page errors`, errors.slice(0, 3).join(" | "));
 	return page;

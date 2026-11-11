@@ -8,14 +8,18 @@ log="${RUNNER_TEMP:-/tmp}/dev-server.log"
 
 pnpm --filter web dev >"$log" 2>&1 &
 
-for _ in $(seq 1 60); do
-	if curl -fs -o /dev/null "$url"; then
+# Give up after this many seconds in total. One probe may take at most 5: a
+# server that accepts the connection but never answers must not hang the job.
+deadline=60
+
+while (( SECONDS < deadline )); do
+	if curl -fs --max-time 5 -o /dev/null "$url"; then
 		echo "dev server is up: $url"
 		exit 0
 	fi
 	sleep 1
 done
 
-echo "dev server did not answer within 60 seconds" >&2
+echo "dev server did not answer within $deadline seconds" >&2
 cat "$log" >&2
 exit 1
