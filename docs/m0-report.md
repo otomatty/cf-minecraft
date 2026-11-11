@@ -115,3 +115,5 @@ M0 はエンジンの骨格で、ゲーム内容の再現はこれからです�
 ## 9. この環境固有の事情
 
 作業環境から `static.rust-lang.org` に接続できず、`rustup target add` が使えませんでした。代わりに Ubuntu の `rustc-1.97` と `libstd-rust-1.97-dev-wasm32` でビルドしています（`MC_CARGO=/usr/lib/rust-1.97/bin/cargo`）。通常の環境では README の手順どおりで動く想定ですが、rustup 版での WASM ビルドは未確認です（ネイティブのビルドとテストは rustup 版でも通っています）。
+
+追記（2026-11-11）: rustup 版（1.99.1）で WASM をビルドし、決定論チェックのハッシュが上の表と同じ `28489699af34e2d8` になることを確かめました。ツールチェーンの版は `rust-toolchain.toml` で固定し、CI（`.github/workflows/ci.yml`）が毎回 rustup 版でビルドします。

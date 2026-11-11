@@ -126,7 +126,7 @@ pub extern "C" fn server_take_outbox() -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn server_set_stored(ptr: *const u8, len: usize) {
     let bytes = input(ptr, len);
-    let coords = bytes.chunks_exact(8).map(|c| {
+    let coords = bytes.as_chunks::<8>().0.iter().map(|c| {
         (
             i32::from_le_bytes(c[0..4].try_into().unwrap()),
             i32::from_le_bytes(c[4..8].try_into().unwrap()),
