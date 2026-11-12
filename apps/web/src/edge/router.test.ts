@@ -442,6 +442,37 @@ test("successful sign-out revokes all memberships and preserves the auth respons
 	);
 });
 
+test("sign-out preserves the auth response when membership lookup rejects", async t => {
+	const errors = t.mock.method(console, "error", () => {});
+	const f = await setup(t);
+	f.login(player);
+	const cause = new Error("membership lookup failed");
+	f.deps.db.worlds = async () => {
+		throw cause;
+	};
+	f.deps.auth.handler = async () =>
+		Response.json(
+			{ signedOut: true },
+			{
+				status: 202,
+				headers: {
+					"Set-Cookie": "session=; Max-Age=0",
+					"X-Auth-Result": "signed-out",
+				},
+			},
+		);
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 202);
+	assert.equal(response.headers.get("Set-Cookie"), "session=; Max-Age=0");
+	assert.equal(response.headers.get("X-Auth-Result"), "signed-out");
+	assert.deepEqual(await response.json(), { signedOut: true });
+	assert.deepEqual(
+		errors.mock.calls.map(call => call.arguments),
+		[["sign-out revoke failed", player.id, cause]],
+	);
+	assert.deepEqual(f.revocations, []);
+});
+
 test("failed sign-out does not revoke memberships", async t => {
 	const f = await setup(t);
 	f.login(player);

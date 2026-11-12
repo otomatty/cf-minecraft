@@ -163,14 +163,18 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		const signingOutUser = signingOut ? await auth.getUser(request) : null;
 		const response = await auth.handler(request);
 		if (response.ok && signingOutUser?.emailVerified) {
-			const memberships = await db.worlds(signingOutUser.id, signingOutUser.email.toLowerCase());
-			await Promise.all(
-				memberships.map(async world => {
-					if (!(await revokeWithRetry(worlds, world.name, signingOutUser.id))) {
-						console.error("revoke failed", world.name, signingOutUser.id);
-					}
-				}),
-			);
+			try {
+				const memberships = await db.worlds(signingOutUser.id, signingOutUser.email.toLowerCase());
+				await Promise.all(
+					memberships.map(async world => {
+						if (!(await revokeWithRetry(worlds, world.name, signingOutUser.id))) {
+							console.error("revoke failed", world.name, signingOutUser.id);
+						}
+					}),
+				);
+			} catch (cause) {
+				console.error("sign-out revoke failed", signingOutUser.id, cause);
+			}
 		}
 		const headers = new Headers(response.headers);
 		headers.set("Cache-Control", "no-store");
