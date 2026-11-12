@@ -27,6 +27,7 @@ async function setup(t) {
 	const calls: string[] = [];
 	const forwarded: Request[] = [];
 	const revocations: [string, string][] = [];
+	const disconnections: [string, number, string][] = [];
 	let revokeFailures = 0;
 	const limits: [string, string][] = [];
 	let blocked = "";
@@ -58,6 +59,10 @@ async function setup(t) {
 							throw new Error("revoke failed");
 						}
 						return 0;
+					},
+					async disconnectAll(code, reason) {
+						disconnections.push([name, code, reason]);
+						return 2;
 					},
 					async metrics() {
 						return { players: 1 };
@@ -102,6 +107,7 @@ async function setup(t) {
 		calls,
 		forwarded,
 		revocations,
+		disconnections,
 		failRevocation(count = Infinity) {
 			revokeFailures = count;
 		},
@@ -553,4 +559,20 @@ test("Worker supplies authorization timestamps for operator and development conn
 	for (const request of f.forwarded) {
 		assert.equal(request.headers.get("X-MC-Authorized-At"), "100000");
 	}
+});
+
+test("debug disconnect is hidden in production and bypasses Origin and limits in development", async t => {
+	const f = await setup(t);
+	const disconnect = () => handle(new Request("https://game.example/api/debug/disconnect?world=lobby", { method: "POST" }), f.deps);
+	assert.equal((await disconnect()).status, 404);
+	assert.deepEqual(f.calls, []);
+	f.deps.env = { DEBUG: "1" };
+	f.block("IP_LIMIT");
+	assert.equal((await f.request("/api/debug/disconnect?world=lobby")).status, 405);
+	assert.equal((await f.request("/api/debug/disconnect?world=BAD", "POST")).status, 400);
+	const response = await disconnect();
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { disconnected: 2 });
+	assert.deepEqual(f.disconnections, [["lobby", 1012, "debug disconnect"]]);
+	assert.deepEqual(f.limits, []);
 });

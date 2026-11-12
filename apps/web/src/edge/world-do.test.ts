@@ -112,10 +112,13 @@ for (const synchronousClose of [false, true]) {
 		for (let i = 0; i < 16; i++) {
 			assert.equal((await f.join(`user-${i}`)).status, 101);
 		}
-		assert.equal((await f.join("another-user")).status, 503);
+		assert.equal((await f.join("another-user")).status, 101);
+		assert.deepEqual(f.closed, [[1013, "world is full"]]);
+		assert.equal(f.connected.length, 16);
+		assert.equal(f.world.sockets.size, 16);
 		const old = f.world.sockets.get(1);
 		assert.equal((await f.join("user-0")).status, 101);
-		assert.deepEqual(f.closed, [[1008, "logged in elsewhere"]]);
+		assert.deepEqual(f.closed, [[1013, "world is full"], [4000, "logged in elsewhere"]]);
 		assert.deepEqual(f.disconnected, [1]);
 		assert.equal(f.world.sockets.size, 16);
 		old.dispatchEvent(new Event("close"));
@@ -139,8 +142,8 @@ for (const synchronousClose of [false, true]) {
 		assert.equal(f.world.revoke("unknown-user"), 0);
 		assert.equal(f.world.revoke("revoked-user"), 2);
 		assert.deepEqual(f.closed, [
-			[1008, "access revoked"],
-			[1008, "access revoked"],
+			[4001, "access revoked"],
+			[4001, "access revoked"],
 		]);
 		assert.deepEqual(f.disconnected, [1, 2]);
 		assert.deepEqual([...f.world.sockets.keys()], [3]);
@@ -215,4 +218,45 @@ test("revoke updates its timestamp and prunes only expired revocations", async t
 		f.sqlite.prepare("SELECT at FROM revocations WHERE user_id = ?").get("current-user").at,
 		now,
 	);
+});
+
+for (const synchronousClose of [false, true]) {
+	test(`disconnectAll cleans up all sockets once (synchronous close=${synchronousClose})`, async t => {
+		const f = fixture(t, synchronousClose);
+		await f.join("one");
+		await f.join("two");
+		const sockets = [...f.world.sockets.values()];
+		f.world.packetCounts.set(1, 1);
+		assert.equal(f.world.disconnectAll(1012, "debug disconnect"), 2);
+		assert.deepEqual(f.closed, [[1012, "debug disconnect"], [1012, "debug disconnect"]]);
+		assert.deepEqual(f.disconnected, [1, 2]);
+		assert.equal(f.world.sockets.size, 0);
+		assert.equal(f.world.users.size, 0);
+		assert.equal(f.world.packetCounts.size, 0);
+		for (const socket of sockets) socket.dispatchEvent(new Event("close"));
+		assert.deepEqual(f.disconnected, [1, 2]);
+		assert.equal(f.world.disconnectAll(1012, "debug disconnect"), 0);
+	});
+}
+
+for (const [data, code, reason] of [
+	["text", 4003, "binary packets only"],
+	[new ArrayBuffer(257), 4003, "binary packets only"],
+]) {
+	test(`bad packet closes without reconnect: ${typeof data}`, async t => {
+		const f = fixture(t);
+		await f.join("user");
+		f.world.sockets.get(1).dispatchEvent(new MessageEvent("message", { data }));
+		assert.deepEqual(f.closed, [[code, reason]]);
+		assert.deepEqual(f.disconnected, [1]);
+	});
+}
+
+test("packet flood closes without reconnect", async t => {
+	const f = fixture(t);
+	await f.join("user");
+	f.world.packetCounts.set(1, 100);
+	f.world.sockets.get(1).dispatchEvent(new MessageEvent("message", { data: new ArrayBuffer(1) }));
+	assert.deepEqual(f.closed, [[4002, "too many packets"]]);
+	assert.deepEqual(f.disconnected, [1]);
 });

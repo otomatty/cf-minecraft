@@ -9,6 +9,7 @@
 //   seed=<int64>      seed for a new local world
 //   autopilot=1       no input needed: the camera circles above the spawn point
 
+import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
@@ -110,6 +111,9 @@ async function main(): Promise<void> {
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
 	const velocity = [0, 0, 0];
 	let joined = false;
+	let opened = false;
+	let connection: "open" | "reconnecting" | "closed" = "closed";
+	let reconnects = 0;
 	let closed: string | null = null;
 	let selected = 1;
 	let serverStats: ServerStats | null = null;
@@ -121,15 +125,27 @@ async function main(): Promise<void> {
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
-		onOpen: () => transport.send(core.encodeHello(viewDistance)),
+		onOpen: () => {
+			if (opened) core.resetWorld();
+			opened = true;
+			transport.send(core.encodeHello(viewDistance));
+		},
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
-			if (id === S2C.Welcome && !joined) {
-				joined = true;
-				const [sx, sy, sz] = core.spawn;
-				camera.x = sx;
-				camera.y = sy + EYE_HEIGHT + (autopilot ? 14 : 2);
-				camera.z = sz;
+			if (id === S2C.Welcome) {
+				if (!joined) {
+					joined = true;
+					const [sx, sy, sz] = core.spawn;
+					camera.x = sx;
+					camera.y = sy + EYE_HEIGHT + (autopilot ? 14 : 2);
+					camera.z = sz;
+				} else {
+					reconnects++;
+					sendPosition();
+				}
+				connection = "open";
+				timeSamples.length = 0;
+				statusLine.className = "";
 				statusLine.textContent = "クリックして開始";
 				if (autopilot) overlay.hidden = true;
 			} else if (id === S2C.TimeUpdate) {
@@ -140,7 +156,16 @@ async function main(): Promise<void> {
 		onStats: (stats: ServerStats) => {
 			serverStats = stats;
 		},
-		onClose: (reason: string) => {
+		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
+			connection = "reconnecting";
+			timeSamples.length = 0;
+			statusLine.className = "";
+			statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+		},
+		onClose: (reason: string, code?: number) => {
+			connection = "closed";
+			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
+			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
@@ -186,7 +211,7 @@ async function main(): Promise<void> {
 		overlay.hidden = locked();
 		if (!locked()) {
 			keys.clear();
-			statusLine.textContent = "一時停止中：クリックして再開";
+			if (connection !== "reconnecting") statusLine.textContent = "一時停止中：クリックして再開";
 		}
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -253,6 +278,9 @@ async function main(): Promise<void> {
 		}
 	});
 	window.addEventListener("pagehide", () => transport.flush());
+	window.addEventListener("pageshow", (event) => {
+		if (event.persisted) transport.resume?.();
+	});
 	document.addEventListener("visibilitychange", () => {
 		if (document.visibilityState === "hidden") transport.flush();
 	});
@@ -314,7 +342,7 @@ async function main(): Promise<void> {
 			`XYZ: ${camera.x.toFixed(2)} / ${(camera.y - EYE_HEIGHT).toFixed(2)} / ${camera.z.toFixed(2)}   Chunk: ${Math.floor(camera.x) >> 4} ${Math.floor(camera.z) >> 4}`,
 			`Facing: ${FACING[Math.round(yaw / 90) % 4]}  (${yaw.toFixed(1)} / ${camera.pitch.toFixed(1)})`,
 			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount}  chunks ${core.chunkCount}`,
-			`Server: ${transport.kind} "${worldName}"  TPS ${measuredTps().toFixed(2)}` +
+			`Server: ${transport.kind} "${worldName}"${connection === "reconnecting" ? "  reconnecting" : ""}  TPS ${measuredTps().toFixed(2)}` +
 				(serverStats
 					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
@@ -376,6 +404,8 @@ async function main(): Promise<void> {
 		stats: () => ({
 			joined,
 			closed,
+			connection,
+			reconnects,
 			fps,
 			...frame,
 			meshQueue: core.dirtyCount,

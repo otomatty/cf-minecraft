@@ -89,6 +89,15 @@ pub extern "C" fn client_new() {
     unsafe { *STATE.0.get() = Some(st) };
 }
 
+/// Discards the mirror and queues all old chunk meshes for removal.
+#[no_mangle]
+pub extern "C" fn client_reset_world() {
+    let st = state();
+    st.unloaded.extend(st.world.chunks.keys().copied());
+    st.world.chunks.clear();
+    st.dirty.clear();
+}
+
 #[no_mangle]
 pub extern "C" fn client_out_ptr() -> *const u8 {
     state().out.as_ptr()

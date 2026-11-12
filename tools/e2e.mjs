@@ -193,6 +193,21 @@ async function playthrough(kind) {
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
 	check(after.gameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.gameTime}`);
 
+	if (kind === "ws") {
+		const response = await fetch(`${edge}/api/debug/disconnect?world=${encodeURIComponent(world)}`, { method: "POST" });
+		check(response.ok, "ws: debug disconnect accepted");
+		const deadline = Date.now() + 15000;
+		await page.waitForFunction(() => window.__mc.stats().connection === "reconnecting", { timeout: 15000, polling: 10 });
+		await page.waitForFunction(() => {
+			const s = window.__mc.stats();
+			return s.connection === "open" && s.reconnects === 1;
+		}, { timeout: Math.max(1, deadline - Date.now()), polling: 10 });
+		const reconnected = await settle(page, "ws after reconnect", chunksInView(view));
+		check(reconnected.connection === "open" && reconnected.reconnects === 1, "ws: reconnected after a dropped connection");
+		const keptAfterReconnect = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
+		check(keptAfterReconnect === 9, "ws: placed block survived reconnect", `block ${keptAfterReconnect}`);
+	}
+
 	check(errors.length === 0, `${kind}: no page errors`, errors.slice(0, 3).join(" | "));
 	return page;
 }
