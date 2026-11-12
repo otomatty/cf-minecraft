@@ -21,6 +21,7 @@ export interface RouterDeps {
 		getByName(name: string): {
 			fetch(request: Request): Promise<Response>;
 			metrics(): Promise<unknown>;
+			revoke(userId: string): Promise<number>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
 		};
 	};
@@ -141,7 +142,17 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (!hasAuthSecrets(env)) {
 			return error("unavailable", 503);
 		}
+		const signingOut = request.method === "POST" && url.pathname === "/api/auth/sign-out";
+		const signingOutUser = signingOut ? await auth.getUser(request) : null;
 		const response = await auth.handler(request);
+		if (response.ok && signingOutUser?.emailVerified) {
+			const memberships = await db.worlds(signingOutUser.id, signingOutUser.email.toLowerCase());
+			await Promise.allSettled(
+				memberships.map(async world => {
+					await worlds.getByName(world.name).revoke(signingOutUser.id);
+				}),
+			);
+		}
 		const headers = new Headers(response.headers);
 		headers.set("Cache-Control", "no-store");
 		return new Response(response.body, {
@@ -323,6 +334,12 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			return error("owner cannot be removed", 400);
 		}
 		await db.deleteMember(name, target);
+		const userIds = await db.userIds(target);
+		await Promise.allSettled(
+			userIds.map(async id => {
+				await worlds.getByName(name).revoke(id);
+			}),
+		);
 		return json({});
 	}
 

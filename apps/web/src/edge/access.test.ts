@@ -34,3 +34,15 @@ test("cookies are never used as an operator credential", () => {
 		null,
 	);
 });
+
+test("Bearer scheme matching ignores case and preserves the token", async () => {
+	for (const scheme of ["bearer", "BEARER"]) {
+		const credential = request({ Authorization: `${scheme} ${secret}` });
+		assert.equal(tokenFromRequest(credential), secret);
+		assert.equal(await isOperator(credential, secret), true);
+		assert.equal(
+			await isOperator(request({ Authorization: `${scheme} ${secret.toUpperCase()}` }), secret),
+			false,
+		);
+	}
+});

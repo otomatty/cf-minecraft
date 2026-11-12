@@ -1,7 +1,7 @@
 // The operator credential is accepted only in an Authorization Bearer header.
 export function tokenFromRequest(request: Request): string | null {
 	const authorization = request.headers.get("Authorization");
-	return authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
+	return authorization && /^bearer /i.test(authorization) ? authorization.slice(7) : null;
 }
 
 export async function isOperator(request: Request, expected?: string): Promise<boolean> {

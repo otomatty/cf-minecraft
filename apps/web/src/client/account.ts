@@ -342,7 +342,7 @@ async function main(): Promise<void> {
 		);
 		const form = element("form");
 		const name = input("名前");
-		name.field.pattern = "[a-z0-9][a-z0-9_-]{0,31}";
+		name.field.pattern = "[a-z0-9][a-z0-9_\\-]{0,31}";
 		name.field.maxLength = 32;
 		const create = element("button", "作成");
 		create.type = "submit";

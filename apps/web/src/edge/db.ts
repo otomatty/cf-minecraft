@@ -11,6 +11,12 @@ export interface World {
 export function createDB(db: D1Database) {
 	const query = (sql: string, ...args: unknown[]) => db.prepare(sql).bind(...args);
 	return {
+		async userIds(email: string) {
+			const result = await query('SELECT id FROM "user" WHERE lower(email) = ?', email).all<{
+				id: string;
+			}>();
+			return result.results.map(row => row.id);
+		},
 		world: (name: string) =>
 			query(
 				"SELECT w.name, w.owner_id, lower(u.email) AS owner_email FROM world w " +

@@ -102,3 +102,34 @@ for (const synchronousClose of [false, true]) {
 		assert.equal(f.world.sockets.size, 16);
 	});
 }
+
+for (const synchronousClose of [false, true]) {
+	test(`revoke closes only the matching user's sockets (synchronous close=${synchronousClose})`, async t => {
+		const f = fixture(t, synchronousClose);
+		assert.equal((await f.join("revoked-user")).status, 101);
+		assert.equal((await f.join("second-connection")).status, 101);
+		assert.equal((await f.join("remaining-user")).status, 101);
+		// Exercise every matching connection, even if multiple IDs share a user.
+		f.world.users.set(2, "revoked-user");
+		for (const id of [1, 2, 3]) {
+			f.world.packetCounts.set(id, 1);
+		}
+		const revokedSockets = [f.world.sockets.get(1), f.world.sockets.get(2)];
+		assert.equal(f.world.revoke("unknown-user"), 0);
+		assert.equal(f.world.revoke("revoked-user"), 2);
+		assert.deepEqual(f.closed, [
+			[1008, "access revoked"],
+			[1008, "access revoked"],
+		]);
+		assert.deepEqual(f.disconnected, [1, 2]);
+		assert.deepEqual([...f.world.sockets.keys()], [3]);
+		assert.deepEqual([...f.world.users], [[3, "remaining-user"]]);
+		assert.deepEqual([...f.world.packetCounts], [[3, 1]]);
+		for (const socket of revokedSockets) {
+			socket.dispatchEvent(new Event("close"));
+		}
+		assert.equal(f.world.revoke("revoked-user"), 0);
+		assert.deepEqual(f.disconnected, [1, 2]);
+		assert.equal(f.world.sockets.size, 1);
+	});
+}

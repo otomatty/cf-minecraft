@@ -26,6 +26,8 @@ async function setup(t) {
 	let user: User | null = null;
 	const calls: string[] = [];
 	const forwarded: Request[] = [];
+	const revocations: [string, string][] = [];
+	let revokeFailure = false;
 	const limits: [string, string][] = [];
 	let blocked = "";
 	let captcha = true;
@@ -48,6 +50,13 @@ async function setup(t) {
 					async fetch(request) {
 						forwarded.push(request);
 						return new Response("forwarded");
+					},
+					async revoke(userId) {
+						revocations.push([name, userId]);
+						if (revokeFailure) {
+							throw new Error("revoke failed");
+						}
+						return 0;
 					},
 					async metrics() {
 						return { players: 1 };
@@ -91,6 +100,10 @@ async function setup(t) {
 		db,
 		calls,
 		forwarded,
+		revocations,
+		failRevocation() {
+			revokeFailure = true;
+		},
 		limits,
 		request,
 		login(u: User | null) {
@@ -358,4 +371,74 @@ test("me, world lists, JSON size, malformed bodies, and response cache headers",
 		);
 	}
 	assert.equal((await f.request("/api/session")).status, 404);
+});
+
+test("member deletion revokes every user ID matching the normalized email", async t => {
+	const f = await setup(t);
+	f.user("player-alias", "player@example.com");
+	f.login(owner);
+	const response = await f.request("/api/worlds/lobby/members/PLAYER%40example.com", "DELETE");
+	assert.equal(response.status, 200);
+	assert.equal(await f.db.member("lobby", "player@example.com"), null);
+	assert.deepEqual(f.revocations.sort(), [
+		["lobby", "player"],
+		["lobby", "player-alias"],
+	]);
+});
+
+test("member deletion still succeeds when revoke rejects", async t => {
+	const f = await setup(t);
+	f.login(owner);
+	f.failRevocation();
+	const response = await f.request("/api/worlds/lobby/members/player%40example.com", "DELETE");
+	assert.equal(response.status, 200);
+	assert.equal(await f.db.member("lobby", "player@example.com"), null);
+	assert.deepEqual(f.revocations, [["lobby", player.id]]);
+});
+
+test("successful sign-out revokes all memberships and preserves the auth response", async t => {
+	const f = await setup(t);
+	await f.db.createWorld("other-world", other.id, other.email.toLowerCase());
+	await f.db.putMember("other-world", player.email.toLowerCase(), "player");
+	f.login(player);
+	f.failRevocation();
+	f.deps.auth.handler = async () => {
+		f.login(null);
+		return Response.json(
+			{ signedOut: true },
+			{
+				status: 202,
+				headers: { "Set-Cookie": "session=; Max-Age=0" },
+			},
+		);
+	};
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 202);
+	assert.equal(response.headers.get("Set-Cookie"), "session=; Max-Age=0");
+	assert.deepEqual(await response.json(), { signedOut: true });
+	assert.deepEqual(f.revocations, [
+		["lobby", player.id],
+		["other-world", player.id],
+	]);
+});
+
+test("failed sign-out does not revoke memberships", async t => {
+	const f = await setup(t);
+	f.login(player);
+	f.deps.auth.handler = async () => Response.json({ error: "failed" }, { status: 400 });
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 400);
+	assert.deepEqual(await response.json(), { error: "failed" });
+	assert.deepEqual(f.revocations, []);
+	assert.deepEqual(f.calls, []);
+});
+
+test("sign-out without a verified user does not revoke memberships", async t => {
+	const f = await setup(t);
+	for (const user of [null, { ...player, emailVerified: false }]) {
+		f.login(user);
+		assert.equal((await f.request("/api/auth/sign-out", "POST", {})).status, 200);
+	}
+	assert.deepEqual(f.revocations, []);
+	assert.deepEqual(f.calls, []);
 });

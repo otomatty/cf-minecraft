@@ -6,6 +6,8 @@ test("siteverify sends secret, token and client IP", async () => {
 	const fetcher = async (url, init) => {
 		assert.equal(url, "https://challenges.cloudflare.com/turnstile/v0/siteverify");
 		assert.equal(init.method, "POST");
+		assert.ok(init.signal instanceof AbortSignal);
+		assert.equal(init.signal.aborted, false);
 		assert.equal(init.body.get("secret"), "1x0000000000000000000000000000000AA");
 		assert.equal(init.body.get("response"), "token");
 		assert.equal(init.body.get("remoteip"), "192.0.2.1");

@@ -163,6 +163,22 @@ export class WorldDO extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	revoke(userId: string): number {
+		let revoked = 0;
+		for (const [id, user] of this.users) {
+			if (user !== userId) continue;
+			const core = this.ensureCore();
+			this.sockets.get(id)?.close(1008, "access revoked");
+			if (this.sockets.delete(id)) {
+				this.users.delete(id);
+				this.packetCounts.delete(id);
+				core.disconnect(id);
+			}
+			revoked++;
+		}
+		return revoked;
+	}
+
 	private startTicking(): void {
 		this.idleTicks = 0;
 		if (this.timer !== null) return;

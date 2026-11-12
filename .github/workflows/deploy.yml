@@ -210,6 +210,7 @@ jobs:
         run: pnpm exec cf deploy --prebuilt --mode production --dry-run
 
       # Apply the additive schema first; it is safe while the old Worker runs.
+      # Older builds from before authentication have no migrations to apply.
       - name: Apply D1 migrations
         if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.dry_run) || steps.tip.outputs.current == 'true' }}
         working-directory: apps/web
@@ -218,6 +219,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
         run: |
+          if [ ! -d migrations ]; then
+            echo "::notice::No migrations directory in this build; skipping D1 migrations."
+            exit 0
+          fi
           if [ -z "$D1_DATABASE_ID" ]; then
             echo "::error::D1_DATABASE_ID must be set."
             exit 1
