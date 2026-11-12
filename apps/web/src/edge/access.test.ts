@@ -1,43 +1,48 @@
-// Run with: node --test apps/web/src/edge/access.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
-import { accessDenial, sessionCookie, tokenFromRequest } from "./access.ts";
+import { isOperator, tokenFromRequest } from "./access.ts";
 
 const secret = "correct-horse";
+const request = (headers = {}) => new Request("https://game.example/ws/lobby", { headers });
 
-test("development does not ask for a token", async () => {
-	assert.equal(await accessDenial({ DEBUG: "1" }, null), null);
+test("an unset operator token never grants access", async () => {
+	assert.equal(await isOperator(request({ Authorization: `Bearer ${secret}` })), false);
+	assert.equal(await isOperator(request(), ""), false);
 });
 
-test("production without a configured token stays closed", async () => {
-	assert.equal(await accessDenial({ DEBUG: "0" }, secret), 503);
+test("only a matching Bearer credential grants operator access", async () => {
+	for (const headers of [
+		{},
+		{ Authorization: "Bearer " },
+		{ Authorization: "Bearer nope" },
+		{ Authorization: `Basic ${secret}` },
+		{ Cookie: `mc_session=${secret}` },
+	]) {
+		assert.equal(await isOperator(request(headers), secret), false);
+	}
+	assert.equal(await isOperator(request({ Authorization: `Bearer ${secret}` }), secret), true);
 });
 
-test("production rejects a missing or wrong token", async () => {
-	const env = { DEBUG: "0", ACCESS_TOKEN: secret };
-	assert.equal(await accessDenial(env, null), 401);
-	assert.equal(await accessDenial(env, ""), 401);
-	assert.equal(await accessDenial(env, "nope"), 401);
-	assert.equal(await accessDenial(env, secret), null);
+test("cookies are never used as an operator credential", () => {
+	assert.equal(tokenFromRequest(request({ Cookie: `mc_session=${secret}` })), null);
+	assert.equal(
+		tokenFromRequest(request({ Authorization: `Bearer ${secret}`, Cookie: "mc_session=other" })),
+		secret,
+	);
+	assert.equal(
+		tokenFromRequest(request({ Authorization: "Basic invalid", Cookie: `mc_session=${secret}` })),
+		null,
+	);
 });
 
-test("the token is read from a bearer header, otherwise the session cookie", () => {
-	const bearer = new Request("https://game.example/ws/lobby", {
-		headers: { Authorization: `Bearer ${secret}`, Cookie: "mc_session=other" },
-	});
-	assert.equal(tokenFromRequest(bearer), secret);
-	const cookie = new Request("https://game.example/ws/lobby", {
-		headers: { Cookie: `mc_session=${encodeURIComponent(secret)}` },
-	});
-	assert.equal(tokenFromRequest(cookie), secret);
-	assert.equal(tokenFromRequest(new Request("https://game.example/ws/lobby")), null);
-});
-
-test("the session cookie is not readable from script", () => {
-	const header = sessionCookie(secret, true);
-	assert.match(header, /HttpOnly/);
-	assert.match(header, /Secure/);
-	assert.match(header, /SameSite=Strict/);
-	assert.equal(sessionCookie(secret, false).includes("Secure"), false);
+test("Bearer scheme matching ignores case and preserves the token", async () => {
+	for (const scheme of ["bearer", "BEARER"]) {
+		const credential = request({ Authorization: `${scheme} ${secret}` });
+		assert.equal(tokenFromRequest(credential), secret);
+		assert.equal(await isOperator(credential, secret), true);
+		assert.equal(
+			await isOperator(request({ Authorization: `${scheme} ${secret.toUpperCase()}` }), secret),
+			false,
+		);
+	}
 });

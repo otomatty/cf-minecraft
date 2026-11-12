@@ -70,56 +70,30 @@ declare global {
 	}
 }
 
-async function ensureEdgeSession(): Promise<void> {
-	const current = await fetch("/api/session");
-	if (current.ok) return;
-	if (current.status === 503) throw new Error("本番の入場トークンが未設定です");
-	if (current.status !== 401) throw new Error(`入場確認に失敗しました (${current.status})`);
-
-	const panel = document.getElementById("panel");
-	if (!panel) throw new Error("入場フォームを置けません");
-	statusLine.textContent = "マルチプレイには入場トークンが必要です";
-	const form = document.createElement("form");
-	const input = document.createElement("input");
-	input.type = "password";
-	input.required = true;
-	input.autocomplete = "current-password";
-	input.placeholder = "入場トークン";
-	const button = document.createElement("button");
-	button.type = "submit";
-	button.textContent = "接続";
-	form.append(input, button);
-	panel.append(form);
-	input.focus();
-
-	await new Promise<void>((resolve) => {
-		form.addEventListener("submit", (event) => {
-			event.preventDefault();
-			button.disabled = true;
-			fetch("/api/session", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ token: input.value }),
-			})
-				.then((res) => {
-					if (res.ok) {
-						form.remove();
-						statusLine.textContent = "読み込み中…";
-						statusLine.className = "";
-						resolve();
-						return;
-					}
-					button.disabled = false;
-					statusLine.textContent = res.status === 401 ? "トークンが違います" : `接続できません (${res.status})`;
-					statusLine.className = "error";
-				})
-				.catch(() => {
-					button.disabled = false;
-					statusLine.textContent = "通信できません。再度お試しください";
-					statusLine.className = "error";
-				});
-		});
-	});
+async function canEnterWorld(): Promise<boolean> {
+	const accountURL = `/account.html?next=${encodeURIComponent(location.pathname + location.search)}`;
+	const stop = (message: string): false => {
+		fail(message);
+		const link = document.createElement("a");
+		link.href = accountURL;
+		link.textContent = "アカウントページへ";
+		link.style.color = "#aaccff";
+		document.getElementById("panel")!.append(link);
+		return false;
+	};
+	const response = await fetch("/api/me");
+	if (response.status === 503) throw new Error("本番の認証設定が未完了です");
+	if (!response.ok) throw new Error(`ログイン確認に失敗しました (${response.status})`);
+	const me = await response.json();
+	if (me.open) return true;
+	if (!me.user) return stop("マルチプレイにはログインが必要です");
+	const world = await fetch(`/api/worlds/${encodeURIComponent(worldName)}`);
+	if (world.status === 404) return stop(`ワールド ${worldName} はありません`);
+	if (world.status === 403) return stop("このワールドに招待されていません");
+	if (world.status === 401) return stop("マルチプレイにはログインが必要です");
+	if (world.status === 503) throw new Error("本番の認証設定が未完了です");
+	if (!world.ok) throw new Error(`ワールドの確認に失敗しました (${world.status})`);
+	return true;
 }
 
 async function runScenario(seed: string, ticks: number): Promise<string> {
@@ -128,6 +102,7 @@ async function runScenario(seed: string, ticks: number): Promise<string> {
 }
 
 async function main(): Promise<void> {
+	if (serverKind === "ws" && !await canEnterWorld()) return;
 	const core = await ClientCore.load(clientWasmUrl);
 	const renderer = await Renderer.create(canvas, core.textureNames());
 	const blockNames = core.blockNames();
@@ -170,7 +145,6 @@ async function main(): Promise<void> {
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
 	};
-	if (serverKind === "ws") await ensureEdgeSession();
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)

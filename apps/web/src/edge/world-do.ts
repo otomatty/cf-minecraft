@@ -22,6 +22,10 @@ const MAX_PACKETS_PER_TICK = 100;
 const AUTOSAVE_TICKS = 100;
 /** Ticks without any player before the loop stops and the object may sleep. */
 const IDLE_STOP_TICKS = 100;
+// Bound how long an in-flight authorization can admit a connection.
+const AUTHORIZATION_MAX_AGE_MS = 30_000;
+// Allow for clock differences between the Worker and Durable Object hosts.
+const CLOCK_SKEW_MS = 2_000;
 
 export interface WorldMetrics {
 	ticking: boolean;
@@ -43,6 +47,7 @@ export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private seed: bigint | null = null;
 	private readonly sockets = new Map<number, WebSocket>();
+	private readonly users = new Map<number, string>();
 	private readonly packetCounts = new Map<number, number>();
 	private nextClient = 1;
 	private timer: ReturnType<typeof setInterval> | null = null;
@@ -59,6 +64,10 @@ export class WorldDO extends DurableObject<Env> {
 				cz INTEGER NOT NULL,
 				data BLOB NOT NULL,
 				PRIMARY KEY (cx, cz)
+			) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS revocations (
+				user_id TEXT PRIMARY KEY,
+				at INTEGER NOT NULL
 			) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS meta (
 				key TEXT PRIMARY KEY,
@@ -99,13 +108,41 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
+		const user = request.headers.get("X-MC-User");
+		if (!user) return new Response("Forbidden", { status: 403 });
+		const authorization = request.headers.get("X-MC-Authorized-At");
+		const authorizedAt = Number(authorization);
+		if (
+			authorization === null ||
+			!/^-?\d+$/.test(authorization) ||
+			!Number.isSafeInteger(authorizedAt) ||
+			Date.now() - authorizedAt > AUTHORIZATION_MAX_AGE_MS
+		) {
+			return new Response("Forbidden", { status: 403 });
+		}
+		const revocations = this.ctx.storage.sql.exec<{ at: number }>(
+			"SELECT at FROM revocations WHERE user_id = ?",
+			user,
+		).toArray();
+		if (revocations.length > 0 && authorizedAt <= revocations[0].at + CLOCK_SKEW_MS) {
+			return new Response("Forbidden", { status: 403 });
+		}
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
-		if (this.sockets.size >= MAX_PLAYERS) {
+		const previous = [...this.users].find(([, identity]) => identity === user)?.[0];
+		if (this.sockets.size - (previous === undefined ? 0 : 1) >= MAX_PLAYERS) {
 			return new Response("World is full", { status: 503 });
 		}
 		const core = this.ensureCore();
+		if (previous !== undefined) {
+			this.sockets.get(previous)?.close(1008, "logged in elsewhere");
+			if (this.sockets.delete(previous)) {
+				this.users.delete(previous);
+				this.packetCounts.delete(previous);
+				core.disconnect(previous);
+			}
+		}
 		const pair = new WebSocketPair();
 		const client = pair[0];
 		const server = pair[1];
@@ -118,14 +155,17 @@ export class WorldDO extends DurableObject<Env> {
 		const id = this.nextClient++;
 		core.connect(id);
 		this.sockets.set(id, server);
+		this.users.set(id, user);
 
 		const drop = () => {
 			if (this.sockets.delete(id)) {
+				this.users.delete(id);
 				this.packetCounts.delete(id);
 				core.disconnect(id);
 			}
 		};
 		server.addEventListener("message", (event) => {
+			if (!this.sockets.has(id)) return;
 			const data = event.data;
 			if (!(data instanceof ArrayBuffer) || data.byteLength > MAX_PACKET_BYTES) {
 				server.close(1003, "binary packets only");
@@ -146,6 +186,33 @@ export class WorldDO extends DurableObject<Env> {
 
 		this.startTicking();
 		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	revoke(userId: string): number {
+		const now = Date.now();
+		this.ctx.storage.sql.exec(
+			"INSERT INTO revocations (user_id, at) VALUES (?, ?) " +
+				"ON CONFLICT(user_id) DO UPDATE SET at = excluded.at",
+			userId,
+			now,
+		);
+		this.ctx.storage.sql.exec(
+			"DELETE FROM revocations WHERE at < ?",
+			now - AUTHORIZATION_MAX_AGE_MS - CLOCK_SKEW_MS,
+		);
+		let revoked = 0;
+		for (const [id, user] of this.users) {
+			if (user !== userId) continue;
+			const core = this.ensureCore();
+			this.sockets.get(id)?.close(1008, "access revoked");
+			if (this.sockets.delete(id)) {
+				this.users.delete(id);
+				this.packetCounts.delete(id);
+				core.disconnect(id);
+			}
+			revoked++;
+		}
+		return revoked;
 	}
 
 	private startTicking(): void {
