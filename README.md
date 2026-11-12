@@ -48,6 +48,7 @@ pnpm dev          # WASMをビルドして http://localhost:5173 で起動
 | URL | 内容 |
 |---|---|
 | `/` | シングルプレイ（統合サーバー） |
+| `/account.html` | Google ログイン、ワールド作成、メンバーの招待 |
 | `/?server=ws&world=lobby` | Durable Object のワールド `lobby` に参加 |
 | `/?autopilot=1` | 入力なしでカメラがスポーン上空を周回 |
 | `/?view=10&seed=42` | 描画距離（2〜12）と新規ワールドのシード |
@@ -57,7 +58,7 @@ pnpm dev          # WASMをビルドして http://localhost:5173 で起動
 ## テスト
 
 ```sh
-pnpm test                 # Rust 29件 + ホスト側 7件
+pnpm test                 # Rust 29件 + ホスト側 30件（7ファイル）
 pnpm typecheck
 pnpm dev                  # 以下は開発サーバーを起動した状態で実行
 node tools/determinism.mjs --edge http://localhost:5173
@@ -78,28 +79,60 @@ JDK の乱数実値を取り直す場合は `tools/oracle/JdkVectors.java` の�
 
 ## デプロイ
 
+最初に D1 データベースを作り、表示された ID にマイグレーションを適用します。コマンドはリポジトリのルートで実行します。
+
 ```sh
 cf auth login
-openssl rand -base64 32
-cf workers secrets update ACCESS_TOKEN --worker maincraft --type secret_text --text '<上で出した値>'
-pnpm run deploy
-MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロイ先> --players 8 --seconds 60
+cf d1 create maincraft
+cf d1 migrations apply <ID> --dir apps/web/migrations
 ```
 
-本番は `ACCESS_TOKEN` が一致しないとワールドを作れません。試行回数の制限はないので、上の `openssl rand -base64 32` の長さを使ってください。短い値は当たることがあります。値はリポジトリに入れません。ローカルの `pnpm dev` はトークン不要です。`pnpm deploy` は pnpm 本体のコマンドなので、デプロイは `pnpm run deploy` です。
+Google Cloud で OAuth クライアント（ウェブアプリケーション）を作ります。承認済みリダイレクト URI に `https://<デプロイ先>/api/auth/callback/google` を登録します。
+
+Cloudflare ダッシュボードで Turnstile のウィジェットを作ります。ホスト名にデプロイ先を登録します。
+
+次の値を Worker の secret に登録します。値はリポジトリに入れません。
+
+| secret | 意味 |
+|---|---|
+| `BETTER_AUTH_SECRET` | セッション認証の秘密鍵。`openssl rand -base64 32` で生成します |
+| `GOOGLE_CLIENT_ID` | Google OAuth のクライアント ID |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth のクライアントシークレット |
+| `TURNSTILE_SITE_KEY` | Turnstile のサイトキー。アカウント画面にも渡します |
+| `TURNSTILE_SECRET_KEY` | Turnstile のサーバー検証用キー |
+| `WORLD_CREATORS` | ワールドを作れるメールアドレス。カンマ区切りで、大小文字と前後の空白は無視します |
+| `ACCESS_TOKEN` | tick-probe 用の運用者トークン。`openssl rand -base64 32` で別の値を生成します |
+
+```sh
+cf workers secrets update BETTER_AUTH_SECRET --worker maincraft --type secret_text --text '<生成した値>'
+cf workers secrets update GOOGLE_CLIENT_ID --worker maincraft --type secret_text --text '<クライアント ID>'
+cf workers secrets update GOOGLE_CLIENT_SECRET --worker maincraft --type secret_text --text '<クライアントシークレット>'
+cf workers secrets update TURNSTILE_SITE_KEY --worker maincraft --type secret_text --text '<サイトキー>'
+cf workers secrets update TURNSTILE_SECRET_KEY --worker maincraft --type secret_text --text '<検証用キー>'
+cf workers secrets update WORLD_CREATORS --worker maincraft --type secret_text --text 'owner@example.com'
+cf workers secrets update ACCESS_TOKEN --worker maincraft --type secret_text --text '<運用者トークン>'
+pnpm run deploy
+MC_ACCESS_TOKEN='<運用者トークン>' node tools/tick-probe.mjs --edge https://<デプロイ先> --players 8 --seconds 60
+```
+
+認証に必要な5つの secret が足りないと、認証が要るルートは 503 で閉じます。`WORLD_CREATORS` が空なら誰も作成できません。`ACCESS_TOKEN` が空なら運用者トークンは無効です。運用者トークンは `Authorization: Bearer <値>` だけで有効です。任意のワールドへの接続と metrics の取得に使えます。間違ったトークンにはレート制限がかかります。
+
+`/account.html` で Google にログインします。`WORLD_CREATORS` に登録した人は、認証ウィジェットを通してワールドを作れます（1人5個まで）。operator は各ワールドの「メンバー」欄からメールアドレスと役割を指定して招待できます。まだログインしたことがない人も招待できます。メンバーは1ワールド64人までです。オーナーは削除・降格できません。参加する人は、招待されたメールアドレスの Google アカウントでログインし、一覧のワールド名を開きます。
+
+ローカルの `pnpm dev` は今までどおり認証なしで動きます。`pnpm deploy` は pnpm 本体のコマンドなので、デプロイは `pnpm run deploy` です。手元から公開するときも、先にマイグレーションを適用してください。
 
 ### 自動公開
 
 公開は、CI（`.github/workflows/ci.yml`）とは別のワークフロー（`.github/workflows/deploy.yml`）が行います。CI は変更を検査するだけで、本番には触れません。
 
-`main` へのプッシュで CI がすべて通ると、`deploy.yml` が起動し、CI が作ったビルド出力をそのまま Cloudflare に公開します。公開の前に作り直しません。自動で公開するのは、そのときの `main` の先頭のコミットのビルドです。先頭のコミットの CI がまだ通っていなければ、何も公開しません。その CI が通ったときに、あらためて起動します。プルリクエストでは、CI が `cf deploy --dry-run` で確認するところまでです。
+`main` へのプッシュで CI がすべて通ると、`deploy.yml` が起動し、CI が作ったビルド出力をそのまま Cloudflare に公開します。公開の前に作り直しません。D1 のマイグレーションを先に適用してから Worker を公開します。追加のみのスキーマなので、古い Worker が動いている間も安全です。自動で公開するのは、そのときの `main` の先頭のコミットのビルドです。先頭のコミットの CI がまだ通っていなければ、何も公開しません。その CI が通ったときに、あらためて起動します。プルリクエストでは、CI が `cf deploy --dry-run` で確認するところまでです。
 
 自動公開は、次の設定が済むまで動きません。
 
-1. Cloudflare で API トークンを作ります。権限は Worker の公開に必要なものだけにし、対象のアカウントを1つに絞ります（[作り方](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)）。
+1. Cloudflare で API トークンを作ります。権限は Worker の公開と D1 の編集に必要なものにし、対象のアカウントを1つに絞ります（[作り方](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)）。
 2. GitHub の Settings → Environments で `production` を作り、その secret に `CLOUDFLARE_API_TOKEN` と `CLOUDFLARE_ACCOUNT_ID` を置きます。公開できるブランチは `main` だけにします。値はリポジトリにも issue にも書きません。
-3. 上の手順で、Worker に `ACCESS_TOKEN` を登録しておきます。
-4. Settings → Secrets and variables → Actions → Variables で、`DEPLOY_ENABLED` を `true` にします。
+3. 上の手順で D1 と OAuth、Turnstile を用意し、Worker の secret を登録しておきます。
+4. Settings → Secrets and variables → Actions → Variables で、`D1_DATABASE_ID` に D1 の ID を設定し、`DEPLOY_ENABLED` を `true` にします。
 
 自動公開を止めるときは、`DEPLOY_ENABLED` を消すか `true` 以外にします。
 
@@ -107,7 +140,7 @@ MC_ACCESS_TOKEN=<同じ値> node tools/tick-probe.mjs --edge https://<デプロ�
 
 Actions の「Deploy」から「Run workflow」を選び、`run_id` に公開したい CI の実行の番号（その実行の URL の末尾の数字）を入れます。`main` へのプッシュで成功した CI の実行だけを受け付けます。前の版に戻すときも、この方法で前の実行を指定します。ビルド出力は30日間残ります。
 
-- `dry_run` にチェックを入れると、ビルド出力を取り出して `cf deploy --dry-run` で確認するだけで、公開はしません。設定の確認に使えます。
+- `dry_run` にチェックを入れると、ビルド出力を取り出して `cf deploy --dry-run` で確認するだけで、公開もマイグレーションの適用もしません。設定の確認に使えます。
 - 手動での公開は、`DEPLOY_ENABLED` に関係なく動きます。
 - 前の版に戻すときは、先に `DEPLOY_ENABLED` を止めてください。有効なままだと、次に `main` の CI が通ったときに、最新のコミットで上書きされます。
 

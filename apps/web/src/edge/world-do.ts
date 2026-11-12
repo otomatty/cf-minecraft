@@ -43,6 +43,7 @@ export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private seed: bigint | null = null;
 	private readonly sockets = new Map<number, WebSocket>();
+	private readonly users = new Map<number, string>();
 	private readonly packetCounts = new Map<number, number>();
 	private nextClient = 1;
 	private timer: ReturnType<typeof setInterval> | null = null;
@@ -99,13 +100,24 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	override async fetch(request: Request): Promise<Response> {
+		const user = request.headers.get("X-MC-User");
+		if (!user) return new Response("Forbidden", { status: 403 });
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
-		if (this.sockets.size >= MAX_PLAYERS) {
+		const previous = [...this.users].find(([, identity]) => identity === user)?.[0];
+		if (this.sockets.size - (previous === undefined ? 0 : 1) >= MAX_PLAYERS) {
 			return new Response("World is full", { status: 503 });
 		}
 		const core = this.ensureCore();
+		if (previous !== undefined) {
+			this.sockets.get(previous)?.close(1008, "logged in elsewhere");
+			if (this.sockets.delete(previous)) {
+				this.users.delete(previous);
+				this.packetCounts.delete(previous);
+				core.disconnect(previous);
+			}
+		}
 		const pair = new WebSocketPair();
 		const client = pair[0];
 		const server = pair[1];
@@ -118,14 +130,17 @@ export class WorldDO extends DurableObject<Env> {
 		const id = this.nextClient++;
 		core.connect(id);
 		this.sockets.set(id, server);
+		this.users.set(id, user);
 
 		const drop = () => {
 			if (this.sockets.delete(id)) {
+				this.users.delete(id);
 				this.packetCounts.delete(id);
 				core.disconnect(id);
 			}
 		};
 		server.addEventListener("message", (event) => {
+			if (!this.sockets.has(id)) return;
 			const data = event.data;
 			if (!(data instanceof ArrayBuffer) || data.byteLength > MAX_PACKET_BYTES) {
 				server.close(1003, "binary packets only");

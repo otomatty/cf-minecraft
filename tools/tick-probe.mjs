@@ -39,7 +39,7 @@ function connect(index) {
 	const core = new ClientCore(new WebAssembly.Instance(clientModule, {}));
 	const wsUrl = `${edge.replace(/^http/, "ws")}/ws/${world}`;
 	const ws = accessToken
-		? new WebSocket(wsUrl, { headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` } })
+		? new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${accessToken}` } })
 		: new WebSocket(wsUrl);
 	ws.binaryType = "arraybuffer";
 	const p = {
@@ -98,20 +98,19 @@ async function ensureAccess() {
 		console.error("MC_ACCESS_TOKEN が必要です");
 		process.exit(1);
 	}
-	if (!accessToken) return;
 	if (!edgeIsLocal(edge) && new URL(edge).protocol !== "https:") {
 		console.error("リモート接続先には HTTPS が必要です");
 		process.exit(1);
 	}
-	const res = await fetch(`${edge}/api/session`, {
-		headers: { cookie: `mc_session=${encodeURIComponent(accessToken)}` },
+	const res = await fetch(`${edge}/api/worlds/${encodeURIComponent(world)}/metrics`, {
+		headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
 	});
 	if (res.status === 401) {
-		console.error("MC_ACCESS_TOKEN が必要です");
+		console.error("MC_ACCESS_TOKEN が違います");
 		process.exit(1);
 	}
 	if (res.status === 503) {
-		console.error("本番の ACCESS_TOKEN が未設定です");
+		console.error("本番の認証設定が未完了です");
 		process.exit(1);
 	}
 	if (!res.ok) {
@@ -121,7 +120,7 @@ async function ensureAccess() {
 }
 
 async function metrics() {
-	const headers = accessToken ? { cookie: `mc_session=${encodeURIComponent(accessToken)}` } : undefined;
+	const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined;
 	return (await fetch(`${edge}/api/worlds/${world}/metrics`, { headers })).json();
 }
 
