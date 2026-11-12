@@ -27,7 +27,7 @@ async function setup(t) {
 	const calls: string[] = [];
 	const forwarded: Request[] = [];
 	const revocations: [string, string][] = [];
-	let revokeFailure = false;
+	let revokeFailures = 0;
 	const limits: [string, string][] = [];
 	let blocked = "";
 	let captcha = true;
@@ -53,7 +53,8 @@ async function setup(t) {
 					},
 					async revoke(userId) {
 						revocations.push([name, userId]);
-						if (revokeFailure) {
+						if (revokeFailures > 0) {
+							revokeFailures--;
 							throw new Error("revoke failed");
 						}
 						return 0;
@@ -101,8 +102,8 @@ async function setup(t) {
 		calls,
 		forwarded,
 		revocations,
-		failRevocation() {
-			revokeFailure = true;
+		failRevocation(count = Infinity) {
+			revokeFailures = count;
 		},
 		limits,
 		request,
@@ -386,17 +387,27 @@ test("member deletion revokes every user ID matching the normalized email", asyn
 	]);
 });
 
-test("member deletion still succeeds when revoke rejects", async t => {
+test("member deletion returns 502 after both revoke attempts fail", async t => {
 	const f = await setup(t);
 	f.login(owner);
-	f.failRevocation();
+	f.failRevocation(2);
 	const response = await f.request("/api/worlds/lobby/members/player%40example.com", "DELETE");
-	assert.equal(response.status, 200);
+	assert.equal(response.status, 502);
+	assert.deepEqual(await response.json(), { error: "revoke failed" });
 	assert.equal(await f.db.member("lobby", "player@example.com"), null);
-	assert.deepEqual(f.revocations, [["lobby", player.id]]);
+	assert.deepEqual(f.revocations, [
+		["lobby", player.id],
+		["lobby", player.id],
+	]);
+	assert.equal(
+		(await f.request("/api/worlds/lobby/members/player%40example.com", "DELETE")).status,
+		200,
+	);
+	assert.equal(f.revocations.length, 3);
 });
 
 test("successful sign-out revokes all memberships and preserves the auth response", async t => {
+	const errors = t.mock.method(console, "error", () => {});
 	const f = await setup(t);
 	await f.db.createWorld("other-world", other.id, other.email.toLowerCase());
 	await f.db.putMember("other-world", player.email.toLowerCase(), "player");
@@ -419,7 +430,16 @@ test("successful sign-out revokes all memberships and preserves the auth respons
 	assert.deepEqual(f.revocations, [
 		["lobby", player.id],
 		["other-world", player.id],
+		["lobby", player.id],
+		["other-world", player.id],
 	]);
+	assert.deepEqual(
+		errors.mock.calls.map(call => call.arguments),
+		[
+			["revoke failed", "lobby", player.id],
+			["revoke failed", "other-world", player.id],
+		],
+	);
 });
 
 test("failed sign-out does not revoke memberships", async t => {
@@ -441,4 +461,65 @@ test("sign-out without a verified user does not revoke memberships", async t => 
 	}
 	assert.deepEqual(f.revocations, []);
 	assert.deepEqual(f.calls, []);
+});
+
+test("member deletion retries a single revoke failure and returns 200", async t => {
+	const f = await setup(t);
+	f.login(owner);
+	f.failRevocation(1);
+	const response = await f.request("/api/worlds/lobby/members/player%40example.com", "DELETE");
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), {});
+	assert.deepEqual(f.revocations, [
+		["lobby", player.id],
+		["lobby", player.id],
+	]);
+});
+
+test("Worker timestamps authorization before the membership query and removes spoofed timestamps", async t => {
+	const f = await setup(t);
+	f.login(player);
+	let now = 100_000;
+	t.mock.method(Date, "now", () => now);
+	const member = f.deps.db.member;
+	f.deps.db.member = async (name, email) => {
+		now = 105_000;
+		return member(name, email);
+	};
+	assert.equal(
+		(
+			await f.request("/ws/lobby", "GET", undefined, {
+				"X-MC-Authorized-At": "9999999999999",
+			})
+		).status,
+		200,
+	);
+	assert.equal(f.forwarded[0].headers.get("X-MC-Authorized-At"), "100000");
+});
+
+test("Worker supplies authorization timestamps for operator and development connections", async t => {
+	const f = await setup(t);
+	t.mock.method(Date, "now", () => 100_000);
+	assert.equal(
+		(
+			await f.request("/ws/lobby", "GET", undefined, {
+				Authorization: "Bearer operator-secret",
+				"X-MC-Authorized-At": "spoofed",
+			})
+		).status,
+		200,
+	);
+	f.deps.env = { DEBUG: "1" };
+	assert.equal(
+		(
+			await f.request("/ws/lobby", "GET", undefined, {
+				"X-MC-Authorized-At": "spoofed",
+			})
+		).status,
+		200,
+	);
+	assert.equal(f.forwarded.length, 2);
+	for (const request of f.forwarded) {
+		assert.equal(request.headers.get("X-MC-Authorized-At"), "100000");
+	}
 });

@@ -88,7 +88,24 @@ async function body(request: Request): Promise<Record<string, unknown> | null> {
 	}
 }
 
+async function revokeWithRetry(
+	worlds: RouterDeps["worlds"],
+	name: string,
+	userId: string,
+): Promise<boolean> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			await worlds.getByName(name).revoke(userId);
+			return true;
+		} catch {
+			// Retry once before reporting that a connection could still be active.
+		}
+	}
+	return false;
+}
+
 export async function handle(request: Request, deps: RouterDeps): Promise<Response> {
+	const authorizedAt = Date.now();
 	const { env, worlds, auth, db } = deps;
 	const url = new URL(request.url);
 	const parts = url.pathname.split("/").filter(Boolean);
@@ -147,9 +164,11 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		const response = await auth.handler(request);
 		if (response.ok && signingOutUser?.emailVerified) {
 			const memberships = await db.worlds(signingOutUser.id, signingOutUser.email.toLowerCase());
-			await Promise.allSettled(
+			await Promise.all(
 				memberships.map(async world => {
-					await worlds.getByName(world.name).revoke(signingOutUser.id);
+					if (!(await revokeWithRetry(worlds, world.name, signingOutUser.id))) {
+						console.error("revoke failed", world.name, signingOutUser.id);
+					}
 				}),
 			);
 		}
@@ -219,6 +238,8 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		}
 		const headers = new Headers(request.headers);
 		headers.delete("X-MC-User");
+		headers.delete("X-MC-Authorized-At");
+		headers.set("X-MC-Authorized-At", String(authorizedAt));
 		headers.set(
 			"X-MC-User",
 			ops ? `ops:${crypto.randomUUID()}` : user ? user.id : `dev:${crypto.randomUUID()}`,
@@ -335,11 +356,10 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		}
 		await db.deleteMember(name, target);
 		const userIds = await db.userIds(target);
-		await Promise.allSettled(
-			userIds.map(async id => {
-				await worlds.getByName(name).revoke(id);
-			}),
-		);
+		const revoked = await Promise.all(userIds.map(id => revokeWithRetry(worlds, name, id)));
+		if (revoked.some(success => !success)) {
+			return error("revoke failed", 502);
+		}
 		return json({});
 	}
 

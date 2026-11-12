@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 // Resolve only the runtime-owned modules; exercise WorldDO's real fetch logic.
 registerHooks({
@@ -60,7 +61,23 @@ function fixture(t, synchronousClose = false) {
 		globalThis.WebSocketPair = originalPair;
 		globalThis.Response = originalResponse;
 	});
-	const world = new WorldDO({ storage: { sql: { exec() {} } } }, {});
+	const sqlite = new DatabaseSync(":memory:");
+	t.after(() => sqlite.close());
+	const context = {
+		storage: {
+			sql: {
+				exec(sql: string, ...args: unknown[]) {
+					if (args.length === 0) {
+						sqlite.exec(sql);
+						return { toArray: () => [] };
+					}
+					const rows = sqlite.prepare(sql).all(...args);
+					return { toArray: () => rows };
+				},
+			},
+		},
+	};
+	const world = new WorldDO(context, {});
 	world.ensureCore = () => ({
 		connect(id) {
 			connected.push(id);
@@ -70,13 +87,17 @@ function fixture(t, synchronousClose = false) {
 		},
 	});
 	world.startTicking = () => {};
-	const join = (user?: string) =>
+	const join = (user?: string, authorizedAt: string | null = String(Date.now())) =>
 		world.fetch(
 			new Request("https://game.example/ws/lobby", {
-				headers: { Upgrade: "websocket", ...(user ? { "X-MC-User": user } : {}) },
+				headers: {
+					Upgrade: "websocket",
+					...(user ? { "X-MC-User": user } : {}),
+					...(authorizedAt === null ? {} : { "X-MC-Authorized-At": authorizedAt }),
+				},
 			}),
 		);
-	return { world, join, connected, disconnected, closed };
+	return { world, join, connected, disconnected, closed, sqlite, context };
 }
 
 test("DO requires the Worker identity header before admitting a connection", async t => {
@@ -133,3 +154,65 @@ for (const synchronousClose of [false, true]) {
 		assert.equal(f.world.sockets.size, 1);
 	});
 }
+
+test("DO rejects missing, invalid, and expired authorization timestamps", async t => {
+	t.mock.method(Date, "now", () => 100_000);
+	const f = fixture(t);
+	for (const authorizedAt of [null, "", "not-a-number", "NaN", "Infinity", "100000.5", "69999"]) {
+		assert.equal((await f.join("user", authorizedAt)).status, 403);
+	}
+	assert.deepEqual(f.connected, []);
+	assert.equal((await f.join("user", "70000")).status, 101);
+});
+
+test("persisted revoke blocks in-flight authorization through the clock-skew window", async t => {
+	let now = 100_000;
+	t.mock.method(Date, "now", () => now);
+	const f = fixture(t);
+	assert.equal(f.world.revoke("user"), 0);
+	// Reconstruct the DO to prove that revocation survives an instance restart.
+	const restarted = new WorldDO(f.context, {});
+	restarted.ensureCore = f.world.ensureCore;
+	restarted.startTicking = () => {};
+	const join = (authorizedAt: string) =>
+		restarted.fetch(
+			new Request("https://game.example/ws/lobby", {
+				headers: {
+					Upgrade: "websocket",
+					"X-MC-User": "user",
+					"X-MC-Authorized-At": authorizedAt,
+				},
+			}),
+		);
+	now = 102_001;
+	for (const authorizedAt of ["99999", "100000", "101999", "102000"]) {
+		assert.equal((await join(authorizedAt)).status, 403);
+	}
+	assert.deepEqual(f.connected, []);
+	assert.equal((await join("102001")).status, 101);
+});
+
+test("revoke updates its timestamp and prunes only expired revocations", async t => {
+	let now = 100_000;
+	t.mock.method(Date, "now", () => now);
+	const f = fixture(t);
+	f.world.revoke("old-user");
+	now = 100_001;
+	f.world.revoke("boundary-user");
+	now = 132_001;
+	f.world.revoke("current-user");
+	const rows = f.sqlite.prepare("SELECT user_id, at FROM revocations ORDER BY user_id").all();
+	assert.deepEqual(
+		rows.map(row => ({ ...row })),
+		[
+			{ user_id: "boundary-user", at: 100_001 },
+			{ user_id: "current-user", at: 132_001 },
+		],
+	);
+	now = 132_002;
+	f.world.revoke("current-user");
+	assert.equal(
+		f.sqlite.prepare("SELECT at FROM revocations WHERE user_id = ?").get("current-user").at,
+		now,
+	);
+});

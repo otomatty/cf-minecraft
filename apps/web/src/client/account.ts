@@ -73,6 +73,8 @@ function message(error: unknown): string {
 
 function apiErrorMessage(status: number): string {
 	switch (status) {
+		case 502:
+			return "メンバーは削除しましたが、接続中の切断に失敗しました。もう一度削除してください";
 		case 503:
 			return "本番の認証設定が未完了です";
 		case 401:
