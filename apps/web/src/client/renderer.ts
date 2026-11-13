@@ -336,10 +336,10 @@ export class Renderer {
 	 * Draws one frame. `target` is the block to outline, if any.
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 */
-	render(camera: Camera, viewDistance: number, target: readonly [number, number, number] | null): FrameStats {
+	render(camera: Camera, viewDistance: number, target: readonly [number, number, number] | null, fovY = FOV_Y): FrameStats {
 		this.resize();
 		const far = (viewDistance + 2) * 16 * 2;
-		const viewProj = viewProjection(camera.yaw, camera.pitch, FOV_Y, this.canvas.width / this.canvas.height, NEAR, far);
+		const viewProj = viewProjection(camera.yaw, camera.pitch, fovY, this.canvas.width / this.canvas.height, NEAR, far);
 		const block = [Math.floor(camera.x), Math.floor(camera.y), Math.floor(camera.z)];
 		const frac = [camera.x - block[0], camera.y - block[1], camera.z - block[2]];
 
