@@ -1,11 +1,13 @@
 /// <reference lib="webworker" />
 // The integrated server: the same core the Durable Object runs, hosted in a
 // Web Worker for single player. Edited chunks are saved to the origin private
-// file system (OPFS), one file per chunk for now; region files come in M1.
+// file system (OPFS), in crash-safe compressed region files.
 
 import { type DirtyChunk, ServerCore } from "../shared/server-core.ts";
 import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
+import { type Meta, OpfsStore } from "./opfs-store.ts";
+import { RegionCodec } from "./region-codec.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
@@ -15,87 +17,6 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 
 function post(event: WorkerEvent, transfer: Transferable[] = []): void {
 	scope.postMessage(event, transfer);
-}
-
-interface Meta {
-	seed: string;
-	gameTime: string;
-	dayTime: string;
-}
-
-/** Chunk files in OPFS. Sync access handles exist only in workers, which is where we are. */
-class OpfsStore {
-	private readonly dir: FileSystemDirectoryHandle;
-
-	private constructor(dir: FileSystemDirectoryHandle) {
-		this.dir = dir;
-	}
-
-	static async open(world: string): Promise<OpfsStore | null> {
-		try {
-			const root = await navigator.storage.getDirectory();
-			return new OpfsStore(await root.getDirectoryHandle(`world-${world}`, { create: true }));
-		} catch {
-			// Private browsing or an old browser: play without saving.
-			return null;
-		}
-	}
-
-	async list(): Promise<Array<[number, number]>> {
-		const out: Array<[number, number]> = [];
-		for await (const name of this.dir.keys()) {
-			const m = /^c\.(-?\d+)\.(-?\d+)$/.exec(name);
-			if (m) out.push([Number(m[1]), Number(m[2])]);
-		}
-		return out;
-	}
-
-	private async readFile(name: string): Promise<Uint8Array | null> {
-		try {
-			const handle = await this.dir.getFileHandle(name);
-			return new Uint8Array(await (await handle.getFile()).arrayBuffer());
-		} catch {
-			return null;
-		}
-	}
-
-	private async writeFile(name: string, data: Uint8Array): Promise<void> {
-		const handle = await this.dir.getFileHandle(name, { create: true });
-		const access = await handle.createSyncAccessHandle();
-		try {
-			access.truncate(0);
-			access.write(data, { at: 0 });
-			access.flush();
-		} finally {
-			access.close();
-		}
-	}
-
-	readChunk(cx: number, cz: number): Promise<Uint8Array | null> {
-		return this.readFile(`c.${cx}.${cz}`);
-	}
-
-	writeChunk(cx: number, cz: number, data: Uint8Array): Promise<void> {
-		return this.writeFile(`c.${cx}.${cz}`, data);
-	}
-
-	async readMeta(): Promise<Meta | null> {
-		const bytes = await this.readFile("meta.json");
-		if (!bytes) return null;
-		try {
-			const meta = JSON.parse(new TextDecoder().decode(bytes)) as Partial<Meta>;
-			if (typeof meta.seed === "string" && /^-?\d{1,19}$/.test(meta.seed)) {
-				return { seed: meta.seed, gameTime: meta.gameTime ?? "0", dayTime: meta.dayTime ?? "0" };
-			}
-		} catch {
-			// Unreadable meta: treat the world as new.
-		}
-		return null;
-	}
-
-	writeMeta(meta: Meta): Promise<void> {
-		return this.writeFile("meta.json", new TextEncoder().encode(JSON.stringify(meta)));
-	}
 }
 
 let core: ServerCore | null = null;
@@ -130,7 +51,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
 	const c = new ServerCore(instance);
 
-	store = await OpfsStore.open(msg.world);
+	store = await OpfsStore.open(msg.world, new RegionCodec(instance));
 	const meta = store ? await store.readMeta() : null;
 	// An existing world keeps its seed; otherwise the page's choice or a random one.
 	seed = meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0];
