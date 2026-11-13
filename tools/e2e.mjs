@@ -72,7 +72,8 @@ async function settle(page, label, chunks) {
 			(chunks) => {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
-				return s.joined && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5 ? s : false;
+				const autopilot = new URLSearchParams(location.search).get("autopilot") === "1";
+				return s.joined && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
 			{ timeout: 120000, polling: 250 },
 			chunks,
@@ -197,7 +198,8 @@ async function playthrough(kind) {
 	const corrected = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), distant.pos);
 	check(corrected === 0, `${kind}: rejected edit rolled back`, `${corrected}`);
 
-	// Wait past one autosave (5 s), then reload: the world must come back from storage.
+	// Wait past one autosave (5 s), then reload. Local restores from storage;
+	// ws rejoins the live core (storage restoration is checked by evict below).
 	const timeBefore = await page.evaluate(() => {
 		window.__mc.flush();
 		return window.__mc.stats().gameTime;
@@ -209,7 +211,7 @@ async function playthrough(kind) {
 	const kept = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	check(after.seed === seedBefore, `${kind}: seed kept across reload`, after.seed);
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
-	check(after.gameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.gameTime}`);
+	check(after.joinedGameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.joinedGameTime}`);
 
 	if (kind === "ws") {
 		const response = await fetch(`${edge}/api/debug/disconnect?world=${encodeURIComponent(world)}`, { method: "POST" });
@@ -224,6 +226,18 @@ async function playthrough(kind) {
 		check(reconnected.connection === "open" && reconnected.reconnects === 1, "ws: reconnected after a dropped connection");
 		const keptAfterReconnect = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 		check(keptAfterReconnect === 9, "ws: placed block survived reconnect", `block ${keptAfterReconnect}`);
+
+		const beforeEvict = await page.evaluate(() => window.__mc.stats());
+		const evicted = await fetch(`${edge}/api/debug/evict?world=${encodeURIComponent(world)}`, { method: "POST" });
+		check(evicted.ok, "ws: debug evict accepted");
+		await page.waitForFunction((reconnects) => {
+			const s = window.__mc.stats();
+			return s.connection === "open" && s.reconnects > reconnects;
+		}, { timeout: 15000, polling: 10 }, beforeEvict.reconnects);
+		const restored = await settle(page, "ws after evict", chunksInView(view));
+		check(restored.joinedGameTime >= beforeEvict.gameTime && restored.joinedGameTime > 0, "ws: clock restored from storage", `tick ${beforeEvict.gameTime} -> ${restored.joinedGameTime}`);
+		const keptAfterEvict = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
+		check(keptAfterEvict === 9, "ws: placed block survived evict", `block ${keptAfterEvict}`);
 	}
 
 	check(errors.length === 0, `${kind}: no page errors`, errors.slice(0, 3).join(" | "));

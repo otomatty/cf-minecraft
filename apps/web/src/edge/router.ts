@@ -24,6 +24,7 @@ export interface RouterDeps {
 			metrics(): Promise<unknown>;
 			revoke(userId: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
+			evict(): Promise<void>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
 		};
 	};
@@ -115,13 +116,17 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	const ip = clientIP(request);
 	const limit: Limiter = async (name, key) => open || deps.limiter(name, key);
 
-	if (url.pathname === "/api/debug/disconnect") {
+	if (url.pathname === "/api/debug/disconnect" || url.pathname === "/api/debug/evict") {
 		if (!open) return error("not found", 404);
 		if (request.method !== "POST") return error("method not allowed", 405);
 		const origin = request.headers.get("Origin");
 		if (origin !== null && origin !== url.origin) return error("forbidden origin", 403);
 		const world = url.searchParams.get("world") ?? "";
 		if (!WORLD_NAME.test(world)) return error("invalid world name", 400);
+		if (url.pathname === "/api/debug/evict") {
+			await worlds.getByName(world).evict();
+			return json({ evicted: true });
+		}
 		const disconnected = await worlds.getByName(world).disconnectAll(SERVICE_RESTART, "debug disconnect");
 		return json({ disconnected });
 	}
