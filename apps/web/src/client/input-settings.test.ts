@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTIONS, defaultSettings, duplicateKeys, loadSettings, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
+import { ACTIONS, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
 
 const memory = () => {
 	const values = new Map<string, string>();
@@ -75,4 +75,61 @@ test("assignments preserve reserved keys and Keyboard Lock excludes Escape", () 
 	for (const code of ["KeyW", "ControlLeft", "ControlRight", "ArrowUp", "Numpad0", "IntlYen"]) assert.equal(validKey(code), true);
 	assert.equal(LOCKABLE_CODES.includes("Escape"), false);
 	for (const code of ["KeyW", "ControlLeft", "ControlRight"]) assert.ok(LOCKABLE_CODES.includes(code));
+});
+
+test("both sides of each modifier match the assigned key", () => {
+	assert.equal(matchesKey("ShiftRight", defaultSettings().keys.down), true);
+	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {
+		assert.equal(matchesKey(`${modifier}Left`, `${modifier}Right`), true);
+		assert.equal(matchesKey(`${modifier}Right`, `${modifier}Left`), true);
+		assert.equal(matchesKey(`${modifier}Right`, `${modifier}Right`), true);
+	}
+	assert.equal(matchesKey("KeyW", "KeyW"), true);
+	assert.equal(matchesKey("KeyW", "KeyS"), false);
+	assert.equal(matchesKey("ShiftRight", "ControlLeft"), false);
+	assert.equal(matchesKey("AltRight", "MetaLeft"), false);
+});
+test("opposite modifier sides are duplicate assignments and rejected on load", () => {
+	const storage = memory();
+	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {
+		const settings = defaultSettings();
+		settings.keys.up = `${modifier}Right`;
+		settings.keys.down = `${modifier}Left`;
+		assert.deepEqual(duplicateKeys(settings.keys), [`${modifier}Left`]);
+		storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+		assert.deepEqual(loadSettings(storage), defaultSettings());
+	}
+});
+test("assignment validation rejects sprint fallback conflicts in either lock state", () => {
+	assert.deepEqual(effectiveKeyConflicts(defaultSettings()), []);
+	for (const sprint of ["ControlLeft", "ControlRight"]) {
+		const settings = defaultSettings();
+		settings.keys.sprint = sprint;
+		const candidate = { ...settings, keys: { ...settings.keys, fullscreen: "KeyR" } };
+		assert.deepEqual(duplicateKeys(candidate.keys), []);
+		assert.deepEqual(effectiveKeyConflicts(candidate), ["KeyR"]);
+		assert.equal(settings.keys.fullscreen, "KeyF");
+	}
+	const settings = defaultSettings();
+	settings.keys.forward = "ControlRight";
+	assert.deepEqual(duplicateKeys(settings.keys), []);
+	assert.deepEqual(effectiveKeyConflicts(settings), ["ControlLeft"]);
+	settings.keys.sprint = "KeyT";
+	assert.deepEqual(effectiveKeyConflicts(settings), []);
+});
+test("saved sprint fallback conflicts reset to defaults; safe custom bindings still load", () => {
+	const storage = memory();
+	for (const sprint of ["ControlLeft", "ControlRight", "KeyR"]) {
+		const settings = defaultSettings();
+		settings.keys.sprint = sprint;
+		if (sprint === "KeyR") settings.keys.forward = "ControlRight";
+		else settings.keys.fullscreen = "KeyR";
+		storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+		assert.deepEqual(loadSettings(storage), defaultSettings());
+	}
+	const settings = defaultSettings();
+	settings.keys.down = "ShiftRight";
+	settings.keys.sprint = "ControlRight";
+	assert.equal(saveSettings(storage, settings), true);
+	assert.deepEqual(loadSettings(storage), settings);
 });

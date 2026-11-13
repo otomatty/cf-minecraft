@@ -14,8 +14,19 @@ export function defaultSettings(): InputSettings {
 		fov: 70,
 	};
 }
+/** Treat the two physical keys of each modifier as one binding. */
+function normalizedKey(code: string): string {
+	return code.replace(/^(Shift|Control|Alt|Meta)(Left|Right)$/, "$1Left");
+}
+export function matchesKey(code: string, assigned: string): boolean {
+	return normalizedKey(code) === normalizedKey(assigned);
+}
 export function duplicateKeys(keys: Record<Action, string>): string[] {
-	return [...new Set(ACTIONS.map(action => keys[action]).filter((code, i, codes) => codes.indexOf(code) !== i))];
+	return [...new Set(ACTIONS.map(action => normalizedKey(keys[action])).filter((code, i, codes) => codes.indexOf(code) !== i))];
+}
+/** Check both runtime key maps, including the sprint fallback when lock is unavailable. */
+export function effectiveKeyConflicts(settings: InputSettings): string[] {
+	return [...new Set([false, true].flatMap(active => duplicateKeys({ ...settings.keys, sprint: sprintKey(settings, active) })))];
 }
 /** Standard physical key codes; Escape is deliberately never requested by Keyboard Lock. */
 export const LOCKABLE_CODES = [
@@ -39,7 +50,7 @@ export function loadSettings(storage: StorageReader): InputSettings {
 	try {
 		const value = JSON.parse(storage.getItem(SETTINGS_KEY) ?? "null");
 		if (!value || !value.keys || !ACTIONS.every(action => validKey(value.keys[action]))
-			|| duplicateKeys(value.keys).length > 0
+			|| duplicateKeys(value.keys).length > 0 || effectiveKeyConflicts(value).length > 0
 			|| !Number.isFinite(value.sensitivity) || value.sensitivity < 0 || value.sensitivity > 200
 			|| !Number.isFinite(value.fov) || value.fov < 30 || value.fov > 110) return defaultSettings();
 		return { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov };

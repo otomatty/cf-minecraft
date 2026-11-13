@@ -14,7 +14,7 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
-import { ACTIONS, type Action, defaultSettings, duplicateKeys, LOCKABLE_CODES, loadSettings, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { forward, right } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { TEX_SIZE } from "./textures.ts";
@@ -201,6 +201,7 @@ async function main(): Promise<void> {
 	// Accessing localStorage itself may throw (for example when storage is disabled).
 	try { settings = loadSettings(localStorage); } catch { /* Keep defaults. */ }
 	const keys = new Set<string>();
+	const pressed = (assigned: string) => [...keys].some(code => matchesKey(code, assigned));
 	let sprinting = false;
 	let lastForwardTap = -Infinity;
 	const heldButtons = new Map<number, number>();
@@ -229,8 +230,6 @@ async function main(): Promise<void> {
 		try {
 			warning.textContent = saveSettings(localStorage, settings) ? "" : "設定を保存できません。再読み込みまで適用します。";
 		} catch { warning.textContent = "設定を保存できません。再読み込みまで適用します。"; }
-		const conflicts = [false, true].flatMap(active => duplicateKeys({ ...settings.keys, sprint: sprintKey(settings, active) }));
-		if (conflicts.length) warning.textContent += ` ダッシュの切替先が別の操作と重複します: ${[...new Set(conflicts)].join(", ")}`;
 		refreshSettings();
 		if (document.fullscreenElement === document.documentElement) void updateKeyboardLock();
 	}
@@ -320,13 +319,14 @@ async function main(): Promise<void> {
 				if (!validKey(e.code)) { warning.textContent = "このキーは割り当てられません（Esc / F8 / F11 は予約済み）。"; return; }
 				const next = { ...settings.keys, [capturing]: e.code };
 				if (duplicateKeys(next).length) { warning.textContent = "そのキーは別の操作に割り当て済みです。"; return; }
+				if (effectiveKeyConflicts({ ...settings, keys: next }).length) { warning.textContent = "ダッシュの切替先が別の操作と重複するため、割り当てられません。"; return; }
 				settings.keys = next;
 				capturing = null;
 				persistSettings();
 			}
 			return;
 		}
-		if (e.code === settings.keys.fullscreen && !e.repeat) {
+		if (matchesKey(e.code, settings.keys.fullscreen) && !e.repeat) {
 			e.preventDefault();
 			void toggleFullscreen();
 			return;
@@ -342,17 +342,17 @@ async function main(): Promise<void> {
 		}
 		if (!locked()) return;
 		e.preventDefault();
-		if (e.code === settings.keys.forward && !e.repeat) {
+		if (matchesKey(e.code, settings.keys.forward) && !e.repeat) {
 			const now = performance.now();
 			if (now - lastForwardTap < DOUBLE_TAP_MS) sprinting = true;
 			lastForwardTap = now;
 		}
-		if (e.code.startsWith("Digit") && !Object.values(settings.keys).includes(e.code)) select(Number(e.code.slice(5)));
+		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) select(Number(e.code.slice(5)));
 		keys.add(e.code);
 	});
 	window.addEventListener("keyup", (e) => {
 		keys.delete(e.code);
-		if (e.code === settings.keys.forward) sprinting = false;
+		if (matchesKey(e.code, settings.keys.forward)) sprinting = false;
 	});
 	window.addEventListener("blur", clearInput);
 	canvas.addEventListener("wheel", (e) => {
@@ -419,15 +419,15 @@ async function main(): Promise<void> {
 			camera.pitch = 28;
 			return;
 		}
-		const fwd = (keys.has(settings.keys.forward) ? 1 : 0) - (keys.has(settings.keys.backward) ? 1 : 0);
-		const strafe = (keys.has(settings.keys.right) ? 1 : 0) - (keys.has(settings.keys.left) ? 1 : 0);
-		const up = (keys.has(settings.keys.up) ? 1 : 0) - (keys.has(settings.keys.down) ? 1 : 0);
+		const fwd = (pressed(settings.keys.forward) ? 1 : 0) - (pressed(settings.keys.backward) ? 1 : 0);
+		const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
+		const up = (pressed(settings.keys.up) ? 1 : 0) - (pressed(settings.keys.down) ? 1 : 0);
 		const f = forward(camera.yaw, 0);
 		const r = right(camera.yaw);
 		let wx = f[0] * fwd + r[0] * strafe;
 		let wz = f[2] * fwd + r[2] * strafe;
 		const len = Math.hypot(wx, wz);
-		const speed = sprinting || keys.has(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)) ? SPRINT_FLY_SPEED : FLY_SPEED;
+		const speed = sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)) ? SPRINT_FLY_SPEED : FLY_SPEED;
 		if (len > 0) {
 			wx = (wx / len) * speed;
 			wz = (wz / len) * speed;
