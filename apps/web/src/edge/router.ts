@@ -1,3 +1,4 @@
+import { SERVICE_RESTART } from "../shared/close-codes.ts";
 import { isOperator, tokenFromRequest } from "./access.ts";
 import { hasAuthSecrets } from "./auth-config.ts";
 import type { AuthSecrets } from "./auth-config.ts";
@@ -22,6 +23,7 @@ export interface RouterDeps {
 			fetch(request: Request): Promise<Response>;
 			metrics(): Promise<unknown>;
 			revoke(userId: string): Promise<number>;
+			disconnectAll(code: number, reason: string): Promise<number>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
 		};
 	};
@@ -112,6 +114,17 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	const open = env.DEBUG === "1";
 	const ip = clientIP(request);
 	const limit: Limiter = async (name, key) => open || deps.limiter(name, key);
+
+	if (url.pathname === "/api/debug/disconnect") {
+		if (!open) return error("not found", 404);
+		if (request.method !== "POST") return error("method not allowed", 405);
+		const origin = request.headers.get("Origin");
+		if (origin !== null && origin !== url.origin) return error("forbidden origin", 403);
+		const world = url.searchParams.get("world") ?? "";
+		if (!WORLD_NAME.test(world)) return error("invalid world name", 400);
+		const disconnected = await worlds.getByName(world).disconnectAll(SERVICE_RESTART, "debug disconnect");
+		return json({ disconnected });
+	}
 
 	// Preserve the development-only scenario endpoint, including its method check.
 	if (url.pathname === "/api/debug/scenario") {

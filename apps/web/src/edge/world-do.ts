@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 
+import {
+	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL,
+} from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import serverWasm from "../wasm/server.wasm";
@@ -132,11 +135,14 @@ export class WorldDO extends DurableObject<Env> {
 		}
 		const previous = [...this.users].find(([, identity]) => identity === user)?.[0];
 		if (this.sockets.size - (previous === undefined ? 0 : 1) >= MAX_PLAYERS) {
-			return new Response("World is full", { status: 503 });
+			const pair = new WebSocketPair();
+			pair[1].accept();
+			pair[1].close(WORLD_FULL, "world is full");
+			return new Response(null, { status: 101, webSocket: pair[0] });
 		}
 		const core = this.ensureCore();
 		if (previous !== undefined) {
-			this.sockets.get(previous)?.close(1008, "logged in elsewhere");
+			this.sockets.get(previous)?.close(LOGGED_IN_ELSEWHERE, "logged in elsewhere");
 			if (this.sockets.delete(previous)) {
 				this.users.delete(previous);
 				this.packetCounts.delete(previous);
@@ -168,14 +174,14 @@ export class WorldDO extends DurableObject<Env> {
 			if (!this.sockets.has(id)) return;
 			const data = event.data;
 			if (!(data instanceof ArrayBuffer) || data.byteLength > MAX_PACKET_BYTES) {
-				server.close(1003, "binary packets only");
+				server.close(BAD_PACKET, "binary packets only");
 				drop();
 				return;
 			}
 			const count = (this.packetCounts.get(id) ?? 0) + 1;
 			this.packetCounts.set(id, count);
 			if (count > MAX_PACKETS_PER_TICK) {
-				server.close(1008, "too many packets");
+				server.close(TOO_MANY_PACKETS, "too many packets");
 				drop();
 				return;
 			}
@@ -204,7 +210,7 @@ export class WorldDO extends DurableObject<Env> {
 		for (const [id, user] of this.users) {
 			if (user !== userId) continue;
 			const core = this.ensureCore();
-			this.sockets.get(id)?.close(1008, "access revoked");
+			this.sockets.get(id)?.close(ACCESS_REVOKED, "access revoked");
 			if (this.sockets.delete(id)) {
 				this.users.delete(id);
 				this.packetCounts.delete(id);
@@ -213,6 +219,20 @@ export class WorldDO extends DurableObject<Env> {
 			revoked++;
 		}
 		return revoked;
+	}
+
+	/** RPC (debug): disconnect everyone using the same cleanup as revoke. */
+	disconnectAll(code: number, reason: string): number {
+		const count = this.sockets.size;
+		for (const [id, socket] of this.sockets) {
+			socket.close(code, reason);
+			if (this.sockets.delete(id)) {
+				this.users.delete(id);
+				this.packetCounts.delete(id);
+				this.ensureCore().disconnect(id);
+			}
+		}
+		return count;
 	}
 
 	private startTicking(): void {

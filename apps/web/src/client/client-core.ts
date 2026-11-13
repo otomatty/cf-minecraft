@@ -6,6 +6,7 @@ interface ClientExports {
 	mc_alloc(len: number): number;
 	mc_free(ptr: number, len: number): void;
 	client_new(): void;
+	client_reset_world(): void;
 	client_out_ptr(): number;
 	client_mesh_ptr(): number;
 	client_packet(ptr: number, len: number): number;
@@ -82,6 +83,10 @@ export class ClientCore {
 		const id = this.x.client_packet(ptr, data.length);
 		this.x.mc_free(ptr, data.length);
 		return id === 0xffffffff ? -1 : id;
+	}
+
+	resetWorld(): void {
+		this.x.client_reset_world();
 	}
 
 	get spawn(): [number, number, number] {
