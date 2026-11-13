@@ -4,8 +4,8 @@ import java.util.Random;
  * Prints reference values from the JDK itself (no game code involved).
  *
  * Run from the repository root:
- *   javac --add-modules jdk.random --add-exports jdk.random/jdk.random=ALL-UNNAMED -d /tmp/oracle tools/oracle/JdkVectors.java
- *   java  --add-modules jdk.random --add-exports jdk.random/jdk.random=ALL-UNNAMED -cp /tmp/oracle JdkVectors \
+ *   javac --add-modules jdk.random --add-exports jdk.random/jdk.random=ALL-UNNAMED -d target/oracle tools/oracle/JdkVectors.java
+ *   java  --add-modules jdk.random --add-exports jdk.random/jdk.random=ALL-UNNAMED -cp target/oracle JdkVectors \
  *     > crates/jmath/tests/vectors/jdk.txt
  */
 public class JdkVectors {
@@ -70,6 +70,141 @@ public class JdkVectors {
             for (int i = 0; i < N; i++) sb.append(' ').append(x.nextLong());
             sb.append('\n');
         }
+        mathVectors(sb);
+        gaussianVectors(sb);
+        tableVectors(sb);
         System.out.print(sb);
     }
+    // Canonicalize NaNs: Java does not specify a NaN sign or payload.
+    static String bits(double x) {
+        return String.format("%016x", Double.doubleToLongBits(x));
+    }
+
+    static void unary(StringBuilder sb, double x) {
+        String[] names = {"sin", "cos", "tan", "asin", "acos", "atan", "log", "log10", "exp"};
+        double[] results = {StrictMath.sin(x), StrictMath.cos(x), StrictMath.tan(x),
+            StrictMath.asin(x), StrictMath.acos(x), StrictMath.atan(x),
+            StrictMath.log(x), StrictMath.log10(x), StrictMath.exp(x)};
+        for (int i = 0; i < names.length; i++)
+            sb.append("M ").append(names[i]).append(' ').append(bits(x)).append(' ').append(bits(results[i])).append('\n');
+    }
+
+    static void binary(StringBuilder sb, double x, double y) {
+        sb.append("M atan2 ").append(bits(x)).append(' ').append(bits(y)).append(' ').append(bits(StrictMath.atan2(x, y))).append('\n');
+        sb.append("M pow ").append(bits(x)).append(' ').append(bits(y)).append(' ').append(bits(StrictMath.pow(x, y))).append('\n');
+    }
+
+    static void mathVectors(StringBuilder sb) {
+        double[] edges = {0.0, -0.0, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+            Double.MIN_VALUE, -Double.MIN_VALUE, Double.MIN_NORMAL, -Double.MIN_NORMAL,
+            Double.longBitsToDouble(0x000fffffffffffffL), Double.MAX_VALUE, -Double.MAX_VALUE,
+            1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 3.0, -3.0, 10.0, -10.0,
+            1e300, -1e300, 1e-300, -1e-300, 0x1.0p31, -0x1.0p31,
+            0x1.0p53, -0x1.0p53, 0x1.0p64, -0x1.0p64,
+            709.782712893384, -745.1332191019411, -708.3964185322641};
+        for (double x : edges) {
+            unary(sb, x);
+            if (Double.isFinite(x)) {
+                unary(sb, Math.nextDown(x));
+                unary(sb, Math.nextUp(x));
+            }
+            for (double y : edges) binary(sb, x, y);
+        }
+        // Branch boundaries from the published fdlibm algorithms.
+        int[] highWords = {0x3e200000, 0x3e300000, 0x3e400000, 0x3fd33333, 0x3fd62e42,
+            0x3fdc0000, 0x3fe00000, 0x3fe60000, 0x3fe90000, 0x3fe921fb,
+            0x3fef3333, 0x3ff00000, 0x3ff0a2b2, 0x3ff30000, 0x4002d97c,
+            0x40038000, 0x413921fb, 0x40862e42, 0x44100000};
+        for (int h : highWords) {
+            for (long low : new long[]{0L, 0xffffffffL}) {
+                double x = Double.longBitsToDouble(((long)h << 32) | low);
+                for (double v : new double[]{Math.nextDown(x), x, Math.nextUp(x)}) {
+                    unary(sb, v); unary(sb, -v);
+                }
+            }
+        }
+        for (int n : new int[]{1, 2, 3, 4, 31, 32, 1000, 1 << 19, 1 << 20, Integer.MAX_VALUE}) {
+            double x = n * Math.PI / 2.0;
+            for (double v : new double[]{Math.nextDown(x), x, Math.nextUp(x)}) {
+                unary(sb, v); unary(sb, -v);
+            }
+        }
+        // Powers of two cover subnormal normalization and each reduction exponent.
+        for (int e = -1074; e <= 1023; e += 7) {
+            double x = Math.scalb(1.0, e);
+            unary(sb, x); unary(sb, -x);
+        }
+        Random r = new Random(0x11fd1b5L);
+        for (int i = 0; i < 768; i++) {
+            double x = Double.longBitsToDouble(r.nextLong());
+            double y = Double.longBitsToDouble(r.nextLong());
+            unary(sb, x); binary(sb, x, y);
+            unary(sb, 2.0 * r.nextDouble() - 1.0);
+            unary(sb, 1500.0 * r.nextDouble() - 750.0);
+            binary(sb, 20.0 * r.nextDouble() - 10.0, 200.0 * r.nextDouble() - 100.0);
+            binary(sb, -10.0 * r.nextDouble(), r.nextInt(2049) - 1074);
+        }
+    }
+
+    static void gaussianVectors(StringBuilder sb) {
+        for (long seed : SEEDS) {
+            Random r = new Random(seed);
+            sb.append("G ").append(seed).append(" sequence");
+            for (int i = 0; i < 64; i++) sb.append(' ').append(bits(r.nextGaussian()));
+            sb.append('\n');
+            r = new Random(seed);
+            sb.append("G ").append(seed).append(" mixed");
+            for (int i = 0; i < 17; i++) {
+                sb.append(' ').append(bits(r.nextGaussian()));
+                sb.append(' ').append(bits(r.nextDouble()));
+                sb.append(' ').append(r.nextLong());
+            }
+            // Reset with a pending cached sample, then reset again without one.
+            r.setSeed(seed);
+            for (int i = 0; i < 4; i++) sb.append(' ').append(bits(r.nextGaussian()));
+            r.setSeed(seed);
+            for (int i = 0; i < 4; i++) sb.append(' ').append(bits(r.nextGaussian()));
+            sb.append('\n');
+        }
+    }
+
+    static void lookup(StringBuilder sb, float[] table, float x) {
+        int si = (int)(x * 10430.378f) & 65535;
+        int ci = (int)(x * 10430.378f + 16384.0f) & 65535;
+        sb.append("L ").append(String.format("%08x", Float.floatToIntBits(x)))
+            .append(' ').append((int)x).append(' ').append(si).append(' ').append(ci)
+            .append(' ').append(String.format("%08x", Float.floatToIntBits(table[si])))
+            .append(' ').append(String.format("%08x", Float.floatToIntBits(table[ci]))).append('\n');
+    }
+
+    static void tableVectors(StringBuilder sb) {
+        float[] table = new float[65536];
+        int doubleDifferences = 0, floatDifferences = 0;
+        for (int i = 0; i < table.length; i++) {
+            double x = i * Math.PI * 2 / 65536;
+            double strict = StrictMath.sin(x), fast = Math.sin(x);
+            table[i] = (float)strict;
+            if (Double.doubleToLongBits(strict) != Double.doubleToLongBits(fast)) doubleDifferences++;
+            if (Float.floatToIntBits((float)strict) != Float.floatToIntBits((float)fast)) floatDifferences++;
+            sb.append("T ").append(i).append(' ').append(String.format("%08x", Float.floatToIntBits(table[i]))).append('\n');
+        }
+        sb.append("# sin table Math.sin differences: f64=").append(doubleDifferences)
+            .append(" f32=").append(floatDifferences).append('\n');
+        float[] edges = {0f, -0f, Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY,
+            Float.MIN_VALUE, -Float.MIN_VALUE, Float.MIN_NORMAL, -Float.MIN_NORMAL,
+            Float.MAX_VALUE, -Float.MAX_VALUE, (float)Integer.MAX_VALUE, (float)Integer.MIN_VALUE,
+            1f / 10430.378f, -1f / 10430.378f, 16384f / 10430.378f,
+            (float)Integer.MAX_VALUE / 10430.378f, (float)Integer.MIN_VALUE / 10430.378f};
+        for (float x : edges) {
+            lookup(sb, table, x);
+            lookup(sb, table, Math.nextDown(x));
+            lookup(sb, table, Math.nextUp(x));
+        }
+        Random r = new Random(11L);
+        for (int i = 0; i < 512; i++) {
+            lookup(sb, table, Float.intBitsToFloat(r.nextInt()));
+            lookup(sb, table, r.nextFloat() * 2000f - 1000f);
+        }
+    }
+
 }
