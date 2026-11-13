@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { OpfsStore } from "./opfs-store.ts";
+import { Generator, ServerCore } from "../shared/server-core.ts";
+import { OpfsStore, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "./region-codec.ts";
 
 // These integration tests use the real WASM format implementation.
@@ -13,6 +14,8 @@ class MemoryDirectory {
 	flushes = 0;
 	failFlush = 0;
 	failDelete = false;
+	failAccess = 0;
+	accessAttempts = 0;
 	operations: string[] = [];
 
 	seed(name: string, bytes: Uint8Array) {
@@ -39,6 +42,8 @@ class MemoryDirectory {
 		return {
 			getFile: async () => ({ arrayBuffer: async () => file.bytes.slice().buffer }),
 			createSyncAccessHandle: async () => {
+				this.accessAttempts++;
+				if (this.failAccess-- > 0) throw new DOMException("locked by another tab", "NoModificationAllowedError");
 				assert.equal(file.open, false, "access handles must be serialized");
 				file.open = true;
 				return {
@@ -125,4 +130,105 @@ test("OPFS overwrite preserves committed chunks after failed data or table flush
 		await store.writeChunk(0, 0, newer);
 		assert.deepEqual(await store.readChunk(0, 0), newer);
 	}
+});
+
+
+test("OPFS retries contended access handles for chunks and metadata", async () => {
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	dir.failAccess = 2;
+	await store.writeChunk(0, 0, old);
+	assert.equal(dir.accessAttempts, 3);
+	assert.deepEqual(await store.readChunk(0, 0), old);
+	dir.failAccess = 2;
+	const meta = { seed: "1", gameTime: "2", dayTime: "3" };
+	await store.writeMeta(meta);
+	assert.deepEqual(await store.readMeta(), meta);
+});
+
+const meta = { seed: "1", gameTime: "2", dayTime: "3" };
+
+test("failed saves retain drained chunks, read the latest snapshot, and recover on the next save", async (t) => {
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	const saves = new PendingChunkSaves(store);
+	const warnings = t.mock.method(console, "warn", () => {});
+	dir.failAccess = 100;
+	await saves.save([{ cx: 0, cz: 0, data: old }, { cx: 1, cz: 0, data: old }], meta);
+	assert.equal(dir.accessAttempts, 6);
+	assert.equal(saves.retrying, true);
+	assert.equal(warnings.mock.callCount(), 1);
+	assert.deepEqual(await saves.readChunk(0, 0), old);
+	dir.failAccess = 0;
+	const saving = saves.save([{ cx: 0, cz: 0, data: newer }], meta);
+	assert.deepEqual(await saves.readChunk(0, 0), newer);
+	await saving;
+	assert.equal(saves.retrying, false);
+	assert.deepEqual(await store.readChunk(0, 0), newer);
+	assert.deepEqual(await store.readChunk(1, 0), old);
+	assert.deepEqual(await store.readMeta(), meta);
+});
+
+test("a snapshot arriving during a write remains pending until its own write succeeds", async (t) => {
+	const store = await open(new MemoryDirectory());
+	const saves = new PendingChunkSaves(store);
+	const write = store.writeChunk.bind(store);
+	let release!: () => void;
+	let entered!: () => void;
+	const started = new Promise<void>((resolve) => { entered = resolve; });
+	const blocked = new Promise<void>((resolve) => { release = resolve; });
+	t.mock.method(store, "writeChunk", async (cx: number, cz: number, data: Uint8Array) => {
+		if (data === old) { entered(); await blocked; }
+		await write(cx, cz, data);
+	});
+	const first = saves.save([{ cx: 0, cz: 0, data: old }], meta);
+	await started;
+	const second = saves.save([{ cx: 0, cz: 0, data: newer }], meta);
+	assert.deepEqual(await saves.readChunk(0, 0), newer);
+	release();
+	await Promise.all([first, second]);
+	assert.deepEqual(await store.readChunk(0, 0), newer);
+});
+
+test("OPFS rejects a corrupt chunk without preventing reads of other chunks", async () => {
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	await store.writeChunk(0, 0, old);
+	await store.writeChunk(1, 0, newer);
+	const file = dir.files.get("r.0.0")!;
+	const sector = new DataView(file.bytes.buffer).getUint32(8, true);
+	file.bytes[sector * 4096 + 5] ^= 1; // Damage the payload CRC, leaving the location table valid.
+	await assert.rejects(store.readChunk(0, 0), /Invalid region storage data/);
+	assert.deepEqual(await store.readChunk(1, 0), newer);
+});
+
+test("OPFS preserves empty chunks on read, listing, and migration", async () => {
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	const empty = new Uint8Array();
+	await store.writeChunk(0, 0, empty);
+	assert.deepEqual(await store.readChunk(0, 0), empty);
+	assert.equal(await store.readChunk(1, 0), null);
+	dir.seed("c.0.0", old);
+	dir.seed("c.-1.0", empty);
+	assert.deepEqual(await store.list(), [[0, 0], [-1, 0]]);
+	assert.deepEqual(await store.readChunk(0, 0), empty);
+	assert.deepEqual(await store.readChunk(-1, 0), empty);
+	assert.equal(dir.files.has("c.0.0"), false);
+	assert.equal(dir.files.has("c.-1.0"), false);
+});
+
+test("regenerating a missing stored chunk in the real core does not make it dirty", () => {
+	const core = ServerCore.fromModule(module);
+	core.start(1n, Generator.Flat);
+	core.setStored([[0, 0]]);
+	core.connect(1);
+	core.packet(1, new Uint8Array([0, 1, 2])); // Hello: protocol 1, view distance 2.
+	core.tick();
+	assert.ok(core.takeRequests().some(([cx, cz]) => cx === 0 && cz === 0));
+	core.chunkMissing(0, 0);
+	for (let i = 0; i < 20; i++) core.tick();
+	assert.ok(core.loadedChunks > 0);
+	assert.equal(core.dirtyChunks, 0);
+	assert.equal(core.takeDirty(), null);
 });

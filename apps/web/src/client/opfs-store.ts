@@ -36,7 +36,7 @@ export class OpfsStore {
 			const m = /^c\.(-?\d+)\.(-?\d+)$/.exec(name);
 			if (!m) continue;
 			const cx = Number(m[1]), cz = Number(m[2]);
-			if (!(await this.readChunk(cx, cz))) {
+			if (await this.readChunk(cx, cz) === null) {
 				const data = await this.readFile(name);
 				if (!data) throw new Error(`Cannot migrate ${name}`);
 				await this.writeChunk(cx, cz, data);
@@ -58,17 +58,19 @@ export class OpfsStore {
 		return out;
 	}
 
-	private region(cx: number, cz: number, op: number, data: Uint8Array = new Uint8Array()): Promise<Uint8Array> {
+	private region(cx: number, cz: number, op: 1): Promise<Uint8Array | null>;
+	private region(cx: number, cz: number, op: 0 | 2, data?: Uint8Array): Promise<Uint8Array>;
+	private region(cx: number, cz: number, op: number, data: Uint8Array = new Uint8Array()): Promise<Uint8Array | null> {
 		const run = this.queue.then(async () => {
 			const name = `r.${Math.floor(cx / 32)}.${Math.floor(cz / 32)}`;
 			let handle: FileSystemFileHandle;
 			try {
 				handle = await this.dir.getFileHandle(name, { create: op === 2 });
 			} catch (error) {
-				if (op !== 2 && error instanceof DOMException && error.name === "NotFoundError") return new Uint8Array();
+				if (op !== 2 && error instanceof DOMException && error.name === "NotFoundError") return op === 1 ? null : new Uint8Array();
 				throw error;
 			}
-			const access = await handle.createSyncAccessHandle();
+			const access = await this.acquireAccess(handle);
 			try {
 				const headerSize = 49152;
 				const size = access.getSize();
@@ -81,7 +83,8 @@ export class OpfsStore {
 				input.set(data, 8 + headerSize);
 				const result = this.codec.call(op, input);
 				const resultView = new DataView(result.buffer, result.byteOffset, result.byteLength);
-				if (op === 1 && result.length) {
+				if (op === 1) {
+					if (!result.length) return null;
 					const bytes = new Uint8Array(resultView.getUint32(4, true));
 					this.readAt(access, bytes, resultView.getUint32(0, true));
 					return this.codec.call(3, bytes);
@@ -110,6 +113,17 @@ export class OpfsStore {
 		return run;
 	}
 
+	private async acquireAccess(handle: FileSystemFileHandle): Promise<FileSystemSyncAccessHandle> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				return await handle.createSyncAccessHandle();
+			} catch (error) {
+				if (attempt === 5) throw error;
+				await new Promise((resolve) => setTimeout(resolve, Math.min(50 * 2 ** attempt, 2000)));
+			}
+		}
+	}
+
 	private readAt(access: FileSystemSyncAccessHandle, bytes: Uint8Array, at: number): void {
 		let read = 0;
 		while (read < bytes.length) {
@@ -130,7 +144,7 @@ export class OpfsStore {
 
 	private async writeFile(name: string, data: Uint8Array): Promise<void> {
 		const handle = await this.dir.getFileHandle(name, { create: true });
-		const access = await handle.createSyncAccessHandle();
+		const access = await this.acquireAccess(handle);
 		try {
 			access.truncate(0);
 			access.write(data, { at: 0 });
@@ -141,7 +155,7 @@ export class OpfsStore {
 	}
 
 	readChunk(cx: number, cz: number): Promise<Uint8Array | null> {
-		return this.region(cx, cz, 1).then((data) => data.length ? data : null);
+		return this.region(cx, cz, 1);
 	}
 
 	writeChunk(cx: number, cz: number, data: Uint8Array): Promise<void> {
@@ -167,3 +181,42 @@ export class OpfsStore {
 	}
 }
 
+interface PendingChunk {
+	cx: number;
+	cz: number;
+	data: Uint8Array;
+}
+
+/** Keeps drained worker snapshots readable and retryable until their writes succeed. */
+export class PendingChunkSaves {
+	private readonly store: OpfsStore;
+	private readonly pending = new Map<string, PendingChunk>();
+	private saving: Promise<void> = Promise.resolve();
+	retrying = false;
+
+	constructor(store: OpfsStore) {
+		this.store = store;
+	}
+
+	readChunk(cx: number, cz: number): Promise<Uint8Array | null> {
+		const chunk = this.pending.get(`${cx},${cz}`);
+		return chunk ? Promise.resolve(chunk.data) : this.store.readChunk(cx, cz);
+	}
+
+	save(chunks: PendingChunk[], meta: Meta): Promise<void> {
+		for (const chunk of chunks) this.pending.set(`${chunk.cx},${chunk.cz}`, chunk);
+		this.saving = this.saving.then(async () => {
+			for (const [key, chunk] of this.pending) {
+				await this.store.writeChunk(chunk.cx, chunk.cz, chunk.data);
+				// A newer snapshot may have arrived while this write was in progress.
+				if (this.pending.get(key) === chunk) this.pending.delete(key);
+			}
+			await this.store.writeMeta(meta);
+			this.retrying = false;
+		}).catch((error) => {
+			this.retrying = true;
+			console.warn("Failed to save OPFS chunks; will retry on next save", error);
+		});
+		return this.saving;
+	}
+}

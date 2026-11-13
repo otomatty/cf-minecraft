@@ -6,7 +6,7 @@
 import { type DirtyChunk, ServerCore } from "../shared/server-core.ts";
 import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
-import { type Meta, OpfsStore } from "./opfs-store.ts";
+import { type Meta, OpfsStore, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "./region-codec.ts";
 
 const CLIENT = 1;
@@ -22,28 +22,29 @@ function post(event: WorkerEvent, transfer: Transferable[] = []): void {
 let core: ServerCore | null = null;
 let store: OpfsStore | null = null;
 let seed = 0n;
-let saving: Promise<void> = Promise.resolve();
+let persistence: PendingChunkSaves | null = null;
 
 function save(): Promise<void> {
 	const c = core;
-	const s = store;
-	if (!c || !s) return saving;
+	const s = persistence;
+	if (!c || !s) return Promise.resolve();
 	// Drain synchronously so the snapshot is consistent, then write in order.
 	const chunks: DirtyChunk[] = [];
 	for (let d = c.takeDirty(); d !== null; d = c.takeDirty()) chunks.push(d);
 	const meta: Meta = { seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
-	saving = saving.then(async () => {
-		for (const chunk of chunks) await s.writeChunk(chunk.cx, chunk.cz, chunk.data);
-		await s.writeMeta(meta);
-	});
-	return saving;
+	return s.save(chunks, meta);
 }
 
 async function serveRequests(c: ServerCore): Promise<void> {
 	for (const [cx, cz] of c.takeRequests()) {
-		const data = store ? await store.readChunk(cx, cz) : null;
-		if (data) c.loadChunk(cx, cz, data);
-		else c.chunkMissing(cx, cz);
+		try {
+			const data = persistence ? await persistence.readChunk(cx, cz) : null;
+			if (data !== null) c.loadChunk(cx, cz, data);
+			else c.chunkMissing(cx, cz);
+		} catch (error) {
+			console.warn(`Failed to read OPFS chunk (${cx}, ${cz}); regenerating`, error);
+			c.chunkMissing(cx, cz);
+		}
 	}
 }
 
@@ -52,6 +53,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	const c = new ServerCore(instance);
 
 	store = await OpfsStore.open(msg.world, new RegionCodec(instance));
+	persistence = store ? new PendingChunkSaves(store) : null;
 	const meta = store ? await store.readMeta() : null;
 	// An existing world keeps its seed; otherwise the page's choice or a random one.
 	seed = meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0];
@@ -87,7 +89,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 					msptMean: spent.reduce((a, b) => a + b, 0) / spent.length,
 					msptMax: Math.max(...spent),
 					loadedChunks: c.loadedChunks,
-					persistence: store ? "opfs" : "off",
+					persistence: store ? (persistence?.retrying ? "opfs (retrying)" : "opfs") : "off",
 					memoryBytes: c.memoryBytes,
 				};
 				spent = [];
