@@ -35,7 +35,7 @@ const MESH_BUDGET_MS = 4;
 const params = new URLSearchParams(location.search);
 const serverKind = params.get("server") === "ws" ? "ws" : "local";
 const worldName = /^[a-z0-9][a-z0-9_-]{0,31}$/.test(params.get("world") ?? "") ? params.get("world")! : "main";
-const viewDistance = Math.max(2, Math.min(12, Number(params.get("view") ?? 8) || 8));
+const viewDistance = Math.max(2, Math.min(12, Math.round(Number(params.get("view") ?? 8) || 8)));
 const seedParam = /^-?\d{1,19}$/.test(params.get("seed") ?? "") ? params.get("seed") : null;
 const autopilot = params.get("autopilot") === "1";
 
@@ -111,6 +111,8 @@ async function main(): Promise<void> {
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
 	const velocity = [0, 0, 0];
 	let joined = false;
+	let joinedGameTime: number | null = null;
+	let autopilotStartedAt: number | null = null;
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
@@ -133,6 +135,7 @@ async function main(): Promise<void> {
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
 			if (id === S2C.Welcome) {
+				joinedGameTime = core.gameTime;
 				if (!joined) {
 					joined = true;
 					const [sx, sy, sz] = core.spawn;
@@ -291,7 +294,10 @@ async function main(): Promise<void> {
 	function move(dt: number, timeMs: number): void {
 		if (autopilot) {
 			const [sx, sy, sz] = spawnForAutopilot();
-			const angle = timeMs / 9000;
+			if (joined && autopilotStartedAt === null && core.chunkCount >= (2 * core.viewDistance + 1) ** 2 && core.dirtyCount === 0) {
+				autopilotStartedAt = timeMs;
+			}
+			const angle = autopilotStartedAt === null ? 0 : (timeMs - autopilotStartedAt) / 9000;
 			camera.x = sx + Math.cos(angle) * 28;
 			camera.z = sz + Math.sin(angle) * 28;
 			camera.y = sy + 22;
@@ -404,6 +410,8 @@ async function main(): Promise<void> {
 		frames: 0,
 		stats: () => ({
 			joined,
+			joinedGameTime,
+			autopilotStarted: autopilotStartedAt !== null,
 			closed,
 			connection,
 			reconnects,

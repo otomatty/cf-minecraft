@@ -28,6 +28,7 @@ async function setup(t) {
 	const forwarded: Request[] = [];
 	const revocations: [string, string][] = [];
 	const disconnections: [string, number, string][] = [];
+	const evictions: string[] = [];
 	let revokeFailures = 0;
 	const limits: [string, string][] = [];
 	let blocked = "";
@@ -63,6 +64,9 @@ async function setup(t) {
 					async disconnectAll(code, reason) {
 						disconnections.push([name, code, reason]);
 						return 2;
+					},
+					async evict() {
+						evictions.push(name);
 					},
 					async metrics() {
 						return { players: 1 };
@@ -108,6 +112,7 @@ async function setup(t) {
 		forwarded,
 		revocations,
 		disconnections,
+		evictions,
 		failRevocation(count = Infinity) {
 			revokeFailures = count;
 		},
@@ -598,5 +603,48 @@ for (const origin of ["https://game.example", null]) {
 		assert.equal(response.status, 200);
 		assert.deepEqual(await response.json(), { disconnected: 2 });
 		assert.deepEqual(f.disconnections, [["lobby", 1012, "debug disconnect"]]);
+	});
+}
+
+test("debug evict is hidden in production and bypasses limits in development", async t => {
+	const f = await setup(t);
+	const evict = () => handle(new Request("https://game.example/api/debug/evict?world=lobby", { method: "POST" }), f.deps);
+	assert.equal((await evict()).status, 404);
+	assert.deepEqual(f.calls, []);
+	f.deps.env = { DEBUG: "1" };
+	f.block("IP_LIMIT");
+	assert.equal((await f.request("/api/debug/evict?world=lobby")).status, 405);
+	for (const world of ["", "BAD", "a".repeat(33), "bad/name"]) {
+		assert.equal((await f.request(`/api/debug/evict?world=${encodeURIComponent(world)}`, "POST")).status, 400);
+	}
+	assert.deepEqual(f.evictions, []);
+	const response = await evict();
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { evicted: true });
+	assert.deepEqual(f.evictions, ["lobby"]);
+	assert.deepEqual(f.limits, []);
+});
+
+test("debug evict rejects a different Origin without evicting the world", async t => {
+	const f = await setup(t);
+	f.deps.env = { DEBUG: "1" };
+	const response = await f.request("/api/debug/evict?world=lobby", "POST", undefined, { Origin: "https://other.example" });
+	assert.equal(response.status, 403);
+	assert.deepEqual(await response.json(), { error: "forbidden origin" });
+	assert.deepEqual(f.calls, []);
+	assert.deepEqual(f.evictions, []);
+});
+
+for (const origin of ["https://game.example", null]) {
+	test(`debug evict accepts ${origin === null ? "no Origin" : "the same Origin"}`, async t => {
+		const f = await setup(t);
+		f.deps.env = { DEBUG: "1" };
+		const response = await handle(new Request("https://game.example/api/debug/evict?world=lobby", {
+			method: "POST",
+			headers: origin === null ? {} : { Origin: origin },
+		}), f.deps);
+		assert.equal(response.status, 200);
+		assert.deepEqual(await response.json(), { evicted: true });
+		assert.deepEqual(f.evictions, ["lobby"]);
 	});
 }
