@@ -35,7 +35,7 @@ const MESH_BUDGET_MS = 4;
 const params = new URLSearchParams(location.search);
 const serverKind = params.get("server") === "ws" ? "ws" : "local";
 const worldName = /^[a-z0-9][a-z0-9_-]{0,31}$/.test(params.get("world") ?? "") ? params.get("world")! : "main";
-const viewDistance = Math.max(2, Math.min(12, Number(params.get("view") ?? 8) || 8));
+const viewDistance = Math.max(2, Math.min(12, Math.round(Number(params.get("view") ?? 8) || 8)));
 const seedParam = /^-?\d{1,19}$/.test(params.get("seed") ?? "") ? params.get("seed") : null;
 const autopilot = params.get("autopilot") === "1";
 
@@ -294,7 +294,7 @@ async function main(): Promise<void> {
 	function move(dt: number, timeMs: number): void {
 		if (autopilot) {
 			const [sx, sy, sz] = spawnForAutopilot();
-			if (autopilotStartedAt === null && core.chunkCount >= (2 * viewDistance + 1) ** 2 && core.dirtyCount === 0) {
+			if (joined && autopilotStartedAt === null && core.chunkCount >= (2 * core.viewDistance + 1) ** 2 && core.dirtyCount === 0) {
 				autopilotStartedAt = timeMs;
 			}
 			const angle = autopilotStartedAt === null ? 0 : (timeMs - autopilotStartedAt) / 9000;
