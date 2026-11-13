@@ -67,6 +67,7 @@ impl Client {
 pub struct Stats {
     pub packets_rejected: u64,
     pub blocks_changed: u64,
+    pub edits_corrected: u64,
     pub chunks_generated: u64,
     pub chunks_loaded_from_storage: u64,
 }
@@ -242,6 +243,7 @@ impl Server {
             C2S::SetBlock { x, y, z, state } => {
                 if !self.can_edit(id, x, y, z, state) {
                     self.stats.packets_rejected += 1;
+                    self.correct_block(id, x, y, z);
                     return;
                 }
                 if let Some(old) = self.world.set_block(x, y, z, state) {
@@ -268,6 +270,21 @@ impl Server {
         let dy = y as f64 + 0.5 - client.pos[1];
         let dz = z as f64 + 0.5 - client.pos[2];
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+    }
+
+    fn correct_block(&mut self, id: u32, x: i32, y: i32, z: i32) {
+        let (joined, sent) = match self.clients.get(&id) {
+            Some(client) => (client.joined, client.sent.contains(&(x >> 4, z >> 4))),
+            None => return,
+        };
+        if !joined || !sent || !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+            return;
+        }
+        if let Some(state) = self.world.get_block(x, y, z) {
+            self.outbox
+                .push((id, S2C::BlockUpdate { x, y, z, state }.encode()));
+            self.stats.edits_corrected += 1;
+        }
     }
 
     fn broadcast_block(&mut self, x: i32, y: i32, z: i32, state: u16) {
@@ -545,6 +562,8 @@ mod tests {
         let [sx, sy, sz] = s.spawn();
         let (bx, by, bz) = (sx.floor() as i32, sy as i32 + 2, sz.floor() as i32);
 
+        let distant_before = s.get_block(bx + 30, by, bz).unwrap();
+
         // In reach: applied and sent to both players.
         s.handle_packet(
             1,
@@ -600,11 +619,257 @@ mod tests {
             z: bz,
             state: blocks::BRICKS,
         };
-        assert_eq!(updates, vec![(1, expected.clone()), (2, expected)]);
+        assert_eq!(
+            updates,
+            vec![
+                (1, expected.clone()),
+                (2, expected),
+                (
+                    1,
+                    S2C::BlockUpdate {
+                        x: bx + 30,
+                        y: by,
+                        z: bz,
+                        state: distant_before
+                    }
+                ),
+                (
+                    1,
+                    S2C::BlockUpdate {
+                        x: bx,
+                        y: by + 1,
+                        z: bz,
+                        state: blocks::AIR
+                    }
+                ),
+            ]
+        );
+        assert_eq!(s.get_block(bx + 30, by, bz), Some(distant_before));
+        assert_eq!(s.stats.edits_corrected, 2);
         assert_eq!(s.get_block(bx, by, bz), Some(blocks::BRICKS));
         assert_eq!(s.get_block(bx, by + 1, bz), Some(blocks::AIR));
         assert_eq!(s.stats.blocks_changed, 1);
         assert_eq!(s.stats.packets_rejected, 4);
+    }
+
+    #[test]
+    fn rejected_edits_correct_only_the_sender() {
+        let mut s = joined(2);
+        s.connect(2);
+        s.handle_packet(
+            2,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.take_outbox();
+        let [sx, sy, sz] = s.spawn();
+        let (x, y, z) = (sx.floor() as i32, sy as i32 + 2, sz.floor() as i32);
+        for (bx, state) in [(x + 20, blocks::BRICKS), (x, 999)] {
+            let before = s.get_block(bx, y, z).unwrap();
+            assert!(s.clients[&1].sent.contains(&(bx >> 4, z >> 4)));
+            s.handle_packet(1, &C2S::SetBlock { x: bx, y, z, state }.encode());
+            s.tick();
+            let updates: Vec<_> = decode_all(s.take_outbox())
+                .into_iter()
+                .filter(|(_, p)| matches!(p, S2C::BlockUpdate { .. }))
+                .collect();
+            assert_eq!(
+                updates,
+                vec![(
+                    1,
+                    S2C::BlockUpdate {
+                        x: bx,
+                        y,
+                        z,
+                        state: before
+                    }
+                )]
+            );
+            assert_eq!(s.get_block(bx, y, z), Some(before));
+        }
+        assert_eq!(s.stats.blocks_changed, 0);
+        assert_eq!(s.stats.packets_rejected, 2);
+        assert_eq!(s.stats.edits_corrected, 2);
+    }
+
+    #[test]
+    fn rejected_edits_without_client_chunk_are_not_corrected() {
+        let mut s = Server::new(1, Generator::DebugHills);
+        s.connect(1);
+        let y = s.spawn()[1] as i32 + 2;
+        s.handle_packet(
+            1,
+            &C2S::SetBlock {
+                x: 0,
+                y,
+                z: 0,
+                state: blocks::BRICKS,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert!(s.take_outbox().is_empty());
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.clients[&1].sent.len(), 6);
+        assert!(!s.clients[&1].sent.contains(&(2, 2)));
+        let before = s.get_block(32, y, 32);
+        s.handle_packet(
+            1,
+            &C2S::SetBlock {
+                x: 32,
+                y,
+                z: 32,
+                state: blocks::BRICKS,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert!(decode_all(s.take_outbox())
+            .iter()
+            .all(|(_, p)| !matches!(p, S2C::BlockUpdate { .. })));
+        assert_eq!(s.get_block(32, y, 32), before);
+        assert_eq!(s.stats.blocks_changed, 0);
+        assert_eq!(s.stats.packets_rejected, 2);
+        assert_eq!(s.stats.edits_corrected, 0);
+    }
+
+    #[test]
+    fn rejected_edits_without_server_chunk_are_not_corrected() {
+        let mut s = joined(2);
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.take_outbox();
+        let y = s.spawn()[1] as i32 + 2;
+        assert!(s.clients[&1].sent.contains(&(0, 0)));
+        s.world.chunks.remove(&(0, 0));
+        s.handle_packet(
+            1,
+            &C2S::SetBlock {
+                x: 0,
+                y,
+                z: 0,
+                state: 999,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.get_block(0, y, 0), None);
+        assert!(decode_all(s.take_outbox())
+            .iter()
+            .all(|(_, p)| !matches!(p, S2C::BlockUpdate { .. })));
+        assert_eq!(s.stats.edits_corrected, 0);
+    }
+
+    #[test]
+    fn predicted_edits_converge_in_different_arrival_orders() {
+        fn deliver(s: &mut Server, copies: &mut [World; 2]) {
+            for (id, packet) in decode_all(s.take_outbox()) {
+                let copy = &mut copies[id as usize - 1];
+                match packet {
+                    S2C::ChunkData { cx, cz, data } => {
+                        copy.chunks.insert(
+                            (cx, cz),
+                            Chunk::read(cx, cz, &mut Reader::new(&data)).unwrap(),
+                        );
+                    }
+                    S2C::BlockUpdate { x, y, z, state } => {
+                        assert!(copy.set_block(x, y, z, state).is_some());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 0: A accepted, 1: B accepted, 2: A rejected. Each inner slice is one tick.
+        let schedules: &[&[&[usize]]] = &[
+            &[&[0], &[1], &[2]],
+            &[&[0], &[2], &[1]],
+            &[&[1], &[0], &[2]],
+            &[&[1], &[2], &[0]],
+            &[&[2], &[0], &[1]],
+            &[&[2], &[1], &[0]],
+            &[&[0], &[2, 1]],
+            &[&[0], &[1, 2]],
+        ];
+        for schedule in schedules {
+            let mut s = joined(3);
+            s.connect(2);
+            s.handle_packet(
+                2,
+                &C2S::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    view_distance: 3,
+                }
+                .encode(),
+            );
+            let mut copies = [World::new(), World::new()];
+            for _ in 0..20 {
+                s.tick();
+                deliver(&mut s, &mut copies);
+            }
+            let [sx, sy, sz] = s.spawn();
+            let (x, y, z) = (sx.floor() as i32, sy as i32 + 2, sz.floor() as i32);
+            let mut expected = s.get_block(x, y, z).unwrap();
+            let mut accepted = 0;
+            let mut rejected = 0;
+            for actions in *schedule {
+                for &action in *actions {
+                    let (id, state) = match action {
+                        0 => (1, blocks::BRICKS),
+                        1 => (2, blocks::OAK_PLANKS),
+                        2 => (1, blocks::OAK_LOG),
+                        _ => unreachable!(),
+                    };
+                    s.handle_packet(
+                        id,
+                        &C2S::PlayerPos {
+                            x: sx + if action == 2 { 20.0 } else { 0.0 },
+                            y: sy,
+                            z: sz,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        }
+                        .encode(),
+                    );
+                    assert_ne!(
+                        copies[id as usize - 1].set_block(x, y, z, state),
+                        Some(state)
+                    );
+                    s.handle_packet(id, &C2S::SetBlock { x, y, z, state }.encode());
+                    if action == 2 {
+                        rejected += 1;
+                    } else {
+                        expected = state;
+                        accepted += 1;
+                    }
+                }
+                s.tick();
+                // A rejection never replaces the last accepted state with its prediction.
+                assert_eq!(s.get_block(x, y, z), Some(expected));
+                assert_eq!(s.stats.blocks_changed, accepted);
+                assert_eq!(s.stats.edits_corrected, rejected);
+                assert!(s.clients[&1].sent.contains(&(x >> 4, z >> 4)));
+                deliver(&mut s, &mut copies);
+                for copy in &copies {
+                    assert_eq!(copy.get_block(x, y, z), s.get_block(x, y, z));
+                }
+            }
+        }
     }
 
     #[test]

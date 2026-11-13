@@ -179,6 +179,24 @@ async function playthrough(kind) {
 	const placed = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	check(before === 0 && placed === 9, `${kind}: block placed`, `${before} -> ${placed} at ${pos.join(",")}`);
 
+	// Prediction happens synchronously; sample it before a server tick can correct it.
+	const distant = await page.evaluate((spawn) => {
+		const x = Math.floor(spawn[0]) + 20;
+		const z = Math.floor(spawn[2]);
+		let y = Math.floor(spawn[1] + 3);
+		const maxY = y + 96;
+		while (window.__mc.getBlock(x, y, z) !== 0 && y < maxY) y++;
+		const before = window.__mc.getBlock(x, y, z);
+		window.__mc.setCamera(spawn[0], spawn[1] + 3, spawn[2], 0, 0);
+		window.__mc.setBlock(x, y, z, 9);
+		return { pos: [x, y, z], before, predicted: window.__mc.getBlock(x, y, z) };
+	}, drawn.spawn);
+	check(distant.before === 0, `${kind}: distant edit starts in air`, `${distant.before} at ${distant.pos.join(",")}`);
+	check(distant.predicted === 9, `${kind}: distant edit predicted`, `${distant.predicted}`);
+	await new Promise((r) => setTimeout(r, 1000));
+	const corrected = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), distant.pos);
+	check(corrected === 0, `${kind}: rejected edit rolled back`, `${corrected}`);
+
 	// Wait past one autosave (5 s), then reload: the world must come back from storage.
 	const timeBefore = await page.evaluate(() => {
 		window.__mc.flush();
