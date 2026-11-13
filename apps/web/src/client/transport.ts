@@ -4,6 +4,8 @@
 import { S2C } from "./client-core.ts";
 import { nextDelayMs, shouldReconnect } from "./reconnect.ts";
 
+const WORLD_CHECK_TIMEOUT_MS = 10_000;
+
 export interface ServerStats {
 	gameTime: number;
 	tps: number;
@@ -148,7 +150,7 @@ export class WebSocketTransport implements Transport {
 		try {
 			const response = await fetch(`/api/worlds/${encodeURIComponent(this.world)}`, {
 				cache: "no-store",
-				signal: probe.signal,
+				signal: AbortSignal.any([probe.signal, AbortSignal.timeout(WORLD_CHECK_TIMEOUT_MS)]),
 			});
 			if (this.stopped) return;
 			const reason = ({

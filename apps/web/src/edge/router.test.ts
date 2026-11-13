@@ -561,7 +561,7 @@ test("Worker supplies authorization timestamps for operator and development conn
 	}
 });
 
-test("debug disconnect is hidden in production and bypasses Origin and limits in development", async t => {
+test("debug disconnect is hidden in production and bypasses limits in development", async t => {
 	const f = await setup(t);
 	const disconnect = () => handle(new Request("https://game.example/api/debug/disconnect?world=lobby", { method: "POST" }), f.deps);
 	assert.equal((await disconnect()).status, 404);
@@ -576,3 +576,27 @@ test("debug disconnect is hidden in production and bypasses Origin and limits in
 	assert.deepEqual(f.disconnections, [["lobby", 1012, "debug disconnect"]]);
 	assert.deepEqual(f.limits, []);
 });
+
+test("debug disconnect rejects a different Origin without disconnecting players", async t => {
+	const f = await setup(t);
+	f.deps.env = { DEBUG: "1" };
+	const response = await f.request("/api/debug/disconnect?world=lobby", "POST", undefined, { Origin: "https://other.example" });
+	assert.equal(response.status, 403);
+	assert.deepEqual(await response.json(), { error: "forbidden origin" });
+	assert.deepEqual(f.calls, []);
+	assert.deepEqual(f.disconnections, []);
+});
+
+for (const origin of ["https://game.example", null]) {
+	test(`debug disconnect accepts ${origin === null ? "no Origin" : "the same Origin"}`, async t => {
+		const f = await setup(t);
+		f.deps.env = { DEBUG: "1" };
+		const response = await handle(new Request("https://game.example/api/debug/disconnect?world=lobby", {
+			method: "POST",
+			headers: origin === null ? {} : { Origin: origin },
+		}), f.deps);
+		assert.equal(response.status, 200);
+		assert.deepEqual(await response.json(), { disconnected: 2 });
+		assert.deepEqual(f.disconnections, [["lobby", 1012, "debug disconnect"]]);
+	});
+}

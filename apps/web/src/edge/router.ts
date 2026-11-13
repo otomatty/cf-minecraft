@@ -118,6 +118,8 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	if (url.pathname === "/api/debug/disconnect") {
 		if (!open) return error("not found", 404);
 		if (request.method !== "POST") return error("method not allowed", 405);
+		const origin = request.headers.get("Origin");
+		if (origin !== null && origin !== url.origin) return error("forbidden origin", 403);
 		const world = url.searchParams.get("world") ?? "";
 		if (!WORLD_NAME.test(world)) return error("invalid world name", 400);
 		const disconnected = await worlds.getByName(world).disconnectAll(SERVICE_RESTART, "debug disconnect");
