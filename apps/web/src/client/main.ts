@@ -14,6 +14,7 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
+import { ACTIONS, type Action, defaultSettings, duplicateKeys, LOCKABLE_CODES, loadSettings, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { forward, right } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { TEX_SIZE } from "./textures.ts";
@@ -26,8 +27,6 @@ const REACH = 5;
 const FLY_SPEED = 10.89;
 const SPRINT_FLY_SPEED = 21.78;
 const VERTICAL_SPEED = 7.5;
-/** Degrees per pixel at the default mouse sensitivity. */
-const MOUSE_DEGREES = 0.15;
 const DOUBLE_TAP_MS = 350;
 const POSITION_INTERVAL_MS = 50;
 const MESH_BUDGET_MS = 4;
@@ -198,28 +197,140 @@ async function main(): Promise<void> {
 	select(1);
 
 	// ---- input -------------------------------------------------------------
+	let settings = defaultSettings();
+	// Accessing localStorage itself may throw (for example when storage is disabled).
+	try { settings = loadSettings(localStorage); } catch { /* Keep defaults. */ }
 	const keys = new Set<string>();
 	let sprinting = false;
-	let lastForwardTap = 0;
+	let lastForwardTap = -Infinity;
+	const heldButtons = new Map<number, number>();
 	const locked = () => document.pointerLockElement === canvas;
+	const clearInput = () => {
+		keys.clear();
+		sprinting = false;
+		lastForwardTap = -Infinity;
+		heldButtons.clear();
+	};
+	const settingsPanel = $<HTMLElement>("settings-panel");
+	const warning = $<HTMLElement>("settings-warning");
+	let capturing: Action | null = null;
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "上昇", down: "下降", sprint: "ダッシュ", fullscreen: "全画面" };
+	const bindingButtons = new Map<Action, HTMLButtonElement>();
+	function refreshSettings(): void {
+		for (const [action, button] of bindingButtons) {
+			button.textContent = capturing === action ? "キーを押してください…" : settings.keys[action];
+		}
+		for (const name of ["sensitivity", "fov"] as const) {
+			$<HTMLInputElement>(name).value = String(settings[name]);
+			$(name + "-value").textContent = `${settings[name]}${name === "sensitivity" ? "%" : "°"}`;
+		}
+	}
+	function persistSettings(): void {
+		try {
+			warning.textContent = saveSettings(localStorage, settings) ? "" : "設定を保存できません。再読み込みまで適用します。";
+		} catch { warning.textContent = "設定を保存できません。再読み込みまで適用します。"; }
+		const conflicts = [false, true].flatMap(active => duplicateKeys({ ...settings.keys, sprint: sprintKey(settings, active) }));
+		if (conflicts.length) warning.textContent += ` ダッシュの切替先が別の操作と重複します: ${[...new Set(conflicts)].join(", ")}`;
+		refreshSettings();
+		if (document.fullscreenElement === document.documentElement) void updateKeyboardLock();
+	}
+	for (const action of ACTIONS) {
+		const label = document.createElement("label");
+		label.textContent = labels[action];
+		const button = document.createElement("button");
+		button.type = "button";
+		button.dataset.action = action;
+		button.addEventListener("click", () => { capturing = action; warning.textContent = ""; refreshSettings(); });
+		label.append(button);
+		$("key-bindings").append(label);
+		bindingButtons.set(action, button);
+	}
+	$("settings-open").addEventListener("click", (event) => {
+		event.stopPropagation();
+		clearInput();
+		settingsPanel.hidden = false;
+		refreshSettings();
+	});
+	settingsPanel.addEventListener("click", event => event.stopPropagation());
+	$("settings-close").addEventListener("click", () => { settingsPanel.hidden = true; capturing = null; });
+	$("settings-reset").addEventListener("click", () => { settings = defaultSettings(); capturing = null; persistSettings(); });
+	for (const name of ["sensitivity", "fov"] as const) {
+		$<HTMLInputElement>(name).addEventListener("input", event => {
+			settings[name] = Number((event.target as HTMLInputElement).value);
+			persistSettings();
+		});
+	}
+	refreshSettings();
 
+	type KeyboardLock = { lock(codes: string[]): Promise<void>; unlock(): void };
+	const keyboard = (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
+	let keyboardLocked = false;
+	let lockGeneration = 0;
+	async function updateKeyboardLock(): Promise<void> {
+		const generation = ++lockGeneration;
+		keyboardLocked = false;
+		clearInput();
+		if (!keyboard?.lock) return;
+		if (document.fullscreenElement !== document.documentElement) {
+			keyboard.unlock();
+			return;
+		}
+		try {
+			await keyboard.lock(LOCKABLE_CODES);
+			if (generation === lockGeneration && document.fullscreenElement === document.documentElement) keyboardLocked = true;
+			else if (!document.fullscreenElement) keyboard.unlock();
+		} catch { /* Unsupported or denied: keep the safe sprint key. */ }
+	}
+	document.addEventListener("fullscreenchange", () => { void updateKeyboardLock(); });
+	async function toggleFullscreen(): Promise<void> {
+		try {
+			if (document.fullscreenElement) await document.exitFullscreen();
+			else await document.documentElement.requestFullscreen();
+		} catch { statusLine.textContent = "全画面に切り替えられませんでした。"; }
+	}
+	async function requestPointerLock(): Promise<void> {
+		try {
+			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
+		} catch {
+			try { await canvas.requestPointerLock(); }
+			catch { statusLine.textContent = "マウスをロックできませんでした。クリックして再試行してください。"; }
+		}
+	}
 	overlay.addEventListener("click", () => {
-		if (joined && !closed) canvas.requestPointerLock();
+		if (joined && !closed && settingsPanel.hidden) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
+		if (!locked()) clearInput();
 		if (autopilot || closed) return;
 		overlay.hidden = locked();
-		if (!locked()) {
-			keys.clear();
-			if (connection !== "reconnecting") statusLine.textContent = "一時停止中：クリックして再開";
-		}
+		if (!locked() && connection !== "reconnecting") statusLine.textContent = "一時停止中：クリックして再開";
 	});
 	document.addEventListener("mousemove", (e) => {
 		if (!locked()) return;
-		camera.yaw = (camera.yaw + e.movementX * MOUSE_DEGREES) % 360;
-		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * MOUSE_DEGREES));
+		const degrees = mouseDegrees(settings.sensitivity);
+		camera.yaw = (camera.yaw + e.movementX * degrees) % 360;
+		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
 	});
 	window.addEventListener("keydown", (e) => {
+		if (!settingsPanel.hidden) {
+			if (capturing) {
+				e.preventDefault();
+				if (e.repeat) return;
+				if (e.code === "Escape") { capturing = null; refreshSettings(); return; }
+				if (!validKey(e.code)) { warning.textContent = "このキーは割り当てられません（Esc / F8 / F11 は予約済み）。"; return; }
+				const next = { ...settings.keys, [capturing]: e.code };
+				if (duplicateKeys(next).length) { warning.textContent = "そのキーは別の操作に割り当て済みです。"; return; }
+				settings.keys = next;
+				capturing = null;
+				persistSettings();
+			}
+			return;
+		}
+		if (e.code === settings.keys.fullscreen && !e.repeat) {
+			e.preventDefault();
+			void toggleFullscreen();
+			return;
+		}
 		if (e.code === "F8") {
 			e.preventDefault();
 			scenarioLine = "Scenario: 実行中…";
@@ -231,19 +342,19 @@ async function main(): Promise<void> {
 		}
 		if (!locked()) return;
 		e.preventDefault();
-		if (e.code === "KeyW" && !e.repeat) {
+		if (e.code === settings.keys.forward && !e.repeat) {
 			const now = performance.now();
 			if (now - lastForwardTap < DOUBLE_TAP_MS) sprinting = true;
 			lastForwardTap = now;
 		}
-		if (e.code.startsWith("Digit")) select(Number(e.code.slice(5)));
+		if (e.code.startsWith("Digit") && !Object.values(settings.keys).includes(e.code)) select(Number(e.code.slice(5)));
 		keys.add(e.code);
 	});
 	window.addEventListener("keyup", (e) => {
 		keys.delete(e.code);
-		if (e.code === "KeyW") sprinting = false;
+		if (e.code === settings.keys.forward) sprinting = false;
 	});
-	window.addEventListener("blur", () => keys.clear());
+	window.addEventListener("blur", clearInput);
 	canvas.addEventListener("wheel", (e) => {
 		if (!locked()) return;
 		e.preventDefault();
@@ -264,20 +375,28 @@ async function main(): Promise<void> {
 		transport.send(core.encodeSetBlock(x, y, z, block));
 		return true;
 	};
-	canvas.addEventListener("mousedown", (e) => {
-		if (!locked() || !target) return;
-		if (e.button === 0) {
-			setBlock(target.x, target.y, target.z, 0);
-		} else if (e.button === 2) {
-			const n = FACE_NORMALS[target.face];
-			const [x, y, z] = [target.x + n[0], target.y + n[1], target.z + n[2]];
+	function interact(button: number): void {
+		// Recast each time: prediction and camera motion can change the target between repeats.
+		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
+		if (!hit) return;
+		if (button === 0) {
+			setBlock(hit.x, hit.y, hit.z, 0);
+		} else if (button === 2) {
+			const n = FACE_NORMALS[hit.face];
+			const [x, y, z] = [hit.x + n[0], hit.y + n[1], hit.z + n[2]];
 			if (core.getBlock(x, y, z) === 0) setBlock(x, y, z, selected);
-		} else if (e.button === 1) {
-			e.preventDefault();
-			const block = core.getBlock(target.x, target.y, target.z);
+		} else if (button === 1) {
+			const block = core.getBlock(hit.x, hit.y, hit.z);
 			if (block > 0) select(block);
 		}
+	}
+	canvas.addEventListener("mousedown", (e) => {
+		if (!locked()) return;
+		e.preventDefault();
+		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
+		interact(e.button);
 	});
+	window.addEventListener("mouseup", e => heldButtons.delete(e.button));
 	window.addEventListener("pagehide", () => transport.flush());
 	window.addEventListener("pageshow", (event) => {
 		if (event.persisted) transport.resume?.();
@@ -300,15 +419,15 @@ async function main(): Promise<void> {
 			camera.pitch = 28;
 			return;
 		}
-		const fwd = (keys.has("KeyW") ? 1 : 0) - (keys.has("KeyS") ? 1 : 0);
-		const strafe = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
-		const up = (keys.has("Space") ? 1 : 0) - (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 1 : 0);
+		const fwd = (keys.has(settings.keys.forward) ? 1 : 0) - (keys.has(settings.keys.backward) ? 1 : 0);
+		const strafe = (keys.has(settings.keys.right) ? 1 : 0) - (keys.has(settings.keys.left) ? 1 : 0);
+		const up = (keys.has(settings.keys.up) ? 1 : 0) - (keys.has(settings.keys.down) ? 1 : 0);
 		const f = forward(camera.yaw, 0);
 		const r = right(camera.yaw);
 		let wx = f[0] * fwd + r[0] * strafe;
 		let wz = f[2] * fwd + r[2] * strafe;
 		const len = Math.hypot(wx, wz);
-		const speed = sprinting || keys.has("ControlLeft") ? SPRINT_FLY_SPEED : FLY_SPEED;
+		const speed = sprinting || keys.has(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)) ? SPRINT_FLY_SPEED : FLY_SPEED;
 		if (len > 0) {
 			wx = (wx / len) * speed;
 			wz = (wz / len) * speed;
@@ -382,7 +501,14 @@ async function main(): Promise<void> {
 			target = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
 		}
 
-		frame = renderer.render(camera, viewDistance, target ? [target.x, target.y, target.z] : null);
+		if (locked()) {
+			for (const [button, next] of heldButtons) {
+				if (now < next) continue;
+				interact(button);
+				heldButtons.set(button, now + (button === 0 ? 250 : 200));
+			}
+		}
+		frame = renderer.render(camera, viewDistance, target ? [target.x, target.y, target.z] : null, settings.fov);
 		window.__mc.frames++;
 
 		frames++;
