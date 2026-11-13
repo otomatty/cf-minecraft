@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { Generator, ServerCore } from "../shared/server-core.ts";
-import { OpfsStore, PendingChunkSaves } from "./opfs-store.ts";
-import { RegionCodec } from "./region-codec.ts";
+import { OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
+import { CorruptRegionError, RegionCodec } from "./region-codec.ts";
 
 // These integration tests use the real WASM format implementation.
 // Run pnpm build:wasm, then node --test apps/web/src/client/opfs-store.test.ts.
@@ -190,7 +190,7 @@ test("a snapshot arriving during a write remains pending until its own write suc
 	assert.deepEqual(await store.readChunk(0, 0), newer);
 });
 
-test("OPFS rejects a corrupt chunk without preventing reads of other chunks", async () => {
+test("OPFS rejects a corrupt chunk without preventing reads of other chunks", async (t) => {
 	const dir = new MemoryDirectory();
 	const store = await open(dir);
 	await store.writeChunk(0, 0, old);
@@ -198,7 +198,15 @@ test("OPFS rejects a corrupt chunk without preventing reads of other chunks", as
 	const file = dir.files.get("r.0.0")!;
 	const sector = new DataView(file.bytes.buffer).getUint32(8, true);
 	file.bytes[sector * 4096 + 5] ^= 1; // Damage the payload CRC, leaving the location table valid.
-	await assert.rejects(store.readChunk(0, 0), /Invalid region storage data/);
+	await assert.rejects(store.readChunk(0, 0), CorruptRegionError);
+	const warnings = t.mock.method(console, "warn", () => {});
+	const target = readTarget();
+	const reads = new PendingChunkReads((cx, cz) => store.readChunk(cx, cz));
+	await reads.serve([[0, 0], [1, 0]], target);
+	assert.deepEqual(target.missing, [[0, 0]]);
+	assert.deepEqual(target.loaded, [[1, 0, newer]]);
+	assert.equal(reads.retrying, false);
+	assert.equal(warnings.mock.callCount(), 1);
 	assert.deepEqual(await store.readChunk(1, 0), newer);
 });
 
@@ -231,4 +239,102 @@ test("regenerating a missing stored chunk in the real core does not make it dirt
 	assert.ok(core.loadedChunks > 0);
 	assert.equal(core.dirtyChunks, 0);
 	assert.equal(core.takeDirty(), null);
+});
+
+
+test("migration flushes a readable but non-durable region before deleting its source", async () => {
+	for (const failAdoptionFlush of [false, true]) {
+		const dir = new MemoryDirectory();
+		dir.seed("c.0.0", old);
+		let store = await open(dir);
+		dir.failFlush = 2;
+		await assert.rejects(store.list(), /crash at flush/);
+		assert.deepEqual(await store.readChunk(0, 0), old);
+		if (failAdoptionFlush) {
+			dir.failFlush = dir.flushes + 1;
+			await assert.rejects(store.list(), /crash at flush/);
+			assert.equal(dir.files.has("c.0.0"), true);
+		} else {
+			await store.list();
+			assert.equal(dir.files.has("c.0.0"), false);
+			assert.deepEqual(dir.operations.slice(-2), ["flush r.0.0", "delete c.0.0"]);
+		}
+		dir.crash();
+		store = await open(dir);
+		await store.list();
+		assert.deepEqual(await store.readChunk(0, 0), old);
+	}
+});
+
+function readTarget() {
+	return {
+		loaded: [] as Array<[number, number, Uint8Array]>,
+		missing: [] as Array<[number, number]>,
+		loadChunk(cx: number, cz: number, data: Uint8Array) { this.loaded.push([cx, cz, data]); },
+		chunkMissing(cx: number, cz: number) { this.missing.push([cx, cz]); },
+	};
+}
+
+test("exhausted access retries leave the chunk requested until a later read succeeds", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	await store.writeChunk(-1, 2, newer);
+	const reads = new PendingChunkReads((cx, cz) => store.readChunk(cx, cz));
+	const target = readTarget();
+	dir.failAccess = 100;
+	await reads.serve([[-1, 2]], target);
+	assert.equal(reads.retrying, true);
+	assert.deepEqual(target.loaded, []);
+	assert.deepEqual(target.missing, []);
+	dir.failAccess = 0;
+	await reads.serve([], target, true);
+	assert.equal(reads.retrying, false);
+	assert.deepEqual(target.loaded, [[-1, 2, newer]]);
+	assert.deepEqual(target.missing, []);
+});
+
+test("pending reads retry only when due and never overlap for the same coordinate", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	let release!: (data: Uint8Array) => void;
+	const blocked = new Promise<Uint8Array>((resolve) => { release = resolve; });
+	let attempts = 0;
+	const reads = new PendingChunkReads(async () => {
+		if (++attempts === 1) throw new Error("temporary I/O failure");
+		return blocked;
+	});
+	const target = readTarget();
+	await reads.serve([[3, 4]], target);
+	await reads.serve([], target);
+	assert.equal(attempts, 1);
+	const retry = reads.serve([], target, true);
+	await reads.serve([[3, 4]], target, true);
+	assert.equal(attempts, 2);
+	assert.equal(reads.retrying, true);
+	release(newer);
+	await retry;
+	await reads.serve([], target, true);
+	assert.equal(attempts, 2);
+	assert.equal(reads.retrying, false);
+	assert.deepEqual(target.loaded, [[3, 4, newer]]);
+	assert.deepEqual(target.missing, []);
+});
+
+test("a pending read can resolve to missing, corrupt, or empty saved data", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	for (const result of [null, new CorruptRegionError(), new Uint8Array()]) {
+		let attempts = 0;
+		const reads = new PendingChunkReads(async () => {
+			if (++attempts === 1) throw new Error("temporary I/O failure");
+			if (result instanceof Error) throw result;
+			return result;
+		});
+		const target = readTarget();
+		await reads.serve([[0, 0]], target);
+		assert.deepEqual(target.missing, []);
+		await reads.serve([], target, true);
+		assert.equal(reads.retrying, false);
+		assert.deepEqual(target.missing, result instanceof Uint8Array ? [] : [[0, 0]]);
+		assert.deepEqual(target.loaded, result instanceof Uint8Array ? [[0, 0, result]] : []);
+	}
 });

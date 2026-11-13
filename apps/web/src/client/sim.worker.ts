@@ -6,12 +6,13 @@
 import { type DirtyChunk, ServerCore } from "../shared/server-core.ts";
 import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
-import { type Meta, OpfsStore, PendingChunkSaves } from "./opfs-store.ts";
+import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "./region-codec.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
 const STATS_TICKS = 20;
+const READ_RETRY_TICKS = 20;
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -23,6 +24,7 @@ let core: ServerCore | null = null;
 let store: OpfsStore | null = null;
 let seed = 0n;
 let persistence: PendingChunkSaves | null = null;
+const reads = new PendingChunkReads((cx, cz) => persistence ? persistence.readChunk(cx, cz) : Promise.resolve(null));
 
 function save(): Promise<void> {
 	const c = core;
@@ -36,16 +38,7 @@ function save(): Promise<void> {
 }
 
 async function serveRequests(c: ServerCore): Promise<void> {
-	for (const [cx, cz] of c.takeRequests()) {
-		try {
-			const data = persistence ? await persistence.readChunk(cx, cz) : null;
-			if (data !== null) c.loadChunk(cx, cz, data);
-			else c.chunkMissing(cx, cz);
-		} catch (error) {
-			console.warn(`Failed to read OPFS chunk (${cx}, ${cz}); regenerating`, error);
-			c.chunkMissing(cx, cz);
-		}
-	}
+	await reads.serve(c.takeRequests(), c, Number(c.gameTime) % READ_RETRY_TICKS === 0);
 }
 
 async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void> {
@@ -89,7 +82,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 					msptMean: spent.reduce((a, b) => a + b, 0) / spent.length,
 					msptMax: Math.max(...spent),
 					loadedChunks: c.loadedChunks,
-					persistence: store ? (persistence?.retrying ? "opfs (retrying)" : "opfs") : "off",
+					persistence: store ? ((persistence?.retrying || reads.retrying) ? "opfs (retrying)" : "opfs") : "off",
 					memoryBytes: c.memoryBytes,
 				};
 				spent = [];

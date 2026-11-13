@@ -1,3 +1,10 @@
+export class CorruptRegionError extends Error {
+	constructor() {
+		super("Invalid region storage data");
+		this.name = "CorruptRegionError";
+	}
+}
+
 // Byte transport only. The region format and write ordering live in crates/storage.
 export class RegionCodec {
 	private readonly x: {
@@ -17,7 +24,7 @@ export class RegionCodec {
 		try {
 			new Uint8Array(this.x.memory.buffer).set(bytes, ptr);
 			const len = this.x.storage_call(op, ptr, bytes.length);
-			if (len < 0) throw new Error("Invalid region storage data");
+			if (len < 0) throw new CorruptRegionError();
 			const out = this.x.server_out_ptr();
 			return new Uint8Array(this.x.memory.buffer).slice(out, out + len);
 		} finally {

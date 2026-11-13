@@ -1,4 +1,4 @@
-import { RegionCodec } from "./region-codec.ts";
+import { CorruptRegionError, RegionCodec } from "./region-codec.ts";
 
 export interface Meta {
 	seed: string;
@@ -40,6 +40,8 @@ export class OpfsStore {
 				const data = await this.readFile(name);
 				if (!data) throw new Error(`Cannot migrate ${name}`);
 				await this.writeChunk(cx, cz, data);
+			} else {
+				await this.flushRegion(cx, cz);
 			}
 			await this.dir.removeEntry(name);
 		}
@@ -105,6 +107,21 @@ export class OpfsStore {
 					}
 				}
 				return result;
+			} finally {
+				access.close();
+			}
+		});
+		this.queue = run.catch(() => {});
+		return run;
+	}
+
+	private flushRegion(cx: number, cz: number): Promise<void> {
+		const run = this.queue.then(async () => {
+			const handle = await this.dir.getFileHandle(`r.${Math.floor(cx / 32)}.${Math.floor(cz / 32)}`);
+			const access = await this.acquireAccess(handle);
+			try {
+				// A previous table write may be readable even though its flush failed.
+				access.flush();
 			} finally {
 				access.close();
 			}
@@ -218,5 +235,55 @@ export class PendingChunkSaves {
 			console.warn("Failed to save OPFS chunks; will retry on next save", error);
 		});
 		return this.saving;
+	}
+}
+
+interface ChunkReadTarget {
+	loadChunk(cx: number, cz: number, data: Uint8Array): unknown;
+	chunkMissing(cx: number, cz: number): void;
+}
+
+/** Leave transient failures requested in the core until a later tick can answer them. */
+export class PendingChunkReads {
+	private readonly read: (cx: number, cz: number) => Promise<Uint8Array | null>;
+	private readonly pending = new Map<string, readonly [number, number]>();
+	private readonly active = new Set<string>();
+
+	constructor(read: (cx: number, cz: number) => Promise<Uint8Array | null>) {
+		this.read = read;
+	}
+
+	get retrying(): boolean {
+		return this.pending.size > 0;
+	}
+
+	async serve(requests: Array<readonly [number, number]>, target: ChunkReadTarget, retryPending = false): Promise<void> {
+		const coords = retryPending ? [...this.pending.values(), ...requests] : requests;
+		await Promise.all(coords.map(async ([cx, cz]) => {
+			const key = `${cx},${cz}`;
+			if (this.active.has(key)) return;
+			this.active.add(key);
+			try {
+				let data: Uint8Array | null;
+				try {
+					data = await this.read(cx, cz);
+				} catch (error) {
+					if (error instanceof CorruptRegionError) {
+						console.warn(`Corrupt OPFS chunk (${cx}, ${cz}); regenerating`, error);
+						this.pending.delete(key);
+						target.chunkMissing(cx, cz);
+					} else {
+						console.warn(`Failed to read OPFS chunk (${cx}, ${cz}); will retry`, error);
+						this.pending.set(key, [cx, cz]);
+					}
+					return;
+				}
+				this.pending.delete(key);
+				if (data === null) target.chunkMissing(cx, cz);
+				else target.loadChunk(cx, cz, data);
+			} finally {
+				this.active.delete(key);
+			}
+		}));
 	}
 }

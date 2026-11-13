@@ -60,7 +60,7 @@ pnpm dev          # WASMをビルドして http://localhost:5173 で起動
 ## テスト
 
 ```sh
-pnpm test                 # Rust 29件 + ホスト側 30件（7ファイル）
+pnpm test                 # Rust 40件 + ホスト側 78件（9ファイル）
 pnpm typecheck
 pnpm dev                  # 以下は開発サーバーを起動した状態で実行
 node tools/determinism.mjs --edge http://localhost:5173
