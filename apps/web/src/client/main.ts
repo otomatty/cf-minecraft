@@ -14,7 +14,7 @@ import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, ClientCore, FACE_NORMALS, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
@@ -26,9 +26,7 @@ import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
 const REACH = 5;
-const TICK_SECONDS = 1 / 20;
 const DOUBLE_TAP_TICKS = 7;
-const POSITION_INTERVAL_MS = 50;
 const MESH_BUDGET_MS = 4;
 
 const params = new URLSearchParams(location.search);
@@ -470,10 +468,8 @@ async function main(): Promise<void> {
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-	let lastPositionSent = 0;
 	const sendPosition = () => {
 		if (autopilot) return;
-		lastPositionSent = performance.now();
 		// Rendering may interpolate through a corner; report only resolved physics feet.
 		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
@@ -532,8 +528,7 @@ async function main(): Promise<void> {
 			camera.pitch = 28;
 			return;
 		}
-		movementTime += dt;
-		while (movementTime >= TICK_SECONDS) {
+		movementTime = advancePlayerFrame(movementTime + dt, () => {
 			previousPosition = [...position];
 			if (pendingFlightToggle) core.toggleFlight();
 			pendingFlightToggle = false;
@@ -544,9 +539,8 @@ async function main(): Promise<void> {
 			pendingJump = false;
 			position = state.position;
 			movementTick++;
-			movementTime -= TICK_SECONDS;
-		}
-		const alpha = movementTime / TICK_SECONDS;
+		}, sendPosition);
+		const alpha = movementTime / PLAYER_TICK_SECONDS;
 		camera.x = previousPosition[0] + (position[0] - previousPosition[0]) * alpha;
 		camera.y = previousPosition[1] + (position[1] - previousPosition[1]) * alpha + EYE_HEIGHT;
 		camera.z = previousPosition[2] + (position[2] - previousPosition[2]) * alpha;
@@ -600,7 +594,6 @@ async function main(): Promise<void> {
 
 		if (joined) {
 			move(dt, now);
-			if (now - lastPositionSent >= POSITION_INTERVAL_MS) sendPosition();
 
 			removeUnloaded();
 			const pop = () => core.popDirty(camera.x, camera.y, camera.z);

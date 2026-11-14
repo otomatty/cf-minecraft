@@ -669,6 +669,56 @@ mod tests {
     }
 
     #[test]
+    fn descending_corner_accepts_each_physics_tick_including_batched_arrival() {
+        let start = [0.69, 66.2, 0.5];
+        for batched in [false, true] {
+            let mut s = joined_at(start);
+            s.world.set_block(0, 65, 0, blocks::BRICKS);
+            let mut player = physics::Player::new(start);
+            player.velocity = [0.8, -0.2, 0.0];
+            for tick in 0..2 {
+                let collisions = |x, y, z| {
+                    s.world
+                        .get_block(x, y, z)
+                        .is_none_or(blocks::is_opaque)
+                        .then(|| physics::Aabb::block(x, y, z))
+                };
+                player.tick(
+                    physics::Input {
+                        flying: true,
+                        ..Default::default()
+                    },
+                    &collisions,
+                );
+                assert!(player.is_clear(&collisions));
+                if tick == 0 {
+                    assert_eq!(player.position, [1.49, 66.0, 0.5]);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                if !batched {
+                    s.tick();
+                }
+            }
+            assert!((player.position[0] - 2.218).abs() < 1e-6);
+            assert!(player.position[1] < 65.9);
+            if batched {
+                s.tick();
+            }
+            assert_eq!(s.stats.positions_rejected, 0);
+            assert_eq!(s.client_position(1), Some(player.position));
+
+            // Omitting the intermediate tick loses the path around the corner:
+            // one combined Y sweep is blocked, as expected by current validation.
+            let mut skipped = joined_at(start);
+            skipped.world.set_block(0, 65, 0, blocks::BRICKS);
+            skipped.handle_packet(1, &position_packet(player.position));
+            skipped.tick();
+            assert_eq!(skipped.stats.positions_rejected, 1);
+            assert_eq!(skipped.client_position(1), Some(start));
+        }
+    }
+
+    #[test]
     fn rising_corner_reports_resolved_physics_not_interpolated_positions() {
         let start = [0.69, 64.9, 0.5];
         let mut s = joined_at(start);

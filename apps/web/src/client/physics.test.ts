@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ClientCore, S2C } from "./client-core.ts";
+import { advancePlayerFrame, ClientCore, S2C } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 
 const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
@@ -145,4 +145,28 @@ test("position reports use resolved physics feet while rendering crosses a risin
 	server.tick();
 	assert.deepEqual(server.clientPosition(1), state.position);
 	assert.equal(server.takeOutbox().filter(p => p.data[0] === S2C.PlayerCorrect).length, 0);
+});
+
+
+test("a two-tick frame sends both resolved positions before advancing again", () => {
+	const client = fixture();
+	const resolved: Array<[number, number, number]> = [];
+	const reported: Array<[number, number, number]> = [];
+	const events: string[] = [];
+	const remaining = advancePlayerFrame(0.1, () => {
+		events.push("tick");
+		resolved.push(client.tickPlayer(1, 0, 0, true, true, false).position);
+	}, () => {
+		events.push("report");
+		const packet = client.encodePlayerPos(0, 0);
+		const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+		reported.push([view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)]);
+	});
+	assert.equal(remaining, 0);
+	assert.deepEqual(events, ["tick", "report", "tick", "report"]);
+	assert.equal(reported.length, 2);
+	assert.notDeepEqual(reported[0], reported[1]);
+	assert.deepEqual(reported, resolved);
+	// A frame shorter than a physics tick must not add a periodic report.
+	assert.equal(advancePlayerFrame(0.01, () => assert.fail("unexpected tick"), () => assert.fail("unexpected report")), 0.01);
 });

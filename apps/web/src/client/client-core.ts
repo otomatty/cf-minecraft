@@ -46,6 +46,18 @@ export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, T
 export const WORDS_PER_QUAD = 8;
 export const MIN_Y = -64;
 
+export const PLAYER_TICK_SECONDS = 1 / 20;
+
+/** Keep every resolved tick in the report stream, even during frame catch-up. */
+export function advancePlayerFrame(accumulatedSeconds: number, tick: () => void, report: () => void): number {
+	while (accumulatedSeconds >= PLAYER_TICK_SECONDS) {
+		tick();
+		report();
+		accumulatedSeconds -= PLAYER_TICK_SECONDS;
+	}
+	return accumulatedSeconds;
+}
+
 export interface PlayerState {
 	position: [number, number, number];
 	velocity: [number, number, number];
