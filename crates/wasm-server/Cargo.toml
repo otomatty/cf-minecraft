@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 sim.workspace = true
 worldgen.workspace = true
 world.workspace = true
+storage = { path = "../storage" }

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import {
-	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL,
+	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL, SERVICE_RESTART,
 } from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
@@ -233,6 +233,17 @@ export class WorldDO extends DurableObject<Env> {
 			}
 		}
 		return count;
+	}
+
+	/** RPC (debug): force the next connection to restore the core from SQLite. */
+	evict(): void {
+		this.disconnectAll(SERVICE_RESTART, "debug evict");
+		this.save();
+		this.stopTicking();
+		this.core = null;
+		this.seed = null;
+		this.idleTicks = 0;
+		this.lastMetrics = null;
 	}
 
 	private startTicking(): void {
