@@ -15,6 +15,7 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward, right } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { TEX_SIZE } from "./textures.ts";
@@ -108,6 +109,18 @@ async function main(): Promise<void> {
 	const core = await ClientCore.load(clientWasmUrl);
 	const renderer = await Renderer.create(canvas, core.textureNames());
 	const blockNames = core.blockNames();
+	let mainThreadMeshMs = 0;
+	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
+		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
+		(section, vertices) => renderer.setSection(...section, vertices),
+		section => core.requeueDirty(...section),
+		section => !core.isDirty(...section) && core.getBlock(section[0] * 16, -64, section[2] * 16) !== -1);
+	function removeUnloaded(): void {
+		for (const [cx, cz] of core.takeUnloaded()) {
+			meshPool.invalidateChunk(cx, cz);
+			renderer.removeChunk(cx, cz);
+		}
+	}
 
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
 	const velocity = [0, 0, 0];
@@ -129,12 +142,17 @@ async function main(): Promise<void> {
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
 		onOpen: () => {
-			if (opened) core.resetWorld();
+			if (opened) {
+				meshPool.reset();
+				core.resetWorld();
+				removeUnloaded();
+			}
 			opened = true;
 			transport.send(core.encodeHello(viewDistance));
 		},
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
+			removeUnloaded();
 			if (id === S2C.Welcome) {
 				joinedGameTime = core.gameTime;
 				if (!joined) {
@@ -516,7 +534,7 @@ async function main(): Promise<void> {
 			`${fps.toFixed(0)} fps`,
 			`XYZ: ${camera.x.toFixed(2)} / ${(camera.y - EYE_HEIGHT).toFixed(2)} / ${camera.z.toFixed(2)}   Chunk: ${Math.floor(camera.x) >> 4} ${Math.floor(camera.z) >> 4}`,
 			`Facing: ${FACING[Math.round(yaw / 90) % 4]}  (${yaw.toFixed(1)} / ${camera.pitch.toFixed(1)})`,
-			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount}  chunks ${core.chunkCount}`,
+			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount} pending + ${meshPool.inFlight} in flight + ${meshPool.pendingResults} awaiting upload  chunks ${core.chunkCount}`,
 			`Server: ${transport.kind} "${worldName}"${connection === "reconnecting" ? "  reconnecting" : ""}  TPS ${measuredTps().toFixed(2)}` +
 				(serverStats
 					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
@@ -538,6 +556,7 @@ async function main(): Promise<void> {
 			fail(`GPUデバイスが失われました: ${renderer.lost}`);
 			return;
 		}
+		let fallbackMeshMs = 0;
 		const dt = Math.min(0.1, (now - last) / 1000);
 		last = now;
 
@@ -545,17 +564,26 @@ async function main(): Promise<void> {
 			move(dt, now);
 			if (now - lastPositionSent >= POSITION_INTERVAL_MS) sendPosition();
 
-			for (const [cx, cz] of core.takeUnloaded()) renderer.removeChunk(cx, cz);
-			const start = performance.now();
-			do {
-				const section = core.popDirty(camera.x, camera.y, camera.z);
-				if (!section) break;
-				renderer.setSection(section[0], section[1], section[2], core.mesh(section[0], section[1], section[2]));
-			} while (performance.now() - start < MESH_BUDGET_MS);
+			removeUnloaded();
+			const pop = () => core.popDirty(camera.x, camera.y, camera.z);
+			if (meshPool.useFallback) {
+				const start = performance.now();
+				do {
+					const section = pop();
+					if (!section) break;
+					renderer.setSection(...section, core.mesh(...section));
+				} while (performance.now() - start < MESH_BUDGET_MS);
+				fallbackMeshMs = performance.now() - start;
+			} else {
+				meshPool.applyResults();
+				meshPool.pump(pop, section => core.padded(...section));
+			}
 
 			target = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
 		}
 
+		// Include worker replies/uploads between frames as well as this frame's dispatch.
+		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
 		if (locked()) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
@@ -592,7 +620,12 @@ async function main(): Promise<void> {
 			reconnects,
 			fps,
 			...frame,
-			meshQueue: core.dirtyCount,
+			meshQueue: core.dirtyCount + meshPool.inFlight + meshPool.pendingResults,
+			meshPendingResults: meshPool.pendingResults,
+			meshPending: core.dirtyCount,
+			meshInFlight: meshPool.inFlight,
+			meshWorkers: meshPool.workerCount,
+			mainThreadMeshMs,
 			chunks: core.chunkCount,
 			gameTime: core.gameTime,
 			tps: measuredTps(),

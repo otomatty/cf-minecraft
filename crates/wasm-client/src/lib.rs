@@ -28,7 +28,6 @@ struct State {
     game_time: i64,
     day_time: i64,
     out: Vec<u8>,
-    mesh: Vec<u32>,
     padded: Vec<u16>,
 }
 
@@ -36,6 +35,11 @@ struct Global(UnsafeCell<Option<State>>);
 // SAFETY: a WebAssembly instance without threads is only ever entered from one thread.
 unsafe impl Sync for Global {}
 static STATE: Global = Global(UnsafeCell::new(None));
+
+struct MeshOutput(UnsafeCell<Vec<u32>>);
+// SAFETY: each instance is entered by only one thread.
+unsafe impl Sync for MeshOutput {}
+static MESH_OUTPUT: MeshOutput = MeshOutput(UnsafeCell::new(Vec::new()));
 
 #[allow(clippy::mut_from_ref)]
 fn state() -> &'static mut State {
@@ -82,7 +86,6 @@ pub extern "C" fn client_new() {
         game_time: 0,
         day_time: 0,
         out: Vec::new(),
-        mesh: Vec::new(),
         padded: vec![blocks::AIR; PADDED_LEN],
     };
     // SAFETY: single-threaded.
@@ -105,7 +108,7 @@ pub extern "C" fn client_out_ptr() -> *const u8 {
 
 #[no_mangle]
 pub extern "C" fn client_mesh_ptr() -> *const u32 {
-    state().mesh.as_ptr()
+    unsafe { (&*MESH_OUTPUT.0.get()).as_ptr() }
 }
 
 fn mark_chunk_dirty(st: &mut State, cx: i32, cz: i32) {
@@ -270,11 +273,21 @@ pub extern "C" fn client_pop_dirty(cam_x: f64, cam_y: f64, cam_z: f64) -> u32 {
     1
 }
 
-/// Meshes one section into the mesh buffer and returns the quad count.
+/// Requeues work if a worker fails after taking it from the dirty set.
 #[no_mangle]
-pub extern "C" fn client_mesh(cx: i32, sy: i32, cz: i32) -> u32 {
+pub extern "C" fn client_requeue_dirty(cx: i32, sy: i32, cz: i32) {
+    state().dirty.insert((cx, sy, cz));
+}
+
+#[no_mangle]
+pub extern "C" fn client_is_dirty(cx: i32, sy: i32, cz: i32) -> u32 {
+    state().dirty.contains(&(cx, sy, cz)) as u32
+}
+
+/// Copies the section and its border into the padded buffer; returns u16 count.
+#[no_mangle]
+pub extern "C" fn client_padded(cx: i32, sy: i32, cz: i32) -> usize {
     let st = state();
-    st.mesh.clear();
     if !(0..SECTIONS as i32).contains(&sy) {
         return 0;
     }
@@ -311,7 +324,35 @@ pub extern "C" fn client_mesh(cx: i32, sy: i32, cz: i32) -> u32 {
             }
         }
     }
-    mesher::mesh_section(&st.padded, &mut st.mesh)
+    PADDED_LEN
+}
+
+#[no_mangle]
+pub extern "C" fn client_padded_ptr() -> *const u16 {
+    state().padded.as_ptr()
+}
+
+/// Meshes padded u16 block data without requiring client_new or a world.
+/// Invalid lengths produce an empty mesh, like an empty section.
+///
+/// # Safety
+/// For PADDED_LEN elements, ptr must point to that many readable, aligned u16s.
+#[no_mangle]
+pub unsafe extern "C" fn mesh_padded(ptr: *const u16, len: usize) -> u32 {
+    let mesh = &mut *MESH_OUTPUT.0.get();
+    mesh.clear();
+    if len != PADDED_LEN {
+        return 0;
+    }
+    mesher::mesh_section(std::slice::from_raw_parts(ptr, len), mesh)
+}
+
+/// Meshes one section into the mesh buffer and returns the quad count.
+#[no_mangle]
+pub extern "C" fn client_mesh(cx: i32, sy: i32, cz: i32) -> u32 {
+    let len = client_padded(cx, sy, cz);
+    // SAFETY: the padded buffer remains valid throughout the call.
+    unsafe { mesh_padded(client_padded_ptr(), len) }
 }
 
 /// Output: repeated `[cx i32 LE][cz i32 LE]` of chunks removed since the last call.
@@ -452,4 +493,51 @@ pub extern "C" fn client_texture_names() -> usize {
 pub extern "C" fn client_block_names() -> usize {
     let names: Vec<&str> = (0..blocks::COUNT).map(|b| blocks::info(b).name).collect();
     emit(state(), names.join("\n").into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_meshing_matches_client_mesh() {
+        // The mesh-only entry point works before client_new.
+        let mut padded = vec![blocks::AIR; PADDED_LEN];
+        padded[padded_index(0, 0, 0)] = blocks::STONE;
+        assert_eq!(unsafe { mesh_padded(padded.as_ptr(), padded.len()) }, 6);
+        client_new();
+        let mut chunk = Chunk::empty(0, 0);
+        for y in MIN_Y..MIN_Y + 32 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    if (x + z + y) % 3 != 0 {
+                        chunk.set(x as usize, y, z as usize, blocks::STONE);
+                    }
+                }
+            }
+        }
+        state().world.chunks.insert((0, 0), chunk);
+        for (cx, sy, cz) in [(0, 0, 0), (0, 1, 0), (0, 2, 0), (1, 0, 0), (0, -1, 0)] {
+            let quads = client_mesh(cx, sy, cz);
+            let expected = unsafe {
+                std::slice::from_raw_parts(
+                    client_mesh_ptr(),
+                    quads as usize * mesher::WORDS_PER_QUAD,
+                )
+            }
+            .to_vec();
+            let len = client_padded(cx, sy, cz);
+            let actual = unsafe { mesh_padded(client_padded_ptr(), len) };
+            assert_eq!(actual, quads);
+            assert_eq!(
+                unsafe {
+                    std::slice::from_raw_parts(
+                        client_mesh_ptr(),
+                        actual as usize * mesher::WORDS_PER_QUAD,
+                    )
+                },
+                expected
+            );
+        }
+    }
 }
