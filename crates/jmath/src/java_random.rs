@@ -11,17 +11,21 @@ const FLOAT_UNIT: f32 = 1.0 / ((1u32 << 24) as f32);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JavaRandom {
     seed: i64,
+    // Store raw bits to retain the existing Eq implementation.
+    next_next_gaussian: Option<u64>,
 }
 
 impl JavaRandom {
     pub fn new(seed: i64) -> Self {
         Self {
             seed: (seed ^ MULTIPLIER) & MASK,
+            next_next_gaussian: None,
         }
     }
 
     pub fn set_seed(&mut self, seed: i64) {
         self.seed = (seed ^ MULTIPLIER) & MASK;
+        self.next_next_gaussian = None;
     }
 
     /// `Random.next(int bits)`.
@@ -51,6 +55,25 @@ impl JavaRandom {
                 return r;
             }
             u = self.next(31);
+        }
+    }
+
+    /// `Random.nextGaussian()`: polar Box–Muller with a cached second sample.
+    /// `set_seed` discards the cache, just as `Random.setSeed` does.
+    pub fn next_gaussian(&mut self) -> f64 {
+        if let Some(bits) = self.next_next_gaussian.take() {
+            return f64::from_bits(bits);
+        }
+        loop {
+            let v1 = 2.0 * self.next_double() - 1.0;
+            let v2 = 2.0 * self.next_double() - 1.0;
+            let s = v1 * v1 + v2 * v2;
+            if s >= 1.0 || s == 0.0 {
+                continue;
+            }
+            let multiplier = (-2.0 * crate::strict_math::log(s) / s).sqrt();
+            self.next_next_gaussian = Some((v2 * multiplier).to_bits());
+            return v1 * multiplier;
         }
     }
 

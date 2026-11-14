@@ -1,0 +1,52 @@
+// origin: FreeBSD /usr/src/lib/msun/src/s_tan.c */
+//
+// ====================================================
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//
+// Developed at SunPro, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+// ====================================================
+
+use super::{k_tan, rem_pio2};
+
+// tan(x)
+// Return tangent function of x.
+//
+// kernel function:
+//      k_tan           ... tangent function on [-pi/4,pi/4]
+//      rem_pio2        ... argument reduction routine
+//
+// Method.
+//      Let S,C and T denote the sin, cos and tan respectively on
+//      [-PI/4, +PI/4]. Reduce the argument x to y1+y2 = x-k*pi/2
+//      in [-pi/4 , +pi/4], and let n = k mod 4.
+//      We have
+//
+//          n        sin(x)      cos(x)        tan(x)
+//     ----------------------------------------------------------
+//          0          S           C             T
+//          1          C          -S            -1/T
+//          2         -S          -C             T
+//          3         -C           S            -1/T
+//     ----------------------------------------------------------
+//
+// Special cases:
+//      Let trig be any of sin, cos, or tan.
+//      trig(+-INF)  is NaN, with signals;
+//      trig(NaN)    is that NaN;
+//
+// Accuracy:
+//      TRIG(x) returns trig(x) nearly rounded
+pub fn tan(x: f64) -> f64 {
+    let ix = super::get_high_word(x) & 0x7fffffff;
+    if ix <= 0x3fe921fb {
+        return k_tan(x, 0.0, 0);
+    }
+    if ix >= 0x7ff00000 {
+        return x - x;
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    k_tan(y0, y1, n & 1)
+}
