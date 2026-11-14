@@ -4,7 +4,7 @@ import { ACTIONS, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSet
 
 const memory = () => {
 	const values = new Map<string, string>();
-	return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+	return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
 };
 test("defaults cover eight actions and are independent copies", () => {
 	const settings = defaultSettings();
@@ -40,8 +40,45 @@ test("corrupt, incomplete, out of range and duplicate saved data fall back", () 
 		assert.deepEqual(loadSettings(storage), defaults);
 	}
 });
+test("legacy preferences migrate once and the current key takes precedence", () => {
+	const storage = memory();
+	const legacyKey = "maincraft.input-settings.v1";
+	const settings = { ...defaultSettings(), sensitivity: 42, fov: 90 };
+	settings.keys.forward = "ArrowUp";
+	storage.setItem(legacyKey, JSON.stringify(settings));
+	assert.deepEqual(loadSettings(storage), settings);
+	assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), settings);
+	assert.equal(storage.getItem(legacyKey), null);
+	storage.setItem(legacyKey, JSON.stringify(defaultSettings()));
+	assert.deepEqual(loadSettings(storage), settings);
+	assert.notEqual(storage.getItem(legacyKey), null);
+	storage.setItem(SETTINGS_KEY, "{");
+	assert.deepEqual(loadSettings(storage), defaultSettings());
+	assert.equal(storage.getItem(SETTINGS_KEY), "{");
+});
+test("invalid legacy preferences fall back without migrating", () => {
+	const storage = memory();
+	const legacyKey = "maincraft.input-settings.v1";
+	for (const value of ["{", "null", "{}", JSON.stringify({ ...defaultSettings(), fov: 111 })]) {
+		storage.setItem(legacyKey, value);
+		assert.deepEqual(loadSettings(storage), defaultSettings());
+		assert.equal(storage.getItem(SETTINGS_KEY), null);
+		assert.equal(storage.getItem(legacyKey), value);
+	}
+});
+test("migration storage failures retain preferences and do not discard the old key", () => {
+	const legacyKey = "maincraft.input-settings.v1";
+	const settings = { ...defaultSettings(), sensitivity: 42 };
+	for (const method of ["setItem", "removeItem"] as const) {
+		const storage = memory();
+		storage.setItem(legacyKey, JSON.stringify(settings));
+		assert.deepEqual(loadSettings({ ...storage, [method]() { throw new Error("denied"); } }), settings);
+		assert.equal(storage.getItem(legacyKey), JSON.stringify(settings));
+		assert.equal(storage.getItem(SETTINGS_KEY), method === "setItem" ? null : JSON.stringify(settings));
+	}
+});
 test("storage exceptions are contained", () => {
-	assert.deepEqual(loadSettings({ getItem() { throw new Error("denied"); } }), defaultSettings());
+	assert.deepEqual(loadSettings({ ...memory(), getItem() { throw new Error("denied"); } }), defaultSettings());
 	assert.equal(saveSettings({ setItem() { throw new Error("quota"); } }, defaultSettings()), false);
 });
 test("duplicates report each repeated key once", () => {

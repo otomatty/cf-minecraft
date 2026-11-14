@@ -1,4 +1,4 @@
-# maincraft
+# cf-minecraft
 
 ブラウザで動くボクセルサンドボックスゲームです。Java版の仕様（バージョン26.3）を基準に、挙動と数値の再現を目指します。Cloudflare Workers と Durable Objects の上で動きます。
 
@@ -81,11 +81,13 @@ JDK の乱数実値を取り直す場合は `tools/oracle/JdkVectors.java` の�
 
 ## デプロイ
 
+公開先は `https://minecraft.saedgewell.workers.dev` です。
+
 最初に D1 データベースを作り、表示された ID にマイグレーションを適用します。コマンドはリポジトリのルートで実行します。
 
 ```sh
 cf auth login
-cf d1 create maincraft
+cf d1 create cf-minecraft
 cf d1 migrations apply <ID> --dir apps/web/migrations
 ```
 
@@ -106,13 +108,13 @@ Cloudflare ダッシュボードで Turnstile のウィジェットを作りま�
 | `ACCESS_TOKEN` | tick-probe 用の運用者トークン。`openssl rand -base64 32` で別の値を生成します |
 
 ```sh
-cf workers secrets update BETTER_AUTH_SECRET --worker maincraft --type secret_text --text '<生成した値>'
-cf workers secrets update GOOGLE_CLIENT_ID --worker maincraft --type secret_text --text '<クライアント ID>'
-cf workers secrets update GOOGLE_CLIENT_SECRET --worker maincraft --type secret_text --text '<クライアントシークレット>'
-cf workers secrets update TURNSTILE_SITE_KEY --worker maincraft --type secret_text --text '<サイトキー>'
-cf workers secrets update TURNSTILE_SECRET_KEY --worker maincraft --type secret_text --text '<検証用キー>'
-cf workers secrets update WORLD_CREATORS --worker maincraft --type secret_text --text 'owner@example.com'
-cf workers secrets update ACCESS_TOKEN --worker maincraft --type secret_text --text '<運用者トークン>'
+cf workers secrets update BETTER_AUTH_SECRET --worker minecraft --type secret_text --text '<生成した値>'
+cf workers secrets update GOOGLE_CLIENT_ID --worker minecraft --type secret_text --text '<クライアント ID>'
+cf workers secrets update GOOGLE_CLIENT_SECRET --worker minecraft --type secret_text --text '<クライアントシークレット>'
+cf workers secrets update TURNSTILE_SITE_KEY --worker minecraft --type secret_text --text '<サイトキー>'
+cf workers secrets update TURNSTILE_SECRET_KEY --worker minecraft --type secret_text --text '<検証用キー>'
+cf workers secrets update WORLD_CREATORS --worker minecraft --type secret_text --text 'owner@example.com'
+cf workers secrets update ACCESS_TOKEN --worker minecraft --type secret_text --text '<運用者トークン>'
 pnpm run deploy
 MC_ACCESS_TOKEN='<運用者トークン>' node tools/tick-probe.mjs --edge https://<デプロイ先> --players 8 --seconds 60
 ```

@@ -6,7 +6,8 @@ export interface InputSettings {
 	sensitivity: number; // Percent: 0..200, mapped to the game's 0..1 range.
 	fov: number;
 }
-export const SETTINGS_KEY = "maincraft.input-settings.v1";
+export const SETTINGS_KEY = "cf-minecraft.input-settings.v1";
+const LEGACY_SETTINGS_KEY = "maincraft.input-settings.v1";
 export function defaultSettings(): InputSettings {
 	return {
 		keys: { forward: "KeyW", backward: "KeyS", left: "KeyA", right: "KeyD", up: "Space", down: "ShiftLeft", sprint: "KeyR", fullscreen: "KeyF" },
@@ -46,14 +47,23 @@ export function validKey(code: unknown): code is string {
 }
 interface StorageReader { getItem(key: string): string | null }
 interface StorageWriter { setItem(key: string, value: string): void }
-export function loadSettings(storage: StorageReader): InputSettings {
+interface StorageRemover { removeItem(key: string): void }
+export function loadSettings(storage: StorageReader & StorageWriter & StorageRemover): InputSettings {
 	try {
-		const value = JSON.parse(storage.getItem(SETTINGS_KEY) ?? "null");
+		const current = storage.getItem(SETTINGS_KEY);
+		const value = JSON.parse((current === null ? storage.getItem(LEGACY_SETTINGS_KEY) : current) ?? "null");
 		if (!value || !value.keys || !ACTIONS.every(action => validKey(value.keys[action]))
 			|| duplicateKeys(value.keys).length > 0 || effectiveKeyConflicts(value).length > 0
 			|| !Number.isFinite(value.sensitivity) || value.sensitivity < 0 || value.sensitivity > 200
 			|| !Number.isFinite(value.fov) || value.fov < 30 || value.fov > 110) return defaultSettings();
-		return { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov };
+		const settings = { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov };
+		if (current === null) {
+			try {
+				storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+				storage.removeItem(LEGACY_SETTINGS_KEY);
+			} catch { /* Keep the loaded preferences even if migration cannot be persisted. */ }
+		}
+		return settings;
 	} catch {
 		return defaultSettings();
 	}
