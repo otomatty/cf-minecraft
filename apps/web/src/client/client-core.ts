@@ -6,6 +6,9 @@ interface ClientExports {
 	mc_alloc(len: number): number;
 	mc_free(ptr: number, len: number): void;
 	client_new(): void;
+	client_player_reset(x: number, y: number, z: number): void;
+	client_player_toggle_flight(): number;
+	client_player_tick(forward: number, strafe: number, yaw: number, flags: number): void;
 	client_reset_world(): void;
 	client_out_ptr(): number;
 	client_mesh_ptr(): number;
@@ -35,6 +38,13 @@ export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, T
 
 export const WORDS_PER_QUAD = 8;
 export const MIN_Y = -64;
+
+export interface PlayerState {
+	position: [number, number, number];
+	velocity: [number, number, number];
+	onGround: boolean;
+	flying: boolean;
+}
 
 export interface RayHit {
 	x: number;
@@ -83,6 +93,26 @@ export class ClientCore {
 		const id = this.x.client_packet(ptr, data.length);
 		this.x.mc_free(ptr, data.length);
 		return id === 0xffffffff ? -1 : id;
+	}
+
+	resetPlayer(x: number, y: number, z: number): void {
+		this.x.client_player_reset(x, y, z);
+	}
+
+	toggleFlight(): boolean {
+		return this.x.client_player_toggle_flight() !== 0;
+	}
+
+	tickPlayer(forward: number, strafe: number, yaw: number, jump: boolean, sprint: boolean, sneak: boolean): PlayerState {
+		this.x.client_player_tick(forward, strafe, yaw, Number(jump) | (Number(sprint) << 1) | (Number(sneak) << 2));
+		const bytes = this.out(50);
+		const view = new DataView(bytes.buffer);
+		return {
+			position: [view.getFloat64(0, true), view.getFloat64(8, true), view.getFloat64(16, true)],
+			velocity: [view.getFloat64(24, true), view.getFloat64(32, true), view.getFloat64(40, true)],
+			onGround: bytes[48] !== 0,
+			flying: bytes[49] !== 0,
+		};
 	}
 
 	resetWorld(): void {
