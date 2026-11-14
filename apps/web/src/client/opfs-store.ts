@@ -1,9 +1,15 @@
+import { decodeArchive, encodeArchive, type ArchiveEntry, MAX_ARCHIVE_BYTES } from "./world-archive.ts";
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
 	seed: string;
 	gameTime: string;
 	dayTime: string;
+}
+
+/** Keep persistence available in browsers without Web Locks. */
+function withWorldLock<T>(world: string, fn: () => Promise<T>): Promise<T> {
+	return navigator.locks ? navigator.locks.request(`mcworld-import-${world}`, fn) : fn();
 }
 
 /** Region files in OPFS. Sync access handles exist only in workers, which is where we are. */
@@ -21,7 +27,8 @@ export class OpfsStore {
 	static async open(world: string, codec: RegionCodec): Promise<OpfsStore | null> {
 		try {
 			const root = await navigator.storage.getDirectory();
-			return new OpfsStore(await root.getDirectoryHandle(`world-${world}`, { create: true }), codec);
+			return await withWorldLock(world, async () =>
+				new OpfsStore(await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
 		} catch {
 			// Private browsing or an old browser: play without saving.
 			return null;
@@ -164,7 +171,12 @@ export class OpfsStore {
 		const access = await this.acquireAccess(handle);
 		try {
 			access.truncate(0);
-			access.write(data, { at: 0 });
+			let written = 0;
+			while (written < data.length) {
+				const n = access.write(data.subarray(written), { at: written });
+				if (n === 0) throw new Error("Short file write");
+				written += n;
+			}
 			access.flush();
 		} finally {
 			access.close();
@@ -182,20 +194,84 @@ export class OpfsStore {
 	async readMeta(): Promise<Meta | null> {
 		const bytes = await this.readFile("meta.json");
 		if (!bytes) return null;
-		try {
-			const meta = JSON.parse(new TextDecoder().decode(bytes)) as Partial<Meta>;
-			if (typeof meta.seed === "string" && /^-?\d{1,19}$/.test(meta.seed)) {
-				return { seed: meta.seed, gameTime: meta.gameTime ?? "0", dayTime: meta.dayTime ?? "0" };
+		try { return parseMeta(bytes, false); } catch { return null; }
+	}
+
+	/** Read a snapshot inside the same queue as region and metadata writes. */
+	exportArchive(): Promise<Uint8Array<ArrayBuffer>> {
+		const run = this.queue.then(async () => {
+			const entries: ArchiveEntry[] = [];
+			let size = 12;
+			for await (const name of this.dir.keys()) {
+				if (name !== "meta.json" && !/^r\.-?\d+\.-?\d+$/.test(name)) continue;
+				const file = await (await this.dir.getFileHandle(name)).getFile();
+				size += 10 + new TextEncoder().encode(name).length + file.size;
+				if (size > MAX_ARCHIVE_BYTES) throw new Error("アーカイブは 1 GiB 以下にしてください");
+				entries.push({ name, data: new Uint8Array(await file.arrayBuffer()) });
 			}
-		} catch {
-			// Unreadable meta: treat the world as new.
+			return encodeArchive(entries);
+		});
+		this.queue = run.catch(() => {});
+		return run;
+	}
+
+	async importArchive(world: string, bytes: Uint8Array): Promise<void> {
+		if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(world)) throw new Error("ワールド名は英小文字・数字で始まる32文字以内の英小文字・数字・_・-にしてください");
+		const entries = decodeArchive(bytes);
+		const meta = parseMeta(entries.find(entry => entry.name === "meta.json")!.data, true);
+		for (const { name, data } of entries) {
+			if (name === "meta.json") continue;
+			const input = new Uint8Array(8 + 49152);
+			new DataView(input.buffer).setUint32(0, data.length, true);
+			input.set(data.subarray(0, 49152), 8);
+			try {
+				this.codec.call(0, input);
+			} catch (error) {
+				if (error instanceof CorruptRegionError) throw new Error(`リージョンファイル ${name} が壊れています`, { cause: error });
+				throw error;
+			}
 		}
-		return null;
+		// When available, a cross-tab lock closes the existence-check/create race.
+		await withWorldLock(world, async () => {
+			const root = await navigator.storage.getDirectory();
+			const name = `world-${world}`;
+			for await (const existing of root.keys()) {
+				if (existing === name) throw new Error("同じ名前のワールドが既に存在します");
+			}
+			const dir = await root.getDirectoryHandle(name, { create: true });
+			const target = new OpfsStore(dir, this.codec);
+			try {
+				for (const entry of entries) if (entry.name !== "meta.json") await target.writeFile(entry.name, entry.data);
+				await target.writeMeta(meta);
+			} catch (error) {
+				await root.removeEntry(name, { recursive: true });
+				throw error;
+			}
+		});
 	}
 
 	writeMeta(meta: Meta): Promise<void> {
-		return this.writeFile("meta.json", new TextEncoder().encode(JSON.stringify(meta)));
+		const run = this.queue.then(() => this.writeFile("meta.json", new TextEncoder().encode(JSON.stringify(meta))));
+		this.queue = run.catch(() => {});
+		return run;
 	}
+}
+
+/** Shared validation for saved and imported metadata. */
+function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
+	const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Partial<Meta> | null;
+	if (!meta || typeof meta.seed !== "string" || !/^-?\d{1,19}$/.test(meta.seed)) throw new Error("meta.json のシードが不正です");
+	const time = (value: unknown): string => {
+		if (value === undefined || value === null) return "0";
+		if (typeof value === "string" && /^-?\d{1,20}$/.test(value)) return BigInt.asIntN(64, BigInt(value)).toString();
+		if (strictTimes) throw new Error("meta.json の時刻が不正です");
+		return "0";
+	};
+	return {
+		seed: BigInt.asIntN(64, BigInt(meta.seed)).toString(),
+		gameTime: time(meta.gameTime),
+		dayTime: time(meta.dayTime),
+	};
 }
 
 interface PendingChunk {

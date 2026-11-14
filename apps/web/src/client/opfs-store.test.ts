@@ -3,10 +3,21 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
+import { decodeArchive, encodeArchive } from "./world-archive.ts";
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 // These integration tests use the real WASM format implementation.
 // Run pnpm build:wasm, then node --test apps/web/src/client/opfs-store.test.ts.
+// Node 22 has no Web Locks; model the browser's exclusive lock queue.
+const locks = new Map<string, Promise<unknown>>();
+Object.defineProperty(navigator, "locks", { configurable: true, value: {
+	request(name: string, run: () => Promise<unknown>) {
+		const next = (locks.get(name) ?? Promise.resolve()).then(run);
+		locks.set(name, next.catch(() => {}));
+		return next;
+	},
+} });
+
 const module = new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url)));
 
 class MemoryDirectory {
@@ -40,7 +51,7 @@ class MemoryDirectory {
 		}
 		const file = this.files.get(name)!;
 		return {
-			getFile: async () => ({ arrayBuffer: async () => file.bytes.slice().buffer }),
+			getFile: async () => ({ size: file.bytes.length, arrayBuffer: async () => file.bytes.slice().buffer }),
 			createSyncAccessHandle: async () => {
 				this.accessAttempts++;
 				if (this.failAccess-- > 0) throw new DOMException("locked by another tab", "NoModificationAllowedError");
@@ -336,6 +347,193 @@ test("a pending read can resolve to missing, corrupt, or empty saved data", asyn
 		assert.equal(reads.retrying, false);
 		assert.deepEqual(target.missing, result instanceof Uint8Array ? [] : [[0, 0]]);
 		assert.deepEqual(target.loaded, result instanceof Uint8Array ? [[0, 0, result]] : []);
+	}
+});
+
+
+test("archive export waits for queued region and metadata writes", async () => {
+	const dir = new MemoryDirectory(), store = await open(dir);
+	const writing = store.writeChunk(0, 0, old);
+	const writingMeta = store.writeMeta(meta);
+	const exporting = store.exportArchive();
+	await Promise.all([writing, writingMeta]);
+	const entries = decodeArchive(await exporting);
+	assert.deepEqual(entries.map(e => e.name).sort(), ["meta.json", "r.0.0"]);
+	assert.deepEqual(entries.find(e => e.name === "r.0.0")!.data, dir.files.get("r.0.0")!.durable);
+	assert.deepEqual(JSON.parse(new TextDecoder().decode(entries.find(e => e.name === "meta.json")!.data)), meta);
+});
+
+function importRoot() {
+	const dirs = new Map<string, MemoryDirectory>();
+	const root = {
+		async *keys() { yield* dirs.keys(); },
+		async getDirectoryHandle(name: string, options?: { create?: boolean }) {
+			if (!dirs.has(name)) {
+				if (!options?.create) throw new DOMException("missing", "NotFoundError");
+				dirs.set(name, new MemoryDirectory());
+			}
+			return dirs.get(name)!;
+		},
+		async removeEntry(name: string) { dirs.delete(name); },
+	};
+	Object.defineProperty(navigator, "storage", { configurable: true, value: { getDirectory: async () => root } });
+	return dirs;
+}
+
+test("archive import preserves chunks and metadata, refuses overwrite, writes metadata last", async () => {
+	const store = await open(new MemoryDirectory());
+	await store.writeChunk(-1, 33, newer);
+	await store.writeMeta(meta);
+	const bytes = await store.exportArchive();
+	const dirs = importRoot();
+	await store.importArchive("copied", bytes);
+	const dir = dirs.get("world-copied")!;
+	assert.equal(dir.operations.at(-1), "flush meta.json");
+	assert.deepEqual(await (await open(dir)).readChunk(-1, 33), newer);
+	assert.deepEqual(await (await open(dir)).readMeta(), meta);
+	// Restore the root after the read helpers installed their mock.
+	Object.defineProperty(navigator, "storage", { configurable: true, value: { getDirectory: async () => ({ async *keys() { yield "world-copied"; } }) } });
+	await assert.rejects(store.importArchive("copied", bytes), /既に存在/);
+});
+
+test("invalid archives, metadata, region tables and world names never create a directory", async (t) => {
+	// Exercise a codec validation failure independently of the accepted short-file format.
+	t.mock.method(RegionCodec.prototype, "call", () => { throw new CorruptRegionError(); });
+	const store = await open(new MemoryDirectory());
+	const dirs = importRoot();
+	const metadata = new TextEncoder().encode(JSON.stringify(meta));
+	for (const entries of [
+		[{ name: "meta.json", data: new Uint8Array([123]) }],
+		[{ name: "meta.json", data: new TextEncoder().encode('{"seed":"1","gameTime":3}') }],
+		[{ name: "meta.json", data: metadata }, { name: "r.0.0", data: new Uint8Array([1]) }],
+	]) await assert.rejects(store.importArchive("invalid", encodeArchive(entries)));
+	await assert.rejects(store.importArchive("../bad", encodeArchive([{ name: "meta.json", data: metadata }])));
+	const broken = encodeArchive([{ name: "meta.json", data: metadata }]); broken[broken.length - 1] ^= 1;
+	await assert.rejects(store.importArchive("invalid", broken));
+	assert.equal(dirs.size, 0);
+});
+
+test("failed archive writes remove the incomplete world", async () => {
+	const store = await open(new MemoryDirectory());
+	await store.writeChunk(0, 0, old); await store.writeMeta(meta);
+	const bytes = await store.exportArchive();
+	for (const boundary of [1, 2]) {
+		const dirs = importRoot();
+		const original = navigator.storage.getDirectory;
+		Object.defineProperty(navigator, "storage", { configurable: true, value: { getDirectory: async () => {
+			const root = await original();
+			return { keys: () => root.keys(), removeEntry: (name: string) => root.removeEntry(name), getDirectoryHandle: async (name: string, options: { create: boolean }) => {
+				const dir = await root.getDirectoryHandle(name, options) as unknown as MemoryDirectory;
+				dir.failFlush = boundary;
+				return dir;
+			} };
+		} } });
+		await assert.rejects(store.importArchive("failed", bytes), /crash/);
+		assert.equal(dirs.size, 0);
+	}
+});
+
+
+test("concurrent imports of the same world serialize and only one succeeds", async () => {
+	const store = await open(new MemoryDirectory());
+	const dirs = importRoot();
+	const bytes = encodeArchive([{ name: "meta.json", data: new TextEncoder().encode(JSON.stringify(meta)) }]);
+	const results = await Promise.allSettled([store.importArchive("race", bytes), store.importArchive("race", bytes)]);
+	assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+	assert.equal(results.filter(result => result.status === "rejected").length, 1);
+	assert.equal(dirs.size, 1);
+});
+
+
+test("OPFS opens, saves, and imports without Web Locks", async () => {
+	const descriptor = Object.getOwnPropertyDescriptor(navigator, "locks")!;
+	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+	try {
+		const store = await open(new MemoryDirectory());
+		await store.writeChunk(-1, 33, newer);
+		await store.writeMeta(meta);
+		assert.deepEqual(await store.readChunk(-1, 33), newer);
+		assert.deepEqual(await store.readMeta(), meta);
+		const bytes = await store.exportArchive();
+		const dirs = importRoot();
+		await store.importArchive("without-locks", bytes);
+		const imported = await open(dirs.get("world-without-locks")!);
+		assert.deepEqual(await imported.readChunk(-1, 33), newer);
+		assert.deepEqual(await imported.readMeta(), meta);
+	} finally {
+		Object.defineProperty(navigator, "locks", descriptor);
+	}
+});
+
+test("archive import reports corrupt regions in Japanese before creating a directory", async (t) => {
+	t.mock.method(RegionCodec.prototype, "call", () => { throw new CorruptRegionError(); });
+	const store = await open(new MemoryDirectory());
+	const dirs = importRoot();
+	const bytes = encodeArchive([
+		{ name: "meta.json", data: new TextEncoder().encode(JSON.stringify(meta)) },
+		{ name: "r.-1.2", data: new Uint8Array([1]) },
+	]);
+	await assert.rejects(store.importArchive("corrupt", bytes), {
+		message: "リージョンファイル r.-1.2 が壊れています",
+		cause: new CorruptRegionError(),
+	});
+	assert.equal(dirs.size, 0);
+});
+
+
+test("archive import accepts empty and short region files like normal reads", async () => {
+	for (const data of [new Uint8Array(), new Uint8Array([1, 2, 3]), new Uint8Array(49151)]) {
+		const source = new MemoryDirectory();
+		source.seed("r.-1.2", data);
+		const store = await open(source);
+		await store.writeMeta(meta);
+		assert.deepEqual(await store.list(), []);
+		const bytes = await store.exportArchive();
+		const dirs = importRoot();
+		await store.importArchive("short-region", bytes);
+		const dir = dirs.get("world-short-region")!;
+		assert.deepEqual(dir.files.get("r.-1.2")!.durable, data);
+		const imported = await open(dir);
+		assert.deepEqual(await imported.list(), []);
+		assert.deepEqual(await imported.readMeta(), meta);
+	}
+});
+
+test("existing and imported metadata normalize seeds and times to signed i64", async () => {
+	for (const values of [
+		{ seed: "9223372036854775808", gameTime: "18446744073709551615", dayTime: "-9223372036854775809" },
+		{ seed: "-9999999999999999999", gameTime: "99999999999999999999", dayTime: "-99999999999999999999" },
+		{ seed: "2026" },
+	]) {
+		const normalized = {
+			seed: BigInt.asIntN(64, BigInt(values.seed)).toString(),
+			gameTime: BigInt.asIntN(64, BigInt(values.gameTime ?? "0")).toString(),
+			dayTime: BigInt.asIntN(64, BigInt(values.dayTime ?? "0")).toString(),
+		};
+		const dir = new MemoryDirectory();
+		dir.seed("meta.json", new TextEncoder().encode(JSON.stringify(values)));
+		const store = await open(dir);
+		assert.deepEqual(await store.readMeta(), normalized);
+		const bytes = await store.exportArchive();
+		const dirs = importRoot();
+		await store.importArchive("normalized", bytes);
+		const imported = await open(dirs.get("world-normalized")!);
+		assert.deepEqual(await imported.readMeta(), normalized);
+	}
+});
+
+test("invalid times fall back to zero for existing worlds but are refused on import", async () => {
+	for (const field of ["gameTime", "dayTime"]) {
+		for (const value of ["not-a-number", 3, false, {}, "123456789012345678901"]) {
+			const dir = new MemoryDirectory();
+			dir.seed("meta.json", new TextEncoder().encode(JSON.stringify({ ...meta, [field]: value })));
+			const store = await open(dir);
+			assert.deepEqual(await store.readMeta(), { ...meta, [field]: "0" });
+			const bytes = await store.exportArchive();
+			const dirs = importRoot();
+			await assert.rejects(store.importArchive("invalid-time", bytes), /meta.json の時刻が不正です/);
+			assert.equal(dirs.size, 0);
+		}
 	}
 });
 

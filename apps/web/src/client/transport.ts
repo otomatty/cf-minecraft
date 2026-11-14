@@ -36,18 +36,30 @@ export interface Transport {
 export type WorkerRequest =
 	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number }
 	| { type: "packet"; data: ArrayBuffer }
-	| { type: "save" };
+	| { type: "save" }
+	| { type: "export"; id: number }
+	| { type: "import"; id: number; world: string; data: ArrayBuffer };
 
 export type WorkerEvent =
 	| { type: "ready"; seed: string; persistence: string }
 	| { type: "packets"; list: ArrayBuffer[] }
 	| { type: "stats"; stats: ServerStats }
-	| { type: "error"; message: string };
+	| { type: "error"; message: string }
+	| { type: "exported"; id: number; data: ArrayBuffer }
+	| { type: "imported"; id: number; world: string }
+	| { type: "archiveError"; id: number; message: string };
 
 /** Single player: the server core runs in a Web Worker of this page (the "integrated server"). */
 export class LocalTransport implements Transport {
 	readonly kind = "local";
 	private readonly worker: Worker;
+	private nextId = 0;
+	private readonly pending = new Map<number, { resolve(data?: ArrayBuffer): void; reject(error: Error): void }>();
+
+	private rejectPending(message: string): void {
+		for (const request of this.pending.values()) request.reject(new Error(message));
+		this.pending.clear();
+	}
 
 	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers) {
 		this.worker = new Worker(new URL("./sim.worker.ts", import.meta.url), { type: "module" });
@@ -63,12 +75,28 @@ export class LocalTransport implements Transport {
 				case "stats":
 					handlers.onStats(msg.stats);
 					break;
+				case "exported":
+					this.pending.get(msg.id)?.resolve(msg.data);
+					this.pending.delete(msg.id);
+					break;
+				case "imported":
+					this.pending.get(msg.id)?.resolve();
+					this.pending.delete(msg.id);
+					break;
+				case "archiveError":
+					this.pending.get(msg.id)?.reject(new Error(msg.message));
+					this.pending.delete(msg.id);
+					break;
 				case "error":
+					this.rejectPending(msg.message);
 					handlers.onClose(msg.message);
 					break;
 			}
 		};
-		this.worker.onerror = (event) => handlers.onClose(event.message || "sim worker failed");
+		this.worker.onerror = (event) => {
+			this.rejectPending(event.message || "sim worker failed");
+			handlers.onClose(event.message || "sim worker failed");
+		};
 		this.post({ type: "init", wasmUrl, world, seed, generator });
 	}
 
@@ -85,7 +113,25 @@ export class LocalTransport implements Transport {
 		this.post({ type: "save" });
 	}
 
+	async exportWorld(): Promise<Uint8Array<ArrayBuffer>> {
+		const id = this.nextId++;
+		const data = await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
+			this.pending.set(id, { resolve, reject });
+			this.post({ type: "export", id });
+		});
+		return new Uint8Array(data!);
+	}
+
+	async importWorld(world: string, bytes: Uint8Array): Promise<void> {
+		const id = this.nextId++, data = new Uint8Array(bytes).buffer;
+		await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
+			this.pending.set(id, { resolve, reject });
+			this.post({ type: "import", id, world, data }, [data]);
+		});
+	}
+
 	close(): void {
+		this.rejectPending("ワールドを閉じました");
 		this.worker.terminate();
 	}
 }

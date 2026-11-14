@@ -213,6 +213,27 @@ async function playthrough(kind) {
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
 	check(after.joinedGameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.joinedGameTime}`);
 
+	if (kind === "local") {
+		const importedWorld = `e2e-import-${run}`;
+		const archive = await page.evaluate(async (name) => {
+			const bytes = await window.__mc.exportWorld();
+			const magic = new TextDecoder().decode(bytes.subarray(0, 7));
+			await window.__mc.importWorld(name, bytes);
+			let duplicateRejected = false;
+			try { await window.__mc.importWorld(name, bytes); } catch { duplicateRejected = true; }
+			return { magic, size: bytes.length, duplicateRejected };
+		}, importedWorld);
+		check(archive.magic === "MCWORLD" && archive.size > 12, "local: world exported", `${archive.size} bytes`);
+		check(archive.duplicateRejected, "local: world imported", "duplicate import rejected");
+		const url = new URL(page.url());
+		url.searchParams.set("world", importedWorld);
+		url.searchParams.delete("seed");
+		await page.goto(url.href, { waitUntil: "load" });
+		const imported = await settle(page, "local imported world", chunksInView(view));
+		const importedBlock = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
+		check(importedBlock === 9 && imported.seed === seedBefore, "local: imported world kept the block and seed", `block ${importedBlock}, seed ${imported.seed}`);
+	}
+
 	if (kind === "ws") {
 		const response = await fetch(`${edge}/api/debug/disconnect?world=${encodeURIComponent(world)}`, { method: "POST" });
 		check(response.ok, "ws: debug disconnect accepted");

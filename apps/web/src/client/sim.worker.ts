@@ -8,6 +8,7 @@ import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
 import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
+import { finishWorldImport } from "./world-import.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
@@ -23,6 +24,8 @@ function post(event: WorkerEvent, transfer: Transferable[] = []): void {
 let core: ServerCore | null = null;
 let store: OpfsStore | null = null;
 let seed = 0n;
+let currentWorld = "";
+let archiveQueue: Promise<unknown> = Promise.resolve();
 let persistence: PendingChunkSaves | null = null;
 const reads = new PendingChunkReads((cx, cz) => persistence ? persistence.readChunk(cx, cz) : Promise.resolve(null));
 
@@ -42,6 +45,7 @@ async function serveRequests(c: ServerCore): Promise<void> {
 }
 
 async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void> {
+	currentWorld = msg.world;
 	const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
 	const c = new ServerCore(instance);
 
@@ -49,7 +53,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	persistence = store ? new PendingChunkSaves(store) : null;
 	const meta = store ? await store.readMeta() : null;
 	// An existing world keeps its seed; otherwise the page's choice or a random one.
-	seed = meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0];
+	seed = BigInt.asIntN(64, meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0]);
 	c.start(seed, msg.generator);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (store) c.setStored(await store.list());
@@ -100,6 +104,22 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
 			break;
 		case "packet":
 			core?.packet(CLIENT, new Uint8Array(msg.data));
+			break;
+		case "export":
+		case "import":
+			archiveQueue = archiveQueue.then(async () => {
+				if (!core || !store || !persistence) throw new Error("ブラウザの保存機能が使えないため、読み込み・書き出しができません");
+				if (msg.type === "export") {
+					await save();
+					if (persistence.retrying) throw new Error("保存に失敗したため書き出せません。もう一度お試しください");
+					const data = (await store.exportArchive()).buffer;
+					post({ type: "exported", id: msg.id, data }, [data]);
+				} else {
+					if (msg.world === currentWorld) throw new Error("現在開いているワールドには読み込めません");
+					await store.importArchive(msg.world, new Uint8Array(msg.data));
+					await finishWorldImport(msg, save, persistence, post);
+				}
+			}).catch(error => post({ type: "archiveError", id: msg.id, message: error instanceof Error ? error.message : String(error) }));
 			break;
 		case "save":
 			void save();

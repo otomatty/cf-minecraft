@@ -176,6 +176,12 @@
 					<label>マウス感度 <span><input id="sensitivity" type="range" min="0" max="200" step="1" /><output id="sensitivity-value"></output></span></label>
 					<label>視野角（縦） <span><input id="fov" type="range" min="30" max="110" step="1" /><output id="fov-value"></output></span></label>
 					<p id="settings-warning" role="status" aria-live="polite"></p>
+					<div id="world-archive" hidden>
+						<button id="world-export" type="button">ワールドを書き出す</button>
+						<button id="world-import" type="button">ワールドを読み込む</button>
+						<input id="world-file" type="file" accept=".mcworld" hidden />
+						<p id="archive-status" role="status" aria-live="polite"></p>
+					</div>
 					<button id="settings-reset" type="button">既定に戻す</button>
 					<button id="settings-close" type="button">閉じる</button>
 				</section>
