@@ -30,7 +30,7 @@ export interface RouterDeps {
 	};
 	auth: {
 		handler(request: Request): Promise<Response>;
-		getUser(request: Request): Promise<User | null>;
+		getSession(request: Request): Promise<{ user: User; session: { id: string } } | null>;
 	};
 	db: WorldDB;
 	limiter: Limiter;
@@ -178,7 +178,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			return error("unavailable", 503);
 		}
 		const signingOut = request.method === "POST" && url.pathname === "/api/auth/sign-out";
-		const signingOutUser = signingOut ? await auth.getUser(request) : null;
+		const signingOutUser = signingOut ? (await auth.getSession(request))?.user : null;
 		const response = await auth.handler(request);
 		if (response.ok && signingOutUser?.emailVerified) {
 			try {
@@ -211,7 +211,8 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	if (!open && !hasAuthSecrets(env)) {
 		return error("unavailable", 503);
 	}
-	const user = hasAuthSecrets(env) ? await auth.getUser(request) : null;
+	const session = hasAuthSecrets(env) ? await auth.getSession(request) : null;
+	const user = session?.user ?? null;
 	if (me) {
 		if (request.method !== "GET") {
 			return error("method not allowed", 405);
@@ -261,6 +262,8 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		const headers = new Headers(request.headers);
 		headers.delete("X-MC-User");
 		headers.delete("X-MC-Authorized-At");
+		headers.delete("X-MC-Session");
+		if (!ops && session) headers.set("X-MC-Session", session.session.id);
 		headers.set("X-MC-Authorized-At", String(authorizedAt));
 		headers.set(
 			"X-MC-User",

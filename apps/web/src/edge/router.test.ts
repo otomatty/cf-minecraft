@@ -78,8 +78,8 @@ async function setup(t) {
 			},
 		},
 		auth: {
-			async getUser() {
-				return user;
+			async getSession() {
+				return user ? { user, session: { id: `session-${user.id}` } } : null;
 			},
 			async handler() {
 				authCalls++;
@@ -648,3 +648,23 @@ for (const origin of ["https://game.example", null]) {
 		assert.deepEqual(f.evictions, ["lobby"]);
 	});
 }
+
+test("Worker replaces spoofed session IDs with the Better Auth session ID", async t => {
+	const f = await setup(t);
+	f.login(player);
+	await f.request("/ws/lobby", "GET", undefined, { "X-MC-Session": "spoofed-token" });
+	assert.equal(f.forwarded[0].headers.get("X-MC-Session"), "session-player");
+});
+
+test("Worker strips session IDs from operator and unauthenticated development connections", async t => {
+	const f = await setup(t);
+	f.login(player);
+	await f.request("/ws/lobby", "GET", undefined, {
+		Authorization: "Bearer operator-secret", "X-MC-Session": "spoofed",
+	});
+	f.login(null);
+	f.deps.env = { DEBUG: "1" };
+	await f.request("/ws/lobby", "GET", undefined, { "X-MC-Session": "spoofed" });
+	for (const request of f.forwarded) assert.equal(request.headers.get("X-MC-Session"), null);
+	assert.equal(f.forwarded.length, 2);
+});
