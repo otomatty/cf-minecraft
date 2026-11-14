@@ -71,7 +71,10 @@ function message(error: unknown): string {
 	return error instanceof Error ? error.message : "通信できません。再度お試しください";
 }
 
-function apiErrorMessage(status: number): string {
+function apiErrorMessage(status: number, code?: unknown): string {
+	if (status === 503 && code === "sign-out incomplete") {
+		return "ログアウトを完了できませんでした。もう一度お試しください";
+	}
 	switch (status) {
 		case 502:
 			return "メンバーは削除しましたが、接続中の切断に失敗しました。もう一度削除してください";
@@ -97,8 +100,8 @@ function apiErrorMessage(status: number): string {
 class APIError extends Error {
 	status: number;
 
-	constructor(status: number) {
-		super(apiErrorMessage(status));
+	constructor(status: number, code?: unknown) {
+		super(apiErrorMessage(status, code));
 		this.status = status;
 	}
 }
@@ -118,7 +121,8 @@ async function api<T>(
 		throw new Error("通信できません。再度お試しください");
 	});
 	if (!response.ok) {
-		throw new APIError(response.status);
+		const body = await response.json().catch(() => null) as { error?: unknown } | null;
+		throw new APIError(response.status, body?.error);
 	}
 	return response.json() as Promise<T>;
 }
