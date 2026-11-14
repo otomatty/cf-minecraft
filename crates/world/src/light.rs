@@ -106,6 +106,30 @@ fn index(p: Pos) -> usize {
 }
 
 impl World {
+    /// Opt-in mesh invalidation tracking; simulation worlds need no tracking.
+    pub fn track_light_changes(&mut self) {
+        self.light_changes = Some(Default::default());
+    }
+    pub fn take_light_changes(&mut self) -> impl Iterator<Item = (i32, usize, i32)> {
+        self.light_changes
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+            .into_iter()
+    }
+    /// Store blocks immediately, leaving lighting to a client frame budget.
+    pub fn insert_chunk_unlit(&mut self, mut chunk: Chunk) {
+        self.remove_chunk(chunk.cx, chunk.cz);
+        chunk.lighting = None;
+        self.chunks.insert((chunk.cx, chunk.cz), chunk);
+    }
+    /// One indivisible unit of initial lighting work.
+    pub fn light_chunk(&mut self, cx: i32, cz: i32) {
+        if let Some(chunk) = self.chunks.remove(&(cx, cz)) {
+            self.insert_chunk(chunk);
+        }
+    }
+
     /// Insert generated, received or decoded blocks and derive their lighting.
     pub fn insert_chunk(&mut self, mut chunk: Chunk) -> Option<Chunk> {
         let key = (chunk.cx, chunk.cz);
@@ -217,9 +241,14 @@ impl World {
                 }
             }
         }
-        // Check unloaded edges once, rather than once per boundary cell.
+        // Unlit columns are closed boundaries too. Checking readiness once per
+        // edge avoids scanning thousands of cells for each deferred neighbour.
         for d in [(-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1)] {
-            if !self.chunks.contains_key(&(key.0 + d.0, key.1 + d.2)) {
+            if !self
+                .chunks
+                .get(&(key.0 + d.0, key.1 + d.2))
+                .is_some_and(|c| c.lighting.is_some())
+            {
                 continue;
             }
             for y in MIN_Y..MIN_Y + HEIGHT {
@@ -255,6 +284,9 @@ impl World {
         self.spread(true, sky_queue);
         self.spread(false, block_queue);
         self.compact_chunk(key);
+        if let Some(changes) = &mut self.light_changes {
+            changes.extend((0..SECTIONS).map(|s| (key.0, s, key.1)));
+        }
         old
     }
 
@@ -308,7 +340,11 @@ impl World {
     }
 
     fn loaded(&self, p: Pos) -> bool {
-        section_index(p.1).is_some() && self.chunks.contains_key(&(p.0 >> 4, p.2 >> 4))
+        section_index(p.1).is_some()
+            && self
+                .chunks
+                .get(&(p.0 >> 4, p.2 >> 4))
+                .is_some_and(|c| c.lighting.is_some())
     }
     fn level(&self, p: Pos, sky: bool) -> u8 {
         let Some(s) = section_index(p.1) else {
@@ -331,7 +367,19 @@ impl World {
             return;
         };
         if let Some(c) = self.chunks.get_mut(&(p.0 >> 4, p.2 >> 4)) {
-            let lighting = c.lighting.as_mut().unwrap();
+            let Some(lighting) = c.lighting.as_mut() else {
+                return;
+            };
+            let old = if sky {
+                lighting.sections[s].sky.get(index(p))
+            } else {
+                lighting.sections[s].block.get(index(p))
+            };
+            if old != v {
+                if let Some(changes) = &mut self.light_changes {
+                    changes.insert((p.0 >> 4, s, p.2 >> 4));
+                }
+            }
             if sky {
                 lighting.sections[s].sky.set(index(p), v);
             } else {

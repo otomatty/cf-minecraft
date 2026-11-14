@@ -16,6 +16,7 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
@@ -107,6 +108,7 @@ async function runScenario(seed: string, ticks: number): Promise<string> {
 async function main(): Promise<void> {
 	if (serverKind === "ws" && !await canEnterWorld()) return;
 	const core = await ClientCore.load(clientWasmUrl);
+	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const renderer = await Renderer.create(canvas, core.textureNames());
 	const blockNames = core.blockNames();
 	let mainThreadMeshMs = 0;
@@ -146,6 +148,7 @@ async function main(): Promise<void> {
 	let reconnects = 0;
 	let closed: string | null = null;
 	let selected = 1;
+	let lightMs = 0;
 	let serverStats: ServerStats | null = null;
 	let scenarioLine = "";
 	const timeSamples: Array<[number, number]> = [];
@@ -264,8 +267,9 @@ async function main(): Promise<void> {
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
+	const hotbarBlocks = [1, 2, 3, 4, 5, 6, 7, 8, blockNames.indexOf("lamp_block")];
 	const textureNames = new Set(core.textureNames());
-	for (let block = 1; block <= 9 && block < blockNames.length; block++) {
+	for (const block of hotbarBlocks) {
 		const c = document.createElement("canvas");
 		c.width = c.height = TEX_SIZE;
 		const name = blockNames[block];
@@ -279,8 +283,8 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	const select = (block: number) => {
-		selected = Math.max(1, Math.min(slots.length, block));
-		slots.forEach((c, i) => c.classList.toggle("selected", i + 1 === selected));
+		selected = Math.max(1, Math.min(blockNames.length - 1, block));
+		slots.forEach((c, i) => c.classList.toggle("selected", hotbarBlocks[i] === selected));
 	};
 	select(1);
 
@@ -443,7 +447,7 @@ async function main(): Promise<void> {
 				lastJumpTap = -Infinity;
 			} else lastJumpTap = movementTick;
 		}
-		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) select(Number(e.code.slice(5)));
+		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) select(hotbarBlocks[Number(e.code.slice(5)) - 1] ?? selected);
 		keys.add(e.code);
 	});
 	window.addEventListener("keyup", (e) => {
@@ -454,7 +458,7 @@ async function main(): Promise<void> {
 	canvas.addEventListener("wheel", (e) => {
 		if (!locked()) return;
 		e.preventDefault();
-		select(((selected - 1 + Math.sign(e.deltaY) + slots.length) % slots.length) + 1);
+		select(hotbarBlocks[(Math.max(0, hotbarBlocks.indexOf(selected)) + Math.sign(e.deltaY) + slots.length) % slots.length]);
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
@@ -581,6 +585,7 @@ async function main(): Promise<void> {
 			return;
 		}
 		let fallbackMeshMs = 0;
+		lightMs = 0;
 		const dt = Math.min(0.1, (now - last) / 1000);
 		last = now;
 
@@ -589,6 +594,7 @@ async function main(): Promise<void> {
 			if (now - lastPositionSent >= POSITION_INTERVAL_MS) sendPosition();
 
 			removeUnloaded();
+			lightMs = lightPool.step(camera.x, camera.z);
 			const pop = () => core.popDirty(camera.x, camera.y, camera.z);
 			if (meshPool.useFallback) {
 				const start = performance.now();
@@ -600,7 +606,7 @@ async function main(): Promise<void> {
 				fallbackMeshMs = performance.now() - start;
 			} else {
 				meshPool.applyResults();
-				meshPool.pump(pop, section => core.padded(...section));
+				meshPool.pump(pop, section => core.padded(...section), section => core.paddedLight(...section));
 			}
 
 			target = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
@@ -645,6 +651,9 @@ async function main(): Promise<void> {
 			fps,
 			...frame,
 			meshQueue: core.dirtyCount + meshPool.inFlight + meshPool.pendingResults,
+			lightQueue: lightPool.queue,
+			lightFallback: lightPool.useFallback,
+			lightMs,
 			meshPendingResults: meshPool.pendingResults,
 			meshPending: core.dirtyCount,
 			meshInFlight: meshPool.inFlight,

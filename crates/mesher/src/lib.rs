@@ -1,13 +1,13 @@
 //! Turns one 16x16x16 section into quads.
 //!
 //! Like the game, every visible block face is its own quad (no greedy
-//! merging): per-vertex ambient occlusion and, later, per-vertex light make
+//! merging): per-vertex ambient occlusion and per-vertex light make
 //! neighbouring faces differ.
 //!
 //! Vertex layout, two `u32` per vertex:
 //! ```text
 //! word 0: x:5 | y:5 | z:5 | face:3 | ao:2 | u:1 | v:1     (x, y, z in 0..=16)
-//! word 1: texture layer:12 | tint:1
+//! word 1: texture layer:12 | tint:1 | sky:4 | block:4
 //! ```
 //! Four vertices per quad, counter-clockwise seen from outside. The index
 //! pattern `0 1 2, 0 2 3` is shared by all quads; when ambient occlusion asks
@@ -100,7 +100,22 @@ fn uv(face: usize, p: [i32; 3]) -> (u32, u32) {
 /// diagonal. Mapped to 0.4/0.6/0.8/1.0 brightness this equals averaging the
 /// game's 0.2 shade of opaque cubes over the four blocks touching a vertex.
 pub fn mesh_section(padded: &[BlockState], out: &mut Vec<u32>) -> u32 {
+    mesh_section_lit(padded, None, out)
+}
+
+/// Missing light uses full daylight (sky 15, block 0).
+/// Samples on the outside of the face exclude opaque blocks; averages round
+/// to the nearest integer before packing into four bits.
+pub fn mesh_section_lit(
+    padded: &[BlockState],
+    light: Option<(&[u8], &[u8])>,
+    out: &mut Vec<u32>,
+) -> u32 {
     assert_eq!(padded.len(), PADDED_LEN);
+    if let Some((sky, block)) = light {
+        assert_eq!(sky.len(), PADDED_LEN);
+        assert_eq!(block.len(), PADDED_LEN);
+    }
     let mut quads = 0u32;
     for y in 0..16i32 {
         for z in 0..16i32 {
@@ -154,7 +169,30 @@ pub fn mesh_section(padded: &[BlockState], out: &mut Vec<u32>) -> u32 {
                             | ao[k] << 18
                             | u << 20
                             | v << 21;
-                        words[k][1] = info.tex[f] as u32 | (info.tint[f] as u32) << 12;
+                        let mut sums = [0u32; 2];
+                        let mut count = 0;
+                        for db in [0, si] {
+                            for dc in [0, sj] {
+                                let idx = padded_index(
+                                    ax + face.b[0] * db + face.c[0] * dc,
+                                    ay + face.b[1] * db + face.c[1] * dc,
+                                    az + face.b[2] * db + face.c[2] * dc,
+                                );
+                                if !blocks::is_opaque(padded[idx]) {
+                                    let (sky, block) =
+                                        light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
+                                    sums[0] += sky as u32;
+                                    sums[1] += block as u32;
+                                    count += 1;
+                                }
+                            }
+                        }
+                        let sky = (sums[0] + count / 2) / count;
+                        let block = (sums[1] + count / 2) / count;
+                        words[k][1] = info.tex[f] as u32
+                            | (info.tint[f] as u32) << 12
+                            | sky << 13
+                            | block << 17;
                     }
 
                     // Split along the brighter diagonal so shading is symmetric.
@@ -226,6 +264,49 @@ mod tests {
     }
 
     #[test]
+    fn smooth_light_averages_outside_cells_and_excludes_opaque_samples() {
+        let mut p = empty();
+        p[padded_index(5, 5, 5)] = blocks::STONE;
+        let mut sky = vec![15; PADDED_LEN];
+        let mut block = vec![0; PADDED_LEN];
+        let mut out = Vec::new();
+        mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+        assert!(out.chunks(2).all(|v| (v[1] >> 13) & 15 == 15));
+        // Lower x/z vertex on the top face touches these four exterior cells.
+        for (x, z, v) in [(5, 5, 12), (4, 5, 8), (5, 4, 4), (4, 4, 0)] {
+            sky[padded_index(x, 6, z)] = v;
+            block[padded_index(x, 6, z)] = 15 - v;
+        }
+        let vertex = |out: &[u32]| -> u32 {
+            out.chunks(2)
+                .find(|v| {
+                    v[0] & 31 == 5
+                        && (v[0] >> 5) & 31 == 6
+                        && (v[0] >> 10) & 31 == 5
+                        && (v[0] >> 15) & 7 == UP as u32
+                })
+                .unwrap()[1]
+        };
+        out.clear();
+        mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+        assert_eq!((vertex(&out) >> 13) & 15, 6);
+        assert_eq!((vertex(&out) >> 17) & 15, 9);
+        p[padded_index(4, 6, 4)] = blocks::STONE;
+        out.clear();
+        mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+        assert_eq!((vertex(&out) >> 13) & 15, 8);
+        assert_eq!((vertex(&out) >> 17) & 15, 7);
+        // Adjacent to a lamp, a lit exterior face keeps block light at night.
+        p[padded_index(4, 6, 4)] = blocks::LAMP_BLOCK;
+        sky.fill(0);
+        block.fill(14);
+        out.clear();
+        mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+        assert_eq!((vertex(&out) >> 13) & 15, 0);
+        assert_eq!((vertex(&out) >> 17) & 15, 14);
+    }
+
+    #[test]
     fn lone_block_has_six_outward_facing_fully_lit_quads() {
         let mut p = empty();
         p[padded_index(5, 6, 7)] = blocks::GRASS_BLOCK;
@@ -249,6 +330,7 @@ mod tests {
             uvs.sort();
             assert_eq!(uvs, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
             assert!(q.iter().all(|v| v.ao == 3));
+            assert!(out.chunks(2).all(|v| (v[1] >> 13) & 255 == 15));
             for v in q {
                 for axis in 0..3 {
                     let base = [5, 6, 7][axis];

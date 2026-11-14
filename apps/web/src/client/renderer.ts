@@ -5,14 +5,14 @@
 //   and linear mip blending, like the original fixed pipeline.
 // * Directional face shading 1.0 / 0.5 / 0.8 / 0.6 and the ambient occlusion
 //   brightness steps are the game's values.
-// * Per-block light levels and translucent blocks are not implemented yet.
+// * Per-vertex sky/block light samples a time-dependent lightmap.
 //
 // Precision: vertices are small integers relative to their section, and the
 // section origin is subtracted from the camera's block position in integer
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { skyState } from "./sky.ts";
+import { skyState, lightmap } from "./sky.ts";
 import { MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
 import { downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
@@ -48,6 +48,8 @@ struct Globals {
 @group(0) @binding(1) var<storage, read> origins: array<vec4<i32>>;
 @group(0) @binding(2) var tex: texture_2d_array<f32>;
 @group(0) @binding(3) var samp: sampler;
+@group(0) @binding(4) var lightTex: texture_2d<f32>;
+@group(0) @binding(5) var lightSampler: sampler;
 
 struct VOut {
 	@builtin(position) pos: vec4<f32>,
@@ -56,6 +58,7 @@ struct VOut {
 	@location(2) rel: vec3<f32>,
 	@location(3) @interpolate(flat) layer: u32,
 	@location(4) @interpolate(flat) tint: u32,
+	@location(5) light: vec2<f32>,
 };
 
 @vertex
@@ -76,6 +79,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	out.rel = rel;
 	out.layer = a.y & 4095u;
 	out.tint = (a.y >> 12u) & 1u;
+	out.light = (vec2<f32>(f32((a.y >> 17u) & 15u), f32((a.y >> 13u) & 15u)) + vec2<f32>(0.5)) / 16.0;
 	return out;
 }
 
@@ -85,8 +89,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 	if (in.tint == 1u) {
 		color = color * g.grassTint.rgb;
 	}
-	// #14 で置き換える: temporary global skylight until per-block lighting exists.
-	color = color * in.shade * g.fogRange.z;
+	color = color * in.shade * textureSample(lightTex, lightSampler, in.light).rgb;
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
 	return vec4<f32>(mix(color, g.fogColor.rgb, fog), 1.0);
@@ -241,6 +244,7 @@ export class Renderer {
 	private readonly quadIndices: GPUBuffer;
 	private readonly outlineVertices: GPUBuffer;
 	private readonly terrainBind: GPUBindGroup;
+	private readonly lightTexture: GPUTexture;
 	private readonly outlineBind: GPUBindGroup;
 	private depth: GPUTexture | null = null;
 	private readonly sections = new Map<string, SectionMesh>();
@@ -352,6 +356,7 @@ export class Renderer {
 			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
 			depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
 		});
+		this.lightTexture = device.createTexture({ size: [16, 16], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		this.terrainBind = device.createBindGroup({
 			layout: this.terrain.getBindGroupLayout(0),
 			entries: [
@@ -359,6 +364,8 @@ export class Renderer {
 				{ binding: 1, resource: { buffer: this.origins } },
 				{ binding: 2, resource: texture.createView({ dimension: "2d-array" }) },
 				{ binding: 3, resource: sampler },
+				{ binding: 4, resource: this.lightTexture.createView() },
+				{ binding: 5, resource: device.createSampler({ minFilter: "linear", magFilter: "linear" }) },
 			],
 		});
 
@@ -470,6 +477,7 @@ export class Renderer {
 	render(camera: Camera, viewDistance: number, target: readonly [number, number, number] | null, fovY = FOV_Y, dayTime = 6000): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
+		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
 		const cloudFogEnd = Math.max(256, viewDistance * 16 * 2);
 		// Keep the cloud plane visible through its entire fade, including diagonal views.
 		const far = Math.max((viewDistance + 2) * 16 * 2, cloudFogEnd * 2);
@@ -484,7 +492,7 @@ export class Renderer {
 		f.set([frac[0], frac[1], frac[2], 0], 20);
 		f.set([...sky.fogColor, 1], 24);
 		const fogEnd = viewDistance * 16;
-		f.set([fogEnd * 0.75, fogEnd, sky.skylight, 0], 28);
+		f.set([fogEnd * 0.75, fogEnd, 0, 0], 28);
 		f.set([GRASS_TINT[0] / 255, GRASS_TINT[1] / 255, GRASS_TINT[2] / 255, 1], 32);
 		f.set([...sky.skyColor, sky.skyBrightness], 36);
 		f.set([...sky.sunsetColor, sky.sunsetStrength], 40);

@@ -1,3 +1,5 @@
+import type { LightMutation } from "./light-pool.ts";
+
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
@@ -24,7 +26,17 @@ export interface ClientExports {
 	client_pop_dirty(x: number, y: number, z: number): number;
 	client_padded(cx: number, sy: number, cz: number): number;
 	client_padded_ptr(): number;
-	mesh_padded(ptr: number, len: number): number;
+	mesh_padded(ptr: number, len: number, sky: number, block: number): number;
+	client_light_step(x: number, z: number): number;
+	client_light_pending(): number;
+	client_external_light(enabled: number): void;
+	client_light_generation(cx: number, cz: number, generation: number): void;
+	client_light_export_mode(): void;
+	client_take_light_updates(): number;
+	client_apply_light_updates(ptr: number, len: number): number;
+	client_padded_light(cx: number, sy: number, cz: number): number;
+	client_padded_sky_ptr(): number;
+	client_padded_block_ptr(): number;
 	client_is_dirty(cx: number, sy: number, cz: number): number;
 	client_requeue_dirty(cx: number, sy: number, cz: number): void;
 	client_mesh(cx: number, sy: number, cz: number): number;
@@ -42,6 +54,7 @@ export interface ClientExports {
 export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4 } as const;
 
 export const WORDS_PER_QUAD = 8;
+export const LIGHT_FRAME_BUDGET_MS = 2;
 export const MIN_Y = -64;
 
 export interface PlayerState {
@@ -71,6 +84,7 @@ export const FACE_NORMALS: ReadonlyArray<readonly [number, number, number]> = [
 export class ClientCore {
 	private readonly x: ClientExports;
 	private readonly decoder = new TextDecoder();
+	observeLight: ((change: LightMutation) => void) | undefined;
 
 	constructor(instance: WebAssembly.Instance) {
 		this.x = instance.exports as unknown as ClientExports;
@@ -97,6 +111,7 @@ export class ClientCore {
 		new Uint8Array(this.x.memory.buffer).set(data, ptr);
 		const id = this.x.client_packet(ptr, data.length);
 		this.x.mc_free(ptr, data.length);
+		if (id === S2C.ChunkData || id === S2C.UnloadChunk || id === S2C.BlockUpdate) this.observeLight?.({ type: "packet", data: data.slice() });
 		return id === 0xffffffff ? -1 : id;
 	}
 
@@ -122,6 +137,7 @@ export class ClientCore {
 
 	resetWorld(): void {
 		this.x.client_reset_world();
+		this.observeLight?.({ type: "reset" });
 	}
 
 	get spawn(): [number, number, number] {
@@ -146,6 +162,37 @@ export class ClientCore {
 
 	get chunkCount(): number {
 		return this.x.client_chunk_count();
+	}
+
+	externalLight(enabled: boolean): void { this.x.client_external_light(Number(enabled)); }
+	lightGeneration(cx: number, cz: number, generation: number): void { this.x.client_light_generation(cx, cz, generation); }
+	exportLight(): void { this.x.client_light_export_mode(); }
+	takeLightUpdates(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_take_light_updates()); }
+	applyLightUpdates(records: Uint8Array[]): void {
+		const len = records.reduce((n, record) => n + record.length, 0);
+		const ptr = this.x.mc_alloc(len);
+		try {
+			const bytes = new Uint8Array(this.x.memory.buffer, ptr, len);
+			let offset = 0;
+			for (const record of records) { bytes.set(record, offset); offset += record.length; }
+			this.x.client_apply_light_updates(ptr, len);
+		} finally { this.x.mc_free(ptr, len); }
+	}
+
+	get lightPending(): number { return this.x.client_light_pending(); }
+
+	stepLight(x: number, z: number): number {
+		const start = performance.now();
+		while (this.lightPending && performance.now() - start < LIGHT_FRAME_BUDGET_MS) {
+			if (!this.x.client_light_step(x, z)) break;
+		}
+		return performance.now() - start;
+	}
+
+	paddedLight(cx: number, sy: number, cz: number): { sky: Uint8Array<ArrayBuffer>; block: Uint8Array<ArrayBuffer> } {
+		const len = this.x.client_padded_light(cx, sy, cz);
+		const bytes = new Uint8Array(this.x.memory.buffer, this.x.client_padded_sky_ptr(), len * 2).slice();
+		return { sky: bytes.subarray(0, len), block: bytes.subarray(len) };
 	}
 
 	get dirtyCount(): number {
@@ -202,7 +249,9 @@ export class ClientCore {
 	}
 
 	predictBlock(x: number, y: number, z: number, block: number): boolean {
-		return this.x.client_predict_block(x, y, z, block) === 1;
+		const changed = this.x.client_predict_block(x, y, z, block) === 1;
+		if (changed) this.observeLight?.({ type: "predict", x, y, z, block });
+		return changed;
 	}
 
 	encodeHello(viewDistance: number): Uint8Array<ArrayBuffer> {

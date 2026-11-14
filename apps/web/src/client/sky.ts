@@ -36,7 +36,29 @@ export function skyState(dayTime: number, viewDistance = 8) {
 		skyBrightness: brightness,
 		starBrightness: clamp(1 - (sunHeight * 2 + 0.25)) ** 2 * 0.5,
 		moonPhase: mod(Math.floor(dayTime / 24000), 8),
-		// Temporary ambient floor until the light engine supplies a per-block lightmap.
+		// Sky contribution to the terrain lightmap, including moonlit nights.
 		skylight: 0.18 + 0.82 * clamp(sunHeight * 2 + 0.2),
 	};
+}
+
+
+/** RGBA8 lightmap: x = block light, y = sky light. See docs/lighting.md.
+ * Curve and colour mixing are presentation only; stored light stays integer.
+ */
+export function lightmap(skylight: number): Uint8Array<ArrayBuffer> {
+	const pixels = new Uint8Array(16 * 16 * 4);
+	const curve = (level: number) => { const x = level / 15; return x / (4 - 3 * x); };
+	for (let sky = 0; sky < 16; sky++) {
+		for (let block = 0; block < 16; block++) {
+			const s = curve(sky) * clamp(skylight);
+			const b = curve(block);
+			for (let channel = 0; channel < 3; channel++) {
+				const warm = b * [1, 0.85, 0.65][channel];
+				const mixed = Math.max(s, warm) + 0.15 * Math.min(s, warm);
+				pixels[(sky * 16 + block) * 4 + channel] = Math.round(255 * (0.04 + 0.96 * clamp(mixed)));
+			}
+			pixels[(sky * 16 + block) * 4 + 3] = 255;
+		}
+	}
+	return pixels;
 }
