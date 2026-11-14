@@ -180,3 +180,33 @@ export function downsample(src: Uint8Array, size: number): Uint8Array {
 	}
 	return out;
 }
+
+/** Original pixel art: layer 0 sun, layers 1..8 lunar phases, layer 9 repeating clouds. */
+export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 0; y < TEX_SIZE; y++) {
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const i = (y * TEX_SIZE + x) * 4;
+			const u = (x + 0.5) / TEX_SIZE * 2 - 1;
+			const v = (y + 0.5) / TEX_SIZE * 2 - 1;
+			if (layer === 9) {
+				// Periodic low-frequency waves, quantised into blocky islands.
+				const wave = Math.sin(x / TEX_SIZE * Math.PI * 4) + Math.cos(y / TEX_SIZE * Math.PI * 6)
+					+ Math.sin((x + y) / TEX_SIZE * Math.PI * 2);
+				pixels.set([255, 255, 255, wave > 0.15 ? 210 : 0], i);
+			} else if (layer === 0) {
+				const edge = Math.max(Math.abs(u), Math.abs(v));
+				pixels.set([255, edge < 0.65 ? 247 : 204, edge < 0.65 ? 205 : 103, edge < 0.92 ? 255 : 0], i);
+			} else {
+				const phase = layer - 1;
+				const radius = u * u + v * v;
+				const depth = Math.sqrt(Math.max(0, 1 - radius));
+				const lit = depth * Math.cos(phase * Math.PI / 4) + u * Math.sin(phase * Math.PI / 4) > 0;
+				const crater = ((x * 13 + y * 7 + x * y) % 19) < 4 ? 0.72 : 1;
+				const shade = (lit ? 225 : 24) * crater;
+				pixels.set([shade * 0.94, shade * 0.97, shade, radius < 0.88 ? 255 : 0], i);
+			}
+		}
+	}
+	return pixels;
+}

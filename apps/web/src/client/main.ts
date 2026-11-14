@@ -7,6 +7,7 @@
 //   world=<name>      world to open (default "main")
 //   view=<chunks>     view distance, 2..12 (default 8)
 //   seed=<int64>      seed for a new local world
+//   time=<tick>       starting day time for the local server
 //   autopilot=1       no input needed: the camera circles above the spawn point
 
 import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
@@ -18,6 +19,7 @@ import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConfl
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
+import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE } from "./textures.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
 
@@ -34,6 +36,7 @@ const serverKind = params.get("server") === "ws" ? "ws" : "local";
 const worldName = /^[a-z0-9][a-z0-9_-]{0,31}$/.test(params.get("world") ?? "") ? params.get("world")! : "main";
 const viewDistance = Math.max(2, Math.min(12, Math.round(Number(params.get("view") ?? 8) || 8)));
 const seedParam = /^-?\d{1,19}$/.test(params.get("seed") ?? "") ? params.get("seed") : null;
+const startTime = parseStartTime(params.get("time"));
 const autopilot = params.get("autopilot") === "1";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -147,7 +150,8 @@ async function main(): Promise<void> {
 	let scenarioLine = "";
 	const timeSamples: Array<[number, number]> = [];
 	let target: { x: number; y: number; z: number; face: number } | null = null;
-	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0 };
+	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0, skyBrightness: 1 };
+	let timeReceivedAt = performance.now();
 	let fps = 0;
 
 	// ---- transport ---------------------------------------------------------
@@ -166,6 +170,7 @@ async function main(): Promise<void> {
 			removeUnloaded();
 			if (id === S2C.Welcome) {
 				joinedGameTime = core.gameTime;
+				timeReceivedAt = performance.now();
 				if (!joined) {
 					joined = true;
 					const [sx, sy, sz] = core.spawn;
@@ -183,6 +188,7 @@ async function main(): Promise<void> {
 				statusLine.textContent = "クリックして開始";
 				if (autopilot) overlay.hidden = true;
 			} else if (id === S2C.TimeUpdate) {
+				timeReceivedAt = performance.now();
 				timeSamples.push([performance.now(), core.gameTime]);
 				if (timeSamples.length > 6) timeSamples.shift();
 			}
@@ -207,7 +213,7 @@ async function main(): Promise<void> {
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
-			: new LocalTransport(serverWasmUrl, worldName, seedParam, Generator.DebugHills, handlers);
+			: new LocalTransport(serverWasmUrl, worldName, seedParam, Generator.DebugHills, handlers, startTime);
 
 	const local = () => {
 		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
@@ -609,7 +615,7 @@ async function main(): Promise<void> {
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
-		frame = renderer.render(camera, viewDistance, target ? [target.x, target.y, target.z] : null, settings.fov);
+		frame = renderer.render(camera, viewDistance, target ? [target.x, target.y, target.z] : null, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
 		window.__mc.frames++;
 
 		frames++;
