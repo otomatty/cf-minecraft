@@ -178,8 +178,21 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			return error("unavailable", 503);
 		}
 		const signingOut = request.method === "POST" && url.pathname === "/api/auth/sign-out";
-		const signingOutUser = signingOut ? (await auth.getSession(request))?.user : null;
+		const signingOutSession = signingOut ? await auth.getSession(request) : null;
+		const signingOutUser = signingOutSession?.user;
 		const response = await auth.handler(request);
+		if (response.ok && signingOutSession) {
+			try {
+				// Better Auth can report success even when deleting the session fails.
+				if (await db.sessionExists(signingOutSession.session.id)) {
+					console.error("sign-out incomplete", signingOutUser?.id);
+					return error("sign-out incomplete", 503);
+				}
+			} catch (cause) {
+				console.error("sign-out verification failed", signingOutUser?.id, cause);
+				return error("sign-out incomplete", 503);
+			}
+		}
 		if (response.ok && signingOutUser?.emailVerified) {
 			try {
 				const memberships = await db.worlds(signingOutUser.id, signingOutUser.email.toLowerCase());

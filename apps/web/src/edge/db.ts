@@ -11,6 +11,9 @@ export interface World {
 export function createDB(db: D1Database) {
 	const query = (sql: string, ...args: unknown[]) => db.prepare(sql).bind(...args);
 	return {
+		async sessionExists(id: string): Promise<boolean> {
+			return (await query("SELECT id FROM session WHERE id = ?", id).first<{ id: string }>()) !== null;
+		},
 		async userIds(email: string) {
 			const result = await query('SELECT id FROM "user" WHERE lower(email) = ?', email).all<{
 				id: string;

@@ -668,3 +668,81 @@ test("Worker strips session IDs from operator and unauthenticated development co
 	for (const request of f.forwarded) assert.equal(request.headers.get("X-MC-Session"), null);
 	assert.equal(f.forwarded.length, 2);
 });
+
+function signOutSession(f) {
+	f.sqlite.prepare(
+		"INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId) VALUES (?, ?, ?, 0, 0, ?)",
+	).run("session-player", new Date(Date.now() + 86_400_000).toISOString(), "session-token", player.id);
+	f.login(player);
+	return () => Response.json({ signedOut: true }, {
+		headers: { "Set-Cookie": "session=; Max-Age=0" },
+	});
+}
+
+for (const verified of [true, false]) {
+	test(`sign-out with a remaining session returns 503 without clearing cookies (verified=${verified})`, async t => {
+		const errors = t.mock.method(console, "error", () => {});
+		const f = await setup(t);
+		f.deps.auth.handler = signOutSession(f);
+		f.login({ ...player, emailVerified: verified });
+		const response = await f.request("/api/auth/sign-out", "POST", {});
+		assert.equal(response.status, 503);
+		assert.equal(response.headers.has("Set-Cookie"), false);
+		assert.equal(response.headers.get("Cache-Control"), "no-store");
+		assert.deepEqual(await response.json(), { error: "sign-out incomplete" });
+		assert.equal(await f.db.sessionExists("session-player"), true);
+		assert.deepEqual(f.revocations, []);
+		assert.equal(errors.mock.callCount(), 1);
+	});
+}
+
+test("sign-out verification failure returns 503 without clearing cookies", async t => {
+	const errors = t.mock.method(console, "error", () => {});
+	const f = await setup(t);
+	f.deps.auth.handler = signOutSession(f);
+	const cause = new Error("D1 unavailable");
+	f.deps.db.sessionExists = async id => {
+		assert.equal(id, "session-player");
+		throw cause;
+	};
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 503);
+	assert.equal(response.headers.has("Set-Cookie"), false);
+	assert.deepEqual(await response.json(), { error: "sign-out incomplete" });
+	assert.deepEqual(f.revocations, []);
+	assert.deepEqual(errors.mock.calls.map(call => call.arguments), [
+		["sign-out verification failed", player.id, cause],
+	]);
+});
+
+test("retry after incomplete sign-out succeeds once the original session is deleted", async t => {
+	t.mock.method(console, "error", () => {});
+	const f = await setup(t);
+	const authResponse = signOutSession(f);
+	f.deps.auth.handler = authResponse;
+	assert.equal((await f.request("/api/auth/sign-out", "POST", {})).status, 503);
+	f.deps.auth.handler = async () => {
+		f.sqlite.prepare("DELETE FROM session WHERE id = ?").run("session-player");
+		f.login(null);
+		return authResponse();
+	};
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get("Set-Cookie"), "session=; Max-Age=0");
+	assert.deepEqual(await response.json(), { signedOut: true });
+	assert.equal(await f.db.sessionExists("session-player"), false);
+	assert.deepEqual(f.revocations, [["lobby", player.id]]);
+});
+
+test("sign-out without a session preserves the auth response without querying D1", async t => {
+	const f = await setup(t);
+	f.deps.db.sessionExists = async () => { assert.fail("unexpected session lookup"); };
+	f.deps.auth.handler = async () => Response.json({ signedOut: true }, {
+		headers: { "Set-Cookie": "session=; Max-Age=0" },
+	});
+	const response = await f.request("/api/auth/sign-out", "POST", {});
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get("Set-Cookie"), "session=; Max-Age=0");
+	assert.deepEqual(await response.json(), { signedOut: true });
+	assert.deepEqual(f.revocations, []);
+});
