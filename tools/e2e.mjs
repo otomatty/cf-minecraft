@@ -310,7 +310,9 @@ async function inputs() {
 	const yaw = await page.evaluate(() => window.__mc.stats().camera.yaw);
 	check(Math.abs(yaw - 30) < 0.01, "input: mouse look turns 0.15 degrees per pixel", `yaw ${yaw.toFixed(2)}`);
 
-	// Walk: W for one second at yaw 30 moves along the view direction.
+	// Flight from rest: acceleration 0.05/tick (input scaled by 0.98), drag 0.91.
+	// 15–25 ticks travel about 4.0–8.6 blocks; allow a small timing/interpolation margin.
+	// W for one second at yaw 30 moves along the view direction.
 	const from = await page.evaluate(() => window.__mc.stats().camera);
 	await page.keyboard.down("KeyW");
 	await new Promise((r) => setTimeout(r, 1000));
@@ -319,7 +321,7 @@ async function inputs() {
 	const [dx, dz] = [to.x - from.x, to.z - from.z];
 	const dist = Math.hypot(dx, dz);
 	const heading = (Math.atan2(-dx, dz) * 180) / Math.PI;
-	check(dist > 6 && dist < 13 && Math.abs(heading - 30) < 1, "input: W flies forward along the view direction", `${dist.toFixed(1)} blocks, heading ${heading.toFixed(1)}`);
+	check(dist > 3.9 && dist < 9 && Math.abs(heading - 30) < 1, "input: W flies forward along the view direction", `${dist.toFixed(1)} blocks, heading ${heading.toFixed(1)}`);
 
 	check(errors.length === 0, "input: no page errors", errors.slice(0, 3).join(" | "));
 	await page.close();

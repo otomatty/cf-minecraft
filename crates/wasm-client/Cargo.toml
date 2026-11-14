@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 world.workspace = true
 protocol.workspace = true
 mesher.workspace = true
+physics.workspace = true
