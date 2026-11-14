@@ -32,6 +32,8 @@ export interface ClientExports {
 	client_get_block(x: number, y: number, z: number): number;
 	client_raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
 	client_enc_hello(view: number): number;
+	client_player_position(axis: number): number;
+	client_enc_teleport(x: number, y: number, z: number): number;
 	client_enc_pos(x: number, y: number, z: number, yaw: number, pitch: number): number;
 	client_enc_set_block(x: number, y: number, z: number, block: number): number;
 	client_texture_names(): number;
@@ -39,7 +41,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const MIN_Y = -64;
@@ -211,6 +213,14 @@ export class ClientCore {
 
 	encodePos(x: number, y: number, z: number, yaw: number, pitch: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_pos(x, y, z, yaw, pitch));
+	}
+
+	get playerPosition(): [number, number, number] {
+		return [this.x.client_player_position(0), this.x.client_player_position(1), this.x.client_player_position(2)];
+	}
+
+	encodeTeleport(x: number, y: number, z: number): Uint8Array<ArrayBuffer> {
+		return this.out(this.x.client_enc_teleport(x, y, z));
 	}
 
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {

@@ -4,6 +4,8 @@ import { registerHooks } from "node:module";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { testDB } from "./d1-shim.test.ts";
+import { ClientCore } from "../client/client-core.ts";
+import { Generator, ServerCore } from "../shared/server-core.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
 
 // Resolve only the runtime-owned modules; exercise WorldDO's real fetch logic.
@@ -39,6 +41,9 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	const closed: [number, string][] = [];
 	const disconnected: number[] = [];
 	const connected: number[] = [];
+	const teleportPermissions: boolean[] = [];
+	const initialPositions: Array<[number, number, number] | undefined> = [];
+	const acceptedPositions = new Map<number, [number, number, number]>();
 	class Socket extends EventTarget {
 		accept() {}
 		close(code, reason) {
@@ -99,8 +104,13 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	t.after(authDB.close);
 	const world = new WorldDO(context, { DB: authDB.db });
 	world.ensureCore = () => ({
-		connect(id) {
+		connect(id, allowTeleport, position) {
 			connected.push(id);
+			teleportPermissions.push(allowTeleport);
+			initialPositions.push(position);
+		},
+		clientPosition(id) {
+			return acceptedPositions.get(id);
 		},
 		disconnect(id) {
 			disconnected.push(id);
@@ -118,7 +128,7 @@ function fixture(t, synchronousClose = false, legacy = false) {
 				},
 			}),
 		);
-	return { world, join, connected, disconnected, closed, sqlite, context, authDB };
+	return { world, join, initialPositions, acceptedPositions, teleportPermissions, connected, disconnected, closed, sqlite, context, authDB };
 }
 
 test("DO requires the Worker identity header before admitting a connection", async t => {
@@ -473,4 +483,89 @@ test("connections without sessions do not query D1", async t => {
 	t.mock.method(f.authDB.db, "prepare", () => { assert.fail("unexpected D1 query"); });
 	await f.world.recheckAccess();
 	assert.deepEqual(f.closed, []);
+});
+
+
+test("only ops and dev connections receive teleport permission", async t => {
+	const f = fixture(t);
+	for (const user of ["ops:operator", "dev:anonymous", "player", "user:ops:spoof", "ops", "dev"]) {
+		const response = await f.join(user);
+		assert.equal(response.status, 101);
+	}
+	assert.deepEqual(f.teleportPermissions, [true, true, false, false, false, false]);
+});
+
+
+for (const event of ["close", "error"]) {
+	test(`reconnect after ${event} restores only the same user's accepted position`, async t => {
+		const f = fixture(t);
+		await f.join("player");
+		const position: [number, number, number] = [3000.5, 100, -3000.5];
+		f.acceptedPositions.set(1, position);
+		f.world.sockets.get(1).dispatchEvent(new Event(event));
+		assert.deepEqual(f.disconnected, [1]);
+		await f.join("other-player");
+		await f.join("player");
+		assert.deepEqual(f.initialPositions, [undefined, undefined, position]);
+		assert.deepEqual(f.teleportPermissions, [false, false, false]);
+	});
+}
+
+for (const synchronousClose of [false, true]) {
+	test(`replacement connection captures position before disconnect (synchronous close=${synchronousClose})`, async t => {
+		const f = fixture(t, synchronousClose);
+		await f.join("player");
+		const old = f.world.sockets.get(1);
+		const position: [number, number, number] = [3000.5, 100, 0.5];
+		f.acceptedPositions.set(1, position);
+		await f.join("player");
+		assert.deepEqual(f.initialPositions, [undefined, position]);
+		// A late close from the old socket cannot overwrite the new connection.
+		old.dispatchEvent(new Event("close"));
+		const latest: [number, number, number] = [3001, 100, 0.5];
+		f.acceptedPositions.set(2, latest);
+		f.world.sockets.get(2).dispatchEvent(new Event("close"));
+		await f.join("player");
+		assert.deepEqual(f.initialPositions, [undefined, position, latest]);
+	});
+}
+
+test("debug disconnect remembers positions but debug evict clears them", async t => {
+	const f = fixture(t);
+	await f.join("player");
+	const position: [number, number, number] = [3000.5, 100, 0.5];
+	f.acceptedPositions.set(1, position);
+	f.world.disconnectAll(1012, "restart");
+	await f.join("player");
+	assert.deepEqual(f.initialPositions, [undefined, position]);
+	f.acceptedPositions.set(2, position);
+	f.world.evict();
+	await f.join("player");
+	assert.deepEqual(f.initialPositions, [undefined, position, undefined]);
+});
+
+test("real WASM ABI restores a normal user's position and exposes only accepted movement", () => {
+	const core = ServerCore.fromModule(storageModule);
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	core.start(1n, Generator.Flat);
+	const position: [number, number, number] = [3000.5, 100, -3000.5];
+	core.connect(1, false, position);
+	assert.deepEqual(core.clientPosition(1), position);
+	assert.equal(core.clientPosition(2), undefined);
+	core.packet(1, client.encodeHello(2));
+	core.tick();
+	const next: [number, number, number] = [3000.7, 100, -3000.5];
+	core.packet(1, client.encodePos(...next, 0, 0));
+	assert.deepEqual(core.clientPosition(1), position);
+	core.tick();
+	assert.deepEqual(core.clientPosition(1), next);
+	core.packet(1, client.encodePos(10000, 100, 0, 0, 0));
+	core.tick();
+	assert.deepEqual(core.clientPosition(1), next);
+	core.disconnect(1);
+	assert.equal(core.clientPosition(1), undefined);
+	core.connect(2, false, [NaN, 100, 0.5]);
+	core.connect(3);
+	assert.deepEqual(core.clientPosition(2), core.clientPosition(3));
 });

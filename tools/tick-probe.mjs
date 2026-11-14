@@ -73,7 +73,9 @@ function connect(index) {
 			const [x, y, z] = core.spawn;
 			// Spread the players out so each loads its own area.
 			p.pos = [x + index * 300, y + 10, z];
-		} else if (id === S2C.ChunkData) p.chunks++;
+			ws.send(core.encodeTeleport(...p.pos));
+		} else if (id === S2C.PlayerCorrect) p.pos = core.playerPosition;
+		else if (id === S2C.ChunkData) p.chunks++;
 		else if (id === S2C.BlockUpdate) p.blockUpdates++;
 		else if (id === S2C.TimeUpdate) p.times.push([performance.now(), core.gameTime]);
 	};

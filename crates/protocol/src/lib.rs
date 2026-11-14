@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +23,11 @@ pub enum C2S {
         z: f64,
         yaw: f32,
         pitch: f32,
+    },
+    Teleport {
+        x: f64,
+        y: f64,
+        z: f64,
     },
     SetBlock {
         x: i32,
@@ -56,6 +61,11 @@ pub enum S2C {
         z: i32,
         state: BlockState,
     },
+    PlayerCorrect {
+        x: f64,
+        y: f64,
+        z: f64,
+    },
     TimeUpdate {
         game_time: i64,
         day_time: i64,
@@ -65,12 +75,14 @@ pub enum S2C {
 pub mod id {
     pub const C2S_HELLO: u8 = 0x00;
     pub const C2S_PLAYER_POS: u8 = 0x01;
+    pub const C2S_TELEPORT: u8 = 0x03;
     pub const C2S_SET_BLOCK: u8 = 0x02;
 
     pub const S2C_WELCOME: u8 = 0x00;
     pub const S2C_CHUNK_DATA: u8 = 0x01;
     pub const S2C_UNLOAD_CHUNK: u8 = 0x02;
     pub const S2C_BLOCK_UPDATE: u8 = 0x03;
+    pub const S2C_PLAYER_CORRECT: u8 = 0x05;
     pub const S2C_TIME_UPDATE: u8 = 0x04;
 }
 
@@ -100,6 +112,12 @@ impl C2S {
                 w.f32(yaw);
                 w.f32(pitch);
             }
+            C2S::Teleport { x, y, z } => {
+                w.u8(id::C2S_TELEPORT);
+                w.f64(x);
+                w.f64(y);
+                w.f64(z);
+            }
             C2S::SetBlock { x, y, z, state } => {
                 w.u8(id::C2S_SET_BLOCK);
                 w.i32(x);
@@ -124,6 +142,11 @@ impl C2S {
                 z: r.f64()?,
                 yaw: r.f32()?,
                 pitch: r.f32()?,
+            },
+            id::C2S_TELEPORT => C2S::Teleport {
+                x: r.f64()?,
+                y: r.f64()?,
+                z: r.f64()?,
             },
             id::C2S_SET_BLOCK => {
                 let (x, y, z) = (r.i32()?, r.i32()?, r.i32()?);
@@ -183,6 +206,12 @@ impl S2C {
                 w.i32(*z);
                 w.varint(*state as u32);
             }
+            S2C::PlayerCorrect { x, y, z } => {
+                w.u8(id::S2C_PLAYER_CORRECT);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+            }
             S2C::TimeUpdate {
                 game_time,
                 day_time,
@@ -229,6 +258,11 @@ impl S2C {
                     state: state as BlockState,
                 }
             }
+            id::S2C_PLAYER_CORRECT => S2C::PlayerCorrect {
+                x: r.f64()?,
+                y: r.f64()?,
+                z: r.f64()?,
+            },
             id::S2C_TIME_UPDATE => S2C::TimeUpdate {
                 game_time: r.i64()?,
                 day_time: r.i64()?,
@@ -249,6 +283,11 @@ mod tests {
     #[test]
     fn every_packet_round_trips() {
         let c2s = [
+            C2S::Teleport {
+                x: 123.0,
+                y: 80.0,
+                z: -321.0,
+            },
             C2S::Hello {
                 protocol: PROTOCOL_VERSION,
                 view_distance: 8,
@@ -271,6 +310,11 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let s2c = [
+            S2C::PlayerCorrect {
+                x: 0.5,
+                y: 65.0,
+                z: -0.5,
+            },
             S2C::Welcome {
                 seed: i64::MIN,
                 game_time: 42,

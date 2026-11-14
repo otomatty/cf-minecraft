@@ -58,6 +58,7 @@ interface DebugHandle {
 	error: string | null;
 	frames: number;
 	stats(): Record<string, unknown>;
+	sendRawPosition(x: number, y: number, z: number): void;
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
 	getBlock(x: number, y: number, z: number): number;
@@ -144,6 +145,7 @@ async function main(): Promise<void> {
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
+	let positionsCorrected = 0;
 	let closed: string | null = null;
 	let selected = 1;
 	let serverStats: ServerStats | null = null;
@@ -179,6 +181,8 @@ async function main(): Promise<void> {
 					camera.z = sz;
 					resetPlayer();
 				} else {
+					// Keep camera/prediction at the previous location. The DO restores
+					// its accepted position; PlayerCorrect still wins if they differ.
 					reconnects++;
 					sendPosition();
 				}
@@ -187,6 +191,14 @@ async function main(): Promise<void> {
 				statusLine.className = "";
 				statusLine.textContent = "クリックして開始";
 				if (autopilot) overlay.hidden = true;
+			} else if (id === S2C.PlayerCorrect) {
+				positionsCorrected++;
+				position = core.playerPosition;
+				previousPosition = [...position];
+				movementTime = 0;
+				camera.x = position[0];
+				camera.y = position[1] + EYE_HEIGHT;
+				camera.z = position[2];
 			} else if (id === S2C.TimeUpdate) {
 				timeReceivedAt = performance.now();
 				timeSamples.push([performance.now(), core.gameTime]);
@@ -460,6 +472,7 @@ async function main(): Promise<void> {
 
 	let lastPositionSent = 0;
 	const sendPosition = () => {
+		if (autopilot) return;
 		lastPositionSent = performance.now();
 		transport.send(core.encodePos(camera.x, camera.y - EYE_HEIGHT, camera.z, camera.yaw, camera.pitch));
 	};
@@ -642,6 +655,7 @@ async function main(): Promise<void> {
 			closed,
 			connection,
 			reconnects,
+			positionsCorrected,
 			fps,
 			...frame,
 			meshQueue: core.dirtyCount + meshPool.inFlight + meshPool.pendingResults,
@@ -659,7 +673,9 @@ async function main(): Promise<void> {
 			spawn: core.spawn,
 			seed: core.seed.toString(),
 		}),
+		sendRawPosition: (x, y, z) => transport.send(core.encodePos(x, y, z, camera.yaw, camera.pitch)),
 		setCamera: (x, y, z, yaw, pitch) => {
+			transport.send(core.encodeTeleport(x, y - EYE_HEIGHT, z));
 			Object.assign(camera, { x, y, z, yaw, pitch });
 			resetPlayer();
 		},
@@ -678,6 +694,7 @@ window.__mc = {
 	error: null,
 	frames: 0,
 	stats: () => ({}),
+	sendRawPosition: () => {},
 	setCamera: () => {},
 	setBlock: () => false,
 	getBlock: () => -1,

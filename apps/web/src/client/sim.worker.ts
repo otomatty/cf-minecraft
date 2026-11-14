@@ -58,7 +58,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
-	c.connect(CLIENT);
+	c.connect(CLIENT, import.meta.env.DEV);
 	core = c;
 	post({ type: "ready", seed: seed.toString(), persistence: store ? "opfs" : "off" });
 

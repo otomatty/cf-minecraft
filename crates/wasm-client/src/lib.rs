@@ -149,6 +149,9 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.spawn = spawn;
             st.view_distance = view_distance as u32;
         }
+        S2C::PlayerCorrect { x, y, z } => {
+            st.player = physics::Player::new([x, y, z]);
+        }
         S2C::ChunkData { cx, cz, data } => {
             let Ok(chunk) = Chunk::read(cx, cz, &mut Reader::new(&data)) else {
                 return u32::MAX;
@@ -470,6 +473,17 @@ pub extern "C" fn client_enc_pos(x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -
         }
         .encode(),
     )
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_teleport(x: f64, y: f64, z: f64) -> usize {
+    emit(state(), C2S::Teleport { x, y, z }.encode())
+}
+
+/// Authoritative feet position, including the most recent correction.
+#[no_mangle]
+pub extern "C" fn client_player_position(axis: usize) -> f64 {
+    state().player.position[axis.min(2)]
 }
 
 #[no_mangle]

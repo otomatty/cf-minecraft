@@ -9,3 +9,4 @@ jmath.workspace = true
 world.workspace = true
 worldgen.workspace = true
 protocol.workspace = true
+physics.workspace = true

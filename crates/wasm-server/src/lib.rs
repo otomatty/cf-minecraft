@@ -64,7 +64,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn server_abi_version() -> u32 {
-    1
+    3
 }
 
 #[no_mangle]
@@ -78,8 +78,32 @@ pub extern "C" fn server_set_time(game_time: i64, day_time: i64) {
 }
 
 #[no_mangle]
-pub extern "C" fn server_connect(client: u32) {
-    server().connect(client);
+pub extern "C" fn server_connect(
+    client: u32,
+    allow_teleport: u32,
+    has_position: u32,
+    x: f64,
+    y: f64,
+    z: f64,
+) {
+    server().connect_at(
+        client,
+        allow_teleport != 0,
+        (has_position != 0).then_some([x, y, z]),
+    );
+}
+
+/// Output: last accepted feet [x, y, z] as f64 LE, or length 0 for an unknown id.
+#[no_mangle]
+pub extern "C" fn server_client_position(client: u32) -> usize {
+    let st = state();
+    st.out.clear();
+    if let Some(position) = st.server.as_ref().expect("server").client_position(client) {
+        for value in position {
+            st.out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    st.out.len()
 }
 
 #[no_mangle]

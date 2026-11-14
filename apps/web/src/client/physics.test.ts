@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ClientCore } from "./client-core.ts";
+import { ClientCore, S2C } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 
 const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
@@ -89,4 +89,28 @@ test("WASM and native flight share the same sine-table trajectory", () => {
 		assert.equal(state.onGround, false);
 		assert.equal(state.flying, true);
 	}
+});
+
+
+test("server correction resets WASM prediction position and velocity", () => {
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const server = ServerCore.fromModule(serverModule);
+	server.start(1n, Generator.Flat);
+	server.connect(1);
+	server.packet(1, client.encodeHello(2));
+	for (let i = 0; i < 20; i++) {
+		server.tick();
+		for (const packet of server.takeOutbox()) client.packet(packet.data);
+	}
+	client.resetPlayer(...client.spawn);
+	for (let i = 0; i < 10; i++) client.tickPlayer(1, 0, 0, true, true, false);
+	server.packet(1, client.encodePos(10000, 200, 10000, 0, 0));
+	server.tick();
+	const corrections = server.takeOutbox().filter(p => p.data[0] === S2C.PlayerCorrect);
+	assert.equal(corrections.length, 1);
+	assert.equal(client.packet(corrections[0].data), S2C.PlayerCorrect);
+	assert.deepEqual(client.playerPosition, client.spawn);
+	const state = client.tickPlayer(0, 0, 0, false, false, false);
+	assert.deepEqual(state.position, client.spawn);
+	assert.deepEqual(state.velocity, [0, 0, 0]);
 });

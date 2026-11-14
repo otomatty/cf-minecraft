@@ -31,7 +31,9 @@ pub fn run_detailed(seed: i64, ticks: u32) -> Outcome {
     let mut disk: BTreeMap<(i32, i32), Vec<u8>> = BTreeMap::new();
     let mut wire = Fnv64::new();
 
-    server.connect(1);
+    // This storage/edit script deliberately crosses its own placed solids.
+    // Use a host-authorized teleport; physics trajectories are tested in sim.
+    server.connect_with_teleport(1, true);
     server.handle_packet(
         1,
         &C2S::Hello {
@@ -48,17 +50,7 @@ pub fn run_detailed(seed: i64, ticks: u32) -> Outcome {
         let direction = if t < ticks / 2 { 1.0 } else { -1.0 };
         x += direction * 0.9 + (rng.next_double() - 0.5);
         z += rng.next_double() - 0.5;
-        server.handle_packet(
-            1,
-            &C2S::PlayerPos {
-                x,
-                y,
-                z,
-                yaw: 0.0,
-                pitch: 0.0,
-            }
-            .encode(),
-        );
+        server.handle_packet(1, &C2S::Teleport { x, y, z }.encode());
 
         for _ in 0..4 {
             let bx = x.floor() as i32 + rng.next_int_bound(9) - 4;
