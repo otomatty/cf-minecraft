@@ -56,6 +56,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	seed = BigInt.asIntN(64, meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0]);
 	c.start(seed, msg.generator);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
+	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
 	c.connect(CLIENT);
 	core = c;

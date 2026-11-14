@@ -87,9 +87,9 @@ async function settle(page, label, chunks) {
 }
 
 /** Number of distinct colours on a coarse grid of the screenshot: a blank frame has one. */
-async function distinctColours(page, file) {
+async function distinctColours(page, file, measureBrightness = false) {
 	await page.screenshot({ path: file });
-	return page.evaluate(async (dataUrl) => {
+	return page.evaluate(async ({ dataUrl, measureBrightness }) => {
 		const img = new Image();
 		img.src = dataUrl;
 		await img.decode();
@@ -97,14 +97,43 @@ async function distinctColours(page, file) {
 		const g = c.getContext("2d");
 		g.drawImage(img, 0, 0);
 		const seen = new Set();
+		let luminance = 0;
+		let samples = 0;
 		for (let y = 40; y < img.height; y += 24) {
 			for (let x = 12; x < img.width; x += 24) {
 				const [r, gr, b] = g.getImageData(x, y, 1, 1).data;
 				seen.add((r >> 3) << 10 | (gr >> 3) << 5 | (b >> 3));
+				luminance += 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+				samples++;
 			}
 		}
-		return seen.size;
-	}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
+		return measureBrightness ? luminance / samples : seen.size;
+	}, { dataUrl: `data:image/png;base64,${readFileSync(file).toString("base64")}`, measureBrightness });
+}
+
+/** Identical seed, fixed camera, and the same screenshot grid used by the blank-frame check. */
+async function dayNight() {
+	const measurements = [];
+	for (const time of [6000, 18000]) {
+		const { page, errors } = await open(`server=local&world=e2e-sky-${time}-${run}&seed=2026&view=5&time=${time}`);
+		try {
+			const stats = await settle(page, `sky ${time}`, chunksInView(5));
+			await page.evaluate((spawn) => {
+				document.getElementById("overlay").hidden = true;
+				window.__mc.setCamera(spawn[0], spawn[1] + 16, spawn[2], 0, 15);
+			}, stats.spawn);
+			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+			const brightness = await distinctColours(page, join(shots, `sky-${time}.png`), true);
+			const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
+			measurements.push({ brightness, sky });
+			check(errors.length === 0, `sky ${time}: no page errors`, errors.slice(0, 3).join(" | "));
+		} finally {
+			await page.close();
+		}
+	}
+	const [day, night] = measurements;
+	check(day.sky > 0.9 && night.sky < 0.1, "sky: clock selects noon and midnight", `${day.sky} / ${night.sky}`);
+	check(night.brightness < day.brightness * 0.65, "sky: midnight frame is darker than noon", `${night.brightness.toFixed(1)} / ${day.brightness.toFixed(1)}`);
 }
 
 /**
@@ -328,6 +357,7 @@ async function inputs() {
 try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
+	await dayNight();
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
 	const inBrowser = await page.evaluate(() => window.__mc.runScenario("2026", 600));

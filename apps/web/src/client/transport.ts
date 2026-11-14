@@ -34,7 +34,7 @@ export interface Transport {
 }
 
 export type WorkerRequest =
-	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number }
+	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null }
 	| { type: "packet"; data: ArrayBuffer }
 	| { type: "save" }
 	| { type: "export"; id: number }
@@ -61,7 +61,7 @@ export class LocalTransport implements Transport {
 		this.pending.clear();
 	}
 
-	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers) {
+	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers, startTime: number | null = null) {
 		this.worker = new Worker(new URL("./sim.worker.ts", import.meta.url), { type: "module" });
 		this.worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
 			const msg = event.data;
@@ -97,7 +97,7 @@ export class LocalTransport implements Transport {
 			this.rejectPending(event.message || "sim worker failed");
 			handlers.onClose(event.message || "sim worker failed");
 		};
-		this.post({ type: "init", wasmUrl, world, seed, generator });
+		this.post({ type: "init", wasmUrl, world, seed, generator, startTime });
 	}
 
 	private post(msg: WorkerRequest, transfer: Transferable[] = []): void {
