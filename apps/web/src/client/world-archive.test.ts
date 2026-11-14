@@ -26,6 +26,20 @@ test("archive round trips metadata and positive/negative region names, including
 	assert.equal(crc32(new TextEncoder().encode("123456789")), 0xcbf43926);
 });
 test("archive supports metadata only", () => assert.deepEqual(decodeArchive(encodeArchive([meta])), [meta]));
+test("encoder and decoder accept canonical region names with safe integer coordinates", () => {
+	for (const name of ["r.0.0", "r.-1.2", "r.12.-34", "r.9007199254740991.-9007199254740991"]) {
+		const entries = [meta, { name, data: new Uint8Array() }];
+		assert.deepEqual(decodeArchive(encodeArchive(entries)), entries);
+		assert.deepEqual(decodeArchive(raw(entries)), entries);
+	}
+});
+test("encoder and decoder reject noncanonical and unsafe region coordinates", () => {
+	for (const name of ["r.00.0", "r.-0.0", "r.01.-2", "r.0.-00", "r.9007199254740992.0", "r.0.-9007199254740992", "r.1e2.0", "r.+1.0"]) {
+		const entries = [meta, { name, data: new Uint8Array() }];
+		assert.throws(() => encodeArchive(entries), /ファイル名/, name);
+		assert.throws(() => decodeArchive(raw(entries)), /ファイル名/, name);
+	}
+});
 test("archive rejects bad magic, unsupported version, CRC, trailing bytes, and every truncation", () => {
 	const original = raw([meta]);
 	for (const offset of [0, 7, original.length - 1]) {
