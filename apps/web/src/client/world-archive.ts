@@ -3,7 +3,14 @@ export interface ArchiveEntry { name: string; data: Uint8Array }
 export const MAX_ARCHIVE_BYTES = 1024 ** 3;
 const MAX_ENTRIES = 100_000;
 const magic = new TextEncoder().encode("MCWORLD");
-const validName = (name: string) => name === "meta.json" || /^r\.-?\d+\.-?\d+$/.test(name);
+export function isRegionName(name: string): boolean {
+	const match = /^r\.(0|-?[1-9]\d*)\.(0|-?[1-9]\d*)$/.exec(name);
+	if (!match) return false;
+	const rx = Number(match[1]), rz = Number(match[2]);
+	return Number.isSafeInteger(rx) && Number.isSafeInteger(rz)
+		&& name === `r.${Math.floor(rx * 32 / 32)}.${Math.floor(rz * 32 / 32)}`;
+}
+const validName = (name: string) => name === "meta.json" || isRegionName(name);
 const table = Uint32Array.from({ length: 256 }, (_, n) => {
 	for (let i = 0; i < 8; i++) n = (n >>> 1) ^ (n & 1 ? 0xedb88320 : 0);
 	return n >>> 0;

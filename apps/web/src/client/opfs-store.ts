@@ -1,4 +1,4 @@
-import { decodeArchive, encodeArchive, type ArchiveEntry, MAX_ARCHIVE_BYTES } from "./world-archive.ts";
+import { decodeArchive, encodeArchive, isRegionName, type ArchiveEntry, MAX_ARCHIVE_BYTES } from "./world-archive.ts";
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
@@ -203,7 +203,7 @@ export class OpfsStore {
 			const entries: ArchiveEntry[] = [];
 			let size = 12;
 			for await (const name of this.dir.keys()) {
-				if (name !== "meta.json" && !/^r\.-?\d+\.-?\d+$/.test(name)) continue;
+				if (name !== "meta.json" && !isRegionName(name)) continue;
 				const file = await (await this.dir.getFileHandle(name)).getFile();
 				size += 10 + new TextEncoder().encode(name).length + file.size;
 				if (size > MAX_ARCHIVE_BYTES) throw new Error("アーカイブは 1 GiB 以下にしてください");
