@@ -14,6 +14,7 @@ worldgen = { path = "crates/worldgen" }
 protocol = { path = "crates/protocol" }
 sim = { path = "crates/sim" }
 mesher = { path = "crates/mesher" }
+physics = { path = "crates/physics" }
 
 [profile.release]
 opt-level = 3

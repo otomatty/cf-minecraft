@@ -1,6 +1,6 @@
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
-// and input together. M0 scope: a flying camera with no collision, block
-// breaking and placing, and a debug overlay.
+// and input together: fixed-step player prediction, interpolated rendering,
+// block breaking and placing, and a debug overlay.
 //
 // URL parameters:
 //   server=local|ws   integrated server in a Web Worker (default) or the Durable Object
@@ -15,7 +15,7 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
-import { forward, right } from "./math.ts";
+import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { TEX_SIZE } from "./textures.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
@@ -23,11 +23,8 @@ import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
 const REACH = 5;
-/** Creative flying speeds in blocks per second; movement itself is a placeholder until M1. */
-const FLY_SPEED = 10.89;
-const SPRINT_FLY_SPEED = 21.78;
-const VERTICAL_SPEED = 7.5;
-const DOUBLE_TAP_MS = 350;
+const TICK_SECONDS = 1 / 20;
+const DOUBLE_TAP_TICKS = 7;
 const POSITION_INTERVAL_MS = 50;
 const MESH_BUDGET_MS = 4;
 
@@ -110,7 +107,21 @@ async function main(): Promise<void> {
 	const blockNames = core.blockNames();
 
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
-	const velocity = [0, 0, 0];
+	let position: [number, number, number] = [camera.x, camera.y - EYE_HEIGHT, camera.z];
+	let previousPosition = [...position];
+	let movementTime = 0;
+	let movementTick = 0;
+	let lastJumpTap = -Infinity;
+	let pendingJump = false;
+	let pendingFlightToggle = false;
+	function resetPlayer(): void {
+		position = [camera.x, camera.y - EYE_HEIGHT, camera.z];
+		previousPosition = [...position];
+		movementTime = 0;
+		lastJumpTap = -Infinity;
+		pendingJump = pendingFlightToggle = false;
+		core.resetPlayer(...position);
+	}
 	let joined = false;
 	let joinedGameTime: number | null = null;
 	let autopilotStartedAt: number | null = null;
@@ -143,6 +154,7 @@ async function main(): Promise<void> {
 					camera.x = sx;
 					camera.y = sy + EYE_HEIGHT + (autopilot ? 14 : 2);
 					camera.z = sz;
+					resetPlayer();
 				} else {
 					reconnects++;
 					sendPosition();
@@ -262,12 +274,14 @@ async function main(): Promise<void> {
 		keys.clear();
 		sprinting = false;
 		lastForwardTap = -Infinity;
+		lastJumpTap = -Infinity;
+		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
 	};
 	const settingsPanel = $<HTMLElement>("settings-panel");
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
-	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "上昇", down: "下降", sprint: "ダッシュ", fullscreen: "全画面" };
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
@@ -395,9 +409,15 @@ async function main(): Promise<void> {
 		if (!locked()) return;
 		e.preventDefault();
 		if (matchesKey(e.code, settings.keys.forward) && !e.repeat) {
-			const now = performance.now();
-			if (now - lastForwardTap < DOUBLE_TAP_MS) sprinting = true;
-			lastForwardTap = now;
+			if (movementTick - lastForwardTap <= DOUBLE_TAP_TICKS) sprinting = true;
+			lastForwardTap = movementTick;
+		}
+		if (matchesKey(e.code, settings.keys.up) && !e.repeat && !pressed(settings.keys.up)) {
+			pendingJump = true;
+			if (movementTick - lastJumpTap <= DOUBLE_TAP_TICKS) {
+				pendingFlightToggle = !pendingFlightToggle;
+				lastJumpTap = -Infinity;
+			} else lastJumpTap = movementTick;
 		}
 		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) select(Number(e.code.slice(5)));
 		keys.add(e.code);
@@ -474,26 +494,24 @@ async function main(): Promise<void> {
 			camera.pitch = 28;
 			return;
 		}
-		const fwd = (pressed(settings.keys.forward) ? 1 : 0) - (pressed(settings.keys.backward) ? 1 : 0);
-		const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
-		const up = (pressed(settings.keys.up) ? 1 : 0) - (pressed(settings.keys.down) ? 1 : 0);
-		const f = forward(camera.yaw, 0);
-		const r = right(camera.yaw);
-		let wx = f[0] * fwd + r[0] * strafe;
-		let wz = f[2] * fwd + r[2] * strafe;
-		const len = Math.hypot(wx, wz);
-		const speed = sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)) ? SPRINT_FLY_SPEED : FLY_SPEED;
-		if (len > 0) {
-			wx = (wx / len) * speed;
-			wz = (wz / len) * speed;
+		movementTime += dt;
+		while (movementTime >= TICK_SECONDS) {
+			previousPosition = [...position];
+			if (pendingFlightToggle) core.toggleFlight();
+			pendingFlightToggle = false;
+			const fwd = (pressed(settings.keys.forward) ? 1 : 0) - (pressed(settings.keys.backward) ? 1 : 0);
+			const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
+			const sprint = sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement));
+			const state = core.tickPlayer(fwd, strafe, camera.yaw, pendingJump || pressed(settings.keys.up), sprint, pressed(settings.keys.down));
+			pendingJump = false;
+			position = state.position;
+			movementTick++;
+			movementTime -= TICK_SECONDS;
 		}
-		const blend = 1 - Math.exp(-dt * 12);
-		velocity[0] += (wx - velocity[0]) * blend;
-		velocity[1] += (up * VERTICAL_SPEED - velocity[1]) * blend;
-		velocity[2] += (wz - velocity[2]) * blend;
-		camera.x += velocity[0] * dt;
-		camera.y = Math.max(-80, Math.min(400, camera.y + velocity[1] * dt));
-		camera.z += velocity[2] * dt;
+		const alpha = movementTime / TICK_SECONDS;
+		camera.x = previousPosition[0] + (position[0] - previousPosition[0]) * alpha;
+		camera.y = previousPosition[1] + (position[1] - previousPosition[1]) * alpha + EYE_HEIGHT;
+		camera.z = previousPosition[2] + (position[2] - previousPosition[2]) * alpha;
 	}
 
 	// ---- HUD ---------------------------------------------------------------
@@ -602,7 +620,10 @@ async function main(): Promise<void> {
 			spawn: core.spawn,
 			seed: core.seed.toString(),
 		}),
-		setCamera: (x, y, z, yaw, pitch) => Object.assign(camera, { x, y, z, yaw, pitch }),
+		setCamera: (x, y, z, yaw, pitch) => {
+			Object.assign(camera, { x, y, z, yaw, pitch });
+			resetPlayer();
+		},
 		setBlock,
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
 		runScenario,
