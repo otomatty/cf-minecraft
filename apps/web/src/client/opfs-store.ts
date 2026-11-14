@@ -1,4 +1,4 @@
-import { CorruptRegionError, RegionCodec } from "./region-codec.ts";
+import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
 	seed: string;

@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
 	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL, SERVICE_RESTART,
 } from "../shared/close-codes.ts";
+import { RegionCodec } from "../shared/region-codec.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import serverWasm from "../wasm/server.wasm";
@@ -48,6 +49,7 @@ export interface WorldMetrics {
 
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
+	private codec: RegionCodec | null = null;
 	private seed: bigint | null = null;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
@@ -66,6 +68,7 @@ export class WorldDO extends DurableObject<Env> {
 				cx INTEGER NOT NULL,
 				cz INTEGER NOT NULL,
 				data BLOB NOT NULL,
+				format INTEGER NOT NULL DEFAULT 0,
 				PRIMARY KEY (cx, cz)
 			) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS revocations (
@@ -77,6 +80,10 @@ export class WorldDO extends DurableObject<Env> {
 				value TEXT NOT NULL
 			) WITHOUT ROWID;
 		`);
+		const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(chunks)").toArray();
+		if (!columns.some((column) => column.name === "format")) {
+			ctx.storage.sql.exec("ALTER TABLE chunks ADD COLUMN format INTEGER NOT NULL DEFAULT 0");
+		}
 	}
 
 	private meta(key: string): string | null {
@@ -101,7 +108,9 @@ export class WorldDO extends DurableObject<Env> {
 			this.setMeta("seed", seedText);
 		}
 		this.seed = BigInt(seedText);
-		const core = ServerCore.fromModule(serverWasm);
+		const instance = new WebAssembly.Instance(serverWasm, {});
+		const core = new ServerCore(instance);
+		this.codec = new RegionCodec(instance);
 		core.start(this.seed, Generator.DebugHills);
 		core.setTime(BigInt(this.meta("gameTime") ?? "0"), BigInt(this.meta("dayTime") ?? "0"));
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
@@ -241,6 +250,7 @@ export class WorldDO extends DurableObject<Env> {
 		this.save();
 		this.stopTicking();
 		this.core = null;
+		this.codec = null;
 		this.seed = null;
 		this.idleTicks = 0;
 		this.lastMetrics = null;
@@ -286,10 +296,24 @@ export class WorldDO extends DurableObject<Env> {
 
 		for (const [cx, cz] of core.takeRequests()) {
 			const rows = this.ctx.storage.sql
-				.exec<{ data: ArrayBuffer }>("SELECT data FROM chunks WHERE cx = ? AND cz = ?", cx, cz)
+				.exec<{ data: ArrayBuffer; format: number }>("SELECT data, format FROM chunks WHERE cx = ? AND cz = ?", cx, cz)
 				.toArray();
-			if (rows.length > 0) core.loadChunk(cx, cz, new Uint8Array(rows[0].data));
-			else core.chunkMissing(cx, cz);
+			if (rows.length === 0) {
+				core.chunkMissing(cx, cz);
+				continue;
+			}
+			let data: Uint8Array = new Uint8Array(rows[0].data);
+			if (rows[0].format !== 0) {
+				try {
+					if (rows[0].format !== 1) throw new Error("Unknown chunk format");
+					data = this.codec!.call(3, data);
+				} catch (error) {
+					console.warn("Corrupt stored chunk", cx, cz, error);
+					core.chunkMissing(cx, cz);
+					continue;
+				}
+			}
+			core.loadChunk(cx, cz, data);
 		}
 
 		if (core.gameTime % BigInt(AUTOSAVE_TICKS) === 0n) this.save();
@@ -311,9 +335,10 @@ export class WorldDO extends DurableObject<Env> {
 		// One transaction: a crash leaves either the old or the new snapshot.
 		this.ctx.storage.transactionSync(() => {
 			for (let chunk = core.takeDirty(); chunk !== null; chunk = core.takeDirty()) {
-				const blob = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
+				const data = this.codec!.call(4, chunk.data);
+				const blob = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 				this.ctx.storage.sql.exec(
-					"INSERT INTO chunks (cx, cz, data) VALUES (?, ?, ?) ON CONFLICT (cx, cz) DO UPDATE SET data = excluded.data",
+					"INSERT INTO chunks (cx, cz, data, format) VALUES (?, ?, ?, 1) ON CONFLICT (cx, cz) DO UPDATE SET data = excluded.data, format = excluded.format",
 					chunk.cx,
 					chunk.cz,
 					blob,
