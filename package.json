@@ -1,5 +1,5 @@
 {
-  "name": "maincraft",
+  "name": "cf-minecraft",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.28.0",

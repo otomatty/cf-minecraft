@@ -3,7 +3,7 @@ import * as entrypoint from "./src/edge/index.ts" with { type: "cf-worker" };
 
 export default defineConfig(({ mode }) => ({
 	worker: {
-		name: "maincraft",
+		name: "minecraft",
 		compatibilityDate: "2026-11-04",
 		entrypoint,
 		// Everything else is a static asset (the game client).
@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => ({
 			DEBUG: bindings.text(mode === "development" ? "1" : "0"),
 			// Operator access for production probes.
 			ACCESS_TOKEN: bindings.secret(),
-			DB: bindings.d1({ name: "maincraft" }),
+			DB: bindings.d1({ name: "cf-minecraft" }),
 			IP_LIMIT: bindings.rateLimit({ namespace: "1001", simple: { limit: 120, period: 60 } }),
 			AUTH_LIMIT: bindings.rateLimit({ namespace: "1002", simple: { limit: 20, period: 60 } }),
 			USER_LIMIT: bindings.rateLimit({ namespace: "1003", simple: { limit: 30, period: 60 } }),

@@ -59,7 +59,7 @@ WASM の3ホストはいずれも V8 です。Firefox（SpiderMonkey）と Safar
 
 ### 本番環境での計測（2026-11-11）
 
-デプロイ先 `https://maincraft.saedgewell.workers.dev` に対して、同じ `tools/tick-probe.mjs` で計測しました。
+デプロイ先 `https://maincraft.saedgewell.workers.dev`（当時の名前。現在の公開先は `https://minecraft.saedgewell.workers.dev`）に対して、同じ `tools/tick-probe.mjs` で計測しました。
 
 | 条件 | クライアント実測TPS | 落ちたtick | タイマー間隔 p50 / p99 / 最大 | 読込チャンク | WASMメモリ | 下り通信 |
 |---|---|---|---|---|---|---|

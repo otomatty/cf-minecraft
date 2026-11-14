@@ -512,7 +512,7 @@ async function main(): Promise<void> {
 		const minutes = Math.floor((((day % 24000) + 6000) % 24000) * 0.06);
 		const clock = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 		const lines = [
-			`maincraft M0  [${renderer.adapterInfo}]`,
+			`cf-minecraft  [${renderer.adapterInfo}]`,
 			`${fps.toFixed(0)} fps`,
 			`XYZ: ${camera.x.toFixed(2)} / ${(camera.y - EYE_HEIGHT).toFixed(2)} / ${camera.z.toFixed(2)}   Chunk: ${Math.floor(camera.x) >> 4} ${Math.floor(camera.z) >> 4}`,
 			`Facing: ${FACING[Math.round(yaw / 90) % 4]}  (${yaw.toFixed(1)} / ${camera.pitch.toFixed(1)})`,
