@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::blocks;
 use crate::io::{DecodeError, Reader, Writer};
+use crate::light::ChunkLighting;
 use crate::palette::{PalettedContainer, SIZE};
 use crate::{section_index, BlockState, MIN_Y, SECTIONS};
 
@@ -57,6 +58,9 @@ pub struct Chunk {
     pub sections: Vec<Section>,
     /// Changed since it was last handed to storage.
     pub dirty: bool,
+    /// Derived lighting and heightmap. No allocation while lighting is disabled.
+    /// Never serialized; initialized when inserted into a lighting-enabled world.
+    pub lighting: Option<Box<ChunkLighting>>,
 }
 
 impl Chunk {
@@ -66,6 +70,7 @@ impl Chunk {
             cz,
             sections: vec![Section::uniform(blocks::AIR); SECTIONS],
             dirty: false,
+            lighting: None,
         }
     }
 
@@ -117,12 +122,22 @@ impl Chunk {
             cz,
             sections,
             dirty: false,
+            lighting: None,
         })
     }
 
     pub fn hash_into(&self, h: &mut Fnv64) {
+        self.hash_into_with_lighting(h, true);
+    }
+
+    fn hash_into_with_lighting(&self, h: &mut Fnv64, include_light: bool) {
         h.i32(self.cx);
         h.i32(self.cz);
+        if include_light {
+            if let Some(lighting) = &self.lighting {
+                lighting.hash_into(h);
+            }
+        }
         for section in &self.sections {
             match section.states.uniform() {
                 Some(v) => {
@@ -143,12 +158,41 @@ impl Chunk {
 /// Loaded chunks, ordered by coordinate so iteration is deterministic.
 #[derive(Default)]
 pub struct World {
+    /// Read access and iteration; mutate loaded blocks through `set_block`, and
+    /// use `insert_chunk` / `remove_chunk` to keep derived lighting in sync.
     pub chunks: BTreeMap<(i32, i32), Chunk>,
+    pub(crate) lighting_enabled: bool,
 }
 
 impl World {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lighting is opt-in. Enabling an existing world rebuilds all loaded light.
+    pub fn with_lighting(enabled: bool) -> Self {
+        Self {
+            lighting_enabled: enabled,
+            ..Self::default()
+        }
+    }
+
+    pub fn lighting_enabled(&self) -> bool {
+        self.lighting_enabled
+    }
+
+    pub fn set_lighting_enabled(&mut self, enabled: bool) {
+        if enabled == self.lighting_enabled {
+            return;
+        }
+        if enabled {
+            self.rebuild_light();
+        } else {
+            self.lighting_enabled = false;
+            for chunk in self.chunks.values_mut() {
+                chunk.lighting = None;
+            }
+        }
     }
 
     #[inline]
@@ -164,13 +208,20 @@ impl World {
         let old = chunk.set((x & 15) as usize, y, (z & 15) as usize, state)?;
         if old != state {
             chunk.dirty = true;
+            let before = blocks::info(old);
+            let after = blocks::info(state);
+            if self.lighting_enabled
+                && (before.opacity, before.emission) != (after.opacity, after.emission)
+            {
+                self.update_light(x, y, z);
+            }
         }
         Some(old)
     }
 
     pub fn hash_into(&self, h: &mut Fnv64) {
         for chunk in self.chunks.values() {
-            chunk.hash_into(h);
+            chunk.hash_into_with_lighting(h, self.lighting_enabled);
         }
     }
 }
@@ -224,7 +275,7 @@ mod tests {
     #[test]
     fn negative_coordinates_map_to_the_right_chunk_and_section() {
         let mut w = World::new();
-        w.chunks.insert((-1, -1), Chunk::empty(-1, -1));
+        w.insert_chunk(Chunk::empty(-1, -1));
         assert_eq!(w.set_block(-1, -64, -1, blocks::STONE), Some(blocks::AIR));
         let c = &w.chunks[&(-1, -1)];
         assert_eq!(c.get(15, -64, 15), blocks::STONE);

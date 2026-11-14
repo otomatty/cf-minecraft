@@ -7,6 +7,7 @@
 pub mod blocks;
 pub mod chunk;
 pub mod io;
+pub mod light;
 pub mod palette;
 
 pub use chunk::{Chunk, Fnv64, Section, World};

@@ -29,6 +29,8 @@ struct State {
     day_time: i64,
     out: Vec<u8>,
     padded: Vec<u16>,
+    padded_sky: Vec<u8>,
+    padded_block: Vec<u8>,
     player: physics::Player,
     flying: bool,
 }
@@ -89,6 +91,8 @@ pub extern "C" fn client_new() {
         day_time: 0,
         out: Vec::new(),
         padded: vec![blocks::AIR; PADDED_LEN],
+        padded_sky: Vec::new(),
+        padded_block: Vec::new(),
         player: physics::Player::default(),
         flying: true,
     };
@@ -153,7 +157,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             let Ok(chunk) = Chunk::read(cx, cz, &mut Reader::new(&data)) else {
                 return u32::MAX;
             };
-            st.world.chunks.insert((cx, cz), chunk);
+            st.world.insert_chunk(chunk);
             mark_chunk_dirty(st, cx, cz);
             // Border faces of the neighbours can now be culled.
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -161,7 +165,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             }
         }
         S2C::UnloadChunk { cx, cz } => {
-            if st.world.chunks.remove(&(cx, cz)).is_some() {
+            if st.world.remove_chunk(cx, cz).is_some() {
                 st.unloaded.push((cx, cz));
             }
         }
@@ -334,6 +338,41 @@ pub extern "C" fn client_padded(cx: i32, sy: i32, cz: i32) -> usize {
 #[no_mangle]
 pub extern "C" fn client_padded_ptr() -> *const u16 {
     state().padded.as_ptr()
+}
+
+/// Copies 18³ sky/block levels (one byte each) in `padded_index` order.
+/// Returns 0 while lighting is disabled. Otherwise missing chunks and below-world
+/// cells are dark; above the world sky is 15.
+#[no_mangle]
+pub extern "C" fn client_padded_light(cx: i32, sy: i32, cz: i32) -> usize {
+    let st = state();
+    if !st.world.lighting_enabled()
+        || !(0..SECTIONS as i32).contains(&sy)
+        || !st.world.chunks.contains_key(&(cx, cz))
+    {
+        return 0;
+    }
+    st.padded_sky.resize(PADDED_LEN, 0);
+    st.padded_block.resize(PADDED_LEN, 0);
+    for y in -1..=16 {
+        for z in -1..=16 {
+            for x in -1..=16 {
+                let i = padded_index(x, y, z);
+                let (wx, wy, wz) = (cx * 16 + x, MIN_Y + sy * 16 + y, cz * 16 + z);
+                st.padded_sky[i] = st.world.sky_light(wx, wy, wz);
+                st.padded_block[i] = st.world.block_light(wx, wy, wz);
+            }
+        }
+    }
+    PADDED_LEN
+}
+#[no_mangle]
+pub extern "C" fn client_padded_sky_ptr() -> *const u8 {
+    state().padded_sky.as_ptr()
+}
+#[no_mangle]
+pub extern "C" fn client_padded_block_ptr() -> *const u8 {
+    state().padded_block.as_ptr()
 }
 
 /// Meshes padded u16 block data without requiring client_new or a world.
@@ -558,8 +597,63 @@ pub extern "C" fn client_player_tick(forward: f32, strafe: f32, yaw: f32, flags:
 mod tests {
     use super::*;
 
+    static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn padded_lighting_includes_neighbors_and_vertical_limits() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        assert!(!state().world.lighting_enabled());
+        assert_eq!(client_padded_light(0, 0, 0), 0);
+        assert_eq!(state().padded_sky.capacity(), 0);
+        assert_eq!(state().padded_block.capacity(), 0);
+        state().world.set_lighting_enabled(true);
+        let mut left = Chunk::empty(-1, 0);
+        left.set(15, MIN_Y + 15, 8, blocks::LAMP_BLOCK);
+        // Exercise the same decoding and insertion path as a real mirror.
+        for c in [Chunk::empty(0, 0), left] {
+            let packet = S2C::ChunkData {
+                cx: c.cx,
+                cz: c.cz,
+                data: c.to_bytes(),
+            }
+            .encode();
+            assert_ne!(
+                unsafe { client_packet(packet.as_ptr(), packet.len()) },
+                u32::MAX
+            );
+        }
+        assert_eq!(client_padded_light(0, 0, 0), PADDED_LEN);
+        let sky = unsafe { std::slice::from_raw_parts(client_padded_sky_ptr(), PADDED_LEN) };
+        let block = unsafe { std::slice::from_raw_parts(client_padded_block_ptr(), PADDED_LEN) };
+        for y in -1..=16 {
+            for z in -1..=16 {
+                for x in -1..=16 {
+                    let i = padded_index(x, y, z);
+                    assert_eq!(sky[i], state().world.sky_light(x, MIN_Y + y, z));
+                    assert_eq!(block[i], state().world.block_light(x, MIN_Y + y, z));
+                }
+            }
+        }
+        assert_eq!(block[padded_index(-1, 15, 8)], 15);
+        assert_eq!(block[padded_index(0, 15, 8)], 14);
+        assert_eq!(block[padded_index(0, 16, 8)], 13);
+        assert_eq!(sky[padded_index(0, -1, 8)], 0);
+        assert_eq!(sky[padded_index(16, 0, 8)], 0);
+        assert_eq!(client_padded_light(0, SECTIONS as i32 - 1, 0), PADDED_LEN);
+        assert_eq!(state().padded_sky[padded_index(0, 16, 8)], 15);
+        assert_eq!(client_padded_light(0, -1, 0), 0);
+        assert_eq!(client_padded_light(1, 0, 0), 0);
+        assert_eq!(
+            client_predict_block(-1, MIN_Y + 15, 8, blocks::AIR as u32),
+            1
+        );
+        assert_eq!(state().world.block_light(0, MIN_Y + 15, 8), 0);
+    }
+
     #[test]
     fn split_meshing_matches_client_mesh() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
         // The mesh-only entry point works before client_new.
         let mut padded = vec![blocks::AIR; PADDED_LEN];
         padded[padded_index(0, 0, 0)] = blocks::STONE;
@@ -575,7 +669,12 @@ mod tests {
                 }
             }
         }
-        state().world.chunks.insert((0, 0), chunk);
+        state().world.insert_chunk(chunk);
+        assert!(!state().world.lighting_enabled());
+        assert!(state().world.chunks[&(0, 0)].lighting.is_none());
+        assert_eq!(client_padded_light(0, 0, 0), 0);
+        assert_eq!(state().padded_sky.capacity(), 0);
+        assert_eq!(state().padded_block.capacity(), 0);
         for (cx, sy, cz) in [(0, 0, 0), (0, 1, 0), (0, 2, 0), (1, 0, 0), (0, -1, 0)] {
             let quads = client_mesh(cx, sy, cz);
             let expected = unsafe {
