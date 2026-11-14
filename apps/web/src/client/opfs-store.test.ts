@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { decodeArchive, encodeArchive } from "./world-archive.ts";
-import { CorruptRegionError, RegionCodec } from "./region-codec.ts";
+import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 // These integration tests use the real WASM format implementation.
 // Run pnpm build:wasm, then node --test apps/web/src/client/opfs-store.test.ts.
@@ -535,4 +535,16 @@ test("invalid times fall back to zero for existing worlds but are refused on imp
 			assert.equal(dirs.size, 0);
 		}
 	}
+});
+
+test("real WASM standalone compression uses the fixed native bytes and decodes empty data", () => {
+	const codec = new RegionCodec(new WebAssembly.Instance(module, {}));
+	const data = new TextEncoder().encode("Durable Object chunk");
+	const encoded = codec.call(4, data);
+	assert.deepEqual(encoded, new Uint8Array([
+		28, 0, 0, 0, 1, 213, 246, 228, 128, 120, 156, 115, 41, 45, 74, 76, 202, 73,
+		85, 240, 79, 202, 74, 77, 46, 81, 72, 206, 40, 205, 203, 6, 0, 76, 246, 7, 112,
+	]));
+	assert.deepEqual(codec.call(3, encoded), data);
+	assert.deepEqual(codec.call(3, codec.call(4, new Uint8Array())), new Uint8Array());
 });

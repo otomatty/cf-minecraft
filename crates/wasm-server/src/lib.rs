@@ -213,7 +213,7 @@ pub extern "C" fn server_run_scenario(seed: i64, ticks: u32) -> i64 {
     sim::scenario::run(seed, ticks) as i64
 }
 
-/// Region storage operation; returns -1 on invalid input. Uses server_out_ptr.
+/// Storage operation (0–3: region access/decode, 4: encode chunk); returns -1 on invalid input. Uses server_out_ptr.
 ///
 /// # Safety
 /// `ptr..ptr+len` must be readable.

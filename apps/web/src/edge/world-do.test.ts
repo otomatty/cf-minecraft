@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { RegionCodec } from "../shared/region-codec.ts";
 
 // Resolve only the runtime-owned modules; exercise WorldDO's real fetch logic.
 registerHooks({
@@ -32,7 +34,7 @@ registerHooks({
 
 const { WorldDO } = await import("./world-do.ts");
 
-function fixture(t, synchronousClose = false) {
+function fixture(t, synchronousClose = false, legacy = false) {
 	const closed: [number, string][] = [];
 	const disconnected: number[] = [];
 	const connected: number[] = [];
@@ -63,16 +65,31 @@ function fixture(t, synchronousClose = false) {
 	});
 	const sqlite = new DatabaseSync(":memory:");
 	t.after(() => sqlite.close());
+	if (legacy) {
+		sqlite.exec("CREATE TABLE chunks (cx INTEGER NOT NULL, cz INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (cx, cz)) WITHOUT ROWID");
+		sqlite.prepare("INSERT INTO chunks VALUES (?, ?, ?)").run(-2, 3, new Uint8Array([1, 2, 3]));
+	}
 	const context = {
 		storage: {
+			transactionSync(fn) {
+				sqlite.exec("BEGIN");
+				try {
+					const result = fn();
+					sqlite.exec("COMMIT");
+					return result;
+				} catch (error) {
+					sqlite.exec("ROLLBACK");
+					throw error;
+				}
+			},
 			sql: {
 				exec(sql: string, ...args: unknown[]) {
-					if (args.length === 0) {
+					if (args.length === 0 && !/^(SELECT|PRAGMA)/i.test(sql.trim())) {
 						sqlite.exec(sql);
 						return { toArray: () => [] };
 					}
-					const rows = sqlite.prepare(sql).all(...args);
-					return { toArray: () => rows };
+					const rows = sqlite.prepare(sql).all(...args.map(arg => arg instanceof ArrayBuffer ? new Uint8Array(arg) : arg));
+					return { toArray: () => rows, one: () => { assert.equal(rows.length, 1); return rows[0]; } };
 				},
 			},
 		},
@@ -259,4 +276,62 @@ test("packet flood closes without reconnect", async t => {
 	f.world.sockets.get(1).dispatchEvent(new MessageEvent("message", { data: new ArrayBuffer(1) }));
 	assert.deepEqual(f.closed, [[4002, "too many packets"]]);
 	assert.deepEqual(f.disconnected, [1]);
+});
+
+// Use the same real format implementation as the OPFS tests after build:wasm.
+const storageModule = new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url)));
+function storageCore(world, requests: Array<[number, number]>, dirty = []) {
+	world.codec = new RegionCodec(new WebAssembly.Instance(storageModule, {}));
+	const loaded = [];
+	const missing = [];
+	world.core = {
+		tick() {}, takeOutbox() { return []; }, takeRequests() { return requests.splice(0); },
+		loadChunk(cx, cz, data) { loaded.push([cx, cz, data]); },
+		chunkMissing(cx, cz) { missing.push([cx, cz]); },
+		takeDirty() { return dirty.shift() ?? null; }, gameTime: 1n, dayTime: 1n,
+	};
+	return { loaded, missing };
+}
+
+test("DO saves compressed chunks and restores them through storage_call", t => {
+	const { world, sqlite } = fixture(t);
+	const data = new Uint8Array(4096).fill(7);
+	const result = storageCore(world, [[-2, 3]], [{ cx: -2, cz: 3, data }]);
+	assert.equal(world.save(), 1);
+	const row = sqlite.prepare("SELECT data, format FROM chunks").get();
+	assert.equal(row.format, 1);
+	assert.ok(row.data.length < data.length);
+	assert.deepEqual(world.codec.call(3, row.data), data);
+	world.step();
+	assert.deepEqual(result.loaded, [[-2, 3, data]]);
+	assert.deepEqual(result.missing, []);
+});
+
+test("DO migrates a legacy table once and compresses legacy rows only on save", t => {
+	const { world, sqlite, context } = fixture(t, false, true);
+	new WorldDO(context, {}); // Repeated startup must not add the column twice.
+	assert.equal(sqlite.prepare("SELECT format FROM chunks").get().format, 0);
+	const data = new Uint8Array([1, 2, 3]);
+	const result = storageCore(world, [[-2, 3]], [{ cx: -2, cz: 3, data }]);
+	world.step();
+	assert.deepEqual(result.loaded, [[-2, 3, data]]);
+	assert.equal(sqlite.prepare("SELECT format FROM chunks").get().format, 0);
+	world.save();
+	assert.equal(sqlite.prepare("SELECT format FROM chunks").get().format, 1);
+	assert.deepEqual(world.codec.call(3, sqlite.prepare("SELECT data FROM chunks").get().data), data);
+});
+
+test("DO reports corrupt compressed chunks as missing with their coordinates", t => {
+	const { world, sqlite } = fixture(t);
+	const warnings = t.mock.method(console, "warn", () => {});
+	const result = storageCore(world, [[-2, 3], [4, 5], [6, 7]]);
+	const corrupt = world.codec.call(4, new Uint8Array([1, 2, 3]));
+	corrupt[5] ^= 1; // Valid zlib, damaged CRC.
+	sqlite.prepare("INSERT INTO chunks VALUES (?, ?, ?, ?)").run(-2, 3, corrupt, 1);
+	sqlite.prepare("INSERT INTO chunks VALUES (?, ?, ?, ?)").run(4, 5, new Uint8Array([1]), 1);
+	world.step();
+	assert.deepEqual(result.loaded, []);
+	assert.deepEqual(result.missing, [[-2, 3], [4, 5], [6, 7]]);
+	assert.equal(warnings.mock.callCount(), 2);
+	assert.deepEqual(warnings.mock.calls[0].arguments.slice(1, 3), [-2, 3]);
 });

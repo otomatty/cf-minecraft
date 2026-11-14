@@ -1,5 +1,5 @@
 import { decodeArchive, encodeArchive, type ArchiveEntry, MAX_ARCHIVE_BYTES } from "./world-archive.ts";
-import { CorruptRegionError, RegionCodec } from "./region-codec.ts";
+import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
 	seed: string;
