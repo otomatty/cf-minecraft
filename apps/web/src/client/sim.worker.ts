@@ -8,6 +8,7 @@ import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
 import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "./region-codec.ts";
+import { finishWorldImport } from "./world-import.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
@@ -52,7 +53,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	persistence = store ? new PendingChunkSaves(store) : null;
 	const meta = store ? await store.readMeta() : null;
 	// An existing world keeps its seed; otherwise the page's choice or a random one.
-	seed = meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0];
+	seed = BigInt.asIntN(64, meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0]);
 	c.start(seed, msg.generator);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (store) c.setStored(await store.list());
@@ -116,7 +117,7 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
 				} else {
 					if (msg.world === currentWorld) throw new Error("現在開いているワールドには読み込めません");
 					await store.importArchive(msg.world, new Uint8Array(msg.data));
-					post({ type: "imported", id: msg.id, world: msg.world });
+					await finishWorldImport(msg, save, persistence, post);
 				}
 			}).catch(error => post({ type: "archiveError", id: msg.id, message: error instanceof Error ? error.message : String(error) }));
 			break;
