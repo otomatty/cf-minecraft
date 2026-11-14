@@ -18,7 +18,7 @@ export default {
 			limiter: createLimiter(env),
 			auth: {
 				handler: request => hasAuthSecrets(env) ? getAuth().handler(request) : Promise.resolve(json({ error: "unavailable" }, 503)),
-				getUser: async request => (await getAuth().api.getSession({ headers: request.headers }))?.user ?? null,
+				getSession: request => getAuth().api.getSession({ headers: request.headers }),
 			},
 			turnstile: (token, ip) => verifyTurnstile(env.TURNSTILE_SECRET_KEY, token, ip),
 		});

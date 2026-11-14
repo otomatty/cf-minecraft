@@ -30,6 +30,8 @@ const IDLE_STOP_TICKS = 100;
 const AUTHORIZATION_MAX_AGE_MS = 30_000;
 // Allow for clock differences between the Worker and Durable Object hosts.
 const CLOCK_SKEW_MS = 2_000;
+/** Recheck connected Better Auth sessions and membership every minute. */
+const ACCESS_RECHECK_MS = 60_000;
 
 export interface WorldMetrics {
 	ticking: boolean;
@@ -53,6 +55,10 @@ export class WorldDO extends DurableObject<Env> {
 	private seed: bigint | null = null;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
+	private readonly sessions = new Map<number, string>();
+	private worldName: string | null = null;
+	private lastAccessCheck = Date.now();
+	private accessCheckRunning = false;
 	private readonly packetCounts = new Map<number, number>();
 	private nextClient = 1;
 	private timer: ReturnType<typeof setInterval> | null = null;
@@ -154,6 +160,7 @@ export class WorldDO extends DurableObject<Env> {
 			this.sockets.get(previous)?.close(LOGGED_IN_ELSEWHERE, "logged in elsewhere");
 			if (this.sockets.delete(previous)) {
 				this.users.delete(previous);
+				this.sessions.delete(previous);
 				this.packetCounts.delete(previous);
 				core.disconnect(previous);
 			}
@@ -171,10 +178,15 @@ export class WorldDO extends DurableObject<Env> {
 		core.connect(id);
 		this.sockets.set(id, server);
 		this.users.set(id, user);
+		const session = request.headers.get("X-MC-Session");
+		if (session) this.sessions.set(id, session);
+		// The router forwards /ws/:world to its named DO.
+		this.worldName = new URL(request.url).pathname.split("/").filter(Boolean)[1];
 
 		const drop = () => {
 			if (this.sockets.delete(id)) {
 				this.users.delete(id);
+				this.sessions.delete(id);
 				this.packetCounts.delete(id);
 				core.disconnect(id);
 			}
@@ -222,6 +234,7 @@ export class WorldDO extends DurableObject<Env> {
 			this.sockets.get(id)?.close(ACCESS_REVOKED, "access revoked");
 			if (this.sockets.delete(id)) {
 				this.users.delete(id);
+				this.sessions.delete(id);
 				this.packetCounts.delete(id);
 				core.disconnect(id);
 			}
@@ -237,6 +250,7 @@ export class WorldDO extends DurableObject<Env> {
 			socket.close(code, reason);
 			if (this.sockets.delete(id)) {
 				this.users.delete(id);
+				this.sessions.delete(id);
 				this.packetCounts.delete(id);
 				this.ensureCore().disconnect(id);
 			}
@@ -256,9 +270,48 @@ export class WorldDO extends DurableObject<Env> {
 		this.lastMetrics = null;
 	}
 
+	private async recheckAccess(): Promise<void> {
+		const connections = [...this.sessions].map(([id, session]) => ({
+			id, session, user: this.users.get(id),
+		}));
+		if (connections.length === 0) return;
+		try {
+			// At most MAX_PLAYERS session IDs: one query, below D1's bind limit.
+			// Better Auth's SQLite adapter stores dates as ISO 8601 strings.
+			// Owners need membership too, exactly as at the router's entrance.
+			const result = await this.env.DB.prepare(
+				'SELECT s.id, s.userId, s.expiresAt FROM session s JOIN "user" u ON u.id = s.userId ' +
+					"JOIN world_member m ON m.email = lower(u.email) " +
+					"JOIN world w ON w.name = m.world " +
+					`WHERE m.world = ? AND u.emailVerified = 1 AND s.id IN (${connections.map(() => "?").join(",")})`,
+			).bind(this.worldName, ...connections.map(connection => connection.session))
+				.all<{ id: string; userId: string; expiresAt: string }>();
+			if (!result.success) throw new Error("Access recheck query failed");
+			const now = Date.now();
+			for (const connection of connections) {
+				// An old query must never revoke a replacement connection.
+				if (this.sessions.get(connection.id) !== connection.session) continue;
+				if (result.results.some(row =>
+					row.id === connection.session && row.userId === connection.user &&
+					new Date(row.expiresAt).getTime() > now
+				)) continue;
+				this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
+				if (this.sockets.delete(connection.id)) {
+					this.users.delete(connection.id);
+					this.sessions.delete(connection.id);
+					this.packetCounts.delete(connection.id);
+					this.ensureCore().disconnect(connection.id);
+				}
+			}
+		} catch (error) {
+			console.error("access recheck failed", this.worldName, error);
+		}
+	}
+
 	private startTicking(): void {
 		this.idleTicks = 0;
 		if (this.timer !== null) return;
+		this.lastAccessCheck = Date.now();
 		this.pacer = new TickPacer(Date.now());
 		this.timer = setInterval(() => this.onTimer(), TICK_MS);
 	}
@@ -282,6 +335,12 @@ export class WorldDO extends DurableObject<Env> {
 		const core = this.core;
 		if (!core) return;
 		core.tick();
+		const now = Date.now();
+		if (!this.accessCheckRunning && now - this.lastAccessCheck >= ACCESS_RECHECK_MS) {
+			this.lastAccessCheck = now;
+			this.accessCheckRunning = true;
+			void this.recheckAccess().finally(() => { this.accessCheckRunning = false; });
+		}
 		this.packetCounts.clear();
 
 		for (const { client, data } of core.takeOutbox()) {

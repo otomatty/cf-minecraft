@@ -30,6 +30,8 @@ struct State {
     out: Vec<u8>,
     mesh: Vec<u32>,
     padded: Vec<u16>,
+    player: physics::Player,
+    flying: bool,
 }
 
 struct Global(UnsafeCell<Option<State>>);
@@ -84,6 +86,8 @@ pub extern "C" fn client_new() {
         out: Vec::new(),
         mesh: Vec::new(),
         padded: vec![blocks::AIR; PADDED_LEN],
+        player: physics::Player::default(),
+        flying: true,
     };
     // SAFETY: single-threaded.
     unsafe { *STATE.0.get() = Some(st) };
@@ -452,4 +456,59 @@ pub extern "C" fn client_texture_names() -> usize {
 pub extern "C" fn client_block_names() -> usize {
     let names: Vec<&str> = (0..blocks::COUNT).map(|b| blocks::info(b).name).collect();
     emit(state(), names.join("\n").into_bytes())
+}
+
+/// Reset prediction after spawn or a debug camera teleport. Coordinates are feet.
+#[no_mangle]
+pub extern "C" fn client_player_reset(x: f64, y: f64, z: f64) {
+    let st = state();
+    st.player = physics::Player::new([x, y, z]);
+    st.flying = true;
+}
+
+struct Collisions<'a>(&'a World);
+impl physics::CollisionWorld for Collisions<'_> {
+    fn collision_box(&self, x: i32, y: i32, z: i32) -> Option<physics::Aabb> {
+        // Unknown chunks are solid: never predict a fall into unloaded terrain.
+        self.0
+            .get_block(x, y, z)
+            .is_none_or(blocks::is_opaque)
+            .then(|| physics::Aabb::block(x, y, z))
+    }
+}
+
+/// Toggle only when the player can safely start walking. A debug teleport or
+/// a placed block may leave the player inside terrain; flight lets them escape.
+#[no_mangle]
+pub extern "C" fn client_player_toggle_flight() -> u32 {
+    let st = state();
+    if !st.flying || st.player.is_clear(&Collisions(&st.world)) {
+        st.flying = !st.flying;
+    }
+    u32::from(st.flying)
+}
+
+/// One 50ms tick. Flags: jump=1, sprint=2, sneak=4. Output is six f64 LE
+/// values (feet xyz, velocity xyz), followed by on_ground and flying as u8.
+#[no_mangle]
+pub extern "C" fn client_player_tick(forward: f32, strafe: f32, yaw: f32, flags: u32) {
+    let st = state();
+    st.player.tick(
+        physics::Input {
+            forward,
+            strafe,
+            yaw,
+            jump: flags & 1 != 0,
+            sprint: flags & 2 != 0,
+            sneak: flags & 4 != 0,
+            flying: st.flying,
+        },
+        &Collisions(&st.world),
+    );
+    st.out.clear();
+    for v in st.player.position.into_iter().chain(st.player.velocity) {
+        st.out.extend_from_slice(&v.to_le_bytes());
+    }
+    st.out.push(u8::from(st.player.on_ground));
+    st.out.push(u8::from(st.flying));
 }
