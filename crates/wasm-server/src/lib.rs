@@ -212,3 +212,18 @@ pub extern "C" fn server_client_count() -> u32 {
 pub extern "C" fn server_run_scenario(seed: i64, ticks: u32) -> i64 {
     sim::scenario::run(seed, ticks) as i64
 }
+
+/// Region storage operation; returns -1 on invalid input. Uses server_out_ptr.
+///
+/// # Safety
+/// `ptr..ptr+len` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn storage_call(op: u32, ptr: *const u8, len: usize) -> i32 {
+    match storage::call(op, input(ptr, len)) {
+        Ok(out) => {
+            state().out = out;
+            state().out.len() as i32
+        }
+        Err(_) => -1,
+    }
+}
