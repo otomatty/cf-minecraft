@@ -7,7 +7,7 @@ import { type DirtyChunk, ServerCore } from "../shared/server-core.ts";
 import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
 import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
-import { RegionCodec } from "./region-codec.ts";
+import { RegionCodec } from "../shared/region-codec.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;

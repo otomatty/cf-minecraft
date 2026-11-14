@@ -4,7 +4,7 @@
 // node tools/storage.mjs target/storage-fixture.bin
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { RegionCodec } from "../apps/web/src/client/region-codec.ts";
+import { RegionCodec } from "../apps/web/src/shared/region-codec.ts";
 
 const native = readFileSync(process.argv[2] ?? "target/storage-fixture.bin");
 const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../apps/web/src/wasm/server.wasm", import.meta.url)), {});

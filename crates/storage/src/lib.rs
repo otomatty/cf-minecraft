@@ -86,11 +86,11 @@ impl Region {
             .map(|(_, e)| (e.sector as usize * SECTOR, e.count as usize * SECTOR))
     }
     pub fn plan(&self, index: usize, data: &[u8]) -> Result<Vec<Write>> {
-        if index >= ENTRIES || data.len() > MAX_CHUNK {
+        if index >= ENTRIES {
             return Err(Error);
         }
-        let compressed = compress_to_vec_zlib(data, 6);
-        let count = (compressed.len() + 9).div_ceil(SECTOR);
+        let mut payload = encode(data)?;
+        let count = payload.len().div_ceil(SECTOR);
         // Reserve both copies, including the one we are about to replace.
         let mut occupied: Vec<(usize, usize)> = self
             .slots
@@ -114,11 +114,6 @@ impl Region {
         if (sector as u64 + count as u64) * SECTOR as u64 > u32::MAX as u64 {
             return Err(Error);
         }
-        let mut payload = Vec::with_capacity(count * SECTOR);
-        payload.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
-        payload.push(1); // zlib
-        payload.extend_from_slice(&crc(data).to_le_bytes());
-        payload.extend_from_slice(&compressed);
         payload.resize(count * SECTOR, 0);
         let mut location = Vec::with_capacity(24);
         location.extend_from_slice(&generation.to_le_bytes());
@@ -147,6 +142,20 @@ pub struct Write {
     pub bytes: Vec<u8>,
 }
 
+/// Encodes one chunk using the region payload format, without sector padding.
+pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > MAX_CHUNK {
+        return Err(Error);
+    }
+    let compressed = compress_to_vec_zlib(data, 6);
+    let mut payload = Vec::with_capacity(compressed.len() + 9);
+    payload.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+    payload.push(1); // zlib
+    payload.extend_from_slice(&crc(data).to_le_bytes());
+    payload.extend_from_slice(&compressed);
+    Ok(payload)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.len() < 9 || bytes[4] != 1 {
         return Err(Error);
@@ -164,8 +173,12 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// C ABI wire adapter. Input for 0..=2: size u32, index u32, header, optional chunk.
 /// Output: 0=list of u32 indices, 1=offset/length u32 pair (or empty),
-/// 2=repeated offset/length u32 pairs followed by write bytes; 3=decoded chunk.
+/// 2=repeated offset/length u32 pairs followed by write bytes; 3=decoded chunk;
+/// 4=encoded chunk (input is the uncompressed chunk).
 pub fn call(op: u32, bytes: &[u8]) -> Result<Vec<u8>> {
+    if op == 4 {
+        return encode(bytes);
+    }
     if op == 3 {
         return decode(bytes);
     }
@@ -224,6 +237,42 @@ mod tests {
     fn read(file: &[u8], index: usize) -> Option<Vec<u8>> {
         let (at, len) = open(file).range(index)?;
         Some(decode(&file[at..at + len]).unwrap())
+    }
+    #[test]
+    fn standalone_roundtrip_and_region_payload() {
+        for data in [vec![], b"Durable Object chunk".to_vec(), vec![7; 100_000]] {
+            let encoded = call(4, &data).unwrap();
+            assert_eq!(call(3, &encoded).unwrap(), data);
+            assert_eq!(encoded.len(), 9 + u32_at(&encoded, 0) as usize);
+            let plan = open(&[]).plan(0, &data).unwrap();
+            assert_eq!(&plan[0].bytes[..encoded.len()], encoded);
+        }
+    }
+    #[test]
+    fn standalone_size_limit() {
+        let mut data = vec![0; MAX_CHUNK];
+        let encoded = call(4, &data).unwrap();
+        assert_eq!(call(3, &encoded).unwrap(), data);
+        data.push(0);
+        assert!(call(4, &data).is_err());
+        // Oversized zlib streams are also rejected on decode.
+        let compressed = compress_to_vec_zlib(&data, 6);
+        let mut oversized = Vec::new();
+        oversized.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        oversized.push(1);
+        oversized.extend_from_slice(&crc(&data).to_le_bytes());
+        oversized.extend_from_slice(&compressed);
+        assert!(call(3, &oversized).is_err());
+    }
+    #[test]
+    fn standalone_fixed_output() {
+        assert_eq!(
+            call(4, b"Durable Object chunk").unwrap(),
+            [
+                28, 0, 0, 0, 1, 213, 246, 228, 128, 120, 156, 115, 41, 45, 74, 76, 202, 73, 85,
+                240, 79, 202, 74, 77, 46, 81, 72, 206, 40, 205, 203, 6, 0, 76, 246, 7, 112,
+            ]
+        );
     }
     #[test]
     fn roundtrip_overwrite_reuse() {
