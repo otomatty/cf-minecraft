@@ -1,7 +1,7 @@
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
-interface ClientExports {
+export interface ClientExports {
 	memory: WebAssembly.Memory;
 	mc_alloc(len: number): number;
 	mc_free(ptr: number, len: number): void;
@@ -19,6 +19,11 @@ interface ClientExports {
 	client_chunk_count(): number;
 	client_dirty_count(): number;
 	client_pop_dirty(x: number, y: number, z: number): number;
+	client_padded(cx: number, sy: number, cz: number): number;
+	client_padded_ptr(): number;
+	mesh_padded(ptr: number, len: number): number;
+	client_is_dirty(cx: number, sy: number, cz: number): number;
+	client_requeue_dirty(cx: number, sy: number, cz: number): void;
 	client_mesh(cx: number, sy: number, cz: number): number;
 	client_take_unloaded(): number;
 	client_get_block(x: number, y: number, z: number): number;
@@ -131,6 +136,19 @@ export class ClientCore {
 	mesh(cx: number, sy: number, cz: number): Uint32Array {
 		const quads = this.x.client_mesh(cx, sy, cz);
 		return new Uint32Array(this.x.memory.buffer, this.x.client_mesh_ptr(), quads * WORDS_PER_QUAD);
+	}
+
+	padded(cx: number, sy: number, cz: number): Uint16Array<ArrayBuffer> {
+		const len = this.x.client_padded(cx, sy, cz);
+		return new Uint16Array(this.x.memory.buffer, this.x.client_padded_ptr(), len).slice();
+	}
+
+	isDirty(cx: number, sy: number, cz: number): boolean {
+		return this.x.client_is_dirty(cx, sy, cz) !== 0;
+	}
+
+	requeueDirty(cx: number, sy: number, cz: number): void {
+		this.x.client_requeue_dirty(cx, sy, cz);
 	}
 
 	takeUnloaded(): Array<[number, number]> {
