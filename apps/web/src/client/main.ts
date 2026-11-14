@@ -474,7 +474,8 @@ async function main(): Promise<void> {
 	const sendPosition = () => {
 		if (autopilot) return;
 		lastPositionSent = performance.now();
-		transport.send(core.encodePos(camera.x, camera.y - EYE_HEIGHT, camera.z, camera.yaw, camera.pitch));
+		// Rendering may interpolate through a corner; report only resolved physics feet.
+		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
 		if (connection !== "open") return false;

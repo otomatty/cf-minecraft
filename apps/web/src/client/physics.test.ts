@@ -114,3 +114,35 @@ test("server correction resets WASM prediction position and velocity", () => {
 	assert.deepEqual(state.position, client.spawn);
 	assert.deepEqual(state.velocity, [0, 0, 0]);
 });
+
+
+test("position reports use resolved physics feet while rendering crosses a rising corner", () => {
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const server = ServerCore.fromModule(serverModule);
+	const start: [number, number, number] = [0.69, 64.9, 0.5];
+	server.start(1n, Generator.Flat);
+	server.connect(1, false, start);
+	server.packet(1, client.encodeHello(2));
+	for (let i = 0; i < 20; i++) {
+		server.tick();
+		for (const packet of server.takeOutbox()) client.packet(packet.data);
+	}
+	server.packet(1, client.encodeSetBlock(1, 64, 0, 9));
+	server.tick();
+	for (const packet of server.takeOutbox()) client.packet(packet.data);
+	assert.equal(client.getBlock(1, 64, 0), 9);
+	client.resetPlayer(...start);
+	const state = client.tickPlayer(0, -1, 0, true, false, false);
+	assert.ok(state.position[1] >= 65);
+	// A rendered point can overlap the block despite clear physics endpoints.
+	const rendered = start.map((v, axis) => v + (state.position[axis] - v) * 0.3);
+	assert.ok(rendered[0] + Math.fround(0.6) / 2 > 1 && rendered[1] < 65);
+	// This is the same encoder used by main.ts's sendPosition, with no camera input.
+	const report = client.encodePlayerPos(0, 0);
+	const view = new DataView(report.buffer, report.byteOffset, report.byteLength);
+	assert.deepEqual([1, 9, 17].map(offset => view.getFloat64(offset)), state.position);
+	server.packet(1, report);
+	server.tick();
+	assert.deepEqual(server.clientPosition(1), state.position);
+	assert.equal(server.takeOutbox().filter(p => p.data[0] === S2C.PlayerCorrect).length, 0);
+});

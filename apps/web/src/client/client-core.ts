@@ -215,6 +215,11 @@ export class ClientCore {
 		return this.out(this.x.client_enc_pos(x, y, z, yaw, pitch));
 	}
 
+	/** Report the latest collision-resolved physics state, independent of rendering. */
+	encodePlayerPos(yaw: number, pitch: number): Uint8Array<ArrayBuffer> {
+		return this.encodePos(...this.playerPosition, yaw, pitch);
+	}
+
 	get playerPosition(): [number, number, number] {
 		return [this.x.client_player_position(0), this.x.client_player_position(1), this.x.client_player_position(2)];
 	}

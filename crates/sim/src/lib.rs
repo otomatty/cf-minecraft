@@ -564,32 +564,39 @@ fn valid_position(pos: [f64; 3]) -> bool {
 // Unknown chunks are solid, just as in client prediction. No terrain is
 // generated on demand by a movement packet (including stored chunks in flight).
 fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
+    let origin = physics::Player::new(from).bounds();
     let collisions = |x, y, z| {
-        world
-            .get_block(x, y, z)
-            .is_none_or(blocks::is_opaque)
-            .then(|| physics::Aabb::block(x, y, z))
+        let bounds = physics::Aabb::block(x, y, z);
+        match world.get_block(x, y, z) {
+            // Ignore only known solids already intersecting the starting body,
+            // for this report's sweep AND endpoint. This permits gradual escape
+            // from placements, but a later report cannot reenter an escaped block.
+            Some(state) if blocks::is_opaque(state) && !origin.intersects(bounds) => Some(bounds),
+            // Unknown chunks remain solid even if the origin overlaps them.
+            None => Some(bounds),
+            _ => None,
+        }
     };
     let target = physics::Player::new(to);
     if !target.is_clear(&collisions) {
         return false;
     }
-    // Small sweeps keep the broad phase bounded even for a full reserve.
-    // Y-first clipping allows predicted upward steps, including stepping onto
-    // a predicted placement later rejected by the server: no support is required.
     let delta = std::array::from_fn::<_, 3, _>(|a| to[a] - from[a]);
-    let steps = delta.iter().fold(1.0_f64, |n, d| n.max(d.abs().ceil())) as usize;
     let mut player = physics::Player::new(from);
-    for i in 1..=steps {
-        let desired = std::array::from_fn(|a| {
-            from[a] + delta[a] * i as f64 / steps as f64 - player.position[a]
-        });
-        let actual = physics::resolve(&collisions, player.bounds(), desired);
-        if (0..3).any(|a| (actual[a] - desired[a]).abs() >= COLLISION_TOLERANCE) {
-            return false;
-        }
-        for (a, d) in actual.into_iter().enumerate() {
-            player.position[a] += d;
+    // Follow prediction's complete Y, then complete X, then complete Z path.
+    // Split only within each axis: a full-reserve report has bounded broad
+    // phases without turning the path into a diagonal staircase through solids.
+    for axis in [1, 0, 2] {
+        let steps = delta[axis].abs().ceil().max(1.0) as usize;
+        for i in 1..=steps {
+            let mut desired = [0.0; 3];
+            desired[axis] =
+                from[axis] + delta[axis] * i as f64 / steps as f64 - player.position[axis];
+            let actual = physics::resolve(&collisions, player.bounds(), desired);
+            if (actual[axis] - desired[axis]).abs() >= COLLISION_TOLERANCE {
+                return false;
+            }
+            player.position[axis] += actual[axis];
         }
     }
     true
@@ -641,6 +648,165 @@ mod tests {
         }
         s.take_outbox();
         s
+    }
+
+    fn joined_at(position: [f64; 3]) -> Server {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect_at(1, false, Some(position));
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 3,
+            }
+            .encode(),
+        );
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.take_outbox();
+        s
+    }
+
+    #[test]
+    fn rising_corner_reports_resolved_physics_not_interpolated_positions() {
+        let start = [0.69, 64.9, 0.5];
+        let mut s = joined_at(start);
+        s.world.set_block(1, 64, 0, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.21, 0.4, 0.0];
+        for tick in 0..5 {
+            let collisions = |x, y, z| {
+                s.world
+                    .get_block(x, y, z)
+                    .is_none_or(blocks::is_opaque)
+                    .then(|| physics::Aabb::block(x, y, z))
+            };
+            player.tick(
+                physics::Input {
+                    flying: true,
+                    ..Default::default()
+                },
+                &collisions,
+            );
+            assert!(player.is_clear(&collisions));
+            if tick == 0 {
+                let rendered =
+                    std::array::from_fn(|a| start[a] + (player.position[a] - start[a]) * 0.1);
+                // Both physics endpoints are safe, but the camera's straight
+                // interpolation crosses the corner. It must never be reported.
+                assert!(!physics::Player::new(rendered).is_clear(&collisions));
+            }
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 0, "tick {tick}");
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+    }
+
+    #[test]
+    fn overlapping_placement_allows_gradual_escape_but_not_reentry_or_other_solids() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        s.handle_packet(
+            1,
+            &C2S::SetBlock {
+                x: 0,
+                y: 65,
+                z: 0,
+                state: blocks::BRICKS,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.get_block(0, 65, 0), Some(blocks::BRICKS));
+        // A separate obstacle must still block movement while embedded.
+        s.world.set_block(0, 65, 1, blocks::BRICKS);
+        s.handle_packet(1, &position_packet([0.5, 65.0, 1.1]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 1);
+        assert_eq!(s.client_position(1), Some(start));
+        let mut player = physics::Player::new(start);
+        for _ in 0..12 {
+            let collisions = |x, y, z| {
+                s.world
+                    .get_block(x, y, z)
+                    .is_none_or(blocks::is_opaque)
+                    .then(|| physics::Aabb::block(x, y, z))
+            };
+            player.tick(
+                physics::Input {
+                    strafe: -1.0,
+                    flying: true,
+                    ..Default::default()
+                },
+                &collisions,
+            );
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 1);
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+        assert!(player.position[0] - physics::WIDTH / 2.0 > 1.0);
+        s.handle_packet(1, &position_packet(start));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 2);
+        assert_eq!(s.client_position(1), Some(player.position));
+    }
+
+    #[test]
+    fn falling_motion_completes_y_before_x() {
+        let start = [0.65, 68.0, 0.5];
+        let mut s = joined_at(start);
+        s.world.set_block(1, 67, 0, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.28, -3.0, 0.0];
+        let collisions = |x, y, z| {
+            s.world
+                .get_block(x, y, z)
+                .is_none_or(blocks::is_opaque)
+                .then(|| physics::Aabb::block(x, y, z))
+        };
+        player.tick(physics::Input::default(), &collisions);
+        assert_eq!(player.position, [0.93, 65.0, 0.5]);
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 0);
+        assert_eq!(s.client_position(1), Some(player.position));
+    }
+
+    #[test]
+    fn fast_diagonal_motion_completes_x_before_z_and_cannot_tunnel() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        // The X-then-Z path goes around this obstacle; a diagonal crosses it.
+        s.world.set_block(1, 65, 1, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [3.0, 0.0, 3.0];
+        let collisions = |x, y, z| {
+            s.world
+                .get_block(x, y, z)
+                .is_none_or(blocks::is_opaque)
+                .then(|| physics::Aabb::block(x, y, z))
+        };
+        player.tick(
+            physics::Input {
+                flying: true,
+                ..Default::default()
+            },
+            &collisions,
+        );
+        assert_eq!(player.position, [3.5, 65.0, 3.5]);
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 0);
+        assert_eq!(s.client_position(1), Some(player.position));
+        // A thin wall directly on the next X leg must clip even a fast report.
+        s.world.set_block(5, 65, 3, blocks::BRICKS);
+        s.handle_packet(1, &position_packet([8.5, 65.0, 8.5]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 1);
+        assert_eq!(s.client_position(1), Some(player.position));
     }
 
     #[test]
