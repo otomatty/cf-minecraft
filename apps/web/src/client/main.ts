@@ -62,6 +62,8 @@ interface DebugHandle {
 	getBlock(x: number, y: number, z: number): number;
 	runScenario(seed: string, ticks: number): Promise<string>;
 	flush(): void;
+	exportWorld(): Promise<Uint8Array>;
+	importWorld(name: string, bytes: Uint8Array): Promise<void>;
 }
 
 declare global {
@@ -176,6 +178,53 @@ async function main(): Promise<void> {
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
 			: new LocalTransport(serverWasmUrl, worldName, seedParam, Generator.DebugHills, handlers);
+
+	const local = () => {
+		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
+		return transport;
+	};
+	const exportWorld = () => local().exportWorld();
+	const importWorld = (name: string, bytes: Uint8Array) => local().importWorld(name, bytes);
+	$("world-archive").hidden = serverKind !== "local";
+	const exportButton = $<HTMLButtonElement>("world-export");
+	const importButton = $<HTMLButtonElement>("world-import");
+	const archiveStatus = $("archive-status");
+	const fileInput = $<HTMLInputElement>("world-file");
+	async function archiveAction(action: () => Promise<void>): Promise<void> {
+		exportButton.disabled = importButton.disabled = true;
+		archiveStatus.textContent = "処理中…";
+		try { await action(); }
+		catch (error) { archiveStatus.textContent = `処理に失敗しました: ${error instanceof Error ? error.message : String(error)}`; }
+		finally { exportButton.disabled = importButton.disabled = false; }
+	}
+	exportButton.addEventListener("click", () => void archiveAction(async () => {
+		const bytes = await exportWorld();
+		const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+		const link = document.createElement("a");
+		link.href = url;
+		link.download = `${worldName}-${new Date().toISOString().slice(0, 10)}.mcworld`;
+		document.body.append(link);
+		link.click(); link.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+		archiveStatus.textContent = "ワールドを書き出しました";
+	}));
+	importButton.addEventListener("click", () => { fileInput.value = ""; fileInput.click(); });
+	fileInput.addEventListener("change", () => {
+		const file = fileInput.files?.[0];
+		if (!file) return;
+		const defaultName = file.name.replace(/\.mcworld$/i, "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 32) || "imported";
+		const name = window.prompt("新しいワールド名（英小文字・数字で始まる32文字以内の英小文字・数字・_・-）", defaultName);
+		if (name === null) return;
+		void archiveAction(async () => {
+			if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) throw new Error("ワールド名の形式が正しくありません");
+			if (file.size > 1024 ** 3) throw new Error("ファイルは 1 GiB 以下にしてください");
+			await importWorld(name, new Uint8Array(await file.arrayBuffer()));
+			archiveStatus.textContent = "ワールドを読み込みました";
+			const url = new URL(location.href);
+			url.searchParams.set("world", name);
+			location.assign(url);
+		});
+	});
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
@@ -558,6 +607,8 @@ async function main(): Promise<void> {
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
 		runScenario,
 		flush: () => transport.flush(),
+		exportWorld,
+		importWorld,
 	};
 	requestAnimationFrame(tick);
 }
@@ -572,6 +623,8 @@ window.__mc = {
 	getBlock: () => -1,
 	runScenario,
 	flush: () => {},
+	exportWorld: async () => { throw new Error("初期化中です"); },
+	importWorld: async () => { throw new Error("初期化中です"); },
 };
 
 main().catch((err) => {
