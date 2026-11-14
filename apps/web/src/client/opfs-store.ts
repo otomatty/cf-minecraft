@@ -194,7 +194,7 @@ export class OpfsStore {
 	async readMeta(): Promise<Meta | null> {
 		const bytes = await this.readFile("meta.json");
 		if (!bytes) return null;
-		try { return parseMeta(bytes); } catch { return null; }
+		try { return parseMeta(bytes, false); } catch { return null; }
 	}
 
 	/** Read a snapshot inside the same queue as region and metadata writes. */
@@ -218,9 +218,10 @@ export class OpfsStore {
 	async importArchive(world: string, bytes: Uint8Array): Promise<void> {
 		if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(world)) throw new Error("ワールド名は英小文字・数字で始まる32文字以内の英小文字・数字・_・-にしてください");
 		const entries = decodeArchive(bytes);
+		const meta = parseMeta(entries.find(entry => entry.name === "meta.json")!.data, true);
 		for (const { name, data } of entries) {
-			if (name === "meta.json") { parseMeta(data); continue; }
-			const input = new Uint8Array(8 + Math.min(data.length, 49152));
+			if (name === "meta.json") continue;
+			const input = new Uint8Array(8 + 49152);
 			new DataView(input.buffer).setUint32(0, data.length, true);
 			input.set(data.subarray(0, 49152), 8);
 			try {
@@ -241,7 +242,7 @@ export class OpfsStore {
 			const target = new OpfsStore(dir, this.codec);
 			try {
 				for (const entry of entries) if (entry.name !== "meta.json") await target.writeFile(entry.name, entry.data);
-				await target.writeFile("meta.json", entries.find(entry => entry.name === "meta.json")!.data);
+				await target.writeMeta(meta);
 			} catch (error) {
 				await root.removeEntry(name, { recursive: true });
 				throw error;
@@ -257,14 +258,20 @@ export class OpfsStore {
 }
 
 /** Shared validation for saved and imported metadata. */
-function parseMeta(bytes: Uint8Array): Meta {
+function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
 	const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Partial<Meta> | null;
-	if (!meta || typeof meta.seed !== "string" || !/^-?\d{1,19}$/.test(meta.seed)
-		|| BigInt(meta.seed) < -(1n << 63n) || BigInt(meta.seed) >= 1n << 63n) throw new Error("meta.json のシードが不正です");
-	for (const value of [meta.gameTime ?? "0", meta.dayTime ?? "0"]) {
-		if (typeof value !== "string" || !/^-?\d{1,19}$/.test(value) || BigInt(value) < -(1n << 63n) || BigInt(value) >= 1n << 63n) throw new Error("meta.json の時刻が不正です");
-	}
-	return { seed: meta.seed, gameTime: meta.gameTime ?? "0", dayTime: meta.dayTime ?? "0" };
+	if (!meta || typeof meta.seed !== "string" || !/^-?\d{1,19}$/.test(meta.seed)) throw new Error("meta.json のシードが不正です");
+	const time = (value: unknown): string => {
+		if (value === undefined || value === null) return "0";
+		if (typeof value === "string" && /^-?\d{1,20}$/.test(value)) return BigInt.asIntN(64, BigInt(value)).toString();
+		if (strictTimes) throw new Error("meta.json の時刻が不正です");
+		return "0";
+	};
+	return {
+		seed: BigInt.asIntN(64, BigInt(meta.seed)).toString(),
+		gameTime: time(meta.gameTime),
+		dayTime: time(meta.dayTime),
+	};
 }
 
 interface PendingChunk {

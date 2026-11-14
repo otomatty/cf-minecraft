@@ -396,7 +396,9 @@ test("archive import preserves chunks and metadata, refuses overwrite, writes me
 	await assert.rejects(store.importArchive("copied", bytes), /既に存在/);
 });
 
-test("invalid archives, metadata, region tables and world names never create a directory", async () => {
+test("invalid archives, metadata, region tables and world names never create a directory", async (t) => {
+	// Exercise a codec validation failure independently of the accepted short-file format.
+	t.mock.method(RegionCodec.prototype, "call", () => { throw new CorruptRegionError(); });
 	const store = await open(new MemoryDirectory());
 	const dirs = importRoot();
 	const metadata = new TextEncoder().encode(JSON.stringify(meta));
@@ -463,7 +465,8 @@ test("OPFS opens, saves, and imports without Web Locks", async () => {
 	}
 });
 
-test("archive import reports corrupt regions in Japanese before creating a directory", async () => {
+test("archive import reports corrupt regions in Japanese before creating a directory", async (t) => {
+	t.mock.method(RegionCodec.prototype, "call", () => { throw new CorruptRegionError(); });
 	const store = await open(new MemoryDirectory());
 	const dirs = importRoot();
 	const bytes = encodeArchive([
@@ -475,4 +478,61 @@ test("archive import reports corrupt regions in Japanese before creating a direc
 		cause: new CorruptRegionError(),
 	});
 	assert.equal(dirs.size, 0);
+});
+
+
+test("archive import accepts empty and short region files like normal reads", async () => {
+	for (const data of [new Uint8Array(), new Uint8Array([1, 2, 3]), new Uint8Array(49151)]) {
+		const source = new MemoryDirectory();
+		source.seed("r.-1.2", data);
+		const store = await open(source);
+		await store.writeMeta(meta);
+		assert.deepEqual(await store.list(), []);
+		const bytes = await store.exportArchive();
+		const dirs = importRoot();
+		await store.importArchive("short-region", bytes);
+		const dir = dirs.get("world-short-region")!;
+		assert.deepEqual(dir.files.get("r.-1.2")!.durable, data);
+		const imported = await open(dir);
+		assert.deepEqual(await imported.list(), []);
+		assert.deepEqual(await imported.readMeta(), meta);
+	}
+});
+
+test("existing and imported metadata normalize seeds and times to signed i64", async () => {
+	for (const values of [
+		{ seed: "9223372036854775808", gameTime: "18446744073709551615", dayTime: "-9223372036854775809" },
+		{ seed: "-9999999999999999999", gameTime: "99999999999999999999", dayTime: "-99999999999999999999" },
+		{ seed: "2026" },
+	]) {
+		const normalized = {
+			seed: BigInt.asIntN(64, BigInt(values.seed)).toString(),
+			gameTime: BigInt.asIntN(64, BigInt(values.gameTime ?? "0")).toString(),
+			dayTime: BigInt.asIntN(64, BigInt(values.dayTime ?? "0")).toString(),
+		};
+		const dir = new MemoryDirectory();
+		dir.seed("meta.json", new TextEncoder().encode(JSON.stringify(values)));
+		const store = await open(dir);
+		assert.deepEqual(await store.readMeta(), normalized);
+		const bytes = await store.exportArchive();
+		const dirs = importRoot();
+		await store.importArchive("normalized", bytes);
+		const imported = await open(dirs.get("world-normalized")!);
+		assert.deepEqual(await imported.readMeta(), normalized);
+	}
+});
+
+test("invalid times fall back to zero for existing worlds but are refused on import", async () => {
+	for (const field of ["gameTime", "dayTime"]) {
+		for (const value of ["not-a-number", 3, false, {}, "123456789012345678901"]) {
+			const dir = new MemoryDirectory();
+			dir.seed("meta.json", new TextEncoder().encode(JSON.stringify({ ...meta, [field]: value })));
+			const store = await open(dir);
+			assert.deepEqual(await store.readMeta(), { ...meta, [field]: "0" });
+			const bytes = await store.exportArchive();
+			const dirs = importRoot();
+			await assert.rejects(store.importArchive("invalid-time", bytes), /meta.json の時刻が不正です/);
+			assert.equal(dirs.size, 0);
+		}
+	}
 });
