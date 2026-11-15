@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
 import { paintTexture, downsample, textureIconPixels, LEAVES_TINT, WATER_TINT } from "./textures.ts";
 import { ClientCore } from "./client-core.ts";
-import { terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);
@@ -46,7 +46,7 @@ test("terrain tint layers follow texture names when the texture array is reorder
 function quad(x, y, z, rotated = false) {
 	const vertices = [[x, y, z], [x + 1, y, z], [x + 1, y + 1, z], [x, y + 1, z]];
 	if (rotated) vertices.push(vertices.shift());
-	return vertices.flatMap(([x, y, z]) => [x | y << 5 | z << 10, 0]);
+	return vertices.flatMap(([x, y, z]) => [x * 16 | (y * 16) << 9 | (z * 16) << 18, 0]);
 }
 
 test("quad centers and far-first order preserve whole quads and rotated AO diagonals", () => {
@@ -57,6 +57,41 @@ test("quad centers and far-first order preserve whole quads and rotated AO diago
 	assert.deepEqual([...indices], [4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 0, 1, 2, 0, 2, 3]);
 	assert.deepEqual([...sortedQuadIndices(centers, [1.5, 2.5, 16])].filter((_, i) => i % 6 === 0), [0, 8, 4]);
 	assert.deepEqual([...sortedQuadIndices(centers, [1.5, 2.5, 6])].filter((_, i) => i % 6 === 0), [0, 4, 8]);
+});
+
+test("quad centers decode sixteenths, section edge 256, shading bits and water height", () => {
+	const words = new Uint32Array([[240, 256, 240], [256, 256, 240], [256, 256, 256], [240, 256, 256]].flatMap(([x, y, z]) => [x | y << 9 | z << 18, 0]));
+	for (let i = 0; i < words.length; i += 2) {
+		words[i] |= 5 << 27 | 3 << 30;
+		words[i + 1] = (1 << 31 | 16 << 26 | 16 << 21 | 15 << 17 | 15 << 13 | 4095) >>> 0;
+	}
+	const center = quadCenters(words);
+	assert.equal(center[0], 15.5);
+	assert.ok(Math.abs(center[1] - (16 - 1 / 9)) < 1e-6);
+	assert.equal(center[2], 15.5);
+	const partial = quadCenters(new Uint32Array(quad(0.3125, 0.5, 0.6875)));
+	assert.deepEqual([...partial], [0.8125, 1, 0.6875]);
+});
+
+test("outlines use the selected shape bounds relative to the camera", () => {
+	for (const [min, max] of [[[0, 0, 0], [1, 0.5, 1]], [[0, 0.5, 0], [1, 1, 1]], [[5 / 16, 0, 5 / 16], [11 / 16, 10 / 16, 11 / 16]]]) {
+		const vertices = outlineBox({ x: -16, y: 80, z: 3, face: 1, hitY: 1, min, max }, [-17, 79, 3], [0.5, 0.25, 0.75]);
+		const relative = [0.5, 0.75, -0.75];
+		for (let a = 0; a < 3; a++) {
+			const values = [...vertices].filter((_, i) => i % 3 === a);
+			assert.ok(Math.abs(Math.min(...values) - (relative[a] + min[a] - 0.002)) < 1e-6);
+			assert.ok(Math.abs(Math.max(...values) - (relative[a] + max[a] + 0.002)) < 1e-6);
+		}
+	}
+});
+
+test("plant textures are deterministic cutouts with visible colored pixels", () => {
+	for (const name of ["red_flower", "yellow_flower", "short_grass"]) {
+		const pixels = paintTexture(name);
+		assert.deepEqual(pixels, paintTexture(name));
+		const alpha = [...pixels].filter((_, i) => i % 4 === 3);
+		assert.ok(alpha.includes(0) && alpha.includes(255));
+	}
 });
 
 test("sections draw far-first every frame and sort near-first, including negative world coordinates", () => {
@@ -144,7 +179,7 @@ test("original glass and leaf textures contain holes; water stays grayscale and 
 
 test("cutout mipmaps preserve threshold coverage to the nearest representable texel", () => {
 	const coverage = pixels => [...pixels].filter((v, i) => i % 4 === 3 && v >= 128).length / (pixels.length / 4);
-	for (const name of ["glass", "oak_leaves"]) {
+	for (const name of ["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"]) {
 		let pixels = paintTexture(name);
 		for (let size = 16; size > 1; size >>= 1) {
 			const expected = coverage(pixels);

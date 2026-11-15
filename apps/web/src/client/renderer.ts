@@ -14,12 +14,12 @@
 
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
-import { MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
+import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
 import { downsample, GRASS_TINT, LEAVES_TINT, WATER_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 
 const MAX_SECTIONS = 16384;
-/** Leaves retain internal faces: every block can emit six quads. */
+/** Cube/one-box slab: at most six quads per cell; double-sided Cross: four. */
 const MAX_QUADS = 4096 * 6;
 const GLOBALS_BYTES = 272;
 const MIP_LEVELS = 5;
@@ -70,9 +70,10 @@ struct VOut {
 
 @vertex
 fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut {
-	let local = vec3<f32>(f32(a.x & 31u), f32((a.x >> 5u) & 31u), f32((a.x >> 10u) & 31u));
-	let face = (a.x >> 15u) & 7u;
-	let ao = (a.x >> 18u) & 3u;
+	var local = vec3<f32>(f32(a.x & 511u), f32((a.x >> 9u) & 511u), f32((a.x >> 18u) & 511u)) / 16.0;
+	local.y -= f32(a.y >> 31u) / 9.0;
+	let face = (a.x >> 27u) & 7u;
+	let ao = (a.x >> 30u) & 3u;
 	let rel = vec3<f32>(origins[section].xyz - g.camBlock.xyz) + local - g.camFrac.xyz;
 
 	// Direction order: down, up, north, south, west, east.
@@ -81,7 +82,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 
 	var out: VOut;
 	out.pos = g.viewProj * vec4<f32>(rel, 1.0);
-	out.uv = vec2<f32>(f32((a.x >> 20u) & 1u), f32((a.x >> 21u) & 1u));
+	out.uv = vec2<f32>(f32((a.y >> 21u) & 31u), f32((a.y >> 26u) & 31u)) / 16.0;
 	out.shade = faceShade[face] * aoShade[ao];
 	out.rel = rel;
 	out.layer = a.y & 4095u;
@@ -331,7 +332,7 @@ export class Renderer {
 					{ bytesPerRow: size * 4 },
 					[size, size, 1],
 				);
-				if (size > 1) pixels = downsample(pixels, size, name === "glass" || name === "oak_leaves");
+				if (size > 1) pixels = downsample(pixels, size, ["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"].includes(name));
 			}
 		});
 		const sampler = device.createSampler({
@@ -466,7 +467,7 @@ export class Renderer {
 		const old = this.sections.get(k);
 		const layers = splitMeshLayers(words, counts);
 		const quads = words.length / WORDS_PER_QUAD;
-		if (quads > MAX_QUADS) throw new Error("Section mesh exceeds cube face limit");
+		if (quads > MAX_QUADS) throw new Error("Section mesh exceeds model quad limit");
 		if (quads === 0) {
 			if (old) this.dropSection(k, old);
 			return;
@@ -530,7 +531,7 @@ export class Renderer {
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: readonly [number, number, number] | null, fovY = FOV_Y, dayTime = 6000): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -636,11 +637,12 @@ export class Renderer {
 	}
 }
 
-/** The twelve edges of a slightly enlarged unit cube around a block, relative to the camera. */
-function outlineBox(target: readonly [number, number, number], block: number[], frac: number[]): Float32Array<ArrayBuffer> {
+/** Twelve edges of the selected box, slightly enlarged and relative to the camera. */
+export function outlineBox(target: RayHit, block: number[], frac: number[]): Float32Array<ArrayBuffer> {
 	const e = 0.002;
-	const lo = [0, 1, 2].map((a) => target[a] - block[a] - frac[a] - e);
-	const hi = lo.map((v) => v + 1 + 2 * e);
+	const position = [target.x, target.y, target.z];
+	const lo = position.map((v, a) => v + target.min[a] - block[a] - frac[a] - e);
+	const hi = position.map((v, a) => v + target.max[a] - block[a] - frac[a] + e);
 	const corner = (n: number) => [n & 1 ? hi[0] : lo[0], n & 2 ? hi[1] : lo[1], n & 4 ? hi[2] : lo[2]];
 	const edges = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7];
 	const out = new Float32Array(24 * 3);

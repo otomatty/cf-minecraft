@@ -6,8 +6,8 @@
 //!
 //! Vertex layout, two `u32` per vertex:
 //! ```text
-//! word 0: x:5 | y:5 | z:5 | face:3 | ao:2 | u:1 | v:1     (x, y, z in 0..=16)
-//! word 1: texture layer:12 | tint:1 | sky:4 | block:4
+//! word 0: x:9 | y:9 | z:9 | face:3 | ao:2 (position in sixteenths, 0..=256)
+//! word 1: texture layer:12 | tint:1 | sky:4 | block:4 | u:5 | v:5 | water_top:1
 //! ```
 //! Four vertices per quad, counter-clockwise seen from outside. The index
 //! pattern `0 1 2, 0 2 3` is shared by all quads; when ambient occlusion asks
@@ -77,17 +77,17 @@ const FACES: [Face; 6] = [
 
 const CORNERS: [(i32, i32); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
 
-/// Texture coordinates of a block corner (each component 0 or 1) on a face.
+/// Texture coordinates in sixteenths, cropped to the box position on a face.
 /// Side faces keep "up" at v = 0 and are not mirrored when seen from outside.
 #[inline]
 fn uv(face: usize, p: [i32; 3]) -> (u32, u32) {
     let (u, v) = match face {
-        DOWN => (p[0], 1 - p[2]),
+        DOWN => (p[0], 16 - p[2]),
         UP => (p[0], p[2]),
-        NORTH => (1 - p[0], 1 - p[1]),
-        SOUTH => (p[0], 1 - p[1]),
-        WEST => (p[2], 1 - p[1]),
-        _ => (1 - p[2], 1 - p[1]),
+        NORTH => (16 - p[0], 16 - p[1]),
+        SOUTH => (p[0], 16 - p[1]),
+        WEST => (p[2], 16 - p[1]),
+        _ => (16 - p[2], 16 - p[1]),
     };
     (u as u32, v as u32)
 }
@@ -135,85 +135,145 @@ pub fn mesh_section_layers(
                 }
                 let info = blocks::info(state);
                 let out = &mut layers[info.layer as usize];
-                for (f, face) in FACES.iter().enumerate() {
-                    let n = face.normal;
-                    let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
-                    let neighbor = padded[padded_index(ax, ay, az)];
-                    if blocks::occludes(neighbor) || (state == neighbor && info.cull_same) {
-                        continue;
-                    }
-
-                    let mut words = [[0u32; 2]; 4];
-                    let mut ao = [0u32; 4];
-                    for (k, &(i, j)) in CORNERS.iter().enumerate() {
-                        let (si, sj) = (2 * i - 1, 2 * j - 1);
-                        let solid = |d: [i32; 3]| -> bool {
-                            blocks::occludes(padded[padded_index(ax + d[0], ay + d[1], az + d[2])])
-                        };
-                        let side1 = solid([face.b[0] * si, face.b[1] * si, face.b[2] * si]);
-                        let side2 = solid([face.c[0] * sj, face.c[1] * sj, face.c[2] * sj]);
-                        let corner = solid([
-                            face.b[0] * si + face.c[0] * sj,
-                            face.b[1] * si + face.c[1] * sj,
-                            face.b[2] * si + face.c[2] * sj,
-                        ]);
-                        ao[k] = if side1 && side2 {
-                            0
-                        } else {
-                            3 - (side1 as u32 + side2 as u32 + corner as u32)
-                        };
-
-                        // Corner position inside the unit cube.
-                        let on = |axis: usize| -> i32 {
-                            if n[axis] != 0 {
-                                (n[axis] > 0) as i32
-                            } else {
-                                face.b[axis] * i + face.c[axis] * j
-                            }
-                        };
-                        let p = [on(0), on(1), on(2)];
-                        let (u, v) = uv(f, p);
-                        words[k][0] = (x + p[0]) as u32
-                            | ((y + p[1]) as u32) << 5
-                            | ((z + p[2]) as u32) << 10
-                            | (f as u32) << 15
-                            | ao[k] << 18
-                            | u << 20
-                            | v << 21;
-                        let mut sums = [0u32; 2];
-                        let mut count = 0;
-                        for db in [0, si] {
-                            for dc in [0, sj] {
-                                let idx = padded_index(
-                                    ax + face.b[0] * db + face.c[0] * dc,
-                                    ay + face.b[1] * db + face.c[1] * dc,
-                                    az + face.b[2] * db + face.c[2] * dc,
-                                );
-                                if !blocks::occludes(padded[idx]) {
-                                    let (sky, block) =
-                                        light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
-                                    sums[0] += sky as u32;
-                                    sums[1] += block as u32;
-                                    count += 1;
-                                }
+                if info.model == blocks::Model::Cross {
+                    let idx = padded_index(x, y, z);
+                    let (sky, block) = light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
+                    for plane in [
+                        [[2, 0, 2], [14, 0, 14], [14, 16, 14], [2, 16, 2]],
+                        [[14, 0, 2], [2, 0, 14], [2, 16, 14], [14, 16, 2]],
+                    ] {
+                        for reverse in [false, true] {
+                            for k in 0..4 {
+                                let j = if reverse { 3 - k } else { k };
+                                let p = plane[j];
+                                out.extend(pack(
+                                    [x * 16 + p[0], y * 16 + p[1], z * 16 + p[2]],
+                                    UP,
+                                    3,
+                                    ((j == 1 || j == 2) as u32 * 16, (j < 2) as u32 * 16),
+                                    info.tex[0],
+                                    info.tint[0],
+                                    sky as u32,
+                                    block as u32,
+                                    false,
+                                ));
                             }
                         }
-                        // The face's direct neighbor is always a non-occluding sample.
-                        debug_assert!(count > 0);
-                        let sky = (sums[0] + count / 2) / count;
-                        let block = (sums[1] + count / 2) / count;
-                        words[k][1] = info.tex[f] as u32
-                            | (info.tint[f] as u32) << 12
-                            | sky << 13
-                            | block << 17;
                     }
+                    continue;
+                }
+                let boxes = match info.model {
+                    blocks::Model::Boxes(boxes) => boxes,
+                    _ => &[blocks::FULL_BOX],
+                };
+                for bounds in boxes {
+                    for (f, face) in FACES.iter().enumerate() {
+                        let n = face.normal;
+                        let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
+                        let neighbor = padded[padded_index(ax, ay, az)];
+                        let axis = n.iter().position(|v| *v != 0).unwrap();
+                        let boundary = if n[axis] < 0 {
+                            bounds.min[axis] == 0
+                        } else {
+                            bounds.max[axis] == 16
+                        };
+                        if boundary
+                            && (blocks::occludes(neighbor) || (state == neighbor && info.cull_same))
+                        {
+                            continue;
+                        }
 
-                    // Split along the brighter diagonal so shading is symmetric.
-                    let start = if ao[0] + ao[2] >= ao[1] + ao[3] { 0 } else { 1 };
-                    for k in 0..4 {
-                        let w = words[(start + k) % 4];
-                        out.push(w[0]);
-                        out.push(w[1]);
+                        let mut words = [[0u32; 2]; 4];
+                        let mut ao = [0u32; 4];
+                        for (k, &(i, j)) in CORNERS.iter().enumerate() {
+                            let (si, sj) = (2 * i - 1, 2 * j - 1);
+                            let solid = |d: [i32; 3]| -> bool {
+                                blocks::occludes(
+                                    padded[padded_index(ax + d[0], ay + d[1], az + d[2])],
+                                )
+                            };
+                            let side1 = solid([face.b[0] * si, face.b[1] * si, face.b[2] * si]);
+                            let side2 = solid([face.c[0] * sj, face.c[1] * sj, face.c[2] * sj]);
+                            let corner = solid([
+                                face.b[0] * si + face.c[0] * sj,
+                                face.b[1] * si + face.c[1] * sj,
+                                face.b[2] * si + face.c[2] * sj,
+                            ]);
+                            ao[k] = if !boundary {
+                                3
+                            } else if side1 && side2 {
+                                0
+                            } else {
+                                3 - (side1 as u32 + side2 as u32 + corner as u32)
+                            };
+
+                            // Corner position inside the unit cube.
+                            let on = |axis: usize| -> i32 {
+                                if n[axis] != 0 {
+                                    if n[axis] > 0 {
+                                        bounds.max[axis] as i32
+                                    } else {
+                                        bounds.min[axis] as i32
+                                    }
+                                } else {
+                                    bounds.min[axis] as i32
+                                        + (bounds.max[axis] - bounds.min[axis]) as i32
+                                            * (face.b[axis] * i + face.c[axis] * j)
+                                }
+                            };
+                            let p = [on(0), on(1), on(2)];
+                            let (u, v) = uv(f, p);
+                            let mut sums = [0u32; 2];
+                            let mut count = 0;
+                            for db in [0, si] {
+                                for dc in [0, sj] {
+                                    let idx = padded_index(
+                                        ax + face.b[0] * db + face.c[0] * dc,
+                                        ay + face.b[1] * db + face.c[1] * dc,
+                                        az + face.b[2] * db + face.c[2] * dc,
+                                    );
+                                    if !blocks::occludes(padded[idx]) {
+                                        let (sky, block) =
+                                            light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
+                                        sums[0] += sky as u32;
+                                        sums[1] += block as u32;
+                                        count += 1;
+                                    }
+                                }
+                            }
+                            if !boundary {
+                                let idx = padded_index(x, y, z);
+                                let (sky, block) = light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
+                                sums = [sky as u32, block as u32];
+                                count = 1;
+                            }
+                            // The face's direct neighbor is always a non-occluding sample.
+                            debug_assert!(count > 0);
+                            let sky = (sums[0] + count / 2) / count;
+                            let block = (sums[1] + count / 2) / count;
+                            let water_top = state == blocks::WATER
+                                && p[1] == 16
+                                && padded[padded_index(x, y + 1, z)] != blocks::WATER;
+                            words[k] = pack(
+                                [x * 16 + p[0], y * 16 + p[1], z * 16 + p[2]],
+                                f,
+                                ao[k],
+                                (u, v),
+                                info.tex[f],
+                                info.tint[f],
+                                sky,
+                                block,
+                                water_top,
+                            );
+                        }
+
+                        // Split along the brighter diagonal so shading is symmetric.
+                        let start = if ao[0] + ao[2] >= ao[1] + ao[3] { 0 } else { 1 };
+                        for k in 0..4 {
+                            let w = words[(start + k) % 4];
+                            out.push(w[0]);
+                            out.push(w[1]);
+                        }
                     }
                 }
             }
@@ -226,12 +286,180 @@ pub fn mesh_section_layers(
     counts
 }
 
+/// Two-word vertex ABI shared by WASM, the renderer and translucent sorting.
+#[allow(clippy::too_many_arguments)]
+fn pack(
+    p: [i32; 3],
+    face: usize,
+    ao: u32,
+    uv: (u32, u32),
+    tex: u16,
+    tint: bool,
+    sky: u32,
+    block: u32,
+    water_top: bool,
+) -> [u32; 2] {
+    [
+        p[0] as u32 | (p[1] as u32) << 9 | (p[2] as u32) << 18 | (face as u32) << 27 | ao << 30,
+        tex as u32
+            | (tint as u32) << 12
+            | sky << 13
+            | block << 17
+            | uv.0 << 21
+            | uv.1 << 26
+            | (water_top as u32) << 31,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn empty() -> Vec<BlockState> {
         vec![blocks::AIR; PADDED_LEN]
+    }
+
+    fn position(v: &[u32]) -> [u32; 3] {
+        [v[0] & 511, (v[0] >> 9) & 511, (v[0] >> 18) & 511]
+    }
+
+    #[test]
+    fn dense_partial_models_fit_the_section_quad_budget() {
+        for (state, per_cell) in [(blocks::OAK_SLAB, 6), (blocks::RED_FLOWER, 4)] {
+            let p = vec![state; PADDED_LEN];
+            let mut out = Vec::new();
+            assert_eq!(mesh_section(&p, &mut out), 4096 * per_cell);
+            assert_eq!(out.len(), 4096 * per_cell as usize * WORDS_PER_QUAD);
+        }
+    }
+
+    #[test]
+    fn slabs_have_six_faces_at_exact_positions_and_cropped_uvs() {
+        for base in [blocks::OAK_SLAB, blocks::COBBLESTONE_SLAB] {
+            for (kind, lo, hi) in [(0, 0, 8), (1, 8, 16), (2, 0, 16)] {
+                let mut p = empty();
+                // Exercise the maximum section coordinate, 256.
+                p[padded_index(15, 15, 15)] = base + kind;
+                let mut out = Vec::new();
+                assert_eq!(mesh_section(&p, &mut out), 6);
+                let ys: Vec<_> = out.chunks(2).map(|v| position(v)[1]).collect();
+                assert_eq!(ys.iter().min(), Some(&(240 + lo)));
+                assert_eq!(ys.iter().max(), Some(&(240 + hi)));
+                for q in out.chunks(8) {
+                    let face = (q[0] >> 27) & 7;
+                    for v in q.chunks(2) {
+                        let local = position(v).map(|a| a as i32 - 240);
+                        assert_eq!(
+                            ((v[1] >> 21) & 31, (v[1] >> 26) & 31),
+                            uv(face as usize, local)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_boundary_faces_are_culled_and_partial_shapes_do_not_hide_neighbors() {
+        for (kind, internal_face) in [(0, UP), (1, DOWN), (2, usize::MAX)] {
+            for (f, face) in FACES.iter().enumerate() {
+                let mut p = empty();
+                p[padded_index(0, 0, 0)] = blocks::OAK_SLAB + kind;
+                // A padded neighbor contributes no faces itself.
+                let n = face.normal;
+                let cell = n.map(|a| if a > 0 { 15 } else { 0 });
+                p[padded_index(0, 0, 0)] = blocks::AIR;
+                p[padded_index(cell[0], cell[1], cell[2])] = blocks::OAK_SLAB + kind;
+                p[padded_index(cell[0] + n[0], cell[1] + n[1], cell[2] + n[2])] = blocks::STONE;
+                assert_eq!(
+                    mesh_section(&p, &mut Vec::new()),
+                    if f == internal_face { 6 } else { 5 }
+                );
+            }
+        }
+        for neighbor in [blocks::OAK_SLAB, blocks::OAK_SLAB + 1, blocks::RED_FLOWER] {
+            let mut p = empty();
+            p[padded_index(15, 0, 0)] = blocks::STONE;
+            p[padded_index(16, 0, 0)] = neighbor;
+            assert_eq!(mesh_section(&p, &mut Vec::new()), 6);
+        }
+    }
+
+    #[test]
+    fn internal_faces_and_crosses_use_cell_light_without_ao() {
+        for state in [
+            blocks::OAK_SLAB,
+            blocks::OAK_SLAB + 1,
+            blocks::RED_FLOWER,
+            blocks::YELLOW_FLOWER,
+            blocks::SHORT_GRASS,
+        ] {
+            let mut p = vec![blocks::STONE; PADDED_LEN];
+            p[padded_index(5, 5, 5)] = state;
+            let mut sky = vec![0; PADDED_LEN];
+            let mut block = vec![0; PADDED_LEN];
+            sky[padded_index(5, 5, 5)] = 7;
+            block[padded_index(5, 5, 5)] = 11;
+            let mut out = Vec::new();
+            let counts = mesh_section_layers(&p, Some((&sky, &block)), &mut out);
+            let plant = blocks::info(state).model == blocks::Model::Cross;
+            let layer = if plant { 1 } else { 0 };
+            let texture = blocks::info(state).tex[0] as u32;
+            let quads: Vec<_> = out.chunks(8).filter(|q| q[1] & 4095 == texture).collect();
+            assert_eq!(quads.len(), if plant { 4 } else { 1 });
+            assert!(counts[layer] >= quads.len() as u32);
+            for q in &quads {
+                for v in q.chunks(2) {
+                    assert_eq!(v[0] >> 30, 3);
+                    assert_eq!((v[1] >> 13) & 15, 7);
+                    assert_eq!((v[1] >> 17) & 15, 11);
+                }
+            }
+            if plant {
+                // Every plane has an identical back with reversed winding.
+                for pair in quads.chunks(2) {
+                    for i in 0..4 {
+                        assert_eq!(
+                            position(&pair[0][i * 2..]),
+                            position(&pair[1][(3 - i) * 2..])
+                        );
+                    }
+                    let p: Vec<_> = pair[0]
+                        .chunks(2)
+                        .map(|v| position(v).map(|a| a as i32))
+                        .collect();
+                    assert_ne!(cross(sub(p[1], p[0]), sub(p[2], p[0])), [0; 3]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn water_top_and_side_upper_edges_lower_to_eight_ninths_only_when_exposed() {
+        let mut p = empty();
+        p[padded_index(5, 5, 5)] = blocks::WATER;
+        for stacked in [false, true] {
+            if stacked {
+                p[padded_index(5, 6, 5)] = blocks::WATER;
+            }
+            let mut out = Vec::new();
+            assert_eq!(mesh_section(&p, &mut out), if stacked { 10 } else { 6 });
+            let mut lowered = 0;
+            for v in out.chunks(2) {
+                let y = position(v)[1] as f64 / 16.0;
+                let flag = v[1] >> 31;
+                let expected_flag = u32::from(y == if stacked { 7.0 } else { 6.0 });
+                assert_eq!(flag, expected_flag);
+                let rendered_y = y - flag as f64 / 9.0;
+                if flag == 1 {
+                    lowered += 1;
+                    assert!(
+                        (rendered_y - (if stacked { 6.0 } else { 5.0 }) - 8.0 / 9.0).abs() < 1e-12
+                    );
+                }
+            }
+            assert_eq!(lowered, 12); // Four top corners and two upper corners on each side.
+        }
     }
 
     #[test]
@@ -296,13 +524,13 @@ mod tests {
             let v = out
                 .chunks(2)
                 .find(|v| {
-                    v[0] & 31 == 5
-                        && (v[0] >> 5) & 31 == 6
-                        && (v[0] >> 10) & 31 == 5
-                        && (v[0] >> 15) & 7 == UP as u32
+                    v[0] & 511 == 5 * 16
+                        && (v[0] >> 9) & 511 == 6 * 16
+                        && (v[0] >> 18) & 511 == 5 * 16
+                        && (v[0] >> 27) & 7 == UP as u32
                 })
                 .unwrap();
-            assert_eq!((v[0] >> 18) & 3, 3);
+            assert_eq!((v[0] >> 30) & 3, 3);
             assert_eq!((v[1] >> 13) & 15, 12);
         }
         // Glass fully enclosed by opaque cubes has no faces of its own.
@@ -332,13 +560,13 @@ mod tests {
                     let (a, b) = (q[i * 2], q[i * 2 + 1]);
                     V {
                         pos: [
-                            (a & 31) as i32,
-                            ((a >> 5) & 31) as i32,
-                            ((a >> 10) & 31) as i32,
+                            (a & 511) as i32 / 16,
+                            ((a >> 9) & 511) as i32 / 16,
+                            ((a >> 18) & 511) as i32 / 16,
                         ],
-                        face: ((a >> 15) & 7) as usize,
-                        ao: (a >> 18) & 3,
-                        uv: ((a >> 20) & 1, (a >> 21) & 1),
+                        face: ((a >> 27) & 7) as usize,
+                        ao: (a >> 30) & 3,
+                        uv: (((b >> 21) & 31) / 16, ((b >> 26) & 31) / 16),
                         layer: b & 0xFFF,
                         tint: (b >> 12) & 1 == 1,
                     }
@@ -377,10 +605,10 @@ mod tests {
         let vertex = |out: &[u32]| -> u32 {
             out.chunks(2)
                 .find(|v| {
-                    v[0] & 31 == 5
-                        && (v[0] >> 5) & 31 == 6
-                        && (v[0] >> 10) & 31 == 5
-                        && (v[0] >> 15) & 7 == UP as u32
+                    v[0] & 511 == 5 * 16
+                        && (v[0] >> 9) & 511 == 6 * 16
+                        && (v[0] >> 18) & 511 == 5 * 16
+                        && (v[0] >> 27) & 7 == UP as u32
                 })
                 .unwrap()[1]
         };

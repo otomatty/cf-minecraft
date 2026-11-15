@@ -1,3 +1,4 @@
+import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
 
@@ -52,6 +53,7 @@ export interface ClientExports {
 	client_enc_set_block(x: number, y: number, z: number, block: number): number;
 	client_texture_names(): number;
 	client_block_names(): number;
+	client_block_registry(): number;
 }
 
 /** Server-to-client packet ids (crates/protocol). */
@@ -81,6 +83,11 @@ export interface PlayerState {
 }
 
 export interface RayHit {
+	/** Intersection Y relative to the hit cell, including 1 at its top edge. */
+	hitY: number;
+	/** Local selection bounds in block units. */
+	min: readonly [number, number, number];
+	max: readonly [number, number, number];
 	x: number;
 	y: number;
 	z: number;
@@ -264,8 +271,8 @@ export class ClientCore {
 
 	raycast(origin: readonly number[], dir: readonly number[], max: number): RayHit | null {
 		if (this.x.client_raycast(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], max) === 0) return null;
-		const v = this.outInts(4);
-		return { x: v[0], y: v[1], z: v[2], face: v[3] };
+		const v = this.outInts(10);
+		return { x: v[0], y: v[1], z: v[2], face: v[3], hitY: new DataView(this.out(48).buffer).getFloat64(40, true), min: [v[4] / 16, v[5] / 16, v[6] / 16], max: [v[7] / 16, v[8] / 16, v[9] / 16] };
 	}
 
 	predictBlock(x: number, y: number, z: number, block: number): boolean {
@@ -301,6 +308,10 @@ export class ClientCore {
 
 	textureNames(): string[] {
 		return this.decoder.decode(this.out(this.x.client_texture_names())).split("\n");
+	}
+
+	blockRegistry(): BlockStateInfo[] {
+		return JSON.parse(this.decoder.decode(this.out(this.x.client_block_registry())));
 	}
 
 	blockNames(): string[] {

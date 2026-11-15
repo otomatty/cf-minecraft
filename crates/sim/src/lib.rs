@@ -351,6 +351,13 @@ impl Server {
         let dy = y as f64 + 0.5 - client.pos[1];
         let dz = z as f64 + 0.5 - client.pos[2];
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+            && self.world.get_block(x, y, z).is_some_and(|old| {
+                blocks::can_place(
+                    old,
+                    state,
+                    self.world.get_block(x, y - 1, z).unwrap_or(blocks::AIR),
+                )
+            })
     }
 
     fn correct_block(&mut self, id: u32, x: i32, y: i32, z: i32) {
@@ -575,18 +582,23 @@ fn valid_position(pos: [f64; 3]) -> bool {
 // generated on demand by a movement packet (including stored chunks in flight).
 fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     let origin = physics::Player::new(from).bounds();
-    let collisions = |x, y, z| {
-        let bounds = physics::Aabb::block(x, y, z);
-        match world.get_block(x, y, z) {
-            // Ignore only known solids already intersecting the starting body,
-            // for this report's sweep AND endpoint. This permits gradual escape
-            // from placements, but a later report cannot reenter an escaped block.
-            Some(state) if blocks::is_solid(state) && !origin.intersects(bounds) => Some(bounds),
-            // Unknown chunks remain solid even if the origin overlaps them.
-            None => Some(bounds),
-            _ => None,
+    struct MovementWorld<'a>(&'a World, physics::Aabb);
+    impl physics::CollisionWorld for MovementWorld<'_> {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(physics::Aabb)) {
+            let unknown = self.0.get_block(x, y, z).is_none();
+            physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).collision_boxes(
+                x,
+                y,
+                z,
+                &mut |b| {
+                    if unknown || !self.1.intersects(b) {
+                        visit(b);
+                    }
+                },
+            );
         }
-    };
+    }
+    let collisions = MovementWorld(world, origin);
     let target = physics::Player::new(to);
     if !target.is_clear(&collisions) {
         return false;
@@ -640,6 +652,64 @@ mod tests {
             pitch: 0.0,
         }
         .encode()
+    }
+
+    #[test]
+    fn registry_shape_prediction_paths_are_accepted_by_server() {
+        for (obstacle, roof, passes) in [
+            (blocks::OAK_SLAB, false, true),
+            (blocks::OAK_SLAB + 2, false, false),
+            (blocks::OAK_SLAB + 1, true, true),
+            (blocks::OAK_SLAB, true, false),
+            (blocks::RED_FLOWER, false, true),
+            (blocks::YELLOW_FLOWER, false, true),
+            (blocks::SHORT_GRASS, false, true),
+        ] {
+            let floor = if roof { 63.5 } else { 64.0 };
+            let mut s = joined_at([0.5, floor, 1.5]);
+            for x in 0..16 {
+                for z in 0..16 {
+                    s.world.set_block(
+                        x,
+                        63,
+                        z,
+                        if roof {
+                            blocks::OAK_SLAB
+                        } else {
+                            blocks::STONE
+                        },
+                    );
+                }
+            }
+            s.world
+                .set_block(1, if roof { 65 } else { 64 }, 1, obstacle);
+            let mut player = physics::Player::new([0.5, floor, 1.5]);
+            let mut highest = floor;
+            for _ in 0..18 {
+                let before = player.position;
+                player.tick(
+                    physics::Input {
+                        strafe: -1.0,
+                        ..Default::default()
+                    },
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                highest = highest.max(player.position[1]);
+                assert!(movement_clear(&s.world, before, player.position));
+                s.handle_packet(1, &position_packet(player.position));
+                s.tick();
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
+            assert_eq!(s.stats.positions_rejected, 0);
+            assert_eq!(
+                player.position[0] > 1.0,
+                passes,
+                "state {obstacle}, roof {roof}"
+            );
+            if obstacle == blocks::OAK_SLAB && !roof {
+                assert_eq!(highest, 64.5);
+            }
+        }
     }
 
     #[test]
@@ -1197,6 +1267,53 @@ mod tests {
             }
         }
         assert_eq!(times, vec![20, 40, 60, 80, 100]);
+    }
+
+    #[test]
+    fn placement_allows_overwrites_but_validates_state_and_plant_support() {
+        let mut s = joined(2);
+        for _ in 0..20 {
+            s.tick();
+        }
+        let [sx, sy, sz] = s.spawn();
+        let (x, y, z) = (sx.floor() as i32, sy as i32 + 2, sz.floor() as i32);
+        s.world.set_block(x, y - 1, z, blocks::AIR);
+        for state in [
+            blocks::STONE,
+            blocks::OAK_SLAB,
+            blocks::OAK_SLAB + 1,
+            blocks::OAK_SLAB + 2,
+            blocks::WATER,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(state));
+        }
+        for state in [
+            blocks::COUNT,
+            u16::MAX,
+            blocks::RED_FLOWER,
+            blocks::YELLOW_FLOWER,
+            blocks::SHORT_GRASS,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(blocks::WATER));
+        }
+        for below in [blocks::OAK_SLAB, blocks::GLASS, blocks::WATER] {
+            s.world.set_block(x, y - 1, z, below);
+            assert!(!s.can_edit(1, x, y, z, blocks::RED_FLOWER));
+        }
+        s.world.set_block(x, y - 1, z, blocks::OAK_SLAB + 2);
+        for state in [
+            blocks::RED_FLOWER,
+            blocks::YELLOW_FLOWER,
+            blocks::SHORT_GRASS,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(state));
+        }
     }
 
     #[test]
