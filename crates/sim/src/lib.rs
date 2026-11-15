@@ -628,14 +628,20 @@ fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     if sweep(physics::Player::new(from), to, &[1, 0, 2]).is_some() {
         return true;
     }
-    // Prediction only steps when grounded or landing. Packets contain endpoints
-    // rather than input/vertical velocity; conservatively look for support within
-    // the step height or the reported fall. Otherwise an airborne packet could
-    // use the extra rise to cross the protruding top of a fence.
-    // Include contact at the reported landing endpoint: an exactly floor-length
-    // probe is not shortened by resolve, even though the floor supports it.
-    let probe = delta[1].min(-physics::STEP_HEIGHT) - 1.0e-7;
-    if physics::resolve(&collisions, origin, [0.0, probe, 0.0])[1] == probe {
+    // Prediction only steps when grounded or when the ordinary downward leg
+    // collides. Without velocity, approximate landing by downward movement onto
+    // support, with something below the origin within fall + step height. A
+    // raised landing can shorten the reported fall relative to that Y leg.
+    let supported = |bounds, distance: f64| {
+        // Count contact at the probe endpoint as support too.
+        let probe = -distance - 1.0e-7;
+        physics::resolve(&collisions, bounds, [0.0, probe, 0.0])[1] != probe
+    };
+    let grounded = supported(origin, 0.0);
+    let landing = delta[1] < 0.0
+        && supported(target.bounds(), 0.0)
+        && supported(origin, -delta[1] + physics::STEP_HEIGHT);
+    if !grounded && !landing {
         return false;
     }
     // Prediction can also step up, move X/Z, then descend. Resolve the upward
@@ -787,6 +793,23 @@ mod tests {
             &s.world,
             [0.5, 65.1, 1.5],
             [2.5, 65.1, 1.5]
+        ));
+        for target_y in [65.1, 65.2522, 65.35] {
+            // A downward, horizontal or upward report from the jump apex
+            // cannot gain another step-height rise to clear the fence.
+            assert!(!movement_clear(
+                &s.world,
+                [0.5, 65.2522, 1.5],
+                [2.5, target_y, 1.5]
+            ));
+        }
+        // Ending on support alone is insufficient: the origin also needs
+        // something below it within the reported fall plus the step height.
+        s.world.set_block(2, 64, 1, blocks::STONE);
+        assert!(!movement_clear(
+            &s.world,
+            [0.5, 65.7, 1.5],
+            [2.5, 65.0, 1.5]
         ));
         assert!(movement_clear(&s.world, [0.5, 65.5, 1.5], [2.5, 65.5, 1.5]));
     }
@@ -964,6 +987,44 @@ mod tests {
     }
 
     #[test]
+    fn falling_around_stone_corner_onto_slab_accepts_each_prediction_tick() {
+        let start = [0.69, 65.2, 1.2];
+        let mut s = joined_at(start);
+        for x in 0..4 {
+            for z in 0..4 {
+                s.world.set_block(x, 63, z, blocks::STONE);
+            }
+        }
+        s.world.set_block(1, 64, 0, blocks::STONE);
+        s.world.set_block(1, 64, 1, blocks::OAK_SLAB);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.15, -1.3, 0.15];
+        assert!(!player.on_ground);
+        let ordinary = physics::resolve(
+            &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            player.bounds(),
+            player.velocity,
+        );
+        assert!(player.velocity[0] - ordinary[0] > COLLISION_TOLERANCE);
+        for tick in 0..8 {
+            player.tick(
+                physics::Input::default(),
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            );
+            if tick == 0 {
+                for (actual, expected) in player.position.into_iter().zip([0.84, 64.5, 1.35]) {
+                    assert!((actual - expected).abs() < 1e-12);
+                }
+                assert!(player.on_ground);
+            }
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 0, "tick {tick}");
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+    }
+
+    #[test]
     fn step_route_cannot_cross_full_walls_low_ceilings_or_unknown_chunks() {
         let start = [0.69, 64.0, 1.2];
         for obstacle in ["wall", "ceiling", "unknown"] {
@@ -1043,14 +1104,15 @@ mod tests {
             assert_eq!(s.stats.positions_rejected, 0);
             assert_eq!(s.client_position(1), Some(player.position));
 
-            // Without the intermediate report the normal Y-first path is
-            // blocked, but the new up/across/down alternative remains clear.
+            // Omitting the intermediate report blocks the normal Y-first path.
+            // Both endpoints are airborne, so the step route is ineligible even
+            // though its geometry is clear. Per-tick reports above remain valid.
             let mut skipped = joined_at(start);
             skipped.world.set_block(0, 65, 0, blocks::BRICKS);
             skipped.handle_packet(1, &position_packet(player.position));
             skipped.tick();
-            assert_eq!(skipped.stats.positions_rejected, 0);
-            assert_eq!(skipped.client_position(1), Some(player.position));
+            assert_eq!(skipped.stats.positions_rejected, 1);
+            assert_eq!(skipped.client_position(1), Some(start));
 
             // A wall on the horizontal leg blocks both routes even though the
             // destination beyond it is clear.
