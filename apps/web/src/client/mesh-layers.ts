@@ -42,7 +42,16 @@ export function sortedQuadIndices(centers: Float32Array, camera: Point): Uint32A
 		distance2([centers[q * 3], centers[q * 3 + 1], centers[q * 3 + 2]], camera));
 	const order = distances.map((_, q) => q).sort((a, b) => distances[b] - distances[a]);
 	const indices = new Uint32Array(order.length * 6);
-	order.forEach((q, i) => indices.set([q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3], i * 6));
+	order.forEach((q, i) => {
+		const vertex = q * 4;
+		const offset = i * 6;
+		indices[offset] = vertex;
+		indices[offset + 1] = vertex + 1;
+		indices[offset + 2] = vertex + 2;
+		indices[offset + 3] = vertex;
+		indices[offset + 4] = vertex + 2;
+		indices[offset + 5] = vertex + 3;
+	});
 	return indices;
 }
 
