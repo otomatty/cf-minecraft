@@ -174,6 +174,72 @@ async function undergroundLighting() {
 	} finally { await page.close(); }
 }
 
+/** Change actual terrain behind each material: sky/black or opaque output cannot track that change. */
+async function transparentMaterials() {
+	const { page, errors } = await open(`server=local&world=e2e-materials-${run}&seed=2026&view=3&time=6000`);
+	try {
+		const stats = await settle(page, "materials surface", chunksInView(3));
+		const center = [Math.floor(stats.spawn[0]), Math.floor(stats.spawn[1]) + 8, Math.floor(stats.spawn[2])];
+		await page.evaluate(() => { document.getElementById("overlay").hidden = true; });
+		const capture = async label => {
+			await new Promise(resolve => setTimeout(resolve, 500));
+			await settle(page, label, chunksInView(3));
+			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+			const file = join(shots, `${label}.png`);
+			await page.screenshot({ path: file });
+			return page.evaluate(async dataUrl => {
+				const img = new Image(); img.src = dataUrl; await img.decode();
+				const canvas = new OffscreenCanvas(img.width, img.height), g = canvas.getContext("2d");
+				g.drawImage(img, 0, 0);
+				const samples = [];
+				for (let y = -80; y < 80; y += 4) for (let x = -80; x < 80; x += 4) {
+					if (Math.abs(x) < 16 && Math.abs(y) < 16) continue; // crosshair
+					samples.push(...g.getImageData(img.width / 2 + x, img.height / 2 + y, 1, 1).data.slice(0, 3));
+				}
+				return samples;
+			}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
+		};
+		const difference = (a, b) => a.reduce((sum, v, i) => sum + Math.abs(v - b[i]), 0) / a.length;
+		for (const [name, material] of [["glass", 11], ["water", 13]]) {
+			await page.evaluate(({ center: [cx, cy, cz], name }) => {
+				window.__mc.setCamera(cx + 0.5, cy + 0.5, cz + 0.5, 0, name === "water" ? 90 : 0);
+				for (let y = -3; y <= 3; y++) for (let z = -3; z <= 5; z++) for (let x = -3; x <= 3; x++) {
+					window.__mc.setBlock(cx + x, cy + y, cz + z, 0);
+				}
+			}, { center, name });
+			const terrain = async block => page.evaluate(({ center: [cx, cy, cz], name, block }) => {
+				for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) {
+					const [x, y, z] = name === "water" ? [cx + a, cy - 2, cz + b] : [cx + a, cy + b, cz + 4];
+					window.__mc.setBlock(x, y, z, block);
+				}
+			}, { center, name, block });
+			await terrain(5); // oak planks: warm, patterned reference terrain
+			const bare = await capture(`${name}-bare`);
+			await page.evaluate(({ center: [cx, cy, cz], name, material }) => {
+				for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) {
+					const [x, y, z] = name === "water" ? [cx + a, cy - 1, cz + b] : [cx + a, cy + b, cz + 2];
+					window.__mc.setBlock(x, y, z, material);
+				}
+			}, { center, name, material });
+			const warm = await capture(`${name}-warm`);
+			const placed = await page.evaluate(({ center: [x, y, z], name }) =>
+				name === "water" ? window.__mc.getBlock(x, y - 1, z) : window.__mc.getBlock(x, y, z + 2), { center, name });
+			check(placed === material, `${name}: material placement confirmed`);
+			await terrain(4); // gray cobblestone behind the unchanged material
+			const gray = await capture(`${name}-gray`);
+			const delta = difference(warm, gray);
+			check(delta > 3, `${name}: terrain ${name === "water" ? "below" : "behind"} remains visible`, `terrain change ${delta.toFixed(1)}`);
+			if (name === "glass") {
+				const matching = warm.filter((v, i) => Math.abs(v - bare[i]) < 4).length / warm.length;
+				check(matching > 0.35, "glass: clear pixels retain terrain colour", `${(matching * 100).toFixed(1)}%`);
+			} else {
+				check(difference(warm, bare) > 5, "water: translucent colour is rendered");
+			}
+		}
+		check(errors.length === 0, "materials: no page errors", errors.slice(0, 3).join(" | "));
+	} finally { await page.close(); }
+}
+
 /**
  * Server tick rate as the page sees it, from the arrival of TimeUpdate packets.
  *
@@ -372,7 +438,7 @@ async function inputs() {
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
 	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  dirt`, "input: the block underneath is targeted next", await targetLine());
 
-	await page.keyboard.press("Digit5");
+	await page.keyboard.press("Digit4");
 	await page.mouse.down({ button: "right" });
 	await page.mouse.up({ button: "right" });
 	await new Promise((r) => setTimeout(r, 300));
@@ -407,6 +473,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await dayNight();
 	await undergroundLighting();
+	await transparentMaterials();
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
 	const inBrowser = await page.evaluate(() => window.__mc.runScenario("2026", 600));

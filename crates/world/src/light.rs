@@ -540,6 +540,33 @@ mod tests {
         assert_eq!(a.finish(), b.finish());
     }
     #[test]
+    fn glass_passes_direct_sun_and_leaves_and_water_filter_each_layer() {
+        for material in [blocks::GLASS, blocks::OAK_LEAVES, blocks::WATER] {
+            let mut c = solid(0, 0);
+            for y in 0..MIN_Y + HEIGHT {
+                c.set(8, y, 8, if y < 5 { material } else { blocks::AIR });
+            }
+            let mut w = World::with_lighting(true);
+            w.insert_chunk(c);
+            assert_eq!(w.sky_light(8, 5, 8), 15);
+            for y in 0..5 {
+                let expected = if material == blocks::GLASS {
+                    15
+                } else {
+                    10 + y as u8
+                };
+                assert_eq!(w.sky_light(8, y, 8), expected, "material {material}, y {y}");
+            }
+            w.set_block(8, 3, 8, blocks::AIR);
+            assert_eq!(
+                w.sky_light(8, 0, 8),
+                if material == blocks::GLASS { 15 } else { 10 }
+            );
+            assert_rebuild(&w);
+        }
+    }
+
+    #[test]
     fn flat_surface_and_closed_underground() {
         let mut c = Chunk::empty(0, 0);
         for z in 0..16 {
@@ -753,7 +780,7 @@ mod tests {
         assert_eq!(a, Nibbles::Uniform(0));
         assert_eq!(blocks::info(blocks::AIR).opacity, 0);
         assert_eq!(blocks::info(blocks::LAMP_BLOCK).emission, 15);
-        assert!(blocks::is_opaque(blocks::LAMP_BLOCK));
+        assert!(blocks::occludes(blocks::LAMP_BLOCK));
     }
     #[test]
     fn lighting_is_opt_in_and_disabling_releases_all_derived_data() {

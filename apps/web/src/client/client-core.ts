@@ -1,3 +1,4 @@
+import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
 
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
@@ -14,6 +15,7 @@ export interface ClientExports {
 	client_reset_world(): void;
 	client_out_ptr(): number;
 	client_mesh_ptr(): number;
+	client_mesh_count(layer: number): number;
 	client_packet(ptr: number, len: number): number;
 	client_predict_block(x: number, y: number, z: number, block: number): number;
 	client_seed(): bigint;
@@ -227,6 +229,10 @@ export class ClientCore {
 	mesh(cx: number, sy: number, cz: number): Uint32Array {
 		const quads = this.x.client_mesh(cx, sy, cz);
 		return new Uint32Array(this.x.memory.buffer, this.x.client_mesh_ptr(), quads * WORDS_PER_QUAD);
+	}
+
+	meshCounts(): LayerCounts {
+		return [this.x.client_mesh_count(0), this.x.client_mesh_count(1), this.x.client_mesh_count(2)];
 	}
 
 	padded(cx: number, sy: number, cz: number): Uint16Array<ArrayBuffer> {

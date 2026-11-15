@@ -9,6 +9,20 @@ type Painter = (x: number, y: number, rand: () => number) => Rgb;
 
 /** Plains grass colour of the game's biome colour map; grayscale textures are multiplied by it. */
 export const GRASS_TINT: Rgb = [0x91, 0xbd, 0x59];
+export const LEAVES_TINT: Rgb = [0x70, 0xa8, 0x45];
+export const WATER_TINT: Rgb = [0x45, 0x88, 0xc9];
+
+/** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
+export function textureIconPixels(name: string, pixels: Uint8Array): Uint8ClampedArray<ArrayBuffer> {
+	const icon = new Uint8ClampedArray(pixels);
+	const tint = name === "oak_leaves" ? LEAVES_TINT : name === "water" ? WATER_TINT : undefined;
+	if (tint) {
+		for (let i = 0; i < icon.length; i += 4) {
+			for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
+		}
+	}
+	return icon;
+}
 
 function mulberry32(seed: number): () => number {
 	let a = seed >>> 0;
@@ -128,6 +142,9 @@ function grassSide(rand: () => number): Painter {
 }
 
 const PAINTERS: Record<string, (rand: () => number) => Painter> = {
+	glass: () => (x, y) => [184 + (x + y) % 4 * 12, 220, 238],
+	oak_leaves: speckled([190, 190, 190], 0.4),
+	water: () => (x, y) => gray(185 + 25 * Math.sin((x * 2 + y + Math.sin(y)) * Math.PI / 8)),
 	stone: speckled([125, 125, 125], 0.16, 0.08, 0.85),
 	// Grayscale on purpose: tinted with the biome colour in the shader, as in the game.
 	grass_block_top: speckled([150, 150, 150], 0.3),
@@ -162,14 +179,17 @@ export function paintTexture(name: string): Uint8Array {
 			px[i] = clamp(r);
 			px[i + 1] = clamp(g);
 			px[i + 2] = clamp(b);
-			px[i + 3] = 255;
+			px[i + 3] = name === "glass"
+				? (x === 0 || y === 0 || x === 15 || y === 15 || (x === y + 3 && y > 3 && y < 9) ? 255 : 0)
+				: name === "oak_leaves" ? ((x * 7 + y * 11 + (x >> 1) * (y >> 1)) % 17 < 5 ? 0 : 255)
+				: name === "water" ? 168 + (x + y * 3) % 20 : 255;
 		}
 	}
 	return px;
 }
 
 /** Halves an RGBA image by averaging 2x2 blocks. */
-export function downsample(src: Uint8Array, size: number): Uint8Array {
+export function downsample(src: Uint8Array, size: number, cutout = false): Uint8Array {
 	const half = size >> 1;
 	const out = new Uint8Array(half * half * 4);
 	for (let y = 0; y < half; y++) {
@@ -182,6 +202,19 @@ export function downsample(src: Uint8Array, size: number): Uint8Array {
 				out[(y * half + x) * 4 + c] = (a + b + d + e + 2) >> 2;
 			}
 		}
+	}
+	if (cutout) {
+		// Preserve the closest representable number of pixels passing alpha >= 0.5.
+		// Stable ranking also handles equal-alpha texels that uniform scaling cannot split.
+		let covered = 0;
+		for (let i = 3; i < src.length; i += 4) if (src[i] >= 128) covered++;
+		const target = Math.round(covered / (size * size) * half * half);
+		const ranked = Array.from({ length: half * half }, (_, i) => i)
+			.sort((a, b) => out[b * 4 + 3] - out[a * 4 + 3]);
+		ranked.forEach((pixel, rank) => {
+			const i = pixel * 4 + 3;
+			out[i] = rank < target ? Math.max(160, out[i]) : Math.min(96, out[i]);
+		});
 	}
 	return out;
 }

@@ -581,7 +581,7 @@ fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
             // Ignore only known solids already intersecting the starting body,
             // for this report's sweep AND endpoint. This permits gradual escape
             // from placements, but a later report cannot reenter an escaped block.
-            Some(state) if blocks::is_opaque(state) && !origin.intersects(bounds) => Some(bounds),
+            Some(state) if blocks::is_solid(state) && !origin.intersects(bounds) => Some(bounds),
             // Unknown chunks remain solid even if the origin overlaps them.
             None => Some(bounds),
             _ => None,
@@ -642,6 +642,46 @@ mod tests {
         .encode()
     }
 
+    #[test]
+    fn water_is_passable_and_replaceable_but_glass_and_leaves_are_solid() {
+        let mut s = flat_server();
+        let from = [0.5, 70.0, 0.5];
+        let to = [2.5, 70.0, 0.5];
+        for material in [blocks::WATER, blocks::GLASS, blocks::OAK_LEAVES] {
+            s.world.set_block(2, 70, 0, material);
+            assert_eq!(
+                movement_clear(&s.world, from, to),
+                material == blocks::WATER
+            );
+        }
+        let pos = s.clients[&1].pos;
+        let (x, y, z) = (
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        );
+        for material in [
+            blocks::WATER,
+            blocks::GLASS,
+            blocks::OAK_LEAVES,
+            blocks::STONE,
+        ] {
+            assert!(s.can_edit(1, x, y, z, material));
+            s.handle_packet(
+                1,
+                &C2S::SetBlock {
+                    x,
+                    y,
+                    z,
+                    state: material,
+                }
+                .encode(),
+            );
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(material));
+        }
+    }
+
     fn flat_server() -> Server {
         let mut s = Server::new(1, Generator::Flat);
         s.connect(1);
@@ -690,7 +730,7 @@ mod tests {
                 let collisions = |x, y, z| {
                     s.world
                         .get_block(x, y, z)
-                        .is_none_or(blocks::is_opaque)
+                        .is_none_or(blocks::is_solid)
                         .then(|| physics::Aabb::block(x, y, z))
                 };
                 player.tick(
@@ -739,7 +779,7 @@ mod tests {
             let collisions = |x, y, z| {
                 s.world
                     .get_block(x, y, z)
-                    .is_none_or(blocks::is_opaque)
+                    .is_none_or(blocks::is_solid)
                     .then(|| physics::Aabb::block(x, y, z))
             };
             player.tick(
@@ -791,7 +831,7 @@ mod tests {
             let collisions = |x, y, z| {
                 s.world
                     .get_block(x, y, z)
-                    .is_none_or(blocks::is_opaque)
+                    .is_none_or(blocks::is_solid)
                     .then(|| physics::Aabb::block(x, y, z))
             };
             player.tick(
@@ -824,7 +864,7 @@ mod tests {
         let collisions = |x, y, z| {
             s.world
                 .get_block(x, y, z)
-                .is_none_or(blocks::is_opaque)
+                .is_none_or(blocks::is_solid)
                 .then(|| physics::Aabb::block(x, y, z))
         };
         player.tick(physics::Input::default(), &collisions);
@@ -846,7 +886,7 @@ mod tests {
         let collisions = |x, y, z| {
             s.world
                 .get_block(x, y, z)
-                .is_none_or(blocks::is_opaque)
+                .is_none_or(blocks::is_solid)
                 .then(|| physics::Aabb::block(x, y, z))
         };
         player.tick(
@@ -952,7 +992,7 @@ mod tests {
                     let collisions = |x, y, z| {
                         s.world
                             .get_block(x, y, z)
-                            .is_none_or(blocks::is_opaque)
+                            .is_none_or(blocks::is_solid)
                             .then(|| physics::Aabb::block(x, y, z))
                     };
                     player.tick(

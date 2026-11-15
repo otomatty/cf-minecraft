@@ -22,7 +22,8 @@ scope.onmessage = ({ data }) => {
 		}
 		const quads = x.mesh_padded(ptr, data.padded.length, lightLen ? ptr + bytes : 0, lightLen ? ptr + bytes + lightLen : 0);
 		const vertices = new Uint32Array(x.memory.buffer, x.client_mesh_ptr(), quads * WORDS_PER_QUAD).slice();
-		scope.postMessage({ type: "mesh", id: data.id, vertices }, [vertices.buffer]);
+		const counts = [x.client_mesh_count(0), x.client_mesh_count(1), x.client_mesh_count(2)] as const;
+		scope.postMessage({ type: "mesh", id: data.id, vertices, counts }, [vertices.buffer]);
 	} finally {
 		x.mc_free(ptr, total);
 	}
