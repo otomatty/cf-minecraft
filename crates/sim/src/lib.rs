@@ -632,7 +632,9 @@ fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     // rather than input/vertical velocity; conservatively look for support within
     // the step height or the reported fall. Otherwise an airborne packet could
     // use the extra rise to cross the protruding top of a fence.
-    let probe = delta[1].min(-physics::STEP_HEIGHT);
+    // Include contact at the reported landing endpoint: an exactly floor-length
+    // probe is not shortened by resolve, even though the floor supports it.
+    let probe = delta[1].min(-physics::STEP_HEIGHT) - 1.0e-7;
     if physics::resolve(&collisions, origin, [0.0, probe, 0.0])[1] == probe {
         return false;
     }
@@ -914,6 +916,50 @@ mod tests {
             }
             assert_eq!(s.stats.positions_rejected, 0);
             assert_eq!(s.client_position(1), Some(player.position));
+        }
+    }
+
+    #[test]
+    fn diagonal_slab_corner_landing_accepts_each_prediction_tick() {
+        for floor in [0.0, 64.0] {
+            let start = [0.69, floor + 0.8, 1.2];
+            let mut s = joined_at(start);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, floor as i32 - 1, z, blocks::STONE);
+                    for y in floor as i32..floor as i32 + 4 {
+                        s.world.set_block(x, y, z, blocks::AIR);
+                    }
+                }
+            }
+            s.world.set_block(1, floor as i32, 0, blocks::OAK_SLAB);
+            let mut player = physics::Player::new(start);
+            player.velocity = [0.15, -0.9, 0.15];
+            assert!(!player.on_ground);
+            let ordinary = physics::resolve(
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                player.bounds(),
+                player.velocity,
+            );
+            assert!(player.velocity[0] - ordinary[0] > COLLISION_TOLERANCE);
+            for tick in 0..8 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                if tick == 0 {
+                    // The landing route clears the corner and finishes exactly
+                    // on the floor, despite starting airborne with vy=-0.9.
+                    for (actual, expected) in player.position.into_iter().zip([0.84, floor, 1.35]) {
+                        assert!((actual - expected).abs() < 1e-12);
+                    }
+                    assert!(player.on_ground);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                s.tick();
+                assert_eq!(s.stats.positions_rejected, 0, "floor {floor}, tick {tick}");
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
         }
     }
 

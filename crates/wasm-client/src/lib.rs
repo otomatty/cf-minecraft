@@ -211,8 +211,15 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             } else {
                 st.world.remove_chunk(cx, cz)
             };
-            if removed.is_some() && st.light_exports.is_none() {
-                st.unloaded.push((cx, cz));
+            if removed.is_some() {
+                if st.light_exports.is_none() {
+                    st.unloaded.push((cx, cz));
+                }
+                // Border faces and derived stair/fence connections now see
+                // an absent neighbor. mark_chunk_dirty skips light exporters.
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    mark_chunk_dirty(st, cx + dx, cz + dz);
+                }
             }
         }
         S2C::BlockUpdate {
@@ -957,6 +964,48 @@ mod tests {
             unsafe { client_packet(packet.as_ptr(), packet.len()) },
             u32::MAX
         );
+    }
+
+    #[test]
+    fn unloading_neighbor_requeues_boundary_fence_mesh_except_in_light_export_mode() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        for (external_light, export_mode) in [(false, false), (true, false), (false, true)] {
+            for (cx, cz, ax, az, bx, bz) in [
+                (1, 0, 15, 8, 0, 8),
+                (-1, 0, 0, 8, 15, 8),
+                (0, 1, 8, 15, 8, 0),
+                (0, -1, 8, 0, 8, 15),
+            ] {
+                client_new();
+                // Isolate geometry invalidation from lighting changes.
+                state().world.set_lighting_enabled(false);
+                client_external_light(u32::from(external_light));
+                if export_mode {
+                    client_light_export_mode();
+                }
+                let mut a = Chunk::empty(0, 0);
+                a.set(ax, 80, az, blocks::OAK_FENCE);
+                let mut b = Chunk::empty(cx, cz);
+                b.set(bx, 80, bz, blocks::STONE);
+                receive(&a);
+                receive(&b);
+                assert_eq!(client_mesh(0, 9, 0), 16); // Post and two connected rails.
+                state().dirty.clear();
+
+                let packet = S2C::UnloadChunk { cx, cz }.encode();
+                assert_ne!(
+                    unsafe { client_packet(packet.as_ptr(), packet.len()) },
+                    u32::MAX
+                );
+
+                assert!(!state().world.chunks.contains_key(&(cx, cz)));
+                assert_eq!(state().dirty.contains(&(0, 9, 0)), !export_mode);
+                if export_mode {
+                    assert!(state().dirty.is_empty());
+                    assert!(state().unloaded.is_empty());
+                }
+            }
+        }
     }
 
     #[test]
