@@ -19,8 +19,8 @@ import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./m
 import { downsample, GRASS_TINT, LEAVES_TINT, WATER_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 
 const MAX_SECTIONS = 16384;
-/** Cube/one-box slab: at most six quads per cell; double-sided Cross: four. */
-const MAX_QUADS = 4096 * 6;
+/** A fence has a post and up to eight rails, with six faces per box. */
+const MAX_QUADS = 4096 * 54;
 const GLOBALS_BYTES = 272;
 const MIP_LEVELS = 5;
 

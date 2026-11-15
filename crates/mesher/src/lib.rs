@@ -126,6 +126,7 @@ pub fn mesh_section_layers(
         assert_eq!(block.len(), PADDED_LEN);
     }
     let mut layers: [Vec<u32>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut boxes = Vec::with_capacity(9);
     for y in 0..16i32 {
         for z in 0..16i32 {
             for x in 0..16i32 {
@@ -164,11 +165,14 @@ pub fn mesh_section_layers(
                     }
                     continue;
                 }
-                let boxes = match info.model {
-                    blocks::Model::Boxes(boxes) => boxes,
-                    _ => &[blocks::FULL_BOX],
-                };
-                for bounds in boxes {
+                boxes.clear();
+                blocks::shape_boxes(
+                    state,
+                    |dx, dy, dz| padded[padded_index(x + dx, y + dy, z + dz)],
+                    blocks::ShapePurpose::Render,
+                    |b| boxes.push(b),
+                );
+                for bounds in &boxes {
                     for (f, face) in FACES.iter().enumerate() {
                         let n = face.normal;
                         let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
@@ -343,11 +347,89 @@ mod tests {
 
     #[test]
     fn dense_partial_models_fit_the_section_quad_budget() {
-        for (state, per_cell) in [(blocks::OAK_SLAB, 6), (blocks::RED_FLOWER, 4)] {
+        for (state, per_cell) in [
+            (blocks::OAK_SLAB, 6),
+            (blocks::RED_FLOWER, 4),
+            (blocks::OAK_STAIRS, 12),
+            (blocks::OAK_FENCE, 54),
+        ] {
             let p = vec![state; PADDED_LEN];
             let mut out = Vec::new();
             assert_eq!(mesh_section(&p, &mut out), 4096 * per_cell);
             assert_eq!(out.len(), 4096 * per_cell as usize * WORDS_PER_QUAD);
+        }
+    }
+
+    #[test]
+    fn stairs_use_padded_corners_and_cull_only_boundary_faces() {
+        let mut p = empty();
+        p[padded_index(0, 0, 0)] = blocks::OAK_STAIRS;
+        for (neighbor, expected) in [
+            (blocks::AIR, 12),
+            (blocks::STONE, 10),
+            (blocks::COBBLESTONE_STAIRS + 4, 12),
+        ] {
+            p[padded_index(0, 0, -1)] = neighbor;
+            let mut out = Vec::new();
+            assert_eq!(mesh_section(&p, &mut out), expected);
+            let top: Vec<_> = out
+                .chunks(8)
+                .filter(|q| ((q[0] >> 27) & 7) == UP as u32)
+                .collect();
+            assert_eq!(top.len(), 2);
+            let upper: Vec<_> = top.into_iter().filter(|q| position(q)[1] == 16).collect();
+            assert_eq!(upper.len(), 1);
+            let positions: Vec<_> = upper[0].chunks(2).map(position).collect();
+            assert_eq!(positions.iter().map(|p| p[2]).max(), Some(8));
+            assert_eq!(
+                positions.iter().map(|p| p[0]).max(),
+                Some(if neighbor == blocks::COBBLESTONE_STAIRS + 4 {
+                    8
+                } else {
+                    16
+                })
+            );
+        }
+        // A stone above hides the step top but leaves the internal slab top.
+        let mut p = empty();
+        p[padded_index(0, 15, 0)] = blocks::OAK_STAIRS;
+        p[padded_index(0, 16, 0)] = blocks::STONE;
+        let mut out = Vec::new();
+        assert_eq!(mesh_section(&p, &mut out), 11);
+        let tops: Vec<_> = out
+            .chunks(8)
+            .filter(|q| ((q[0] >> 27) & 7) == UP as u32)
+            .collect();
+        assert_eq!(tops.len(), 1);
+        assert_eq!(position(tops[0])[1], 248);
+    }
+
+    #[test]
+    fn fence_rails_use_padding_and_boundary_culling() {
+        for other in [blocks::AIR, blocks::OAK_FENCE, blocks::STONE] {
+            let mut p = empty();
+            p[padded_index(15, 0, 0)] = blocks::OAK_FENCE;
+            p[padded_index(16, 0, 0)] = other;
+            let mut out = Vec::new();
+            assert_eq!(
+                mesh_section(&p, &mut out),
+                match other {
+                    blocks::AIR => 6,
+                    blocks::STONE => 16,
+                    _ => 18,
+                }
+            );
+            let positions: Vec<_> = out.chunks(2).map(position).collect();
+            assert_eq!(
+                positions.iter().map(|p| p[0]).max(),
+                Some(if other == blocks::AIR { 250 } else { 256 })
+            );
+            assert_eq!(positions.iter().map(|p| p[1]).max(), Some(16));
+            if other != blocks::AIR {
+                for y in [6, 9, 12, 15] {
+                    assert!(positions.iter().any(|p| p[0] == 256 && p[1] == y));
+                }
+            }
         }
     }
 

@@ -19,7 +19,10 @@ pub const COBBLESTONE_SLAB: BlockState = 17;
 pub const RED_FLOWER: BlockState = 20;
 pub const YELLOW_FLOWER: BlockState = 21;
 pub const SHORT_GRASS: BlockState = 22;
-pub const COUNT: BlockState = 23;
+pub const OAK_STAIRS: BlockState = 23;
+pub const COBBLESTONE_STAIRS: BlockState = 31;
+pub const OAK_FENCE: BlockState = 39;
+pub const COUNT: BlockState = 40;
 pub const LEGACY_COUNT: BlockState = 14;
 
 /// Texture layers, in atlas order. The client generates one 16x16 image per
@@ -53,7 +56,7 @@ pub enum RenderLayer {
     Translucent,
 }
 
-/// Local bounds in sixteenths of a block.
+/// Local bounds in sixteenths of a block (fence collisions reach y=24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Box16 {
     pub min: [u8; 3],
@@ -81,6 +84,8 @@ pub enum Model {
     Cube,
     Boxes(&'static [Box16]),
     Cross,
+    Stairs,
+    Fence,
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +292,23 @@ static INFO: [BlockInfo; COUNT as usize] = [
     plant("red_flower", 15, false),
     plant("yellow_flower", 16, false),
     plant("short_grass", 17, true),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("oak_stairs", 5, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("cobblestone_stairs", 4, Model::Stairs),
+    shaped("oak_fence", 5, Model::Fence),
 ];
 
 #[inline]
@@ -332,6 +354,20 @@ const fn slab(name: &'static str, texture: u16, kind: u8) -> BlockInfo {
         emission: 0,
     }
 }
+const fn shaped(name: &'static str, texture: u16, model: Model) -> BlockInfo {
+    BlockInfo {
+        name,
+        tex: all(texture),
+        tint: NO_TINT,
+        model,
+        layer: RenderLayer::Opaque,
+        occludes: false,
+        solid: true,
+        cull_same: false,
+        opacity: 0,
+        emission: 0,
+    }
+}
 const fn plant(name: &'static str, texture: u16, tint: bool) -> BlockInfo {
     BlockInfo {
         name,
@@ -356,11 +392,13 @@ pub struct Block {
 }
 pub fn registry() -> impl Iterator<Item = Block> {
     (0..COUNT)
-        .filter(|s| !matches!(*s, 15 | 16 | 18 | 19))
+        .filter(|s| !matches!(*s, 15 | 16 | 18 | 19 | 24..=30 | 32..=38))
         .map(|first| Block {
             name: info(first).name,
             first,
-            count: if matches!(first, OAK_SLAB | COBBLESTONE_SLAB) {
+            count: if matches!(first, OAK_STAIRS | COBBLESTONE_STAIRS) {
+                8
+            } else if matches!(first, OAK_SLAB | COBBLESTONE_SLAB) {
                 3
             } else {
                 1
@@ -371,7 +409,19 @@ pub fn block(state: BlockState) -> Option<Block> {
     registry().find(|b| (b.first..b.first + b.count).contains(&state))
 }
 pub fn properties(state: BlockState) -> &'static [(&'static str, &'static str)] {
+    // Facing order north/south/west/east, each with bottom then top.
+    const STAIRS: [[(&str, &str); 2]; 8] = [
+        [("facing", "north"), ("half", "bottom")],
+        [("facing", "north"), ("half", "top")],
+        [("facing", "south"), ("half", "bottom")],
+        [("facing", "south"), ("half", "top")],
+        [("facing", "west"), ("half", "bottom")],
+        [("facing", "west"), ("half", "top")],
+        [("facing", "east"), ("half", "bottom")],
+        [("facing", "east"), ("half", "top")],
+    ];
     match state {
+        OAK_STAIRS..=38 => &STAIRS[((state - OAK_STAIRS) % 8) as usize],
         14 | 17 => &[("type", "bottom")],
         15 | 18 => &[("type", "top")],
         16 | 19 => &[("type", "double")],
@@ -380,28 +430,183 @@ pub fn properties(state: BlockState) -> &'static [(&'static str, &'static str)] 
 }
 pub fn state_name(state: BlockState) -> String {
     let mut name = info(state).name.to_owned();
-    if let Some((key, value)) = properties(state).first() {
-        name.push_str(&format!("[{key}={value}]"));
+    let props = properties(state);
+    if !props.is_empty() {
+        name.push('[');
+        for (i, (key, value)) in props.iter().enumerate() {
+            if i > 0 {
+                name.push(',');
+            }
+            name.push_str(&format!("{key}={value}"));
+        }
+        name.push(']');
     }
     name
 }
 pub fn parse_state(name: &str) -> Option<BlockState> {
     (0..COUNT).find(|s| state_name(*s) == name)
 }
-pub fn selection_boxes(state: BlockState) -> &'static [Box16] {
-    match info(state).model {
-        _ if state == AIR || state == WATER || !is_valid(state) => &[],
-        Model::Cube => &[FULL_BOX],
-        Model::Boxes(boxes) => boxes,
-        Model::Cross => &PLANT,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapePurpose {
+    Collision,
+    Selection,
+    Render,
+}
+
+// Only facing and half are persisted. Unlike vanilla's shape/connection states,
+// corners and arms are derived from cardinal neighbours on every query. This
+// keeps prediction, server validation and padded-section meshing in agreement.
+// Rules: https://minecraft.wiki/w/Stairs and https://minecraft.wiki/w/Fence
+const CARDINAL: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+fn stair(state: BlockState) -> Option<(usize, bool)> {
+    (info(state).model == Model::Stairs).then(|| {
+        let index = (state - OAK_STAIRS) % 8;
+        ((index / 2) as usize, index % 2 == 1)
+    })
+}
+fn half_box(direction: usize, low: u8, high: u8) -> Box16 {
+    let (dx, dz) = CARDINAL[direction];
+    Box16 {
+        min: [if dx > 0 { 8 } else { 0 }, low, if dz > 0 { 8 } else { 0 }],
+        max: [
+            if dx < 0 { 8 } else { 16 },
+            high,
+            if dz < 0 { 8 } else { 16 },
+        ],
     }
 }
-pub fn collision_boxes(state: BlockState) -> &'static [Box16] {
-    if is_solid(state) {
-        selection_boxes(state)
-    } else {
-        &[]
+pub fn shape_boxes(
+    state: BlockState,
+    neighbor: impl Fn(i32, i32, i32) -> BlockState,
+    purpose: ShapePurpose,
+    mut visit: impl FnMut(Box16),
+) {
+    if !is_valid(state)
+        || state == AIR
+        || (purpose != ShapePurpose::Render && state == WATER)
+        || (purpose == ShapePurpose::Collision && !is_solid(state))
+    {
+        return;
     }
+    match info(state).model {
+        Model::Cube => visit(FULL_BOX),
+        Model::Boxes(boxes) => boxes.iter().copied().for_each(visit),
+        Model::Cross => PLANT.iter().copied().for_each(visit),
+        Model::Stairs => {
+            let (facing, top) = stair(state).unwrap();
+            visit(if top { TOP[0] } else { BOTTOM[0] });
+            let (low, high) = if top { (0, 8) } else { (8, 16) };
+            let (dx, dz) = CARDINAL[facing];
+            let same = |x, z| stair(neighbor(x, 0, z)) == Some((facing, top));
+            let mut step = half_box(facing, low, high);
+            // Front perpendicular stair cuts the upper step to a quarter (outer).
+            // A same-facing stair on the opposite side prevents this corner.
+            if let Some((other, half)) = stair(neighbor(dx, 0, dz)) {
+                let (ox, oz) = CARDINAL[other];
+                if half == top && dx * ox + dz * oz == 0 && !same(-ox, -oz) {
+                    let cut = half_box(other, low, high);
+                    for a in [0, 2] {
+                        step.min[a] = step.min[a].max(cut.min[a]);
+                        step.max[a] = step.max[a].min(cut.max[a]);
+                    }
+                    visit(step);
+                    return;
+                }
+            }
+            visit(step);
+            // Rear perpendicular stair adds the missing quarter (inner).
+            if let Some((other, half)) = stair(neighbor(-dx, 0, -dz)) {
+                let (ox, oz) = CARDINAL[other];
+                if half == top && dx * ox + dz * oz == 0 && !same(ox, oz) {
+                    let mut extra = half_box(facing ^ 1, low, high);
+                    let cut = half_box(other, low, high);
+                    for a in [0, 2] {
+                        extra.min[a] = extra.min[a].max(cut.min[a]);
+                        extra.max[a] = extra.max[a].min(cut.max[a]);
+                    }
+                    visit(extra);
+                }
+            }
+        }
+        Model::Fence => {
+            let height = if purpose == ShapePurpose::Collision {
+                24
+            } else {
+                16
+            };
+            visit(Box16 {
+                min: [6, 0, 6],
+                max: [10, height, 10],
+            });
+            for (dx, dz) in CARDINAL {
+                let other = neighbor(dx, 0, dz);
+                if info(other).model != Model::Fence && !occludes(other) {
+                    continue;
+                }
+                let mut arm = Box16 {
+                    min: [
+                        if dx < 0 {
+                            0
+                        } else if dx > 0 {
+                            10
+                        } else {
+                            7
+                        },
+                        0,
+                        if dz < 0 {
+                            0
+                        } else if dz > 0 {
+                            10
+                        } else {
+                            7
+                        },
+                    ],
+                    max: [
+                        if dx > 0 {
+                            16
+                        } else if dx < 0 {
+                            6
+                        } else {
+                            9
+                        },
+                        height,
+                        if dz > 0 {
+                            16
+                        } else if dz < 0 {
+                            6
+                        } else {
+                            9
+                        },
+                    ],
+                };
+                if purpose == ShapePurpose::Render {
+                    for (low, high) in [(6, 9), (12, 15)] {
+                        arm.min[1] = low;
+                        arm.max[1] = high;
+                        visit(arm);
+                    }
+                } else {
+                    visit(arm);
+                }
+            }
+        }
+    }
+}
+pub fn selection_boxes(
+    state: BlockState,
+    neighbor: impl Fn(i32, i32, i32) -> BlockState,
+) -> Vec<Box16> {
+    let mut boxes = Vec::new();
+    shape_boxes(state, neighbor, ShapePurpose::Selection, |b| boxes.push(b));
+    boxes
+}
+pub fn collision_boxes(
+    state: BlockState,
+    neighbor: impl Fn(i32, i32, i32) -> BlockState,
+) -> Vec<Box16> {
+    let mut boxes = Vec::new();
+    shape_boxes(state, neighbor, ShapePurpose::Collision, |b| boxes.push(b));
+    boxes
 }
 /// Server placement policy: any replacement is allowed; plants need support.
 pub fn can_place(_old: BlockState, new: BlockState, below: BlockState) -> bool {
@@ -411,6 +616,190 @@ pub fn can_place(_old: BlockState, new: BlockState, below: BlockState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn boxes_at(state: BlockState, cells: &[(i32, i32, BlockState)]) -> Vec<Box16> {
+        selection_boxes(state, |x, _, z| {
+            cells
+                .iter()
+                .find(|c| c.0 == x && c.1 == z)
+                .map_or(AIR, |c| c.2)
+        })
+    }
+
+    #[test]
+    fn appended_state_ids_and_properties() {
+        let old = [
+            "oak_slab[type=bottom]",
+            "oak_slab[type=top]",
+            "oak_slab[type=double]",
+            "cobblestone_slab[type=bottom]",
+            "cobblestone_slab[type=top]",
+            "cobblestone_slab[type=double]",
+            "red_flower",
+            "yellow_flower",
+            "short_grass",
+        ];
+        for (i, name) in old.iter().enumerate() {
+            assert_eq!(parse_state(name), Some(14 + i as u16));
+        }
+        assert_eq!(
+            (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
+            (23, 31, 39, 40)
+        );
+        for base in [OAK_STAIRS, COBBLESTONE_STAIRS] {
+            assert_eq!(block(base).unwrap().count, 8);
+            for (f, facing) in ["north", "south", "west", "east"].iter().enumerate() {
+                for (h, half) in ["bottom", "top"].iter().enumerate() {
+                    let state = base + (f * 2 + h) as u16;
+                    assert_eq!(properties(state), &[("facing", *facing), ("half", *half)]);
+                }
+            }
+        }
+        assert_eq!(block(OAK_FENCE).unwrap().count, 1);
+        for state in OAK_STAIRS..COUNT {
+            assert!(is_solid(state));
+            assert!(!occludes(state));
+            assert_eq!(info(state).opacity, 0);
+            assert_eq!(
+                info(state).tex,
+                all(if state < COBBLESTONE_STAIRS || state == OAK_FENCE {
+                    5
+                } else {
+                    4
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn stair_straight_and_both_corners_all_facings_and_halves() {
+        // Independent expected horizontal half bounds: north, south, west, east.
+        let halves = [
+            ([0, 0], [16, 8]),
+            ([0, 8], [16, 16]),
+            ([0, 0], [8, 16]),
+            ([8, 0], [16, 16]),
+        ];
+        for facing in 0..4 {
+            let (dx, dz) = CARDINAL[facing];
+            for half in 0..2 {
+                let state = OAK_STAIRS + facing as u16 * 2 + half;
+                let (lo, hi) = if half == 0 { (8, 16) } else { (0, 8) };
+                let base = if half == 0 { BOTTOM[0] } else { TOP[0] };
+                let make = |min: [u8; 2], max: [u8; 2]| Box16 {
+                    min: [min[0], lo, min[1]],
+                    max: [max[0], hi, max[1]],
+                };
+                let (min, max) = halves[facing];
+                let step = make(min, max);
+                assert_eq!(boxes_at(state, &[]), vec![base, step]);
+                for other in 0..4 {
+                    let (ox, oz) = CARDINAL[other];
+                    if dx * ox + dz * oz != 0 {
+                        continue;
+                    }
+                    let adjacent = COBBLESTONE_STAIRS + other as u16 * 2 + half;
+                    let (omin, omax) = halves[other];
+                    let intersect = |a: [u8; 2], b: [u8; 2]| {
+                        make(
+                            [a[0].max(omin[0]), a[1].max(omin[1])],
+                            [b[0].min(omax[0]), b[1].min(omax[1])],
+                        )
+                    };
+                    // Both left and right, outer and inner, including mixed materials.
+                    assert_eq!(
+                        boxes_at(state, &[(dx, dz, adjacent)]),
+                        vec![base, intersect(min, max)]
+                    );
+                    let (rear_min, rear_max) = halves[facing ^ 1];
+                    assert_eq!(
+                        boxes_at(state, &[(-dx, -dz, adjacent)]),
+                        vec![base, step, intersect(rear_min, rear_max)]
+                    );
+                    // Opposite halves never join; side continuations suppress corners.
+                    let different_half = if half == 0 {
+                        adjacent + 1
+                    } else {
+                        adjacent - 1
+                    };
+                    assert_eq!(
+                        boxes_at(state, &[(dx, dz, different_half)]),
+                        vec![base, step]
+                    );
+                    assert_eq!(
+                        boxes_at(state, &[(dx, dz, adjacent), (-ox, -oz, state)]),
+                        vec![base, step]
+                    );
+                    assert_eq!(
+                        boxes_at(state, &[(-dx, -dz, adjacent), (ox, oz, state)]),
+                        vec![base, step]
+                    );
+                    // Front (outer) wins when both ends can form a corner.
+                    assert_eq!(
+                        boxes_at(state, &[(dx, dz, adjacent), (-dx, -dz, adjacent)]),
+                        vec![base, intersect(min, max)]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fence_connections_and_purpose_specific_heights() {
+        let post = Box16 {
+            min: [6, 0, 6],
+            max: [10, 16, 10],
+        };
+        assert_eq!(boxes_at(OAK_FENCE, &[]), vec![post]);
+        for (dx, dz) in CARDINAL {
+            for other in [AIR, OAK_FENCE, STONE, GLASS, OAK_STAIRS, OAK_SLAB] {
+                let neighbor = |x, _, z| if (x, z) == (dx, dz) { other } else { AIR };
+                let selection = selection_boxes(OAK_FENCE, neighbor);
+                let collision = collision_boxes(OAK_FENCE, neighbor);
+                let connects = matches!(other, OAK_FENCE | STONE);
+                assert_eq!(selection.len(), if connects { 2 } else { 1 });
+                assert_eq!(collision.len(), selection.len());
+                for (s, c) in selection.iter().zip(collision) {
+                    assert_eq!(s.max[1], 16);
+                    assert_eq!(c.max[1], 24);
+                    assert_eq!(s.min, c.min);
+                    assert_eq!((s.max[0], s.max[2]), (c.max[0], c.max[2]));
+                }
+                if connects {
+                    let arm = selection[1];
+                    assert_eq!(
+                        if dx < 0 {
+                            arm.min[0]
+                        } else if dx > 0 {
+                            arm.max[0]
+                        } else if dz < 0 {
+                            arm.min[2]
+                        } else {
+                            arm.max[2]
+                        },
+                        if dx + dz < 0 { 0 } else { 16 }
+                    );
+                }
+                let mut render = Vec::new();
+                shape_boxes(OAK_FENCE, neighbor, ShapePurpose::Render, |b| {
+                    render.push(b)
+                });
+                assert_eq!(render[0], post);
+                assert_eq!(render.len(), if connects { 3 } else { 1 });
+                if connects {
+                    assert_eq!(
+                        (
+                            render[1].min[1],
+                            render[1].max[1],
+                            render[2].min[1],
+                            render[2].max[1]
+                        ),
+                        (6, 9, 12, 15)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn state_registry_round_trip_and_legacy_ids() {
         let legacy = [

@@ -249,8 +249,9 @@ fn set_block(st: &mut State, x: i32, y: i32, z: i32, block: u16) -> bool {
     };
     match old {
         Some(old) if old != block => {
-            // Faces and ambient occlusion of every block touching this one,
-            // including diagonally, may change: mark each section in reach.
+            // Faces, AO and derived stair/fence connections of touching blocks
+            // may change. Shapes only query cardinal neighbors, so this one-cell
+            // radius also covers their dependencies across section boundaries.
             if st.light_exports.is_none() {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
@@ -754,7 +755,12 @@ pub extern "C" fn client_raycast(
     }
     loop {
         if let Some(b) = st.world.get_block(cell[0], cell[1], cell[2]) {
-            let hit = blocks::selection_boxes(b)
+            let boxes = blocks::selection_boxes(b, |dx, dy, dz| {
+                st.world
+                    .get_block(cell[0] + dx, cell[1] + dy, cell[2] + dz)
+                    .unwrap_or(blocks::AIR)
+            });
+            let hit = boxes
                 .iter()
                 .filter_map(|bounds| {
                     physics::ray_box(
@@ -873,6 +879,8 @@ pub extern "C" fn client_block_registry() -> usize {
             blocks::Model::Cube => "cube",
             blocks::Model::Boxes(_) => "boxes",
             blocks::Model::Cross => "cross",
+            blocks::Model::Stairs => "stairs",
+            blocks::Model::Fence => "fence",
         };
         format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"texture":"{}"}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
@@ -1006,6 +1014,60 @@ mod tests {
     }
 
     #[test]
+    fn raycast_and_selection_follow_neighbor_changes_for_stairs_and_fences() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        state().world.set_block(2, 80, 2, blocks::OAK_STAIRS);
+        assert_eq!(client_raycast(2.75, 82.0, 2.25, 0.0, -1.0, 0.0, 6.0), 1);
+        let hit_y = || f64::from_le_bytes(state().out[40..48].try_into().unwrap());
+        assert_eq!(hit_y(), 1.0);
+        state()
+            .world
+            .set_block(2, 80, 1, blocks::COBBLESTONE_STAIRS + 4);
+        // The outer corner removes the east upper quarter, exposing the slab.
+        assert_eq!(client_raycast(2.75, 82.0, 2.25, 0.0, -1.0, 0.0, 6.0), 1);
+        assert_eq!(hit_y(), 0.5);
+        assert_eq!(client_raycast(2.25, 82.0, 2.25, 0.0, -1.0, 0.0, 6.0), 1);
+        assert_eq!(hit_y(), 1.0);
+        assert_eq!(
+            i32::from_le_bytes(state().out[28..32].try_into().unwrap()),
+            8
+        ); // selected quarter max x
+        state().world.set_block(2, 80, 1, blocks::AIR);
+        assert_eq!(client_raycast(2.75, 82.0, 2.25, 0.0, -1.0, 0.0, 6.0), 1);
+        assert_eq!(hit_y(), 1.0);
+        state().world.set_block(2, 80, 2, blocks::OAK_FENCE);
+        assert_eq!(client_raycast(2.8, 82.0, 2.5, 0.0, -1.0, 0.0, 3.0), 0);
+        state().world.set_block(3, 80, 2, blocks::STONE);
+        assert_eq!(client_raycast(2.8, 82.0, 2.5, 0.0, -1.0, 0.0, 3.0), 1);
+        assert_eq!(hit_y(), 1.0);
+        assert_eq!(
+            i32::from_le_bytes(state().out[32..36].try_into().unwrap()),
+            16
+        ); // selection height, not collision height
+        state().world.set_block(3, 80, 2, blocks::AIR);
+        assert_eq!(client_raycast(2.8, 82.0, 2.5, 0.0, -1.0, 0.0, 3.0), 0);
+    }
+
+    #[test]
+    fn neighbor_edits_dirty_connected_shape_across_section_boundaries() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        for shape in [blocks::OAK_STAIRS, blocks::OAK_FENCE] {
+            client_new();
+            state().world.set_lighting_enabled(false);
+            state().world.insert_chunk(Chunk::empty(0, 0));
+            state().world.insert_chunk(Chunk::empty(1, 0));
+            state().world.set_block(15, 80, 2, shape);
+            state().dirty.clear();
+            assert!(set_block(state(), 16, 80, 2, blocks::STONE));
+            assert!(state().dirty.contains(&(0, 9, 0)));
+            assert!(state().dirty.contains(&(1, 9, 0)));
+        }
+    }
+
+    #[test]
     fn prediction_uses_registry_boxes_for_steps_clearance_and_plants() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         for (obstacle, roof, passes) in [
@@ -1016,6 +1078,9 @@ mod tests {
             (blocks::RED_FLOWER, false, true),
             (blocks::YELLOW_FLOWER, false, true),
             (blocks::SHORT_GRASS, false, true),
+            (blocks::OAK_STAIRS + 6, false, true),
+            (blocks::COBBLESTONE_STAIRS + 6, false, true),
+            (blocks::OAK_FENCE, false, true),
         ] {
             client_new();
             state().world.set_lighting_enabled(false);
@@ -1050,6 +1115,9 @@ mod tests {
                 passes,
                 "state {obstacle}, roof {roof}"
             );
+            if obstacle == blocks::OAK_FENCE {
+                assert!(state().player.position[0] < 1.1);
+            }
             if obstacle == blocks::OAK_SLAB && !roof {
                 assert_eq!(highest, 64.5);
             }

@@ -628,6 +628,14 @@ fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     if sweep(physics::Player::new(from), to, &[1, 0, 2]).is_some() {
         return true;
     }
+    // Prediction only steps when grounded or landing. Packets contain endpoints
+    // rather than input/vertical velocity; conservatively look for support within
+    // the step height or the reported fall. Otherwise an airborne packet could
+    // use the extra rise to cross the protruding top of a fence.
+    let probe = delta[1].min(-physics::STEP_HEIGHT);
+    if physics::resolve(&collisions, origin, [0.0, probe, 0.0])[1] == probe {
+        return false;
+    }
     // Prediction can also step up, move X/Z, then descend. Resolve the upward
     // leg first so low ceilings limit the rise exactly as in Player::tick.
     let up = physics::resolve(&collisions, origin, [0.0, physics::STEP_HEIGHT, 0.0])[1];
@@ -687,6 +695,9 @@ mod tests {
             (blocks::RED_FLOWER, false, true),
             (blocks::YELLOW_FLOWER, false, true),
             (blocks::SHORT_GRASS, false, true),
+            (blocks::OAK_STAIRS + 6, false, true),
+            (blocks::COBBLESTONE_STAIRS + 6, false, true),
+            (blocks::OAK_FENCE, false, true),
         ] {
             let floor = if roof { 63.5 } else { 64.0 };
             let mut s = joined_at([0.5, floor, 1.5]);
@@ -729,10 +740,53 @@ mod tests {
                 passes,
                 "state {obstacle}, roof {roof}"
             );
+            if obstacle == blocks::OAK_FENCE {
+                assert!(player.position[0] < 1.1);
+            }
             if obstacle == blocks::OAK_SLAB && !roof {
                 assert_eq!(highest, 64.5);
             }
         }
+    }
+
+    #[test]
+    fn fence_jump_prediction_is_accepted_and_airborne_crossing_is_rejected() {
+        let mut s = joined_at([0.5, 64.0, 1.5]);
+        for x in 0..16 {
+            for z in 0..16 {
+                s.world.set_block(x, 63, z, blocks::STONE);
+                if x == 1 {
+                    s.world.set_block(x, 64, z, blocks::OAK_FENCE);
+                }
+            }
+        }
+        let mut player = physics::Player::new([0.5, 64.0, 1.5]);
+        let mut highest = 64.0_f64;
+        for _ in 0..60 {
+            let before = player.position;
+            player.tick(
+                physics::Input {
+                    strafe: -1.0,
+                    jump: true,
+                    ..Default::default()
+                },
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            );
+            highest = highest.max(player.position[1]);
+            assert!(player.position[0] < 1.1);
+            assert!(movement_clear(&s.world, before, player.position));
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+        assert!(highest > 65.25 && highest < 65.26);
+        assert_eq!(s.stats.positions_rejected, 0);
+        assert!(!movement_clear(
+            &s.world,
+            [0.5, 65.1, 1.5],
+            [2.5, 65.1, 1.5]
+        ));
+        assert!(movement_clear(&s.world, [0.5, 65.5, 1.5], [2.5, 65.5, 1.5]));
     }
 
     #[test]

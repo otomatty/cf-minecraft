@@ -65,6 +65,7 @@ interface DebugHandle {
 	getBlock(x: number, y: number, z: number): number;
 	stateId(name: string): number;
 	playerPosition(): readonly number[];
+	raycast(origin: readonly number[], direction: readonly number[], max: number): RayHit | null;
 	toggleFlight(): boolean;
 	runScenario(seed: string, ticks: number): Promise<string>;
 	flush(): void;
@@ -551,7 +552,7 @@ async function main(): Promise<void> {
 		if (button === 0) {
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
-			const edit = placementState(registry, selected, hit, (x, y, z) => core.getBlock(x, y, z));
+			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
 			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
@@ -749,6 +750,7 @@ async function main(): Promise<void> {
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
 		stateId: name => registry.findIndex(info => info.stateName === name || info.name === name),
 		playerPosition: () => core.playerPosition,
+		raycast: (origin, direction, max) => core.raycast(origin, direction, max),
 		toggleFlight: () => core.toggleFlight(),
 		runScenario,
 		flush: () => transport.flush(),
@@ -769,6 +771,7 @@ window.__mc = {
 	getBlock: () => -1,
 	stateId: () => -1,
 	playerPosition: () => [],
+	raycast: () => null,
 	toggleFlight: () => false,
 	runScenario,
 	flush: () => {},
