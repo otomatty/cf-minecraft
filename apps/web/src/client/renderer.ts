@@ -26,6 +26,12 @@ const MIP_LEVELS = 5;
 
 export const FOV_Y = 70;
 const NEAR = 0.05;
+export const CLOUD_HEIGHT = 192;
+
+/** Below the cloud plane, water must blend over clouds already drawn behind it. */
+export function cloudsBeforeTranslucent(cameraY: number, cloudHeight = CLOUD_HEIGHT): boolean {
+	return cameraY < cloudHeight;
+}
 
 const TERRAIN_WGSL = /* wgsl */ `
 struct Globals {
@@ -203,7 +209,7 @@ struct CloudOut {
 	let corners = array<vec2<f32>, 6>(vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(1.0,1.0), vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,1.0), vec2<f32>(-1.0,1.0));
 	var out: CloudOut;
 	let p = corners[id] * g.cloudOrigin.w;
-	out.rel = vec3<f32>(p.x, 192.0 - g.skyCamera.z, p.y);
+	out.rel = vec3<f32>(p.x, ${CLOUD_HEIGHT.toFixed(1)} - g.skyCamera.z, p.y);
 	out.pos = g.viewProj * vec4<f32>(out.rel, 1.0);
 	return out;
 }
@@ -593,9 +599,17 @@ export class Renderer {
 		updateTranslucentSort(transparent, cameraPoint, (mesh, local) => {
 			this.device.queue.writeBuffer(mesh.translucentIndices!, 0, sortedQuadIndices(mesh.centers, local));
 		});
-		pass.setBindGroup(0, this.terrainBind);
+		const cloudsFirst = cloudsBeforeTranslucent(camera.y);
+		// Clouds test opaque/cutout depth without writing it, on either side of the plane.
+		const drawClouds = () => {
+			pass.setPipeline(this.clouds);
+			pass.setBindGroup(0, this.skyBind);
+			pass.draw(6);
+		};
 		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
+			if (layer === 2 && cloudsFirst) drawClouds();
 			pass.setPipeline(pipeline);
+			pass.setBindGroup(0, this.terrainBind);
 			for (const mesh of layer === 2 ? transparent : visible) {
 				const count = mesh.counts[layer];
 				if (!count) continue;
@@ -608,10 +622,7 @@ export class Renderer {
 		const drawn = visible.length;
 		const quads = visible.reduce((sum, mesh) => sum + mesh.quads, 0);
 
-		// Alpha-blended clouds test terrain depth from either side, without writing it.
-		pass.setPipeline(this.clouds);
-		pass.setBindGroup(0, this.skyBind);
-		pass.draw(6);
+		if (!cloudsFirst) drawClouds();
 
 		if (target) {
 			pass.setPipeline(this.outline);

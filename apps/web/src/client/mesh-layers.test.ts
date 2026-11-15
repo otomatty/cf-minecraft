@@ -4,7 +4,16 @@ import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
 import { paintTexture, downsample, textureIconPixels, LEAVES_TINT, WATER_TINT } from "./textures.ts";
 import { ClientCore } from "./client-core.ts";
-import { terrainShader } from "./renderer.ts";
+import { terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+
+test("clouds draw before translucent terrain only below the cloud plane", () => {
+	assert.equal(CLOUD_HEIGHT, 192);
+	for (const cameraY of [-64, 64, 191.999]) assert.equal(cloudsBeforeTranslucent(cameraY), true);
+	for (const cameraY of [192, 192.001, 320]) assert.equal(cloudsBeforeTranslucent(cameraY), false);
+	assert.equal(cloudsBeforeTranslucent(95.999, 96), true);
+	assert.equal(cloudsBeforeTranslucent(96, 96), false);
+	assert.equal(cloudsBeforeTranslucent(97, 96), false);
+});
 
 test("leaf and water icons use terrain tints without changing alpha or shared texture pixels", () => {
 	for (const [name, tint] of [["oak_leaves", LEAVES_TINT], ["water", WATER_TINT]]) {

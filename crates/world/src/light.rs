@@ -347,6 +347,10 @@ impl World {
                 .is_some_and(|c| c.lighting.is_some())
     }
     fn level(&self, p: Pos, sky: bool) -> u8 {
+        // The open sky is a source even when the highest in-world cell filters light.
+        if sky && p.1 >= MIN_Y + HEIGHT {
+            return 15;
+        }
         let Some(s) = section_index(p.1) else {
             return 0;
         };
@@ -396,6 +400,9 @@ impl World {
                 >= c.lighting.as_ref().unwrap().heightmap[((p.2 & 15) * 16 + (p.0 & 15)) as usize]
             {
                 15
+            } else if p.1 == MIN_Y + HEIGHT - 1 {
+                let above = neighbor(p, (0, 1, 0));
+                self.transmit(above, p, true, self.level(above, true))
             } else {
                 0
             }
@@ -539,6 +546,65 @@ mod tests {
         rebuilt.hash_into(&mut b);
         assert_eq!(a.finish(), b.finish());
     }
+    fn upper_boundary_shaft(material: crate::BlockState) -> Chunk {
+        let mut c = solid(0, 0);
+        for y in MIN_Y + 1..MIN_Y + HEIGHT {
+            c.set(8, y, 8, blocks::AIR);
+        }
+        c.set(8, MIN_Y + HEIGHT - 1, 8, material);
+        c
+    }
+
+    fn assert_upper_boundary_shaft(w: &World, material: crate::BlockState) {
+        let top = MIN_Y + HEIGHT - 1;
+        assert_eq!(w.level((8, top + 1, 8), true), 15);
+        assert_eq!(w.level((8, top + 1, 8), false), 0);
+        assert_eq!(w.sky_light(8, MIN_Y, 8), 0); // Stone floor.
+        for y in MIN_Y + 1..=top {
+            let expected = match material {
+                blocks::AIR | blocks::GLASS => 15,
+                blocks::STONE => 0,
+                blocks::OAK_LEAVES | blocks::WATER => (14 - (top - y)).max(0) as u8,
+                _ => unreachable!(),
+            };
+            assert_eq!(w.sky_light(8, y, 8), expected, "material {material}, y {y}");
+            assert_eq!(w.block_light(8, y, 8), 0);
+        }
+    }
+
+    #[test]
+    fn upper_boundary_sunlight_filters_into_initially_loaded_shafts() {
+        for material in [
+            blocks::OAK_LEAVES,
+            blocks::WATER,
+            blocks::GLASS,
+            blocks::AIR,
+            blocks::STONE,
+        ] {
+            let mut w = World::with_lighting(true);
+            w.insert_chunk(upper_boundary_shaft(material));
+            assert_upper_boundary_shaft(&w, material);
+        }
+    }
+
+    #[test]
+    fn upper_boundary_sunlight_matches_rebuild_after_placement_removal_and_replacement() {
+        for material in [
+            blocks::OAK_LEAVES,
+            blocks::WATER,
+            blocks::GLASS,
+            blocks::STONE,
+        ] {
+            let mut w = World::with_lighting(true);
+            w.insert_chunk(upper_boundary_shaft(blocks::AIR));
+            for state in [material, blocks::AIR, material] {
+                w.set_block(8, MIN_Y + HEIGHT - 1, 8, state);
+                assert_upper_boundary_shaft(&w, state);
+                assert_rebuild(&w);
+            }
+        }
+    }
+
     #[test]
     fn glass_passes_direct_sun_and_leaves_and_water_filter_each_layer() {
         for material in [blocks::GLASS, blocks::OAK_LEAVES, blocks::WATER] {
