@@ -140,6 +140,11 @@ const PAINTERS: Record<string, (rand: () => number) => Painter> = {
 	oak_log: logSide,
 	oak_log_top: logTop,
 	bricks,
+	lamp_block: () => (x, y) => {
+		const frame = x === 0 || y === 0 || x === 15 || y === 15;
+		const cross = Math.abs(x - 7.5) + Math.abs(y - 7.5) < 5;
+		return frame ? [55, 67, 76] : cross ? [255, 248, 184] : [226, 167, 78];
+	},
 };
 
 /** RGBA pixels of one texture. Unknown names get a magenta/black checker so gaps are obvious. */

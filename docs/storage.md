@@ -91,7 +91,7 @@ cargo test -p storage startup_ten_thousand_chunks -- --nocapture
 
 この環境では crates.io に接続できませんでした。検証時だけ、上流 GitHub の miniz_oxide 0.8.9 と adler2 2.0.1 のソースを `target/vendor` に置きました。Cargo の取得先は `target/cargo-home/config.toml` で切り替えました。これらは Git の管理対象外です。通常の依存宣言と Cargo.lock は crates.io を参照します。
 
-`cargo test --workspace`、fmt、clippy、既存ホストテスト、クライアントの型チェックは通過しました。ネイティブと WASM の保存計画4136バイトも一致しました。シード2026、600 tick の台本は両方とも `05b4399b6948c67e` です。
+`cargo test --workspace`、fmt、clippy、既存ホストテスト、クライアントの型チェックは通過しました。ネイティブと WASM の保存計画4136バイトも一致しました。光源エンジン（#14）の追加後、シード2026、600 tick の台本はネイティブと Node（WASM）の両方で `88d6e0e1abd58ec4` です（更新理由・検証環境は [m0-report.md](m0-report.md)）。
 
 `pnpm build` は WASM の生成まで成功しました。その後の Cloudflare/Vite のソケット作成が、実行環境の制限で `listen EPERM 127.0.0.1` になりました。`node tools/determinism.mjs` も子プロセスの結果取得が `spawnSync EPERM` になりました。ネイティブと WASM を個別に実行して、上記の一致を確認しました。dev と E2E は実行していません。
 
