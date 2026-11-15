@@ -98,6 +98,8 @@ pub fn run_detailed(seed: i64, ticks: u32) -> Outcome {
         }
     }
 
+    // Exercise lighting on every host without charging normal server ticks for it.
+    server.world.rebuild_light();
     let mut h = Fnv64::new();
     h.i64(server.state_hash() as i64);
     h.i64(wire.finish() as i64);

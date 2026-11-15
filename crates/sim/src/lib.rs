@@ -96,7 +96,8 @@ impl Server {
             generator,
             game_time: 0,
             day_time: 0,
-            world: World::new(),
+            // Lighting is unused by simulation until mob spawning needs it.
+            world: World::with_lighting(false),
             clients: BTreeMap::new(),
             pending: Vec::new(),
             outbox: Vec::new(),
@@ -310,7 +311,7 @@ impl Server {
             return false;
         }
         let chunk = worldgen::generate(self.generator, self.seed, c.0, c.1);
-        self.world.chunks.insert(c, chunk);
+        self.world.insert_chunk(chunk);
         self.stats.chunks_generated += 1;
         true
     }
@@ -394,14 +395,23 @@ impl Server {
 
     fn unload_far_chunks(&mut self) {
         let clients = &self.clients;
-        self.world.chunks.retain(|&(cx, cz), chunk| {
-            chunk.dirty
-                || clients.values().any(|c| {
-                    let (px, pz) = c.center();
-                    let r = c.view + UNLOAD_MARGIN;
-                    (cx - px).abs() <= r && (cz - pz).abs() <= r
-                })
-        });
+        let removed: Vec<_> = self
+            .world
+            .chunks
+            .iter()
+            .filter_map(|(&(cx, cz), chunk)| {
+                let keep = chunk.dirty
+                    || clients.values().any(|c| {
+                        let (px, pz) = c.center();
+                        let r = c.view + UNLOAD_MARGIN;
+                        (cx - px).abs() <= r && (cz - pz).abs() <= r
+                    });
+                (!keep).then_some((cx, cz))
+            })
+            .collect();
+        for (cx, cz) in removed {
+            self.world.remove_chunk(cx, cz);
+        }
     }
 
     pub fn take_outbox(&mut self) -> Vec<(u32, Vec<u8>)> {
@@ -430,7 +440,7 @@ impl Server {
         }
         match Chunk::read(cx, cz, &mut Reader::new(bytes)) {
             Ok(chunk) => {
-                self.world.chunks.insert(c, chunk);
+                self.world.insert_chunk(chunk);
                 self.stats.chunks_loaded_from_storage += 1;
                 true
             }
@@ -500,6 +510,24 @@ mod tests {
         out.into_iter()
             .map(|(id, b)| (id, S2C::decode(&b).unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn normal_ticks_do_not_allocate_lighting() {
+        let mut s = Server::new(2026, Generator::DebugHills);
+        s.connect(1);
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert!(!s.world.chunks.is_empty());
+        assert!(!s.world.lighting_enabled());
+        assert!(s.world.chunks.values().all(|c| c.lighting.is_none()));
     }
 
     #[test]
@@ -756,7 +784,7 @@ mod tests {
         s.take_outbox();
         let y = s.spawn()[1] as i32 + 2;
         assert!(s.clients[&1].sent.contains(&(0, 0)));
-        s.world.chunks.remove(&(0, 0));
+        s.world.remove_chunk(0, 0);
         s.handle_packet(
             1,
             &C2S::SetBlock {
@@ -782,10 +810,7 @@ mod tests {
                 let copy = &mut copies[id as usize - 1];
                 match packet {
                     S2C::ChunkData { cx, cz, data } => {
-                        copy.chunks.insert(
-                            (cx, cz),
-                            Chunk::read(cx, cz, &mut Reader::new(&data)).unwrap(),
-                        );
+                        copy.insert_chunk(Chunk::read(cx, cz, &mut Reader::new(&data)).unwrap());
                     }
                     S2C::BlockUpdate { x, y, z, state } => {
                         assert!(copy.set_block(x, y, z, state).is_some());
