@@ -31,7 +31,7 @@ impl Aabb {
     }
 }
 
-/// Enumerate world-space boxes contained within one block cell.
+/// Enumerate boxes owned by one cell; fences can extend 0.5 blocks above it.
 pub trait CollisionWorld {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb));
 }
@@ -57,9 +57,12 @@ impl<F: Fn(i32, i32, i32) -> Option<u16>> CollisionWorld for BlockWorld<F> {
         match self.0(x, y, z) {
             None => visit(Aabb::block(x, y, z)),
             Some(state) => {
-                for bounds in world::blocks::collision_boxes(state) {
-                    visit(shape_box(*bounds, x, y, z));
-                }
+                world::blocks::shape_boxes(
+                    state,
+                    |dx, dy, dz| self.0(x + dx, y + dy, z + dz).unwrap_or(world::blocks::AIR),
+                    world::blocks::ShapePurpose::Collision,
+                    |bounds| visit(shape_box(bounds, x, y, z)),
+                );
             }
         }
     }
@@ -279,7 +282,8 @@ fn toward_zero(v: f64) -> f64 {
     }
 }
 fn visit(world: &impl CollisionWorld, region: Aabb, mut callback: impl FnMut(Aabb)) {
-    for y in region.min[1].floor() as i32..region.max[1].ceil() as i32 {
+    // Fence boxes extend above their owner cell, including when feet are airborne.
+    for y in region.min[1].floor() as i32 - 1..region.max[1].ceil() as i32 {
         for x in region.min[0].floor() as i32..region.max[0].ceil() as i32 {
             for z in region.min[2].floor() as i32..region.max[2].ceil() as i32 {
                 world.collision_boxes(x, y, z, &mut callback);

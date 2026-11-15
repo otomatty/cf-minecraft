@@ -478,7 +478,7 @@ async function inputs() {
 	await page.close();
 }
 
-/** Real placement/UI input plus resolved physics; debug edits only prepare a small platform. */
+/** Real placement/UI input plus resolved physics; debug edits prepare and clear fixtures. */
 async function partialModels() {
 	const view = 3;
 	const { page, errors } = await open(`world=e2e-models-${run}&view=${view}&seed=2026&time=6000`);
@@ -534,6 +534,7 @@ async function partialModels() {
 		await waitFor("picker opened and pointer released", () => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
+		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
 		await page.click('#block-grid [data-block="red_flower"]');
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
 		await page.keyboard.press("KeyE");
@@ -594,6 +595,104 @@ async function partialModels() {
 		}, { timeout: 5000 }, center); }
 		finally { await page.keyboard.up("KeyA"); }
 		check(true, "models: player walks through the flower");
+
+		const pickBlock = async name => {
+			await page.keyboard.press("KeyE");
+			await waitFor(`picker for ${name}`, () => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+			await page.click(`#block-grid [data-block="${name}"]`);
+			check(await page.$eval("#hotbar canvas.selected", (c, name) => c.title === name, name), `models: picker selects ${name}`);
+			// Recenter while unlocked so the next canvas click cannot rotate yaw.
+			await page.mouse.move(640, 360);
+			await page.keyboard.press("KeyE");
+			await waitFor(`picker closed after ${name}`, () => document.getElementById("block-picker").hidden);
+			await resume(`resume after selecting ${name}`);
+		};
+
+		// Replace the flower through real interaction. Looking down retains yaw:
+		// 270 degrees places the high side east, ready to walk up from the west.
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 270, 90), center);
+		await page.mouse.click(640, 360, { button: "left" });
+		await waitFor("flower cleared for stairs", ([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, center);
+		await pickBlock("oak_stairs");
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("east bottom stairs placement", ([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_stairs[facing=east,half=bottom]"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		check(await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_stairs[facing=east,half=bottom]"), center), "models: yaw places east-facing bottom stairs");
+		const straight = await page.evaluate(([x, y, z]) => window.__mc.raycast([x + 0.75, y + 2, z + 0.75], [0, -1, 0], 3), center);
+		check(straight?.hitY === 1 && straight.max[1] === 1, "models: straight stair upper half is selectable", JSON.stringify(straight));
+
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x - 0.5, y + 1.62, z + 0.5, 270, 0);
+			window.__mc.toggleFlight();
+		}, center);
+		await page.keyboard.down("KeyW");
+		try {
+			const result = await waitFor("walk up stairs without jumping", ([x, y]) => {
+				const p = window.__mc.playerPosition();
+				return p[0] > x + 0.6 && Math.abs(p[1] - y - 1) < 0.001 ? p : false;
+			}, { timeout: 5000 }, center);
+			check(true, "models: walking climbs both stair halves", JSON.stringify(await result.jsonValue()));
+		} finally { await page.keyboard.up("KeyW"); }
+
+		// A perpendicular stair in front cuts the original step to a quarter.
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 1.5, y + 3, z + 0.5, 180, 90), center);
+		await pickBlock("cobblestone_stairs");
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("perpendicular stair placement", ([x, y, z]) => window.__mc.getBlock(x + 1, y, z) === window.__mc.stateId("cobblestone_stairs[facing=north,half=bottom]"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		const corner = await page.evaluate(([x, y, z]) => ({
+			state: window.__mc.getBlock(x, y, z),
+			expected: window.__mc.stateId("oak_stairs[facing=east,half=bottom]"),
+			neighbor: window.__mc.getBlock(x + 1, y, z),
+			expectedNeighbor: window.__mc.stateId("cobblestone_stairs[facing=north,half=bottom]"),
+			hit: window.__mc.raycast([x + 0.75, y + 2, z + 0.75], [0, -1, 0], 3),
+		}), center);
+		check(corner.state === corner.expected && corner.neighbor === corner.expectedNeighbor && corner.hit?.x === center[0]
+			&& corner.hit.y === center[1] && corner.hit.z === center[2] && corner.hit.hitY === 0.5 && corner.hit.max[1] === 0.5,
+			"models: perpendicular stairs change the selection shape without changing the original state", JSON.stringify(corner));
+
+		// Clear the stair fixture, then place the fence through right click.
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 270, 90);
+			window.__mc.setBlock(x, y, z, 0);
+			window.__mc.setBlock(x + 1, y, z, 0);
+		}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		await waitFor("stair fixture cleared", ([x, y, z]) => window.__mc.getBlock(x, y, z) === 0 && window.__mc.getBlock(x + 1, y, z) === 0, {}, center);
+		await pickBlock("oak_fence");
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("fence placement", ([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_fence"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		check(await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_fence"), center), "models: right click places a fence");
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x - 0.5, y + 1.62, z + 0.5, 270, 0);
+			window.__mc.toggleFlight();
+		}, center);
+		await page.keyboard.down("KeyW");
+		await page.keyboard.down("Space"); // One held press jumps repeatedly without toggling flight.
+		let fenceMotion;
+		try {
+			fenceMotion = await page.evaluate(async () => {
+				const start = performance.now();
+				let maxX = -Infinity, maxY = -Infinity;
+				while (performance.now() - start < 2000) {
+					const p = window.__mc.playerPosition();
+					maxX = Math.max(maxX, p[0]);
+					maxY = Math.max(maxY, p[1]);
+					await new Promise(resolve => requestAnimationFrame(resolve));
+				}
+				return { maxX, maxY, end: window.__mc.playerPosition() };
+			});
+		} finally {
+			await page.keyboard.up("Space");
+			await page.keyboard.up("KeyW");
+		}
+		check(fenceMotion.maxY > center[1] + 1.2 && fenceMotion.maxY < center[1] + 1.5,
+			"models: fence attempt uses a normal physics jump", JSON.stringify(fenceMotion));
+		check(fenceMotion.maxX <= center[0] + 0.076 && fenceMotion.end[0] <= center[0] + 0.076,
+			"models: jumping cannot cross the fence", JSON.stringify(fenceMotion));
+		// Preserve the existing fourth-slot persistence check after these fixtures.
+		await pickBlock("red_flower");
 		await page.reload({ waitUntil: "load" });
 		await settle(page, "models reload", chunksInView(view));
 		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");

@@ -407,3 +407,85 @@ fn ray_box_faces_parallel_misses_and_inside_exits() {
         assert_eq!(physics::ray_box(origin, dir, bounds), expected);
     }
 }
+
+#[test]
+fn registry_staircase_walks_up_two_blocks_without_jumping() {
+    use world::blocks;
+    for stairs in [blocks::OAK_STAIRS, blocks::COBBLESTONE_STAIRS] {
+        let world = physics::BlockWorld(|x, y, _| {
+            Some(if y < 0 || (x >= 2 && y == 0) || (x >= 3 && y == 1) {
+                blocks::STONE
+            } else if (x == 1 && y == 0) || (x == 2 && y == 1) {
+                stairs + 6
+            } else {
+                blocks::AIR
+            })
+        });
+        let mut p = grounded();
+        let mut heights = Vec::new();
+        for _ in 0..24 {
+            p.tick(
+                Input {
+                    strafe: -1.0,
+                    ..Input::default()
+                },
+                &world,
+            );
+            heights.push(p.position[1]);
+            assert!(p.is_clear(&world));
+        }
+        for height in [0.5, 1.0, 1.5, 2.0] {
+            assert!(heights.contains(&height), "{heights:?}");
+        }
+        assert!(p.position[0] > 3.0);
+        assert_eq!(p.position[1], 2.0);
+    }
+}
+
+#[test]
+fn fence_stops_walking_jumping_and_airborne_sweeps() {
+    use world::blocks;
+    let world = physics::BlockWorld(|x, y, _| {
+        Some(if y < 0 {
+            blocks::STONE
+        } else if x == 1 && y == 0 {
+            blocks::OAK_FENCE
+        } else {
+            blocks::AIR
+        })
+    });
+    for jump in [false, true] {
+        let mut p = grounded();
+        let mut apex = 0.0_f64;
+        for _ in 0..60 {
+            p.tick(
+                Input {
+                    strafe: -1.0,
+                    jump,
+                    ..Input::default()
+                },
+                &world,
+            );
+            apex = apex.max(p.position[1]);
+            assert!(p.is_clear(&world));
+            assert!(p.position[0] <= 1.375 - WIDTH / 2.0);
+        }
+        if jump {
+            assert!(apex > 1.25 && apex < 1.26);
+        }
+    }
+    // The entire player is above the fence's owner cell. Its protruding box
+    // still blocks both overlap checks and a horizontal server/prediction sweep.
+    let p = Player::new([0.5, 1.1, 0.5]);
+    let delta = physics::resolve(&world, p.bounds(), [3.0, 0.0, 0.0]);
+    assert_eq!(delta[0], 1.375 - WIDTH / 2.0 - 0.5);
+    assert!(!Player::new([1.5, 1.1, 0.5]).is_clear(&world));
+    assert_eq!(
+        physics::resolve(
+            &world,
+            Player::new([0.5, 1.5, 0.5]).bounds(),
+            [3.0, 0.0, 0.0]
+        ),
+        [3.0, 0.0, 0.0]
+    );
+}

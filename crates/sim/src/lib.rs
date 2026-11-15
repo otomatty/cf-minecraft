@@ -628,6 +628,9 @@ fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     if sweep(physics::Player::new(from), to, &[1, 0, 2]).is_some() {
         return true;
     }
+    // Validate only the step route's geometry. Inferring ground/landing state
+    // from endpoints can reject valid prediction; tracking velocity is future
+    // work. This also permits a modified client to use a step while airborne.
     // Prediction can also step up, move X/Z, then descend. Resolve the upward
     // leg first so low ceilings limit the rise exactly as in Player::tick.
     let up = physics::resolve(&collisions, origin, [0.0, physics::STEP_HEIGHT, 0.0])[1];
@@ -687,6 +690,9 @@ mod tests {
             (blocks::RED_FLOWER, false, true),
             (blocks::YELLOW_FLOWER, false, true),
             (blocks::SHORT_GRASS, false, true),
+            (blocks::OAK_STAIRS + 6, false, true),
+            (blocks::COBBLESTONE_STAIRS + 6, false, true),
+            (blocks::OAK_FENCE, false, true),
         ] {
             let floor = if roof { 63.5 } else { 64.0 };
             let mut s = joined_at([0.5, floor, 1.5]);
@@ -729,10 +735,65 @@ mod tests {
                 passes,
                 "state {obstacle}, roof {roof}"
             );
+            if obstacle == blocks::OAK_FENCE {
+                assert!(player.position[0] < 1.1);
+            }
             if obstacle == blocks::OAK_SLAB && !roof {
                 assert_eq!(highest, 64.5);
             }
         }
+    }
+
+    #[test]
+    fn fence_jump_prediction_stays_blocked_but_airborne_step_routes_are_accepted() {
+        let mut s = joined_at([0.5, 64.0, 1.5]);
+        for x in 0..16 {
+            for z in 0..16 {
+                s.world.set_block(x, 63, z, blocks::STONE);
+                if x == 1 {
+                    s.world.set_block(x, 64, z, blocks::OAK_FENCE);
+                }
+            }
+        }
+        let mut player = physics::Player::new([0.5, 64.0, 1.5]);
+        let mut highest = 64.0_f64;
+        for _ in 0..60 {
+            let before = player.position;
+            player.tick(
+                physics::Input {
+                    strafe: -1.0,
+                    jump: true,
+                    ..Default::default()
+                },
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            );
+            highest = highest.max(player.position[1]);
+            assert!(player.position[0] < 1.1);
+            assert!(movement_clear(&s.world, before, player.position));
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+        assert!(highest > 65.25 && highest < 65.26);
+        assert_eq!(s.stats.positions_rejected, 0);
+        // Normal prediction above cannot jump the 1.5-high fence. The server
+        // deliberately validates only space, so its extra up/across/down route
+        // accepts these airborne crossings without inferring velocity/support.
+        assert!(movement_clear(&s.world, [0.5, 65.1, 1.5], [2.5, 65.1, 1.5]));
+        for target_y in [65.1, 65.2522, 65.35] {
+            // The spatial step route is clear for downward, horizontal and
+            // upward reports from the jump apex alike.
+            assert!(movement_clear(
+                &s.world,
+                [0.5, 65.2522, 1.5],
+                [2.5, target_y, 1.5]
+            ));
+        }
+        // A clear descent onto support is accepted even with nothing close
+        // beneath the origin; support is not a prerequisite for this route.
+        s.world.set_block(2, 64, 1, blocks::STONE);
+        assert!(movement_clear(&s.world, [0.5, 65.7, 1.5], [2.5, 65.0, 1.5]));
+        assert!(movement_clear(&s.world, [0.5, 65.5, 1.5], [2.5, 65.5, 1.5]));
     }
 
     #[test]
@@ -864,6 +925,93 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_slab_corner_landing_accepts_each_prediction_tick() {
+        for floor in [0.0, 64.0] {
+            let start = [0.69, floor + 0.8, 1.2];
+            let mut s = joined_at(start);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, floor as i32 - 1, z, blocks::STONE);
+                    for y in floor as i32..floor as i32 + 4 {
+                        s.world.set_block(x, y, z, blocks::AIR);
+                    }
+                }
+            }
+            s.world.set_block(1, floor as i32, 0, blocks::OAK_SLAB);
+            let mut player = physics::Player::new(start);
+            player.velocity = [0.15, -0.9, 0.15];
+            assert!(!player.on_ground);
+            let ordinary = physics::resolve(
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                player.bounds(),
+                player.velocity,
+            );
+            assert!(player.velocity[0] - ordinary[0] > COLLISION_TOLERANCE);
+            for tick in 0..8 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                if tick == 0 {
+                    // The landing route clears the corner and finishes exactly
+                    // on the floor, despite starting airborne with vy=-0.9.
+                    for (actual, expected) in player.position.into_iter().zip([0.84, floor, 1.35]) {
+                        assert!((actual - expected).abs() < 1e-12);
+                    }
+                    assert!(player.on_ground);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                s.tick();
+                assert_eq!(s.stats.positions_rejected, 0, "floor {floor}, tick {tick}");
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
+        }
+    }
+
+    #[test]
+    fn falling_around_stone_corner_onto_slab_accepts_each_prediction_tick() {
+        for (start_y, velocity_y) in [(65.2, -1.3), (64.4, -0.5)] {
+            let start = [0.69, start_y, 1.2];
+            let mut s = joined_at(start);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, 63, z, blocks::STONE);
+                }
+            }
+            s.world.set_block(1, 64, 0, blocks::STONE);
+            s.world.set_block(1, 64, 1, blocks::OAK_SLAB);
+            let mut player = physics::Player::new(start);
+            player.velocity = [0.15, velocity_y, 0.15];
+            assert!(!player.on_ground);
+            let ordinary = physics::resolve(
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                player.bounds(),
+                player.velocity,
+            );
+            assert!(player.velocity[0] - ordinary[0] > COLLISION_TOLERANCE);
+            for tick in 0..8 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                if tick == 0 {
+                    for (actual, expected) in player.position.into_iter().zip([0.84, 64.5, 1.35]) {
+                        assert!((actual - expected).abs() < 1e-12);
+                    }
+                    assert!(player.on_ground);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                s.tick();
+                assert_eq!(
+                    s.stats.positions_rejected, 0,
+                    "start_y {start_y}, tick {tick}"
+                );
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
+        }
+    }
+
+    #[test]
     fn step_route_cannot_cross_full_walls_low_ceilings_or_unknown_chunks() {
         let start = [0.69, 64.0, 1.2];
         for obstacle in ["wall", "ceiling", "unknown"] {
@@ -943,8 +1091,9 @@ mod tests {
             assert_eq!(s.stats.positions_rejected, 0);
             assert_eq!(s.client_position(1), Some(player.position));
 
-            // Without the intermediate report the normal Y-first path is
-            // blocked, but the new up/across/down alternative remains clear.
+            // Omitting the intermediate report blocks the normal Y-first path,
+            // but the spatial up/across/down route is still clear. Airborne
+            // endpoints do not prevent the server from trying that route.
             let mut skipped = joined_at(start);
             skipped.world.set_block(0, 65, 0, blocks::BRICKS);
             skipped.handle_packet(1, &position_packet(player.position));
