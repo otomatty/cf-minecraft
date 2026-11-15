@@ -38,12 +38,17 @@ fn main() {
     }
 }
 
-/// Players spread out and walk steadily, so chunks keep being generated,
-/// sent and unloaded for the whole run.
+/// Scripted, host-authorized teleports advance spread-out players at 0.28
+/// blocks/tick to measure chunk generation/streaming regardless of terrain.
+/// Chunks are generated, sent and unloaded throughout the run.
 fn bench(players: u32, view: u8, ticks: u32) {
     let mut server = Server::new(2026, Generator::DebugHills);
     for id in 1..=players {
-        server.connect(id);
+        server.connect_at(
+            id,
+            true,
+            Some([id as f64 * 400.0, 80.0, id as f64 * -250.0]),
+        );
         server.handle_packet(
             id,
             &C2S::Hello {
@@ -59,17 +64,7 @@ fn bench(players: u32, view: u8, ticks: u32) {
         for id in 1..=players {
             let x = id as f64 * 400.0 + t as f64 * 0.28;
             let z = id as f64 * -250.0;
-            server.handle_packet(
-                id,
-                &C2S::PlayerPos {
-                    x,
-                    y: 80.0,
-                    z,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                }
-                .encode(),
-            );
+            server.handle_packet(id, &C2S::Teleport { x, y: 80.0, z }.encode());
         }
         let start = Instant::now();
         server.tick();
@@ -81,12 +76,17 @@ fn bench(players: u32, view: u8, ticks: u32) {
     let mean = times.iter().sum::<f64>() / times.len() as f64;
     let pct = |p: f64| times[((times.len() - 1) as f64 * p) as usize];
     println!(
-        "{{\"host\":\"native\",\"players\":{players},\"view\":{view},\"ticks\":{ticks},\"msptMean\":{mean:.3},\"msptP50\":{:.3},\"msptP99\":{:.3},\"msptMax\":{:.3},\"loadedChunks\":{},\"chunksGenerated\":{},\"mbSent\":{:.1}}}",
+        "{{\"host\":\"native\",\"players\":{players},\"view\":{view},\"ticks\":{ticks},\"msptMean\":{mean:.3},\"msptP50\":{:.3},\"msptP99\":{:.3},\"msptMax\":{:.3},\"loadedChunks\":{},\"chunksGenerated\":{},\"mbSent\":{:.1},\"positions_rejected\":{}}}",
         pct(0.5),
         pct(0.99),
         pct(1.0),
         server.loaded_chunks(),
         server.stats.chunks_generated,
-        bytes_out as f64 / 1e6
+        bytes_out as f64 / 1e6,
+        server.stats.positions_rejected
+    );
+    assert_eq!(
+        server.stats.positions_rejected, 0,
+        "benchmark movement was rejected"
     );
 }

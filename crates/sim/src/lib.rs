@@ -40,6 +40,14 @@ const UNLOAD_INTERVAL: i64 = 100;
 /// Generous interaction range; real reach rules arrive with survival mode.
 const MAX_REACH: f64 = 8.0;
 
+// Creative sprint flight tends to 0.98 * 0.1 / (1 - 0.91) = 1.089;
+// gravity tends to 0.08 * 0.98 / (1 - 0.98) = 3.92 blocks/tick.
+// Margins cover rounding and timing jitter; reserve up to two seconds.
+const HORIZONTAL_PER_TICK: f64 = 1.5;
+const VERTICAL_PER_TICK: f64 = 4.5;
+const MOVEMENT_RESERVE: f64 = 40.0;
+const COLLISION_TOLERANCE: f64 = 0.1;
+
 type ChunkPos = (i32, i32);
 
 struct Client {
@@ -47,6 +55,12 @@ struct Client {
     view: i32,
     pos: [f64; 3],
     sent: BTreeSet<ChunkPos>,
+    allow_teleport: bool,
+    accepted_tick: i64,
+    budget_tick: i64,
+    horizontal_budget: f64,
+    vertical_budget: f64,
+    correction_tick: Option<i64>,
 }
 
 impl Client {
@@ -66,6 +80,7 @@ impl Client {
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub packets_rejected: u64,
+    pub positions_rejected: u64,
     pub blocks_changed: u64,
     pub edits_corrected: u64,
     pub chunks_generated: u64,
@@ -140,7 +155,20 @@ impl Server {
     }
 
     pub fn connect(&mut self, id: u32) {
-        let pos = self.spawn();
+        self.connect_with_teleport(id, false);
+    }
+
+    /// Permission is supplied by the trusted host, never by a wire packet.
+    pub fn connect_with_teleport(&mut self, id: u32, allow_teleport: bool) {
+        self.connect_at(id, allow_teleport, None);
+    }
+
+    /// Restore a trusted host's last accepted feet position on reconnect.
+    /// Invalid coordinates fall back to spawn; no chunk load is required here.
+    pub fn connect_at(&mut self, id: u32, allow_teleport: bool, position: Option<[f64; 3]>) {
+        let pos = position
+            .filter(|p| valid_position(*p))
+            .unwrap_or_else(|| self.spawn());
         self.clients.insert(
             id,
             Client {
@@ -148,8 +176,19 @@ impl Server {
                 view: DEFAULT_VIEW_DISTANCE,
                 pos,
                 sent: BTreeSet::new(),
+                allow_teleport,
+                accepted_tick: self.game_time,
+                budget_tick: self.game_time,
+                horizontal_budget: HORIZONTAL_PER_TICK * MOVEMENT_RESERVE,
+                vertical_budget: VERTICAL_PER_TICK * MOVEMENT_RESERVE,
+                correction_tick: None,
             },
         );
+    }
+
+    /// Last accepted position, never a queued or rejected client report.
+    pub fn client_position(&self, id: u32) -> Option<[f64; 3]> {
+        self.clients.get(&id).map(|client| client.pos)
     }
 
     pub fn disconnect(&mut self, id: u32) {
@@ -228,18 +267,10 @@ impl Server {
                 self.outbox.push((id, welcome.encode()));
             }
             C2S::PlayerPos { x, y, z, .. } => {
-                let Some(client) = self.clients.get_mut(&id) else {
-                    return;
-                };
-                // World border of the game: +-29,999,984 blocks.
-                let ok = [x, y, z].iter().all(|v| v.is_finite())
-                    && x.abs() < 2.9999984e7
-                    && z.abs() < 2.9999984e7;
-                if client.joined && ok {
-                    client.pos = [x, y, z];
-                } else {
-                    self.stats.packets_rejected += 1;
-                }
+                self.move_player(id, [x, y, z], false);
+            }
+            C2S::Teleport { x, y, z } => {
+                self.move_player(id, [x, y, z], true);
             }
             C2S::SetBlock { x, y, z, state } => {
                 if !self.can_edit(id, x, y, z, state) {
@@ -253,6 +284,55 @@ impl Server {
                         self.broadcast_block(x, y, z, state);
                     }
                 }
+            }
+        }
+    }
+
+    fn move_player(&mut self, id: u32, pos: [f64; 3], teleport: bool) {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return;
+        };
+        if !client.joined {
+            self.stats.packets_rejected += 1;
+            return;
+        }
+        let elapsed = (self.game_time - client.budget_tick).max(0) as f64;
+        client.budget_tick = self.game_time;
+        client.horizontal_budget = (client.horizontal_budget + elapsed * HORIZONTAL_PER_TICK)
+            .min(HORIZONTAL_PER_TICK * MOVEMENT_RESERVE);
+        client.vertical_budget = (client.vertical_budget + elapsed * VERTICAL_PER_TICK)
+            .min(VERTICAL_PER_TICK * MOVEMENT_RESERVE);
+        let delta = std::array::from_fn::<_, 3, _>(|a| pos[a] - client.pos[a]);
+        let horizontal = (delta[0] * delta[0] + delta[2] * delta[2]).sqrt();
+        let vertical = delta[1].abs();
+        // Bound Y too: collision cell iteration must remain finite and bounded.
+        let finite = valid_position(pos);
+        let permitted = if teleport {
+            client.allow_teleport
+        } else {
+            horizontal <= client.horizontal_budget
+                && vertical <= client.vertical_budget
+                && finite
+                && movement_clear(&self.world, client.pos, pos)
+        };
+        if finite && permitted {
+            client.pos = pos;
+            client.accepted_tick = self.game_time;
+            if teleport {
+                client.horizontal_budget = HORIZONTAL_PER_TICK * MOVEMENT_RESERVE;
+                client.vertical_budget = VERTICAL_PER_TICK * MOVEMENT_RESERVE;
+            } else {
+                client.horizontal_budget -= horizontal;
+                client.vertical_budget -= vertical;
+            }
+        } else {
+            self.stats.packets_rejected += 1;
+            self.stats.positions_rejected += 1;
+            if client.correction_tick != Some(self.game_time) {
+                client.correction_tick = Some(self.game_time);
+                let [x, y, z] = client.pos;
+                self.outbox
+                    .push((id, S2C::PlayerCorrect { x, y, z }.encode()));
             }
         }
     }
@@ -487,6 +567,51 @@ impl Server {
     }
 }
 
+fn valid_position(pos: [f64; 3]) -> bool {
+    pos.iter().all(|v| v.is_finite() && v.abs() < 2.9999984e7)
+}
+
+// Unknown chunks are solid, just as in client prediction. No terrain is
+// generated on demand by a movement packet (including stored chunks in flight).
+fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
+    let origin = physics::Player::new(from).bounds();
+    let collisions = |x, y, z| {
+        let bounds = physics::Aabb::block(x, y, z);
+        match world.get_block(x, y, z) {
+            // Ignore only known solids already intersecting the starting body,
+            // for this report's sweep AND endpoint. This permits gradual escape
+            // from placements, but a later report cannot reenter an escaped block.
+            Some(state) if blocks::is_opaque(state) && !origin.intersects(bounds) => Some(bounds),
+            // Unknown chunks remain solid even if the origin overlaps them.
+            None => Some(bounds),
+            _ => None,
+        }
+    };
+    let target = physics::Player::new(to);
+    if !target.is_clear(&collisions) {
+        return false;
+    }
+    let delta = std::array::from_fn::<_, 3, _>(|a| to[a] - from[a]);
+    let mut player = physics::Player::new(from);
+    // Follow prediction's complete Y, then complete X, then complete Z path.
+    // Split only within each axis: a full-reserve report has bounded broad
+    // phases without turning the path into a diagonal staircase through solids.
+    for axis in [1, 0, 2] {
+        let steps = delta[axis].abs().ceil().max(1.0) as usize;
+        for i in 1..=steps {
+            let mut desired = [0.0; 3];
+            desired[axis] =
+                from[axis] + delta[axis] * i as f64 / steps as f64 - player.position[axis];
+            let actual = physics::resolve(&collisions, player.bounds(), desired);
+            if (actual[axis] - desired[axis]).abs() >= COLLISION_TOLERANCE {
+                return false;
+            }
+            player.position[axis] += actual[axis];
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +629,469 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    fn position_packet(pos: [f64; 3]) -> Vec<u8> {
+        C2S::PlayerPos {
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+        .encode()
+    }
+
+    fn flat_server() -> Server {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect(1);
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 3,
+            }
+            .encode(),
+        );
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.take_outbox();
+        s
+    }
+
+    fn joined_at(position: [f64; 3]) -> Server {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect_at(1, false, Some(position));
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 3,
+            }
+            .encode(),
+        );
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.take_outbox();
+        s
+    }
+
+    #[test]
+    fn descending_corner_accepts_each_physics_tick_including_batched_arrival() {
+        let start = [0.69, 66.2, 0.5];
+        for batched in [false, true] {
+            let mut s = joined_at(start);
+            s.world.set_block(0, 65, 0, blocks::BRICKS);
+            let mut player = physics::Player::new(start);
+            player.velocity = [0.8, -0.2, 0.0];
+            for tick in 0..2 {
+                let collisions = |x, y, z| {
+                    s.world
+                        .get_block(x, y, z)
+                        .is_none_or(blocks::is_opaque)
+                        .then(|| physics::Aabb::block(x, y, z))
+                };
+                player.tick(
+                    physics::Input {
+                        flying: true,
+                        ..Default::default()
+                    },
+                    &collisions,
+                );
+                assert!(player.is_clear(&collisions));
+                if tick == 0 {
+                    assert_eq!(player.position, [1.49, 66.0, 0.5]);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                if !batched {
+                    s.tick();
+                }
+            }
+            assert!((player.position[0] - 2.218).abs() < 1e-6);
+            assert!(player.position[1] < 65.9);
+            if batched {
+                s.tick();
+            }
+            assert_eq!(s.stats.positions_rejected, 0);
+            assert_eq!(s.client_position(1), Some(player.position));
+
+            // Omitting the intermediate tick loses the path around the corner:
+            // one combined Y sweep is blocked, as expected by current validation.
+            let mut skipped = joined_at(start);
+            skipped.world.set_block(0, 65, 0, blocks::BRICKS);
+            skipped.handle_packet(1, &position_packet(player.position));
+            skipped.tick();
+            assert_eq!(skipped.stats.positions_rejected, 1);
+            assert_eq!(skipped.client_position(1), Some(start));
+        }
+    }
+
+    #[test]
+    fn rising_corner_reports_resolved_physics_not_interpolated_positions() {
+        let start = [0.69, 64.9, 0.5];
+        let mut s = joined_at(start);
+        s.world.set_block(1, 64, 0, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.21, 0.4, 0.0];
+        for tick in 0..5 {
+            let collisions = |x, y, z| {
+                s.world
+                    .get_block(x, y, z)
+                    .is_none_or(blocks::is_opaque)
+                    .then(|| physics::Aabb::block(x, y, z))
+            };
+            player.tick(
+                physics::Input {
+                    flying: true,
+                    ..Default::default()
+                },
+                &collisions,
+            );
+            assert!(player.is_clear(&collisions));
+            if tick == 0 {
+                let rendered =
+                    std::array::from_fn(|a| start[a] + (player.position[a] - start[a]) * 0.1);
+                // Both physics endpoints are safe, but the camera's straight
+                // interpolation crosses the corner. It must never be reported.
+                assert!(!physics::Player::new(rendered).is_clear(&collisions));
+            }
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 0, "tick {tick}");
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+    }
+
+    #[test]
+    fn overlapping_placement_allows_gradual_escape_but_not_reentry_or_other_solids() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        s.handle_packet(
+            1,
+            &C2S::SetBlock {
+                x: 0,
+                y: 65,
+                z: 0,
+                state: blocks::BRICKS,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.get_block(0, 65, 0), Some(blocks::BRICKS));
+        // A separate obstacle must still block movement while embedded.
+        s.world.set_block(0, 65, 1, blocks::BRICKS);
+        s.handle_packet(1, &position_packet([0.5, 65.0, 1.1]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 1);
+        assert_eq!(s.client_position(1), Some(start));
+        let mut player = physics::Player::new(start);
+        for _ in 0..12 {
+            let collisions = |x, y, z| {
+                s.world
+                    .get_block(x, y, z)
+                    .is_none_or(blocks::is_opaque)
+                    .then(|| physics::Aabb::block(x, y, z))
+            };
+            player.tick(
+                physics::Input {
+                    strafe: -1.0,
+                    flying: true,
+                    ..Default::default()
+                },
+                &collisions,
+            );
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 1);
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+        assert!(player.position[0] - physics::WIDTH / 2.0 > 1.0);
+        s.handle_packet(1, &position_packet(start));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 2);
+        assert_eq!(s.client_position(1), Some(player.position));
+    }
+
+    #[test]
+    fn falling_motion_completes_y_before_x() {
+        let start = [0.65, 68.0, 0.5];
+        let mut s = joined_at(start);
+        s.world.set_block(1, 67, 0, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.28, -3.0, 0.0];
+        let collisions = |x, y, z| {
+            s.world
+                .get_block(x, y, z)
+                .is_none_or(blocks::is_opaque)
+                .then(|| physics::Aabb::block(x, y, z))
+        };
+        player.tick(physics::Input::default(), &collisions);
+        assert_eq!(player.position, [0.93, 65.0, 0.5]);
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 0);
+        assert_eq!(s.client_position(1), Some(player.position));
+    }
+
+    #[test]
+    fn fast_diagonal_motion_completes_x_before_z_and_cannot_tunnel() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        // The X-then-Z path goes around this obstacle; a diagonal crosses it.
+        s.world.set_block(1, 65, 1, blocks::BRICKS);
+        let mut player = physics::Player::new(start);
+        player.velocity = [3.0, 0.0, 3.0];
+        let collisions = |x, y, z| {
+            s.world
+                .get_block(x, y, z)
+                .is_none_or(blocks::is_opaque)
+                .then(|| physics::Aabb::block(x, y, z))
+        };
+        player.tick(
+            physics::Input {
+                flying: true,
+                ..Default::default()
+            },
+            &collisions,
+        );
+        assert_eq!(player.position, [3.5, 65.0, 3.5]);
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 0);
+        assert_eq!(s.client_position(1), Some(player.position));
+        // A thin wall directly on the next X leg must clip even a fast report.
+        s.world.set_block(5, 65, 3, blocks::BRICKS);
+        s.handle_packet(1, &position_packet([8.5, 65.0, 8.5]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 1);
+        assert_eq!(s.client_position(1), Some(player.position));
+    }
+
+    #[test]
+    fn reconnect_at_accepted_position_allows_nearby_movement_without_teleport() {
+        let mut s = Server::new(1, Generator::Flat);
+        let start = [3000.5, 100.0, -3000.5];
+        s.connect_at(7, false, Some(start));
+        assert_eq!(s.client_position(7), Some(start));
+        s.handle_packet(
+            7,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        s.tick(); // Stream the restored position's chunks before moving.
+        let next = [start[0] + 0.2, start[1], start[2]];
+        s.handle_packet(7, &position_packet(next));
+        assert_eq!(s.client_position(7), Some(start)); // Pending is not accepted.
+        s.tick();
+        assert_eq!(s.client_position(7), Some(next));
+        assert_eq!(s.stats.positions_rejected, 0);
+        s.handle_packet(
+            7,
+            &C2S::Teleport {
+                x: 0.5,
+                y: 100.0,
+                z: 0.5,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.client_position(7), Some(next)); // Permission is still false.
+        s.disconnect(7);
+        assert_eq!(s.client_position(7), None);
+    }
+
+    #[test]
+    fn invalid_initial_positions_fall_back_to_spawn() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect_at(1, false, None);
+        assert_eq!(s.client_position(1), Some(s.spawn()));
+        for axis in 0..3 {
+            for value in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                29_999_984.0,
+                -29_999_984.0,
+            ] {
+                let mut position = [0.5, 100.0, 0.5];
+                position[axis] = value;
+                s.connect_at(1, false, Some(position));
+                assert_eq!(s.client_position(1), Some(s.spawn()));
+            }
+        }
+    }
+
+    #[test]
+    fn physics_trajectories_and_batched_packets_are_accepted() {
+        for mode in 0..4 {
+            for batch in [1, 8, 40] {
+                let mut s = flat_server();
+                let mut start = s.spawn();
+                if mode == 3 {
+                    start[1] += 1000.0;
+                    s.clients.get_mut(&1).unwrap().allow_teleport = true;
+                    s.handle_packet(
+                        1,
+                        &C2S::Teleport {
+                            x: start[0],
+                            y: start[1],
+                            z: start[2],
+                        }
+                        .encode(),
+                    );
+                    s.tick();
+                }
+                let mut player = physics::Player::new(start);
+                let mut packets = Vec::new();
+                for t in 0..400 {
+                    let collisions = |x, y, z| {
+                        s.world
+                            .get_block(x, y, z)
+                            .is_none_or(blocks::is_opaque)
+                            .then(|| physics::Aabb::block(x, y, z))
+                    };
+                    player.tick(
+                        physics::Input {
+                            forward: if mode == 3 { 0.0 } else { 1.0 },
+                            sprint: mode == 1 || mode == 2,
+                            flying: mode == 2,
+                            jump: mode != 3 && t % 40 == 10,
+                            ..Default::default()
+                        },
+                        &collisions,
+                    );
+                    packets.push(position_packet(player.position));
+                    if (t + 1) % batch == 0 {
+                        for packet in packets.drain(..) {
+                            s.handle_packet(1, &packet);
+                        }
+                    }
+                    s.tick();
+                    s.take_outbox();
+                    assert_eq!(
+                        s.stats.positions_rejected, 0,
+                        "mode {mode}, batch {batch}, tick {t}"
+                    );
+                }
+                assert_eq!(s.clients[&1].pos, player.position);
+            }
+        }
+    }
+
+    #[test]
+    fn speed_budget_is_bounded_consumed_and_corrections_are_throttled() {
+        let mut s = flat_server();
+        let start = s.spawn();
+        for _ in 0..100 {
+            s.handle_packet(1, &position_packet([10000.0, start[1], 0.5]));
+        }
+        s.tick();
+        assert_eq!(s.clients[&1].pos, start);
+        assert_eq!(s.stats.positions_rejected, 100);
+        let corrections: Vec<_> = decode_all(s.take_outbox())
+            .into_iter()
+            .filter(|(_, p)| matches!(p, S2C::PlayerCorrect { .. }))
+            .collect();
+        assert_eq!(
+            corrections,
+            vec![(
+                1,
+                S2C::PlayerCorrect {
+                    x: start[0],
+                    y: start[1],
+                    z: start[2]
+                }
+            )]
+        );
+        s.handle_packet(1, &position_packet([start[0], start[1] + 181.0, start[2]]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 101);
+        assert_eq!(
+            decode_all(s.take_outbox())
+                .iter()
+                .filter(|(_, p)| matches!(p, S2C::PlayerCorrect { .. }))
+                .count(),
+            1
+        );
+        // Many individually short packets in one tick cannot refill the bucket.
+        // Keep the whole route loaded so only the speed budget can stop it.
+        for cx in 0..=5 {
+            assert!(s.ensure_chunk((cx, 0)));
+        }
+        for n in 1..=70 {
+            s.handle_packet(
+                1,
+                &position_packet([start[0] + n as f64, start[1] + 3.0, start[2]]),
+            );
+        }
+        s.tick();
+        assert_eq!(s.clients[&1].pos[0], start[0] + 60.0);
+        assert!(s.stats.positions_rejected > 101);
+    }
+
+    #[test]
+    fn walls_overlap_and_unknown_chunks_are_rejected_but_prediction_support_is_optional() {
+        let mut s = flat_server();
+        let [x, y, z] = s.spawn();
+        for by in y as i32..y as i32 + 4 {
+            s.world.set_block(2, by, 0, blocks::BRICKS);
+        }
+        for target in [[4.5, y, z], [2.5, y, z]] {
+            s.handle_packet(1, &position_packet(target));
+            s.tick();
+            assert_eq!(s.clients[&1].pos, [x, y, z]);
+        }
+        // A step up onto a predicted block that the server refused is valid air.
+        s.handle_packet(1, &position_packet([x, y + 1.0, z + 1.0]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 2);
+        s.world.chunks.remove(&(0, 0));
+        s.handle_packet(1, &position_packet([x, y + 1.0, z + 2.0]));
+        s.tick();
+        assert_eq!(s.stats.positions_rejected, 3);
+    }
+
+    #[test]
+    fn teleport_permission_is_host_only_and_resets_movement_origin() {
+        for allowed in [false, true] {
+            let mut s = flat_server();
+            s.clients.get_mut(&1).unwrap().allow_teleport = allowed;
+            let start = s.clients[&1].pos;
+            let dest = [300.5, 100.0, 0.5];
+            s.handle_packet(
+                1,
+                &C2S::Teleport {
+                    x: dest[0],
+                    y: dest[1],
+                    z: dest[2],
+                }
+                .encode(),
+            );
+            s.tick();
+            assert_eq!(s.clients[&1].pos, if allowed { dest } else { start });
+            if allowed {
+                s.handle_packet(1, &position_packet([301.0, 100.0, 0.5]));
+                s.tick();
+                assert_eq!(s.stats.positions_rejected, 0);
+                assert_eq!(s.clients[&1].accepted_tick, s.game_time - 1);
+            }
+            s.handle_packet(
+                1,
+                &C2S::Teleport {
+                    x: f64::NAN,
+                    y: 100.0,
+                    z: 0.5,
+                }
+                .encode(),
+            );
+            s.tick();
+            assert!(s.stats.positions_rejected > 0);
+        }
     }
 
     fn decode_all(out: Vec<(u32, Vec<u8>)>) -> Vec<(u32, S2C)> {
@@ -833,7 +1421,8 @@ mod tests {
         ];
         for schedule in schedules {
             let mut s = joined(3);
-            s.connect(2);
+            s.clients.get_mut(&1).unwrap().allow_teleport = true;
+            s.connect_with_teleport(2, true);
             s.handle_packet(
                 2,
                 &C2S::Hello {
@@ -862,12 +1451,10 @@ mod tests {
                     };
                     s.handle_packet(
                         id,
-                        &C2S::PlayerPos {
+                        &C2S::Teleport {
                             x: sx + if action == 2 { 20.0 } else { 0.0 },
                             y: sy,
                             z: sz,
-                            yaw: 0.0,
-                            pitch: 0.0,
                         }
                         .encode(),
                     );
@@ -900,18 +1487,17 @@ mod tests {
     #[test]
     fn moving_unloads_old_chunks_and_loads_new_ones() {
         let mut s = joined(2);
+        s.clients.get_mut(&1).unwrap().allow_teleport = true;
         for _ in 0..20 {
             s.tick();
         }
         s.take_outbox();
         s.handle_packet(
             1,
-            &C2S::PlayerPos {
+            &C2S::Teleport {
                 x: 160.5,
                 y: 80.0,
                 z: 0.5,
-                yaw: 0.0,
-                pitch: 0.0,
             }
             .encode(),
         );
@@ -940,6 +1526,7 @@ mod tests {
     #[test]
     fn edits_survive_save_unload_and_reload() {
         let mut s = joined(2);
+        s.clients.get_mut(&1).unwrap().allow_teleport = true;
         for _ in 0..20 {
             s.tick();
         }
@@ -965,15 +1552,13 @@ mod tests {
         assert_eq!(disk.len(), 1);
         assert_eq!(s.dirty_chunks(), 0);
 
-        // Walk far away until the chunk is dropped from memory.
+        // Teleport far away until the chunk is dropped from memory.
         s.handle_packet(
             1,
-            &C2S::PlayerPos {
+            &C2S::Teleport {
                 x: 1000.5,
                 y: 80.0,
                 z: 0.5,
-                yaw: 0.0,
-                pitch: 0.0,
             }
             .encode(),
         );
@@ -986,12 +1571,10 @@ mod tests {
         // Come back: the core asks the host instead of regenerating.
         s.handle_packet(
             1,
-            &C2S::PlayerPos {
+            &C2S::Teleport {
                 x: sx,
                 y: sy,
                 z: sz,
-                yaw: 0.0,
-                pitch: 0.0,
             }
             .encode(),
         );

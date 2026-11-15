@@ -55,6 +55,8 @@ export class WorldDO extends DurableObject<Env> {
 	private seed: bigint | null = null;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
+	// Memory only: eviction/recreation starts players at spawn, not a saved position.
+	private readonly positions = new Map<string, [number, number, number]>();
 	private readonly sessions = new Map<number, string>();
 	private worldName: string | null = null;
 	private lastAccessCheck = Date.now();
@@ -159,6 +161,7 @@ export class WorldDO extends DurableObject<Env> {
 		if (previous !== undefined) {
 			this.sockets.get(previous)?.close(LOGGED_IN_ELSEWHERE, "logged in elsewhere");
 			if (this.sockets.delete(previous)) {
+				this.rememberPosition(previous);
 				this.users.delete(previous);
 				this.sessions.delete(previous);
 				this.packetCounts.delete(previous);
@@ -175,7 +178,7 @@ export class WorldDO extends DurableObject<Env> {
 		server.binaryType = "arraybuffer";
 
 		const id = this.nextClient++;
-		core.connect(id);
+		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user));
 		this.sockets.set(id, server);
 		this.users.set(id, user);
 		const session = request.headers.get("X-MC-Session");
@@ -185,6 +188,7 @@ export class WorldDO extends DurableObject<Env> {
 
 		const drop = () => {
 			if (this.sockets.delete(id)) {
+				this.rememberPosition(id);
 				this.users.delete(id);
 				this.sessions.delete(id);
 				this.packetCounts.delete(id);
@@ -215,6 +219,12 @@ export class WorldDO extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	private rememberPosition(id: number): void {
+		const user = this.users.get(id);
+		const position = this.ensureCore().clientPosition(id);
+		if (user !== undefined && position !== undefined) this.positions.set(user, position);
+	}
+
 	revoke(userId: string): number {
 		const now = Date.now();
 		this.ctx.storage.sql.exec(
@@ -233,6 +243,7 @@ export class WorldDO extends DurableObject<Env> {
 			const core = this.ensureCore();
 			this.sockets.get(id)?.close(ACCESS_REVOKED, "access revoked");
 			if (this.sockets.delete(id)) {
+				this.rememberPosition(id);
 				this.users.delete(id);
 				this.sessions.delete(id);
 				this.packetCounts.delete(id);
@@ -249,6 +260,7 @@ export class WorldDO extends DurableObject<Env> {
 		for (const [id, socket] of this.sockets) {
 			socket.close(code, reason);
 			if (this.sockets.delete(id)) {
+				this.rememberPosition(id);
 				this.users.delete(id);
 				this.sessions.delete(id);
 				this.packetCounts.delete(id);
@@ -263,6 +275,7 @@ export class WorldDO extends DurableObject<Env> {
 		this.disconnectAll(SERVICE_RESTART, "debug evict");
 		this.save();
 		this.stopTicking();
+		this.positions.clear();
 		this.core = null;
 		this.codec = null;
 		this.seed = null;
@@ -297,6 +310,7 @@ export class WorldDO extends DurableObject<Env> {
 				)) continue;
 				this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
 				if (this.sockets.delete(connection.id)) {
+					this.rememberPosition(connection.id);
 					this.users.delete(connection.id);
 					this.sessions.delete(connection.id);
 					this.packetCounts.delete(connection.id);

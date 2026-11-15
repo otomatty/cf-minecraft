@@ -264,6 +264,14 @@ async function playthrough(kind) {
 	}
 
 	if (kind === "ws") {
+		const corrections = await page.evaluate(() => {
+			const before = window.__mc.stats().positionsCorrected;
+			window.__mc.sendRawPosition(100000, 200, 100000);
+			return before;
+		});
+		await page.waitForFunction(before => window.__mc.stats().positionsCorrected > before, { timeout: 10000 }, corrections);
+		const corrected = await page.evaluate(() => window.__mc.stats());
+		check(Math.abs(corrected.camera.x) < 1000 && Math.abs(corrected.camera.z) < 1000, "ws: raw distant position is corrected without teleport");
 		const response = await fetch(`${edge}/api/debug/disconnect?world=${encodeURIComponent(world)}`, { method: "POST" });
 		check(response.ok, "ws: debug disconnect accepted");
 		const deadline = Date.now() + 15000;
