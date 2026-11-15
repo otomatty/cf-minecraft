@@ -83,6 +83,8 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	var out: VOut;
 	out.pos = g.viewProj * vec4<f32>(rel, 1.0);
 	out.uv = vec2<f32>(f32((a.y >> 21u) & 31u), f32((a.y >> 26u) & 31u)) / 16.0;
+	// Crop water side UVs at the displaced height, including a strip's lower edge.
+	if (face >= 2u) { out.uv.y += f32(a.y >> 31u) / 9.0; }
 	out.shade = faceShade[face] * aoShade[ao];
 	out.rel = rel;
 	out.layer = a.y & 4095u;

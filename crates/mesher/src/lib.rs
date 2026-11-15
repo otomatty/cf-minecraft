@@ -134,6 +134,8 @@ pub fn mesh_section_layers(
                     continue;
                 }
                 let info = blocks::info(state);
+                let water_surface =
+                    state == blocks::WATER && padded[padded_index(x, y + 1, z)] != blocks::WATER;
                 let out = &mut layers[info.layer as usize];
                 if info.model == blocks::Model::Cross {
                     let idx = padded_index(x, y, z);
@@ -171,6 +173,14 @@ pub fn mesh_section_layers(
                         let n = face.normal;
                         let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
                         let neighbor = padded[padded_index(ax, ay, az)];
+                        // A full-height water cell exposes a narrow strip above a
+                        // neighboring surface. For side faces ay + 1 <= 16,
+                        // including horizontal neighbors in the padding.
+                        let water_strip = state == blocks::WATER
+                            && f >= NORTH
+                            && neighbor == blocks::WATER
+                            && !water_surface
+                            && padded[padded_index(ax, ay + 1, az)] != blocks::WATER;
                         let axis = n.iter().position(|v| *v != 0).unwrap();
                         let boundary = if n[axis] < 0 {
                             bounds.min[axis] == 0
@@ -178,7 +188,8 @@ pub fn mesh_section_layers(
                             bounds.max[axis] == 16
                         };
                         if boundary
-                            && (blocks::occludes(neighbor) || (state == neighbor && info.cull_same))
+                            && (blocks::occludes(neighbor)
+                                || (state == neighbor && info.cull_same && !water_strip))
                         {
                             continue;
                         }
@@ -221,7 +232,13 @@ pub fn mesh_section_layers(
                                             * (face.b[axis] * i + face.c[axis] * j)
                                 }
                             };
-                            let p = [on(0), on(1), on(2)];
+                            let mut p = [on(0), on(1), on(2)];
+                            let lower_strip_edge = water_strip && p[1] == 0;
+                            if water_strip {
+                                // Both edges encode y=16; only the lower one
+                                // carries the shader's exact 1/9 displacement.
+                                p[1] = 16;
+                            }
                             let (u, v) = uv(f, p);
                             let mut sums = [0u32; 2];
                             let mut count = 0;
@@ -251,9 +268,7 @@ pub fn mesh_section_layers(
                             debug_assert!(count > 0);
                             let sky = (sums[0] + count / 2) / count;
                             let block = (sums[1] + count / 2) / count;
-                            let water_top = state == blocks::WATER
-                                && p[1] == 16
-                                && padded[padded_index(x, y + 1, z)] != blocks::WATER;
+                            let water_top = lower_strip_edge || (water_surface && p[1] == 16);
                             words[k] = pack(
                                 [x * 16 + p[0], y * 16 + p[1], z * 16 + p[2]],
                                 f,
@@ -459,6 +474,114 @@ mod tests {
                 }
             }
             assert_eq!(lowered, 12); // Four top corners and two upper corners on each side.
+        }
+    }
+
+    fn assert_water_strip(out: &[u32], cell: [i32; 3], face: usize, expected: usize) {
+        let n = FACES[face].normal;
+        let axis = if n[0] != 0 { 0 } else { 2 };
+        let plane = (cell[axis] + i32::from(n[axis] > 0)) as u32 * 16;
+        let top = (cell[1] + 1) as u32 * 16;
+        let quads: Vec<_> = out
+            .chunks(WORDS_PER_QUAD)
+            .filter(|q| {
+                (q[0] >> 27) & 7 == face as u32
+                    && q.chunks(2).all(|v| {
+                        let p = position(v);
+                        p[axis] == plane && p[1] >= top - 16 && p[1] <= top
+                    })
+            })
+            .collect();
+        assert_eq!(quads.len(), expected, "cell {cell:?}, face {face}");
+        for q in quads {
+            let mut lower = 0;
+            let points: Vec<_> = q
+                .chunks(2)
+                .map(|v| {
+                    let p = position(v);
+                    assert_eq!(p[1], top);
+                    let drop = (v[1] >> 31) as f64 / 9.0;
+                    lower += usize::from(drop != 0.0);
+                    let y = p[1] as f64 / 16.0 - drop;
+                    // Both raw V values are zero; the shader adds the same drop
+                    // to V on side faces, cropping precisely the upper ninth.
+                    assert_eq!((v[1] >> 26) & 31, 0);
+                    let texture_v = ((v[1] >> 26) & 31) as f64 / 16.0 + drop;
+                    assert!((texture_v - (cell[1] as f64 + 1.0 - y)).abs() < 1e-12);
+                    assert_eq!((v[0] >> 30) & 3, 3);
+                    assert_eq!((v[1] >> 13) & 15, 15);
+                    assert_eq!((v[1] >> 17) & 15, 0);
+                    [p[0] as f64 / 16.0, y, p[2] as f64 / 16.0]
+                })
+                .collect();
+            assert_eq!(lower, 2);
+            for tri in [[0, 1, 2], [0, 2, 3]] {
+                let a: [f64; 3] = std::array::from_fn(|i| points[tri[1]][i] - points[tri[0]][i]);
+                let b: [f64; 3] = std::array::from_fn(|i| points[tri[2]][i] - points[tri[0]][i]);
+                let normal = [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ];
+                assert!((normal[axis] * n[axis] as f64 - 1.0 / 9.0).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn water_column_height_difference_emits_only_the_high_side_strip() {
+        // Includes the reported (5,5,5)/(5,6,5)/(6,5,5) arrangement.
+        for (face, direction) in FACES.iter().enumerate().skip(NORTH) {
+            for y in [0, 5, 15] {
+                for border in [false, true] {
+                    let n = direction.normal;
+                    let axis = if n[0] != 0 { 0 } else { 2 };
+                    let mut cell = [5, y, 5];
+                    if border {
+                        cell[axis] = if n[axis] < 0 { 0 } else { 15 };
+                    }
+                    let neighbor: [i32; 3] = std::array::from_fn(|i| cell[i] + n[i]);
+                    let mut p = empty();
+                    p[padded_index(cell[0], y, cell[2])] = blocks::WATER;
+                    p[padded_index(cell[0], y + 1, cell[2])] = blocks::WATER;
+                    p[padded_index(neighbor[0], y, neighbor[2])] = blocks::WATER;
+                    let mut out = Vec::new();
+                    mesh_section(&p, &mut out);
+                    assert_water_strip(&out, cell, face, 1);
+                    if !border {
+                        assert_water_strip(&out, neighbor, face ^ 1, 0);
+                    }
+                    // Two full-height neighboring cells must still cull.
+                    p[padded_index(neighbor[0], y + 1, neighbor[2])] = blocks::WATER;
+                    out.clear();
+                    mesh_section(&p, &mut out);
+                    assert_water_strip(&out, cell, face, 0);
+                    if !border {
+                        assert_water_strip(&out, neighbor, face ^ 1, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn water_strip_matches_both_sections_at_a_top_horizontal_padding_corner() {
+        let water = [[15, 15, 15], [15, 16, 15], [16, 15, 15]];
+        for origin_x in [0, 16] {
+            let mut p = empty();
+            for [x, y, z] in water {
+                let x = x - origin_x;
+                if (-1..=16).contains(&x) {
+                    p[padded_index(x, y, z)] = blocks::WATER;
+                }
+            }
+            let mut out = Vec::new();
+            mesh_section(&p, &mut out);
+            if origin_x == 0 {
+                assert_water_strip(&out, [15, 15, 15], EAST, 1);
+            } else {
+                assert_water_strip(&out, [0, 15, 15], WEST, 0);
+            }
         }
     }
 

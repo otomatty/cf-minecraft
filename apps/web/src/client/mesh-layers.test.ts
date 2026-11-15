@@ -160,6 +160,33 @@ test("WASM mesh output exposes the same layer counts and boundaries in the worke
 	} finally { x.mc_free(ptr, padded.byteLength); }
 });
 
+test("WASM water height seam emits one narrow quad with a displaced sorting center", () => {
+	const module = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const x = new WebAssembly.Instance(module, {}).exports;
+	const padded = new Uint16Array(18 ** 3);
+	const index = (x, y, z) => ((y + 1) * 18 + z + 1) * 18 + x + 1;
+	for (const [x, y, z] of [[5, 5, 5], [5, 6, 5], [6, 5, 5]]) padded[index(x, y, z)] = 13;
+	const ptr = x.mc_alloc(padded.byteLength);
+	try {
+		new Uint16Array(x.memory.buffer, ptr, padded.length).set(padded);
+		assert.equal(x.mesh_padded(ptr, padded.length, 0, 0), 15);
+		assert.deepEqual([0, 1, 2].map(i => x.client_mesh_count(i)), [0, 0, 15]);
+		const words = new Uint32Array(x.memory.buffer, x.client_mesh_ptr(), 15 * 8).slice();
+		const strips = [];
+		for (let q = 0; q < words.length; q += 8) {
+			const vertices = [0, 2, 4, 6].map(v => words[q + v]);
+			if (vertices.every(v => (v & 511) === 96 && ((v >>> 9) & 511) === 96 && ((v >>> 27) & 7) === 5)) strips.push(words.slice(q, q + 8));
+		}
+		assert.equal(strips.length, 1);
+		const strip = strips[0];
+		const center = quadCenters(strip);
+		assert.equal(center[0], 6);
+		assert.ok(Math.abs(center[1] - (6 - 1 / 18)) < 1e-6);
+		assert.equal(center[2], 5.5);
+		assert.equal([1, 3, 5, 7].filter(i => strip[i] >>> 31).length, 2);
+	} finally { x.mc_free(ptr, padded.byteLength); }
+});
+
 test("original glass and leaf textures contain holes; water stays grayscale and translucent", () => {
 	for (const name of ["glass", "oak_leaves"]) {
 		const pixels = paintTexture(name);
