@@ -408,7 +408,7 @@ async function main(): Promise<void> {
 		clearInput();
 		overlay.hidden = false;
 		statusLine.textContent = "一時停止中：クリックして再開";
-		if (reason === "inventory") void requestPointerLock();
+		if (reason !== "escape") void requestPointerLock();
 	}
 	$("block-picker-close").addEventListener("click", () => closePicker("button"));
 
