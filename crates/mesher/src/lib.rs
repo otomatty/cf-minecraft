@@ -182,11 +182,13 @@ pub fn mesh_section_layers(
                             && !water_surface
                             && padded[padded_index(ax, ay + 1, az)] != blocks::WATER;
                         let axis = n.iter().position(|v| *v != 0).unwrap();
-                        let boundary = if n[axis] < 0 {
+                        // A lowered water top lies inside its cell, so blocks
+                        // above cannot cull it or supply its AO/light samples.
+                        let boundary = (if n[axis] < 0 {
                             bounds.min[axis] == 0
                         } else {
                             bounds.max[axis] == 16
-                        };
+                        }) && !(water_surface && f == UP);
                         if boundary
                             && (blocks::occludes(neighbor)
                                 || (state == neighbor && info.cull_same && !water_strip))
@@ -264,7 +266,8 @@ pub fn mesh_section_layers(
                                 sums = [sky as u32, block as u32];
                                 count = 1;
                             }
-                            // The face's direct neighbor is always a non-occluding sample.
+                            // Boundary faces have a non-occluding direct neighbor;
+                            // internal faces always use their own cell.
                             debug_assert!(count > 0);
                             let sky = (sums[0] + count / 2) / count;
                             let block = (sums[1] + count / 2) / count;
@@ -474,6 +477,49 @@ mod tests {
                 }
             }
             assert_eq!(lowered, 12); // Four top corners and two upper corners on each side.
+        }
+    }
+
+    #[test]
+    fn lowered_water_top_survives_opaque_cover_and_uses_cell_light_without_ao() {
+        for y in [5, 15] {
+            for above in [blocks::STONE, blocks::AIR, blocks::GLASS, blocks::WATER] {
+                let mut p = empty();
+                p[padded_index(5, y, 5)] = blocks::WATER;
+                p[padded_index(5, y + 1, 5)] = above;
+                // These edge blockers would darken an ordinary boundary face.
+                p[padded_index(4, y + 1, 5)] = blocks::STONE;
+                p[padded_index(5, y + 1, 4)] = blocks::STONE;
+                let mut sky = vec![0; PADDED_LEN];
+                let mut block = vec![2; PADDED_LEN];
+                sky[padded_index(5, y, 5)] = 7;
+                block[padded_index(5, y, 5)] = 11;
+                let mut out = Vec::new();
+                mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+                let top: Vec<_> = out
+                    .chunks(WORDS_PER_QUAD)
+                    .filter(|q| {
+                        q[1] & 4095 == blocks::info(blocks::WATER).tex[UP] as u32
+                            && (q[0] >> 27) & 7 == UP as u32
+                            && q.chunks(2).all(|v| position(v)[1] == (y + 1) as u32 * 16)
+                    })
+                    .collect();
+                assert_eq!(
+                    top.len(),
+                    usize::from(above != blocks::WATER),
+                    "above={above}, y={y}"
+                );
+                for q in top {
+                    for v in q.chunks(2) {
+                        assert_eq!(v[1] >> 31, 1);
+                        let height = position(v)[1] as f64 / 16.0 - 1.0 / 9.0;
+                        assert!((height - y as f64 - 8.0 / 9.0).abs() < 1e-12);
+                        assert_eq!((v[0] >> 30) & 3, 3);
+                        assert_eq!((v[1] >> 13) & 15, 7);
+                        assert_eq!((v[1] >> 17) & 15, 11);
+                    }
+                }
+            }
         }
     }
 
