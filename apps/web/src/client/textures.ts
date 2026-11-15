@@ -15,7 +15,7 @@ export const WATER_TINT: Rgb = [0x45, 0x88, 0xc9];
 /** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
 export function textureIconPixels(name: string, pixels: Uint8Array): Uint8ClampedArray<ArrayBuffer> {
 	const icon = new Uint8ClampedArray(pixels);
-	const tint = name === "oak_leaves" ? LEAVES_TINT : name === "water" ? WATER_TINT : undefined;
+	const tint = name === "oak_leaves" ? LEAVES_TINT : name === "water" ? WATER_TINT : name === "short_grass" || name === "grass_block_top" ? GRASS_TINT : undefined;
 	if (tint) {
 		for (let i = 0; i < icon.length; i += 4) {
 			for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
@@ -167,6 +167,7 @@ const PAINTERS: Record<string, (rand: () => number) => Painter> = {
 /** RGBA pixels of one texture. Unknown names get a magenta/black checker so gaps are obvious. */
 export function paintTexture(name: string): Uint8Array {
 	const rand = mulberry32(hashName(name));
+	const plant = name === "red_flower" || name === "yellow_flower" || name === "short_grass";
 	const make = PAINTERS[name];
 	const painter: Painter = make
 		? make(rand)
@@ -174,12 +175,16 @@ export function paintTexture(name: string): Uint8Array {
 	const px = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
 		for (let x = 0; x < TEX_SIZE; x++) {
-			const [r, g, b] = painter(x, y, rand);
+			const flower = Math.abs(x - 7.5) <= 3 && y >= 2 && y <= 7;
+			const stem = (x === 7 || x === 8) && y >= 7;
+			const blade = y >= 5 && (x === 7 || x === 8 || Math.abs(x - 7.5) === Math.floor((15 - y) / 3) + 0.5);
+			const visible = name === "short_grass" ? blade : flower || stem;
+			const [r, g, b] = plant ? (name === "short_grass" ? gray(170 + rand() * 50) : flower ? (name === "red_flower" ? [220, 48, 60] : [245, 210, 48]) : [65, 145, 52]) : painter(x, y, rand);
 			const i = (y * TEX_SIZE + x) * 4;
 			px[i] = clamp(r);
 			px[i + 1] = clamp(g);
 			px[i + 2] = clamp(b);
-			px[i + 3] = name === "glass"
+			px[i + 3] = plant ? (visible ? 255 : 0) : name === "glass"
 				? (x === 0 || y === 0 || x === 15 || y === 15 || (x === y + 3 && y > 3 && y < 9) ? 255 : 0)
 				: name === "oak_leaves" ? ((x * 7 + y * 11 + (x >> 1) * (y >> 1)) % 17 < 5 ? 0 : 255)
 				: name === "water" ? 168 + (x + y * 3) % 20 : 255;

@@ -1,4 +1,7 @@
-/** Mesh ABI: four two-word vertices per quad, grouped opaque/cutout/translucent. */
+/** Mesh ABI: four two-word vertices per quad, grouped opaque/cutout/translucent.
+ * Word 0: x/y/z:9 each (sixteenths), face:3, AO:2.
+ * Word 1: texture:12, tint:1, sky/block:4 each, u/v:5 each, water surface:1.
+ */
 export type LayerCounts = readonly [number, number, number];
 export const QUAD_WORDS = 8;
 export type Point = readonly [number, number, number];
@@ -20,9 +23,10 @@ export function quadCenters(words: Uint32Array): Float32Array {
 	for (let q = 0; q < words.length / QUAD_WORDS; q++) {
 		for (let v = 0; v < 4; v++) {
 			const a = words[q * QUAD_WORDS + v * 2];
-			centers[q * 3] += (a & 31) / 4;
-			centers[q * 3 + 1] += ((a >>> 5) & 31) / 4;
-			centers[q * 3 + 2] += ((a >>> 10) & 31) / 4;
+			const waterDrop = (words[q * QUAD_WORDS + v * 2 + 1] >>> 31) / 9;
+			centers[q * 3] += (a & 511) / 64;
+			centers[q * 3 + 1] += (((a >>> 9) & 511) / 16 - waterDrop) / 4;
+			centers[q * 3 + 2] += ((a >>> 18) & 511) / 64;
 		}
 	}
 	return centers;

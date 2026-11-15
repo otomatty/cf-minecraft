@@ -718,9 +718,9 @@ pub extern "C" fn client_get_block(x: i32, y: i32, z: i32) -> u32 {
         .map_or(u32::MAX, |b| b as u32)
 }
 
-/// Walks the voxel grid along a ray and stops at the first non-air block.
-/// Output on hit: `[x][y][z][face]` as i32 LE, where face is the side that was
-/// entered (`Direction` order). Returns 1 on hit.
+/// Walks the grid and intersects selection boxes, including non-solid plants.
+/// Output: x/y/z/face, local min/max XYZ in sixteenths (ten i32 LE),
+/// then the intersection local Y as f64 LE (0..=1, including the top edge).
 #[no_mangle]
 pub extern "C" fn client_raycast(
     ox: f64,
@@ -752,16 +752,31 @@ pub extern "C" fn client_raycast(
             t_max[a] = (cell[a] as f64 - origin[a]) / dir[a];
         }
     }
-    // Faces by axis and step direction: entering while moving +x means the west face, and so on.
-    const FACE: [[i32; 2]; 3] = [[4, 5], [0, 1], [2, 3]];
-    let mut face = -1i32;
     loop {
         if let Some(b) = st.world.get_block(cell[0], cell[1], cell[2]) {
-            if blocks::is_solid(b) && face >= 0 {
+            let hit = blocks::selection_boxes(b)
+                .iter()
+                .filter_map(|bounds| {
+                    physics::ray_box(
+                        origin,
+                        dir,
+                        physics::shape_box(*bounds, cell[0], cell[1], cell[2]),
+                    )
+                    .filter(|(t, _)| *t <= max)
+                    .map(|(t, face)| (t, face, bounds))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((distance, face, bounds)) = hit {
                 st.out.clear();
-                for v in [cell[0], cell[1], cell[2], face] {
+                for v in [cell[0], cell[1], cell[2], face]
+                    .into_iter()
+                    .chain(bounds.min.map(i32::from))
+                    .chain(bounds.max.map(i32::from))
+                {
                     st.out.extend_from_slice(&v.to_le_bytes());
                 }
+                st.out
+                    .extend_from_slice(&(oy + distance * dy - cell[1] as f64).to_le_bytes());
                 return 1;
             }
         }
@@ -777,7 +792,6 @@ pub extern "C" fn client_raycast(
         }
         cell[a] += step[a];
         t_max[a] += t_delta[a];
-        face = FACE[a][if step[a] > 0 { 0 } else { 1 }];
     }
 }
 
@@ -848,6 +862,25 @@ pub extern "C" fn client_block_names() -> usize {
     emit(state(), names.join("\n").into_bytes())
 }
 
+/// JSON state metadata, indexed by state ID. Block defaults and textures come
+/// from the same registry used by meshing, collisions and server validation.
+#[no_mangle]
+pub extern "C" fn client_block_registry() -> usize {
+    let entries: Vec<_> = (0..blocks::COUNT).map(|state| {
+        let info = blocks::info(state);
+        let block = blocks::block(state).unwrap();
+        let model = match info.model {
+            blocks::Model::Cube => "cube",
+            blocks::Model::Boxes(_) => "boxes",
+            blocks::Model::Cross => "cross",
+        };
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"texture":"{}"}}"#,
+            block.name, blocks::state_name(state), block.first, block.count, model,
+            info.occludes, blocks::TEXTURES[info.tex[1] as usize])
+    }).collect();
+    emit(state(), format!("[{}]", entries.join(",")).into_bytes())
+}
+
 /// Reset prediction after spawn or a debug camera teleport. Coordinates are feet.
 #[no_mangle]
 pub extern "C" fn client_player_reset(x: f64, y: f64, z: f64) {
@@ -858,12 +891,8 @@ pub extern "C" fn client_player_reset(x: f64, y: f64, z: f64) {
 
 struct Collisions<'a>(&'a World);
 impl physics::CollisionWorld for Collisions<'_> {
-    fn collision_box(&self, x: i32, y: i32, z: i32) -> Option<physics::Aabb> {
-        // Unknown chunks are solid: never predict a fall into unloaded terrain.
-        self.0
-            .get_block(x, y, z)
-            .is_none_or(blocks::is_solid)
-            .then(|| physics::Aabb::block(x, y, z))
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(physics::Aabb)) {
+        physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).collision_boxes(x, y, z, visit);
     }
 }
 
@@ -923,6 +952,111 @@ mod tests {
     }
 
     #[test]
+    fn selection_ray_hits_slab_and_plant_bounds_and_skips_empty_space() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        for (block, y, expected) in [
+            (blocks::OAK_SLAB, 80.25, [0, 0, 0, 16, 8, 16]),
+            (blocks::OAK_SLAB + 1, 80.75, [0, 8, 0, 16, 16, 16]),
+            (blocks::RED_FLOWER, 80.25, [5, 0, 5, 11, 10, 11]),
+        ] {
+            state().world.set_block(2, 80, 2, block);
+            assert_eq!(client_raycast(1.5, y, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
+            let hit: Vec<_> = state().out[..40]
+                .chunks(4)
+                .map(|v| i32::from_le_bytes(v.try_into().unwrap()))
+                .collect();
+            assert_eq!(&hit[..4], &[2, 80, 2, 4]);
+            assert_eq!(&hit[4..], &expected);
+            assert_eq!(
+                f64::from_le_bytes(state().out[40..48].try_into().unwrap()),
+                y - 80.0
+            );
+            assert_eq!(
+                client_raycast(
+                    1.5,
+                    if y < 80.5 { 80.9 } else { 80.1 },
+                    2.5,
+                    1.0,
+                    0.0,
+                    0.0,
+                    6.0
+                ),
+                0
+            );
+        }
+        state().world.set_block(2, 80, 2, blocks::OAK_SLAB);
+        assert_eq!(client_raycast(2.5, 82.0, 2.5, 0.0, -1.0, 0.0, 6.0), 1);
+        assert_eq!(
+            i32::from_le_bytes(state().out[12..16].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            f64::from_le_bytes(state().out[40..48].try_into().unwrap()),
+            0.5
+        );
+        state().world.set_block(2, -2, 2, blocks::OAK_SLAB + 1);
+        assert_eq!(client_raycast(1.5, -1.25, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
+        assert_eq!(
+            f64::from_le_bytes(state().out[40..48].try_into().unwrap()),
+            0.75
+        );
+    }
+
+    #[test]
+    fn prediction_uses_registry_boxes_for_steps_clearance_and_plants() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        for (obstacle, roof, passes) in [
+            (blocks::OAK_SLAB, false, true),
+            (blocks::OAK_SLAB + 2, false, false),
+            (blocks::OAK_SLAB + 1, true, true),
+            (blocks::OAK_SLAB, true, false),
+            (blocks::RED_FLOWER, false, true),
+            (blocks::YELLOW_FLOWER, false, true),
+            (blocks::SHORT_GRASS, false, true),
+        ] {
+            client_new();
+            state().world.set_lighting_enabled(false);
+            let mut chunk = Chunk::empty(0, 0);
+            for x in 0..16 {
+                for z in 0..16 {
+                    chunk.set(
+                        x,
+                        63,
+                        z,
+                        if roof {
+                            blocks::OAK_SLAB
+                        } else {
+                            blocks::STONE
+                        },
+                    );
+                }
+            }
+            chunk.set(1, if roof { 65 } else { 64 }, 1, obstacle);
+            state().world.insert_chunk(chunk);
+            let floor = if roof { 63.5 } else { 64.0 };
+            client_player_reset(0.5, floor, 1.5);
+            assert_eq!(client_player_toggle_flight(), 0);
+            let mut highest = floor;
+            for _ in 0..18 {
+                client_player_tick(0.0, -1.0, 0.0, 0);
+                highest = highest.max(state().player.position[1]);
+                assert!(state().player.is_clear(&Collisions(&state().world)));
+            }
+            assert_eq!(
+                state().player.position[0] > 1.0,
+                passes,
+                "state {obstacle}, roof {roof}"
+            );
+            if obstacle == blocks::OAK_SLAB && !roof {
+                assert_eq!(highest, 64.5);
+            }
+        }
+    }
+
+    #[test]
     fn material_collisions_raycast_and_mesh_abi() {
         use physics::CollisionWorld;
         let _guard = CLIENT_LOCK.lock().unwrap();
@@ -932,7 +1066,8 @@ mod tests {
         for material in [blocks::WATER, blocks::GLASS, blocks::OAK_LEAVES] {
             state().world.set_block(2, 80, 2, material);
             state().world.set_block(3, 80, 2, blocks::STONE);
-            let collision = Collisions(&state().world).collision_box(2, 80, 2);
+            let mut collision = None;
+            Collisions(&state().world).collision_boxes(2, 80, 2, &mut |b| collision = Some(b));
             assert_eq!(collision.is_some(), material != blocks::WATER);
             assert_eq!(client_raycast(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
             let hit_x = i32::from_le_bytes(state().out[..4].try_into().unwrap());

@@ -338,3 +338,72 @@ fn fixed_flight_trajectory_with_rotations() {
         assert!(!p.on_ground);
     }
 }
+
+#[test]
+fn registry_shapes_step_under_top_slabs_and_pass_through_plants() {
+    use world::blocks;
+    for (obstacle, roof, climbs, passes) in [
+        (blocks::OAK_SLAB, false, true, true),
+        (blocks::OAK_SLAB + 2, false, false, false),
+        (blocks::OAK_SLAB + 1, true, false, true),
+        (blocks::OAK_SLAB, true, false, false),
+        (blocks::RED_FLOWER, false, false, true),
+        (blocks::YELLOW_FLOWER, false, false, true),
+        (blocks::SHORT_GRASS, false, false, true),
+    ] {
+        let world = physics::BlockWorld(|x, y, _z| {
+            Some(if roof && y == 0 {
+                blocks::OAK_SLAB
+            } else if y < 0 {
+                blocks::STONE
+            } else if x == 1 && y == if roof { 2 } else { 0 } {
+                obstacle
+            } else {
+                blocks::AIR
+            })
+        });
+        let floor = if roof { 0.5 } else { 0.0 };
+        let mut player = Player::new([0.5, floor, 0.5]);
+        let mut highest = floor;
+        for _ in 0..18 {
+            player.tick(
+                Input {
+                    strafe: -1.0,
+                    ..Input::default()
+                },
+                &world,
+            );
+            highest = highest.max(player.position[1]);
+            assert!(player.is_clear(&world), "{obstacle} {player:?}");
+        }
+        assert_eq!(
+            player.position[0] > 1.0,
+            passes,
+            "{obstacle} roof={roof}: {player:?}"
+        );
+        assert_eq!(highest > floor + 0.49, climbs, "{obstacle} roof={roof}");
+    }
+}
+
+#[test]
+fn ray_box_faces_parallel_misses_and_inside_exits() {
+    let bounds = physics::shape_box(
+        world::blocks::Box16 {
+            min: [0, 0, 0],
+            max: [16, 8, 16],
+        },
+        -3,
+        -2,
+        4,
+    );
+    for (origin, dir, expected) in [
+        ([-4.0, -1.75, 4.5], [1.0, 0.0, 0.0], Some((1.0, 4))),
+        ([-2.5, 0.0, 4.5], [0.0, -1.0, 0.0], Some((1.5, 1))),
+        ([-2.5, -3.0, 4.5], [0.0, 1.0, 0.0], Some((1.0, 0))),
+        ([-2.5, -1.75, 4.5], [1.0, 0.0, 0.0], Some((0.5, 5))),
+        ([-4.0, -1.25, 4.5], [1.0, 0.0, 0.0], None),
+        ([-4.0, -1.75, 4.5], [-1.0, 0.0, 0.0], None),
+    ] {
+        assert_eq!(physics::ray_box(origin, dir, bounds), expected);
+    }
+}

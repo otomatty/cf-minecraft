@@ -14,8 +14,10 @@ import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, ClientCore, FACE_NORMALS, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { defaultHotbar, loadHotbar, saveHotbar } from "./hotbar.ts";
+import { placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
@@ -61,6 +63,9 @@ interface DebugHandle {
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
 	getBlock(x: number, y: number, z: number): number;
+	stateId(name: string): number;
+	playerPosition(): readonly number[];
+	toggleFlight(): boolean;
 	runScenario(seed: string, ticks: number): Promise<string>;
 	flush(): void;
 	exportWorld(): Promise<Uint8Array>;
@@ -109,7 +114,7 @@ async function main(): Promise<void> {
 	const core = await ClientCore.load(clientWasmUrl);
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const renderer = await Renderer.create(canvas, core.textureNames());
-	const blockNames = core.blockNames();
+	const registry = core.blockRegistry();
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -152,7 +157,7 @@ async function main(): Promise<void> {
 	let serverStats: ServerStats | null = null;
 	let scenarioLine = "";
 	const timeSamples: Array<[number, number]> = [];
-	let target: { x: number; y: number; z: number; face: number } | null = null;
+	let target: RayHit | null = null;
 	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0, skyBrightness: 1 };
 	let timeReceivedAt = performance.now();
 	let fps = 0;
@@ -277,26 +282,34 @@ async function main(): Promise<void> {
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
-	const hotbarBlocks = ["stone", "dirt", "cobblestone", "oak_planks", "oak_log", "glass", "oak_leaves", "water", "lamp_block"].map(name => blockNames.indexOf(name));
-	const textureNames = new Set(core.textureNames());
+	let hotbarBlocks = defaultHotbar(registry);
+	try { hotbarBlocks = loadHotbar(localStorage, registry); } catch { /* Keep defaults if storage access throws. */ }
+	let selectedSlot = 0;
+	function paintIcon(c: HTMLCanvasElement, state: number): void {
+		c.width = c.height = TEX_SIZE;
+		const info = registry[state];
+		const pixels = renderer.texturePixels.get(info.texture);
+		if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(info.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+		c.title = info.name;
+	}
 	for (const block of hotbarBlocks) {
 		const c = document.createElement("canvas");
-		c.width = c.height = TEX_SIZE;
-		const name = blockNames[block];
-		const tex = textureNames.has(name) ? name : `${name}_side`;
-		const pixels = renderer.texturePixels.get(tex);
-		if (pixels) {
-			c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(tex, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
-		}
-		c.title = name;
+		paintIcon(c, block);
 		hotbar.append(c);
 		slots.push(c);
 	}
-	const select = (block: number) => {
-		selected = Math.max(1, Math.min(blockNames.length - 1, block));
-		slots.forEach((c, i) => c.classList.toggle("selected", hotbarBlocks[i] === selected));
-	};
-	select(1);
+	function selectSlot(slot: number): void {
+		selectedSlot = slot;
+		selected = hotbarBlocks[slot];
+		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
+	}
+	function replaceSlot(state: number): void {
+		hotbarBlocks[selectedSlot] = registry[state].first;
+		paintIcon(slots[selectedSlot], hotbarBlocks[selectedSlot]);
+		selectSlot(selectedSlot);
+		try { saveHotbar(localStorage, hotbarBlocks, registry); } catch { /* Usable until reload if storage is disabled. */ }
+	}
+	selectSlot(0);
 
 	// ---- input -------------------------------------------------------------
 	let settings = defaultSettings();
@@ -319,7 +332,7 @@ async function main(): Promise<void> {
 	const settingsPanel = $<HTMLElement>("settings-panel");
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
-	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面" };
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
@@ -365,6 +378,40 @@ async function main(): Promise<void> {
 	}
 	refreshSettings();
 
+	const picker = $("block-picker");
+	const pickerButtons: HTMLButtonElement[] = [];
+	registry.forEach((info, state) => {
+		if (state === 0 || info.first !== state) return;
+		const button = document.createElement("button");
+		button.type = "button";
+		button.dataset.block = info.name;
+		button.title = info.name;
+		const icon = document.createElement("canvas");
+		paintIcon(icon, state);
+		const label = document.createElement("span");
+		label.textContent = info.name;
+		button.append(icon, label);
+		button.addEventListener("click", () => replaceSlot(state));
+		$("block-grid").append(button);
+		pickerButtons.push(button);
+	});
+	function openPicker(): void {
+		picker.querySelector("p")!.textContent = `クリックで現在のホットバー枠に設定。${settings.keys.inventory} / Esc で閉じます。`;
+		clearInput();
+		picker.hidden = false;
+		overlay.hidden = true;
+		if (locked()) document.exitPointerLock();
+		pickerButtons.find(button => button.dataset.block === registry[selected].name)?.focus();
+	}
+	function closePicker(reason: "inventory" | "escape" | "button"): void {
+		picker.hidden = true;
+		clearInput();
+		overlay.hidden = false;
+		statusLine.textContent = "一時停止中：クリックして再開";
+		if (reason !== "escape") void requestPointerLock();
+	}
+	$("block-picker-close").addEventListener("click", () => closePicker("button"));
+
 	type KeyboardLock = { lock(codes: string[]): Promise<void>; unlock(): void };
 	const keyboard = (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
 	let keyboardLocked = false;
@@ -400,12 +447,12 @@ async function main(): Promise<void> {
 		}
 	}
 	overlay.addEventListener("click", () => {
-		if (joined && !closed && settingsPanel.hidden) void requestPointerLock();
+		if (joined && !closed && settingsPanel.hidden && picker.hidden) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
 		if (autopilot || closed) return;
-		overlay.hidden = locked();
+		overlay.hidden = locked() || !picker.hidden;
 		if (!locked() && connection !== "reconnecting") statusLine.textContent = "一時停止中：クリックして再開";
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -428,6 +475,18 @@ async function main(): Promise<void> {
 				capturing = null;
 				persistSettings();
 			}
+			return;
+		}
+		if (!picker.hidden) {
+			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
+				e.preventDefault();
+				if (!e.repeat) closePicker(e.code === "Escape" ? "escape" : "inventory");
+			}
+			return;
+		}
+		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed) {
+			e.preventDefault();
+			if (!e.repeat) openPicker();
 			return;
 		}
 		if (matchesKey(e.code, settings.keys.fullscreen) && !e.repeat) {
@@ -457,7 +516,7 @@ async function main(): Promise<void> {
 				lastJumpTap = -Infinity;
 			} else lastJumpTap = movementTick;
 		}
-		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) select(hotbarBlocks[Number(e.code.slice(5)) - 1] ?? selected);
+		if (e.code.startsWith("Digit") && !Object.values(settings.keys).some(assigned => matchesKey(e.code, assigned))) selectSlot(Number(e.code.slice(5)) >= 1 && Number(e.code.slice(5)) <= 9 ? Number(e.code.slice(5)) - 1 : selectedSlot);
 		keys.add(e.code);
 	});
 	window.addEventListener("keyup", (e) => {
@@ -468,7 +527,7 @@ async function main(): Promise<void> {
 	canvas.addEventListener("wheel", (e) => {
 		if (!locked()) return;
 		e.preventDefault();
-		select(hotbarBlocks[(Math.max(0, hotbarBlocks.indexOf(selected)) + Math.sign(e.deltaY) + slots.length) % slots.length]);
+		selectSlot((selectedSlot + Math.sign(e.deltaY) + slots.length) % slots.length);
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
@@ -492,13 +551,15 @@ async function main(): Promise<void> {
 		if (button === 0) {
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
-			const n = FACE_NORMALS[hit.face];
-			const [x, y, z] = [hit.x + n[0], hit.y + n[1], hit.z + n[2]];
-			const current = core.getBlock(x, y, z);
-			if (current === 0 || blockNames[current] === "water") setBlock(x, y, z, selected);
+			const edit = placementState(registry, selected, hit, (x, y, z) => core.getBlock(x, y, z));
+			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
-			const block = core.getBlock(hit.x, hit.y, hit.z);
-			if (block > 0) select(block);
+			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
+			if (block && block.first > 0) {
+				const slot = hotbarBlocks.indexOf(block.first);
+				if (slot >= 0) selectSlot(slot);
+				else replaceSlot(block.first);
+			}
 		}
 	}
 	canvas.addEventListener("mousedown", (e) => {
@@ -577,7 +638,7 @@ async function main(): Promise<void> {
 					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
 			`Seed: ${core.seed}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
-			target ? `Target: ${target.x} ${target.y} ${target.z}  ${blockNames[core.getBlock(target.x, target.y, target.z)] ?? "?"}` : "Target: -",
+			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
 		if (scenarioLine) lines.push(scenarioLine);
 		hud.textContent = lines.join("\n");
@@ -630,7 +691,7 @@ async function main(): Promise<void> {
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
-		frame = renderer.render(camera, viewDistance, target ? [target.x, target.y, target.z] : null, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
 		window.__mc.frames++;
 
 		frames++;
@@ -686,6 +747,9 @@ async function main(): Promise<void> {
 		},
 		setBlock,
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
+		stateId: name => registry.findIndex(info => info.stateName === name || info.name === name),
+		playerPosition: () => core.playerPosition,
+		toggleFlight: () => core.toggleFlight(),
 		runScenario,
 		flush: () => transport.flush(),
 		exportWorld,
@@ -703,6 +767,9 @@ window.__mc = {
 	setCamera: () => {},
 	setBlock: () => false,
 	getBlock: () => -1,
+	stateId: () => -1,
+	playerPosition: () => [],
+	toggleFlight: () => false,
 	runScenario,
 	flush: () => {},
 	exportWorld: async () => { throw new Error("初期化中です"); },

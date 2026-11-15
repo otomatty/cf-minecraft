@@ -6,11 +6,106 @@ const memory = () => {
 	const values = new Map<string, string>();
 	return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
 };
-test("defaults cover eight actions and are independent copies", () => {
+const withoutInventory = (settings = defaultSettings()) => ({
+	...settings,
+	keys: Object.fromEntries(Object.entries(settings.keys).filter(([action]) => action !== "inventory")),
+});
+
+test("pre-inventory preferences retain all keys, sensitivity and FOV and persist the migration", () => {
+	for (const key of [SETTINGS_KEY, "maincraft.input-settings.v1"]) {
+		const storage = memory();
+		const expected = { ...defaultSettings(), sensitivity: 37, fov: 96 };
+		expected.keys.forward = "ArrowUp";
+		expected.keys.down = "ShiftRight";
+		storage.setItem(key, JSON.stringify(withoutInventory(expected)));
+		assert.deepEqual(loadSettings(storage), expected);
+		assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+		assert.equal(storage.getItem("maincraft.input-settings.v1"), null);
+	}
+});
+
+test("old E bindings survive and inventory chooses the first free candidate", () => {
+	for (const [extra, inventory] of [
+		[{}, "KeyI"],
+		[{ backward: "KeyI" }, "KeyB"],
+		[{ backward: "KeyI", left: "KeyB" }, "KeyC"],
+		[{ backward: "KeyI", left: "KeyB", right: "KeyC" }, "KeyA"],
+		[{ backward: "KeyI", left: "KeyB", right: "KeyC", up: "KeyA", down: "KeyD" }, "KeyG"],
+	] as const) {
+		for (const key of [SETTINGS_KEY, "maincraft.input-settings.v1"]) {
+			const storage = memory();
+			const expected = { keys: { ...defaultSettings().keys, ...extra, forward: "KeyE", inventory }, sensitivity: 61, fov: 85 };
+			storage.setItem(key, JSON.stringify(withoutInventory(expected)));
+			const loaded = loadSettings(storage);
+			assert.deepEqual(loaded, expected);
+			assert.deepEqual(effectiveKeyConflicts(loaded), []);
+			assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+		}
+	}
+});
+
+test("inventory migration remains usable when saving fails and retries next load", () => {
+	for (const key of [SETTINGS_KEY, "maincraft.input-settings.v1"]) {
+		const storage = memory();
+		const expected = { ...defaultSettings(), sensitivity: 55, fov: 88 };
+		expected.keys.forward = "KeyE";
+		expected.keys.inventory = "KeyI";
+		const old = JSON.stringify(withoutInventory(expected));
+		storage.setItem(key, old);
+		assert.deepEqual(loadSettings({ ...storage, setItem() { throw new Error("quota"); } }), expected);
+		assert.equal(storage.getItem(key), old);
+		assert.deepEqual(loadSettings(storage), expected);
+		assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+	}
+});
+
+test("inventory uses existing duplicate, modifier and sprint fallback conflict checks", () => {
+	const storage = memory();
+	for (const [sprint, inventory, duplicate, conflict] of [
+		["KeyR", "KeyW", ["KeyW"], ["KeyW"]],
+		["KeyR", "ShiftRight", ["ShiftLeft"], ["ShiftLeft"]],
+		["KeyR", "ControlRight", [], ["ControlLeft"]],
+		["ControlRight", "KeyR", [], ["KeyR"]],
+	] as const) {
+		const settings = { ...defaultSettings(), sensitivity: 62, fov: 91 };
+		settings.keys.sprint = sprint;
+		settings.keys.inventory = inventory;
+		assert.deepEqual(duplicateKeys(settings.keys), duplicate);
+		assert.deepEqual(effectiveKeyConflicts(settings), conflict);
+		storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+		assert.deepEqual(loadSettings(storage), defaultSettings());
+	}
+	const custom = defaultSettings();
+	custom.keys.forward = "KeyE";
+	custom.keys.inventory = "KeyI";
+	assert.equal(saveSettings(storage, custom), true);
+	assert.deepEqual(loadSettings(storage), custom);
+});
+
+test("migration does not repair invalid old preferences or explicit invalid inventory bindings", () => {
+	const storage = memory();
+	for (const value of [
+		{ ...withoutInventory(), sensitivity: -1 },
+		{ ...withoutInventory(), fov: 111 },
+		{ ...withoutInventory(), keys: { ...withoutInventory().keys, forward: "Escape" } },
+		{ ...withoutInventory(), keys: { ...withoutInventory().keys, forward: "KeyS" } },
+		{ ...withoutInventory(), keys: { ...withoutInventory().keys, forward: "ControlRight" } },
+		{ ...defaultSettings(), keys: { ...defaultSettings().keys, inventory: null } },
+		{ ...defaultSettings(), keys: { ...defaultSettings().keys, inventory: "NotAKey" } },
+	]) {
+		const original = JSON.stringify(value);
+		storage.setItem(SETTINGS_KEY, original);
+		assert.deepEqual(loadSettings(storage), defaultSettings());
+		assert.equal(storage.getItem(SETTINGS_KEY), original);
+	}
+});
+
+test("defaults cover nine actions and are independent copies", () => {
 	const settings = defaultSettings();
 	assert.equal(Object.keys(settings.keys).length, ACTIONS.length);
 	assert.equal(settings.keys.sprint, "KeyR");
 	assert.equal(settings.keys.fullscreen, "KeyF");
+	assert.equal(settings.keys.inventory, "KeyE");
 	assert.equal(settings.sensitivity, 100);
 	assert.equal(settings.fov, 70);
 	settings.keys.forward = "ArrowUp";
@@ -34,6 +129,7 @@ test("corrupt, incomplete, out of range and duplicate saved data fall back", () 
 		JSON.stringify({ ...defaults, fov: 29 }), JSON.stringify({ ...defaults, fov: 111 }),
 		JSON.stringify({ ...defaults, sensitivity: "100" }),
 		JSON.stringify({ ...defaults, keys: { ...defaults.keys, forward: "Escape" } }),
+		JSON.stringify({ ...defaults, keys: { ...defaults.keys, forward: "KeyE" } }),
 		JSON.stringify({ ...defaults, keys: { ...defaults.keys, forward: "NotAKey" } }),
 		JSON.stringify({ ...defaults, keys: { ...defaults.keys, forward: "KeyS" } })]) {
 		storage.setItem(SETTINGS_KEY, value);
@@ -109,7 +205,7 @@ test("Ctrl sprint requires successful keyboard lock; custom keys are preserved",
 
 test("assignments preserve reserved keys and Keyboard Lock excludes Escape", () => {
 	for (const code of ["Escape", "F8", "F11", "Unidentified", "NotAKey", ""]) assert.equal(validKey(code), false);
-	for (const code of ["KeyW", "ControlLeft", "ControlRight", "ArrowUp", "Numpad0", "IntlYen"]) assert.equal(validKey(code), true);
+	for (const code of ["KeyE", "KeyW", "ControlLeft", "ControlRight", "ArrowUp", "Numpad0", "IntlYen"]) assert.equal(validKey(code), true);
 	assert.equal(LOCKABLE_CODES.includes("Escape"), false);
 	for (const code of ["KeyW", "ControlLeft", "ControlRight"]) assert.ok(LOCKABLE_CODES.includes(code));
 });

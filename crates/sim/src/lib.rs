@@ -351,6 +351,13 @@ impl Server {
         let dy = y as f64 + 0.5 - client.pos[1];
         let dz = z as f64 + 0.5 - client.pos[2];
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+            && self.world.get_block(x, y, z).is_some_and(|old| {
+                blocks::can_place(
+                    old,
+                    state,
+                    self.world.get_block(x, y - 1, z).unwrap_or(blocks::AIR),
+                )
+            })
     }
 
     fn correct_block(&mut self, id: u32, x: i32, y: i32, z: i32) {
@@ -575,41 +582,69 @@ fn valid_position(pos: [f64; 3]) -> bool {
 // generated on demand by a movement packet (including stored chunks in flight).
 fn movement_clear(world: &World, from: [f64; 3], to: [f64; 3]) -> bool {
     let origin = physics::Player::new(from).bounds();
-    let collisions = |x, y, z| {
-        let bounds = physics::Aabb::block(x, y, z);
-        match world.get_block(x, y, z) {
-            // Ignore only known solids already intersecting the starting body,
-            // for this report's sweep AND endpoint. This permits gradual escape
-            // from placements, but a later report cannot reenter an escaped block.
-            Some(state) if blocks::is_solid(state) && !origin.intersects(bounds) => Some(bounds),
-            // Unknown chunks remain solid even if the origin overlaps them.
-            None => Some(bounds),
-            _ => None,
+    struct MovementWorld<'a>(&'a World, physics::Aabb);
+    impl physics::CollisionWorld for MovementWorld<'_> {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(physics::Aabb)) {
+            let unknown = self.0.get_block(x, y, z).is_none();
+            physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).collision_boxes(
+                x,
+                y,
+                z,
+                &mut |b| {
+                    if unknown || !self.1.intersects(b) {
+                        visit(b);
+                    }
+                },
+            );
         }
-    };
+    }
+    let collisions = MovementWorld(world, origin);
     let target = physics::Player::new(to);
     if !target.is_clear(&collisions) {
         return false;
     }
     let delta = std::array::from_fn::<_, 3, _>(|a| to[a] - from[a]);
-    let mut player = physics::Player::new(from);
-    // Follow prediction's complete Y, then complete X, then complete Z path.
     // Split only within each axis: a full-reserve report has bounded broad
     // phases without turning the path into a diagonal staircase through solids.
-    for axis in [1, 0, 2] {
-        let steps = delta[axis].abs().ceil().max(1.0) as usize;
-        for i in 1..=steps {
-            let mut desired = [0.0; 3];
-            desired[axis] =
-                from[axis] + delta[axis] * i as f64 / steps as f64 - player.position[axis];
-            let actual = physics::resolve(&collisions, player.bounds(), desired);
-            if (actual[axis] - desired[axis]).abs() >= COLLISION_TOLERANCE {
-                return false;
+    let sweep = |mut player: physics::Player, destination: [f64; 3], axes: &[usize]| {
+        let start = player.position;
+        for &axis in axes {
+            let steps = (destination[axis] - start[axis]).abs().ceil().max(1.0) as usize;
+            for i in 1..=steps {
+                let mut desired = [0.0; 3];
+                desired[axis] = start[axis]
+                    + (destination[axis] - start[axis]) * i as f64 / steps as f64
+                    - player.position[axis];
+                let actual = physics::resolve(&collisions, player.bounds(), desired);
+                if (actual[axis] - desired[axis]).abs() >= COLLISION_TOLERANCE {
+                    return None;
+                }
+                player.position[axis] += actual[axis];
             }
-            player.position[axis] += actual[axis];
         }
+        Some(player)
+    };
+    // Prefer prediction's ordinary Y/X/Z path.
+    if sweep(physics::Player::new(from), to, &[1, 0, 2]).is_some() {
+        return true;
     }
-    true
+    // Prediction can also step up, move X/Z, then descend. Resolve the upward
+    // leg first so low ceilings limit the rise exactly as in Player::tick.
+    let up = physics::resolve(&collisions, origin, [0.0, physics::STEP_HEIGHT, 0.0])[1];
+    if up <= 0.0 || delta[1] > up {
+        return false;
+    }
+    let raised = physics::Player::new([from[0], from[1] + up, from[2]]);
+    if !raised.is_clear(&collisions) {
+        return false;
+    }
+    let Some(across) = sweep(raised, [to[0], raised.position[1], to[2]], &[0, 2]) else {
+        return false;
+    };
+    if !across.is_clear(&collisions) {
+        return false;
+    }
+    sweep(across, to, &[1]).is_some_and(|landed| landed.is_clear(&collisions))
 }
 
 #[cfg(test)]
@@ -640,6 +675,64 @@ mod tests {
             pitch: 0.0,
         }
         .encode()
+    }
+
+    #[test]
+    fn registry_shape_prediction_paths_are_accepted_by_server() {
+        for (obstacle, roof, passes) in [
+            (blocks::OAK_SLAB, false, true),
+            (blocks::OAK_SLAB + 2, false, false),
+            (blocks::OAK_SLAB + 1, true, true),
+            (blocks::OAK_SLAB, true, false),
+            (blocks::RED_FLOWER, false, true),
+            (blocks::YELLOW_FLOWER, false, true),
+            (blocks::SHORT_GRASS, false, true),
+        ] {
+            let floor = if roof { 63.5 } else { 64.0 };
+            let mut s = joined_at([0.5, floor, 1.5]);
+            for x in 0..16 {
+                for z in 0..16 {
+                    s.world.set_block(
+                        x,
+                        63,
+                        z,
+                        if roof {
+                            blocks::OAK_SLAB
+                        } else {
+                            blocks::STONE
+                        },
+                    );
+                }
+            }
+            s.world
+                .set_block(1, if roof { 65 } else { 64 }, 1, obstacle);
+            let mut player = physics::Player::new([0.5, floor, 1.5]);
+            let mut highest = floor;
+            for _ in 0..18 {
+                let before = player.position;
+                player.tick(
+                    physics::Input {
+                        strafe: -1.0,
+                        ..Default::default()
+                    },
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                highest = highest.max(player.position[1]);
+                assert!(movement_clear(&s.world, before, player.position));
+                s.handle_packet(1, &position_packet(player.position));
+                s.tick();
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
+            assert_eq!(s.stats.positions_rejected, 0);
+            assert_eq!(
+                player.position[0] > 1.0,
+                passes,
+                "state {obstacle}, roof {roof}"
+            );
+            if obstacle == blocks::OAK_SLAB && !roof {
+                assert_eq!(highest, 64.5);
+            }
+        }
     }
 
     #[test]
@@ -719,6 +812,99 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_slab_corner_step_accepts_each_prediction_tick() {
+        let start = [0.69, 64.0, 1.2];
+        for batched in [false, true] {
+            let mut s = joined_at(start);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, 63, z, blocks::STONE);
+                }
+            }
+            s.world.set_block(1, 64, 0, blocks::OAK_SLAB);
+            let mut player = physics::Player::new(start);
+            for _ in 0..2 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+            }
+            assert!(player.on_ground);
+            player.velocity = [0.15, -0.0784, 0.15];
+            let ordinary = physics::resolve(
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                player.bounds(),
+                player.velocity,
+            );
+            assert!(player.velocity[0] - ordinary[0] > COLLISION_TOLERANCE);
+            for tick in 0..8 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                if tick == 0 {
+                    for (actual, expected) in player.position.into_iter().zip([0.84, 64.0, 1.35]) {
+                        assert!((actual - expected).abs() < 1e-12);
+                    }
+                    assert!(player.on_ground);
+                }
+                s.handle_packet(1, &position_packet(player.position));
+                if !batched {
+                    s.tick();
+                    assert_eq!(s.client_position(1), Some(player.position));
+                    assert_eq!(s.stats.positions_rejected, 0, "tick {tick}");
+                }
+            }
+            if batched {
+                s.tick();
+            }
+            assert_eq!(s.stats.positions_rejected, 0);
+            assert_eq!(s.client_position(1), Some(player.position));
+        }
+    }
+
+    #[test]
+    fn step_route_cannot_cross_full_walls_low_ceilings_or_unknown_chunks() {
+        let start = [0.69, 64.0, 1.2];
+        for obstacle in ["wall", "ceiling", "unknown"] {
+            let mut s = joined_at(start);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, 63, z, blocks::STONE);
+                }
+            }
+            let target = match obstacle {
+                "wall" => {
+                    for z in 0..4 {
+                        s.world.set_block(1, 64, z, blocks::STONE);
+                    }
+                    [2.5, 64.0, 1.35]
+                }
+                "ceiling" => {
+                    s.world.set_block(1, 64, 0, blocks::OAK_SLAB);
+                    s.world.set_block(0, 66, 1, blocks::STONE);
+                    [0.84, 64.0, 1.35]
+                }
+                _ => {
+                    s.world.chunks.remove(&(1, 0));
+                    [32.5, 64.0, 1.35]
+                }
+            };
+            // The endpoint itself is empty: the intermediate route must fail.
+            assert!(
+                physics::Player::new(target)
+                    .is_clear(&physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z))),
+                "{obstacle}"
+            );
+            assert!(!movement_clear(&s.world, start, target), "{obstacle}");
+            s.handle_packet(1, &position_packet(target));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 1, "{obstacle}");
+            assert_eq!(s.client_position(1), Some(start));
+        }
+    }
+
+    #[test]
     fn descending_corner_accepts_each_physics_tick_including_batched_arrival() {
         let start = [0.69, 66.2, 0.5];
         for batched in [false, true] {
@@ -757,14 +943,24 @@ mod tests {
             assert_eq!(s.stats.positions_rejected, 0);
             assert_eq!(s.client_position(1), Some(player.position));
 
-            // Omitting the intermediate tick loses the path around the corner:
-            // one combined Y sweep is blocked, as expected by current validation.
+            // Without the intermediate report the normal Y-first path is
+            // blocked, but the new up/across/down alternative remains clear.
             let mut skipped = joined_at(start);
             skipped.world.set_block(0, 65, 0, blocks::BRICKS);
             skipped.handle_packet(1, &position_packet(player.position));
             skipped.tick();
-            assert_eq!(skipped.stats.positions_rejected, 1);
-            assert_eq!(skipped.client_position(1), Some(start));
+            assert_eq!(skipped.stats.positions_rejected, 0);
+            assert_eq!(skipped.client_position(1), Some(player.position));
+
+            // A wall on the horizontal leg blocks both routes even though the
+            // destination beyond it is clear.
+            let mut blocked = joined_at(start);
+            blocked.world.set_block(0, 65, 0, blocks::BRICKS);
+            blocked.world.set_block(1, 66, 0, blocks::BRICKS);
+            blocked.handle_packet(1, &position_packet(player.position));
+            blocked.tick();
+            assert_eq!(blocked.stats.positions_rejected, 1);
+            assert_eq!(blocked.client_position(1), Some(start));
         }
     }
 
@@ -1197,6 +1393,53 @@ mod tests {
             }
         }
         assert_eq!(times, vec![20, 40, 60, 80, 100]);
+    }
+
+    #[test]
+    fn placement_allows_overwrites_but_validates_state_and_plant_support() {
+        let mut s = joined(2);
+        for _ in 0..20 {
+            s.tick();
+        }
+        let [sx, sy, sz] = s.spawn();
+        let (x, y, z) = (sx.floor() as i32, sy as i32 + 2, sz.floor() as i32);
+        s.world.set_block(x, y - 1, z, blocks::AIR);
+        for state in [
+            blocks::STONE,
+            blocks::OAK_SLAB,
+            blocks::OAK_SLAB + 1,
+            blocks::OAK_SLAB + 2,
+            blocks::WATER,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(state));
+        }
+        for state in [
+            blocks::COUNT,
+            u16::MAX,
+            blocks::RED_FLOWER,
+            blocks::YELLOW_FLOWER,
+            blocks::SHORT_GRASS,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(blocks::WATER));
+        }
+        for below in [blocks::OAK_SLAB, blocks::GLASS, blocks::WATER] {
+            s.world.set_block(x, y - 1, z, below);
+            assert!(!s.can_edit(1, x, y, z, blocks::RED_FLOWER));
+        }
+        s.world.set_block(x, y - 1, z, blocks::OAK_SLAB + 2);
+        for state in [
+            blocks::RED_FLOWER,
+            blocks::YELLOW_FLOWER,
+            blocks::SHORT_GRASS,
+        ] {
+            s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(state));
+        }
     }
 
     #[test]

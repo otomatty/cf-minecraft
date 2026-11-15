@@ -31,15 +31,86 @@ impl Aabb {
     }
 }
 
-/// Return a world-space collision box for a block, or None for non-solid space.
-/// Boxes must stay within their block cell. A half-height box supports slabs;
-/// the current client registry contains only air and complete cubes.
+/// Enumerate world-space boxes contained within one block cell.
 pub trait CollisionWorld {
-    fn collision_box(&self, x: i32, y: i32, z: i32) -> Option<Aabb>;
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb));
 }
+/// Convenience adapter for simple worlds with at most one box.
 impl<F: Fn(i32, i32, i32) -> Option<Aabb>> CollisionWorld for F {
-    fn collision_box(&self, x: i32, y: i32, z: i32) -> Option<Aabb> {
-        self(x, y, z)
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb)) {
+        if let Some(b) = self(x, y, z) {
+            visit(b);
+        }
+    }
+}
+pub fn shape_box(bounds: world::blocks::Box16, x: i32, y: i32, z: i32) -> Aabb {
+    let cell = [x, y, z];
+    Aabb {
+        min: std::array::from_fn(|a| cell[a] as f64 + bounds.min[a] as f64 / 16.0),
+        max: std::array::from_fn(|a| cell[a] as f64 + bounds.max[a] as f64 / 16.0),
+    }
+}
+/// Registry collision adapter shared by client prediction and server sweeps.
+pub struct BlockWorld<F>(pub F);
+impl<F: Fn(i32, i32, i32) -> Option<u16>> CollisionWorld for BlockWorld<F> {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb)) {
+        match self.0(x, y, z) {
+            None => visit(Aabb::block(x, y, z)),
+            Some(state) => {
+                for bounds in world::blocks::collision_boxes(state) {
+                    visit(shape_box(*bounds, x, y, z));
+                }
+            }
+        }
+    }
+}
+/// Per-box escape filtering preserves overlapping-placement behaviour.
+pub struct EscapeWorld<'a, W>(pub &'a W, pub Aabb);
+impl<W: CollisionWorld> CollisionWorld for EscapeWorld<'_, W> {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb)) {
+        self.0.collision_boxes(x, y, z, &mut |b| {
+            if !self.1.intersects(b) {
+                visit(b);
+            }
+        });
+    }
+}
+
+/// Ray/box intersection, returning distance and Direction face. Parallel rays
+/// outside a slab miss; an origin inside a box selects its exit face.
+pub fn ray_box(origin: [f64; 3], dir: [f64; 3], bounds: Aabb) -> Option<(f64, i32)> {
+    let mut near = f64::NEG_INFINITY;
+    let mut far = f64::INFINITY;
+    let mut enter = -1;
+    let mut exit = -1;
+    for (axis, faces) in [[4, 5], [0, 1], [2, 3]].iter().enumerate() {
+        if dir[axis] == 0.0 {
+            if origin[axis] < bounds.min[axis] || origin[axis] > bounds.max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let a = (bounds.min[axis] - origin[axis]) / dir[axis];
+        let b = (bounds.max[axis] - origin[axis]) / dir[axis];
+        let positive = dir[axis] > 0.0;
+        if a.min(b) > near {
+            near = a.min(b);
+            enter = faces[usize::from(!positive)];
+        }
+        if a.max(b) < far {
+            far = a.max(b);
+            exit = faces[usize::from(positive)];
+        }
+        if near > far {
+            return None;
+        }
+    }
+    if far < 0.0 {
+        None
+    } else if near >= 0.0 {
+        Some((near, enter))
+    } else {
+        Some((far, exit))
     }
 }
 
@@ -211,9 +282,7 @@ fn visit(world: &impl CollisionWorld, region: Aabb, mut callback: impl FnMut(Aab
     for y in region.min[1].floor() as i32..region.max[1].ceil() as i32 {
         for x in region.min[0].floor() as i32..region.max[0].ceil() as i32 {
             for z in region.min[2].floor() as i32..region.max[2].ceil() as i32 {
-                if let Some(b) = world.collision_box(x, y, z) {
-                    callback(b);
-                }
+                world.collision_boxes(x, y, z, &mut callback);
             }
         }
     }

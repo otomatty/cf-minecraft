@@ -152,6 +152,22 @@
 				border: 1px solid #888;
 				padding: 4px 8px;
 			}
+			#block-picker {
+				position: fixed;
+				inset: 8vh 10vw;
+				padding: 20px;
+				background: #222e;
+				color: white;
+				overflow: auto;
+				border: 2px solid #888;
+			}
+			#block-picker[hidden] { display: none; }
+			#block-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+			#block-grid button { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px; color: white; background: #333; border: 1px solid #888; cursor: pointer; }
+			#block-grid button:focus-visible { outline: 3px solid white; }
+			#block-grid canvas { width: 40px; height: 40px; image-rendering: pixelated; }
+			#block-grid span { overflow-wrap: anywhere; }
+
 		</style>
 	</head>
 	<body>
@@ -166,6 +182,7 @@
 				<p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動（<kbd>R</kbd> / 前進を2回でダッシュ）　<kbd>Space</kbd> 上昇　<kbd>Shift</kbd> 下降</p>
 				<p>左クリック 破壊　右クリック 設置　中クリック ブロック選択　<kbd>1</kbd>〜<kbd>9</kbd> / ホイール 切替</p>
 				<p><kbd>F</kbd> 全画面切替（Keyboard Lock 成功時は左 Ctrl でダッシュ）</p>
+				<p><kbd>E</kbd> ブロック一覧（選ぶと現在のホットバー枠に設定）</p>
 				<p><kbd>F8</kbd> 決定論チェック　<kbd>Esc</kbd> 一時停止</p>
 				<button id="settings-open" type="button">設定</button>
 				<section id="settings-panel" hidden aria-label="入力設定">
@@ -186,6 +203,12 @@
 					<button id="settings-close" type="button">閉じる</button>
 				</section>
 			</div>
+		</div>
+		<div id="block-picker" role="dialog" aria-modal="true" aria-labelledby="block-picker-title" hidden>
+			<h2 id="block-picker-title">ブロック選択</h2>
+			<p>クリックで現在のホットバー枠に設定。E / Esc で閉じます。</p>
+			<div id="block-grid"></div>
+			<button id="block-picker-close" type="button">閉じて再開</button>
 		</div>
 		<script type="module" src="/src/client/main.ts"></script>
 	</body>

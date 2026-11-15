@@ -448,7 +448,7 @@ async function inputs() {
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
 	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  dirt`, "input: the block underneath is targeted next", await targetLine());
 
-	await page.keyboard.press("Digit4");
+	await page.keyboard.press("Digit3");
 	await page.mouse.down({ button: "right" });
 	await page.mouse.up({ button: "right" });
 	await new Promise((r) => setTimeout(r, 300));
@@ -478,9 +478,133 @@ async function inputs() {
 	await page.close();
 }
 
+/** Real placement/UI input plus resolved physics; debug edits only prepare a small platform. */
+async function partialModels() {
+	const view = 3;
+	const { page, errors } = await open(`world=e2e-models-${run}&view=${view}&seed=2026&time=6000`);
+	const waitFor = async (label, predicate, options = {}, ...args) => {
+		try { return await page.waitForFunction(predicate, options, ...args); }
+		catch (error) { throw new Error(`models ${label}: ${error.message}`, { cause: error }); }
+	};
+	try {
+		const stats = await settle(page, "models", chunksInView(view));
+		const center = [Math.floor(stats.spawn[0]), Math.floor(stats.spawn[1]) + 8, Math.floor(stats.spawn[2])];
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x + 0.5, y + 2, z + 0.5, 0, 90);
+			for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+				window.__mc.setBlock(x + dx, y - 1, z + dz, window.__mc.stateId("stone"));
+				for (let dy = 0; dy <= 3; dy++) window.__mc.setBlock(x + dx, y + dy, z + dz, window.__mc.stateId("air"));
+			}
+		}, center);
+		await new Promise(resolve => setTimeout(resolve, 500));
+		await settle(page, "models platform", chunksInView(view));
+		await page.mouse.click(640, 360);
+		await waitFor("initial pointer lock", () => document.pointerLockElement?.id === "view");
+		await page.keyboard.press("Digit4"); // Default fourth slot: oak slab.
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("bottom slab placement", ([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_slab[type=bottom]"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		check(await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_slab[type=bottom]"), center), "models: right click places a bottom slab");
+		await waitFor("bottom slab target HUD", () => document.getElementById("hud").textContent.includes("oak_slab[type=bottom]"));
+
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x - 0.5, y + 1.62, z + 0.5, 0, 0);
+			window.__mc.toggleFlight();
+		}, center);
+		await page.keyboard.down("KeyA"); // At yaw 0, left moves toward +X.
+		let stepped;
+		try {
+			const result = await waitFor("step onto slab", ([x, y]) => {
+				const p = window.__mc.playerPosition();
+				return p[0] > x + 0.1 && Math.abs(p[1] - y - 0.5) < 0.001 ? p : false;
+			}, { timeout: 5000 }, center);
+			stepped = await result.jsonValue();
+		} finally { await page.keyboard.up("KeyA"); }
+		check(!!stepped, "models: walking steps onto the slab", JSON.stringify(stepped));
+
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), center);
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("double slab placement", ([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_slab[type=double]"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		check(await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("oak_slab[type=double]"), center), "models: clicking the empty half makes a double slab");
+		await page.mouse.click(640, 360, { button: "middle" });
+		check(await page.$eval("#hotbar canvas.selected", c => c.title === "oak_slab"), "models: middle click picks the block default");
+
+		await page.keyboard.press("KeyE");
+		await waitFor("picker opened and pointer released", () => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
+		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
+		await page.click('#block-grid [data-block="red_flower"]');
+		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
+		await page.keyboard.press("KeyE");
+		await waitFor("picker closed with inventory key", () => document.getElementById("block-picker").hidden);
+		const resume = async label => {
+			for (let attempt = 1; attempt <= 5; attempt++) {
+				if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+				try {
+					await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
+					await page.click("#overlay");
+					await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
+					return;
+				} catch (error) {
+					// Lock can arrive between the visibility check and the click.
+					if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+					if (attempt === 5) throw new Error(`models ${label}: resume failed after ${attempt} attempts: ${error.message}`, { cause: error });
+				}
+			}
+		};
+		await resume("resume after inventory key");
+		await page.keyboard.press("KeyE");
+		await waitFor("picker reopened before Escape", () => !document.getElementById("block-picker").hidden);
+		await page.keyboard.press("Escape");
+		await waitFor("picker closed with Escape into pause", () => document.getElementById("block-picker").hidden
+			&& !document.getElementById("overlay").hidden && !document.pointerLockElement
+			&& document.getElementById("status").textContent === "一時停止中：クリックして再開");
+		await resume("resume after Escape");
+
+		// Break the slab, then place a flower on the supporting full cube.
+		await page.mouse.click(640, 360, { button: "left" });
+		await waitFor("slab destruction", ([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, center);
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitFor("flower placement", ([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("red_flower"), {}, center);
+		await new Promise(resolve => setTimeout(resolve, 300));
+		check(await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("red_flower"), center), "models: flower placement is confirmed");
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 1.2, z - 1.5, 0, 20), center);
+		await settle(page, "models flower", chunksInView(view));
+		const flowerImage = join(shots, "models-flower.png");
+		await page.screenshot({ path: flowerImage });
+		const redPixels = await page.evaluate(async dataUrl => {
+			const img = new Image(); img.src = dataUrl; await img.decode();
+			const c = new OffscreenCanvas(img.width, img.height), g = c.getContext("2d");
+			g.drawImage(img, 0, 0);
+			const pixels = g.getImageData(520, 240, 240, 240).data;
+			let red = 0;
+			for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > pixels[i + 1] * 1.8 && pixels[i] > pixels[i + 2] * 1.8 && pixels[i] > 60) red++;
+			return red;
+		}, `data:image/png;base64,${readFileSync(flowerImage).toString("base64")}`);
+		check(redPixels > 10, "models: flower cutout is visibly rendered", `${redPixels} red pixels`);
+		await page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x - 0.5, y + 1.62, z + 0.5, 0, 0);
+			window.__mc.toggleFlight();
+		}, center);
+		await page.keyboard.down("KeyA");
+		try { await waitFor("walk through flower", ([x, y]) => {
+			const p = window.__mc.playerPosition();
+			return p[0] > x + 1.2 && Math.abs(p[1] - y) < 0.001;
+		}, { timeout: 5000 }, center); }
+		finally { await page.keyboard.up("KeyA"); }
+		check(true, "models: player walks through the flower");
+		await page.reload({ waitUntil: "load" });
+		await settle(page, "models reload", chunksInView(view));
+		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");
+		check(errors.length === 0, "models: no page errors", errors.slice(0, 3).join(" | "));
+	} finally { await page.close(); }
+}
+
 try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
+	await partialModels();
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();
