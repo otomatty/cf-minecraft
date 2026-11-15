@@ -521,7 +521,16 @@ pub extern "C" fn client_requeue_dirty(cx: i32, sy: i32, cz: i32) {
 
 #[no_mangle]
 pub extern "C" fn client_is_dirty(cx: i32, sy: i32, cz: i32) -> u32 {
-    (state().dirty.contains(&(cx, sy, cz)) || !light_ready(state(), cx, cz)) as u32
+    let st = state();
+    if !light_ready(st, cx, cz) {
+        // A discarded result must be rebuilt after lighting arrives, even if
+        // its section is now empty and light invalidation would skip it.
+        if st.light_exports.is_none() && st.world.chunks.contains_key(&(cx, cz)) {
+            st.dirty.insert((cx, sy, cz));
+        }
+        return 1;
+    }
+    st.dirty.contains(&(cx, sy, cz)) as u32
 }
 
 /// Copies the section and its border into the padded buffer; returns u16 count.
@@ -886,6 +895,61 @@ mod tests {
     }
 
     #[test]
+    fn light_wait_requeues_empty_sections_but_not_unloaded_chunks() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        for unload in [false, true] {
+            client_new();
+            let mut chunk = Chunk::empty(0, 0);
+            chunk.set(8, 8, 8, blocks::STONE);
+            receive(&chunk);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            while client_pop_dirty(8.0, 8.0, 8.0) != 0 {}
+
+            assert_eq!(client_predict_block(8, 8, 8, blocks::AIR as u32), 1);
+            assert!(state().world.chunks[&(0, 0)].sections[4].is_empty());
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 1);
+            let section: Vec<_> = state()
+                .out
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| i32::from_le_bytes(*word))
+                .collect();
+            assert_eq!(section, vec![0, 4, 0]);
+            assert_eq!(client_mesh(0, 4, 0), 0);
+
+            // This arrives while the empty mesh result is in flight. Neither
+            // arrival nor lighting invalidation marks an empty section dirty.
+            receive(&Chunk::empty(1, 0));
+            assert!(!state().dirty.contains(&(0, 4, 0)));
+            if unload {
+                let packet = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+                unsafe {
+                    client_packet(packet.as_ptr(), packet.len());
+                }
+            }
+            assert_eq!(client_is_dirty(0, 4, 0), 1);
+            assert_eq!(state().dirty.contains(&(0, 4, 0)), !unload);
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 0);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), u32::from(!unload));
+            if !unload {
+                let section: Vec<_> = state()
+                    .out
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| i32::from_le_bytes(*word))
+                    .collect();
+                assert_eq!(section, vec![0, 4, 0]);
+                assert_eq!(client_mesh(0, 4, 0), 0);
+            }
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 0);
+        }
+    }
+
+    #[test]
     fn light_export_mode_never_retains_render_work() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         client_new();
@@ -909,6 +973,7 @@ mod tests {
             receive(&chunk);
             client_light_generation(0, 0, generation);
             assert_eq!(client_light_pending(), 1);
+            assert_eq!(client_is_dirty(0, 4, 0), 1);
             assert_no_render_work();
             assert_eq!(client_predict_block(8, 0, 8, blocks::LAMP_BLOCK as u32), 1);
             assert_no_render_work();
