@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ClientCore, LIGHT_FRAME_BUDGET_MS } from "./client-core.ts";
 import { MeshPool, meshWorkerCount, MAX_MESH_WORKERS, MAX_MESH_REQUESTS_PER_WORKER, MESH_FRAME_BUDGET_MS, MESH_REFILL_BUDGET_MS, MESH_APPLY_BUDGET_MS, MAX_BUFFERED_MESHES } from "./mesh-pool.ts";
 
 class FakeWorker {
@@ -9,7 +10,7 @@ class FakeWorker {
 	jobs = [];
 	terminated = false;
 	postMessage(job, transfer) {
-		assert.deepEqual(transfer, [job.padded.buffer]);
+		assert.deepEqual(transfer, [...new Set([job.padded.buffer, ...(job.sky ? [job.sky.buffer] : []), ...(job.block ? [job.block.buffer] : [])])]);
 		this.jobs.push(structuredClone(job, { transfer }));
 		assert.equal(job.padded.byteLength, 0);
 	}
@@ -318,4 +319,37 @@ test("buffering is bounded when workers outpace uploads and resumes after a fram
 	f.pump(queue);
 	assert.equal(queue.length, 20 - MESH_APPLY_BUDGET_MS);
 	assert.equal(f.pool.pendingResults + f.pool.inFlight, MAX_BUFFERED_MESHES);
+});
+
+
+test("padded sky and block arrays transfer with the block snapshot", t => {
+	const f = fixture(t, 1);
+	f.workers[0].ready();
+	const queue = [[1,4,2]];
+	const storage = new Uint8Array(5832 * 2);
+	const sky = storage.subarray(0, 5832).fill(15);
+	const block = storage.subarray(5832).fill(7);
+	f.pool.pump(() => queue.shift() ?? null, () => new Uint16Array(5832), () => ({ sky, block }));
+	assert.equal(sky.byteLength,0);
+	assert.equal(block.byteLength,0);
+	assert.equal(f.workers[0].jobs[0].sky.buffer, f.workers[0].jobs[0].block.buffer);
+	assert.equal(f.workers[0].jobs[0].sky.length,5832);
+	assert.equal(f.workers[0].jobs[0].sky[42],15);
+	assert.equal(f.workers[0].jobs[0].block[42],7);
+});
+
+
+test("client initial lighting stops starting chunks when the frame budget is spent", t => {
+	let now = 0, pending = 10;
+	t.mock.method(performance, "now", () => now);
+	const core = new ClientCore({ exports: {
+		client_new() {},
+		client_light_pending: () => pending,
+		client_light_step(x, z) { assert.equal(x, 12); assert.equal(z, 34); pending--; now += 0.75; return 1; },
+	} });
+	assert.equal(core.stepLight(12,34), 2.25);
+	assert.equal(core.lightPending,7);
+	assert.ok(now >= LIGHT_FRAME_BUDGET_MS && now < LIGHT_FRAME_BUDGET_MS + 0.75);
+	while (pending) core.stepLight(12,34);
+	assert.equal(core.stepLight(12,34),0);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { celestialAngle, parseStartTime, partialDayTicks, skyState } from "./sky.ts";
+import { lightmap, celestialAngle, parseStartTime, partialDayTicks, skyState } from "./sky.ts";
 import { paintSkyTexture } from "./textures.ts";
 
 test("celestial angle follows the published cosine correction and repeats daily", () => {
@@ -73,4 +73,19 @@ test("original sky art is deterministic and all lunar phases have distinct pixel
 		if (layer >= 1 && layer <= 8) phases.add(Buffer.from(art).toString("base64"));
 	}
 	assert.equal(phases.size, 8);
+});
+
+
+test("lightmap separates daylight, cave darkness and warm block light", () => {
+	const day = lightmap(skyState(6000).skylight);
+	const night = lightmap(skyState(18000).skylight);
+	const rgb = (map, block, sky) => [...map.slice((sky * 16 + block) * 4, (sky * 16 + block) * 4 + 3)];
+	assert.deepEqual(rgb(day, 0, 15), [255,255,255]);
+	assert.deepEqual(rgb(night, 0, 0), [10,10,10]);
+	assert.deepEqual(rgb(day, 0, 0), rgb(night, 0, 0));
+	const lamp = rgb(night, 15, 0);
+	assert.ok(lamp[0] === 255 && lamp[1] > 200 && lamp[2] > 160);
+	assert.ok(lamp[0] > lamp[1] && lamp[1] > lamp[2]);
+	assert.ok(rgb(night,0,15)[0] < rgb(day,0,15)[0]);
+	for (let n=1; n<16; n++) assert.ok(rgb(day,n,0)[0] > rgb(day,n-1,0)[0]);
 });

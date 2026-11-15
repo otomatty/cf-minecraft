@@ -6,7 +6,7 @@
 //! (`client_mesh_ptr`).
 
 use std::cell::UnsafeCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
 use protocol::{C2S, PROTOCOL_VERSION, S2C};
@@ -22,6 +22,10 @@ struct State {
     /// Sections whose mesh is stale: (chunk x, section index, chunk z).
     dirty: BTreeSet<(i32, i32, i32)>,
     unloaded: Vec<(i32, i32)>,
+    light_pending: BTreeSet<(i32, i32)>,
+    external_light: bool,
+    light_generations: BTreeMap<(i32, i32), (u32, u32)>,
+    light_exports: Option<BTreeSet<(i32, usize, i32)>>,
     seed: i64,
     spawn: [f64; 3],
     view_distance: u32,
@@ -29,8 +33,7 @@ struct State {
     day_time: i64,
     out: Vec<u8>,
     padded: Vec<u16>,
-    padded_sky: Vec<u8>,
-    padded_block: Vec<u8>,
+    padded_lights: Vec<u8>,
     player: physics::Player,
     flying: bool,
 }
@@ -81,9 +84,13 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn client_new() {
     let st = State {
-        world: World::new(),
+        world: World::with_lighting(true),
         dirty: BTreeSet::new(),
         unloaded: Vec::new(),
+        light_pending: BTreeSet::new(),
+        external_light: false,
+        light_generations: BTreeMap::new(),
+        light_exports: None,
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -91,11 +98,12 @@ pub extern "C" fn client_new() {
         day_time: 0,
         out: Vec::new(),
         padded: vec![blocks::AIR; PADDED_LEN],
-        padded_sky: Vec::new(),
-        padded_block: Vec::new(),
+        padded_lights: Vec::new(),
         player: physics::Player::default(),
         flying: true,
     };
+    let mut st = st;
+    st.world.track_light_changes();
     // SAFETY: single-threaded.
     unsafe { *STATE.0.get() = Some(st) };
 }
@@ -104,9 +112,17 @@ pub extern "C" fn client_new() {
 #[no_mangle]
 pub extern "C" fn client_reset_world() {
     let st = state();
-    st.unloaded.extend(st.world.chunks.keys().copied());
+    if st.light_exports.is_none() {
+        st.unloaded.extend(st.world.chunks.keys().copied());
+    }
     st.world.chunks.clear();
     st.dirty.clear();
+    st.light_pending.clear();
+    st.light_generations.clear();
+    if let Some(exports) = &mut st.light_exports {
+        exports.clear();
+    }
+    st.world.take_light_changes().for_each(drop);
 }
 
 #[no_mangle]
@@ -120,6 +136,9 @@ pub extern "C" fn client_mesh_ptr() -> *const u32 {
 }
 
 fn mark_chunk_dirty(st: &mut State, cx: i32, cz: i32) {
+    if st.light_exports.is_some() {
+        return;
+    }
     if let Some(chunk) = st.world.chunks.get(&(cx, cz)) {
         for (i, section) in chunk.sections.iter().enumerate() {
             if !section.is_empty() {
@@ -160,7 +179,13 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             let Ok(chunk) = Chunk::read(cx, cz, &mut Reader::new(&data)) else {
                 return u32::MAX;
             };
-            st.world.insert_chunk(chunk);
+            st.light_generations.remove(&(cx, cz));
+            if st.external_light {
+                st.world.chunks.insert((cx, cz), chunk);
+            } else {
+                st.world.insert_chunk_unlit(chunk);
+            }
+            st.light_pending.insert((cx, cz));
             mark_chunk_dirty(st, cx, cz);
             // Border faces of the neighbours can now be culled.
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -168,7 +193,14 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             }
         }
         S2C::UnloadChunk { cx, cz } => {
-            if st.world.remove_chunk(cx, cz).is_some() {
+            st.light_pending.remove(&(cx, cz));
+            st.light_generations.remove(&(cx, cz));
+            let removed = if st.external_light {
+                st.world.chunks.remove(&(cx, cz))
+            } else {
+                st.world.remove_chunk(cx, cz)
+            };
+            if removed.is_some() && st.light_exports.is_none() {
                 st.unloaded.push((cx, cz));
             }
         }
@@ -188,6 +220,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.day_time = day_time;
         }
     }
+    mark_light_dirty(st);
     bytes[0] as u32
 }
 
@@ -195,20 +228,31 @@ fn set_block(st: &mut State, x: i32, y: i32, z: i32, block: u16) -> bool {
     if !blocks::is_valid(block) {
         return false;
     }
-    match st.world.set_block(x, y, z, block) {
+    let old = if st.external_light {
+        st.world
+            .chunks
+            .get_mut(&(x >> 4, z >> 4))
+            .and_then(|c| c.set((x & 15) as usize, y, (z & 15) as usize, block))
+    } else {
+        st.world.set_block(x, y, z, block)
+    };
+    match old {
         Some(old) if old != block => {
             // Faces and ambient occlusion of every block touching this one,
             // including diagonally, may change: mark each section in reach.
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    for dx in -1..=1 {
-                        let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                        if let Some(s) = world::section_index(ny) {
-                            st.dirty.insert((nx >> 4, s as i32, nz >> 4));
+            if st.light_exports.is_none() {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                            if let Some(s) = world::section_index(ny) {
+                                st.dirty.insert((nx >> 4, s as i32, nz >> 4));
+                            }
                         }
                     }
                 }
             }
+            mark_light_dirty(st);
             true
         }
         _ => false,
@@ -256,6 +300,188 @@ pub extern "C" fn client_dirty_count() -> u32 {
     state().dirty.len() as u32
 }
 
+fn mark_light_dirty(st: &mut State) {
+    let changes: Vec<_> = st.world.take_light_changes().collect();
+    if let Some(exports) = &mut st.light_exports {
+        exports.extend(changes);
+        return;
+    }
+    for (cx, sy, cz) in changes {
+        dirty_light_section(st, cx, sy, cz);
+    }
+}
+fn dirty_light_section(st: &mut State, cx: i32, sy: usize, cz: i32) {
+    if st.light_exports.is_some() {
+        return;
+    }
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let s = sy as i32 + dy;
+                if (0..SECTIONS as i32).contains(&s)
+                    && st
+                        .world
+                        .chunks
+                        .get(&(cx + dx, cz + dz))
+                        .is_some_and(|c| !c.sections[s as usize].is_empty())
+                {
+                    st.dirty.insert((cx + dx, s, cz + dz));
+                }
+            }
+        }
+    }
+}
+/// External mode never runs initial or incremental lighting on this instance.
+/// Switching back invalidates derived data and queues a budgeted rebuild.
+#[no_mangle]
+pub extern "C" fn client_external_light(enabled: u32) {
+    let st = state();
+    st.external_light = enabled != 0;
+    st.light_pending.extend(st.world.chunks.keys().copied());
+    for chunk in st.world.chunks.values_mut() {
+        chunk.lighting = None;
+    }
+    for value in st.light_generations.values_mut() {
+        value.1 = 0;
+    }
+    st.world.take_light_changes().for_each(drop);
+}
+#[no_mangle]
+pub extern "C" fn client_light_generation(cx: i32, cz: i32, generation: u32) {
+    state().light_generations.insert((cx, cz), (generation, 0));
+}
+#[no_mangle]
+pub extern "C" fn client_light_export_mode() {
+    let st = state();
+    st.light_exports = Some(Default::default());
+    // This instance only produces light updates; it has no renderer to drain these.
+    st.dirty.clear();
+    st.unloaded.clear();
+}
+
+// Wire record: cx, sy, cz, generation (four LE u32s), then 2048 sky
+// and 2048 block packed nibble bytes. One batch can contain many chunks.
+pub const LIGHT_RECORD_BYTES: usize = 16 + 4096;
+fn write_nibbles(out: &mut Vec<u8>, values: &world::light::Nibbles) {
+    match values {
+        world::light::Nibbles::Uniform(v) => out.resize(out.len() + 2048, v * 17),
+        world::light::Nibbles::Packed(a) => out.extend_from_slice(a.as_ref()),
+    }
+}
+fn read_nibbles(bytes: &[u8]) -> world::light::Nibbles {
+    let v = bytes[0] & 15;
+    if bytes.iter().all(|&b| b == v * 17) {
+        world::light::Nibbles::Uniform(v)
+    } else {
+        world::light::Nibbles::Packed(Box::new(bytes.try_into().unwrap()))
+    }
+}
+#[no_mangle]
+pub extern "C" fn client_take_light_updates() -> usize {
+    let st = state();
+    st.out.clear();
+    let changes = st
+        .light_exports
+        .as_mut()
+        .map(std::mem::take)
+        .unwrap_or_default();
+    for (cx, sy, cz) in changes {
+        let Some(c) = st.world.chunks.get(&(cx, cz)) else {
+            continue;
+        };
+        let Some(light) = &c.lighting else { continue };
+        let Some(&(generation, _)) = st.light_generations.get(&(cx, cz)) else {
+            continue;
+        };
+        for value in [cx as u32, sy as u32, cz as u32, generation] {
+            st.out.extend_from_slice(&value.to_le_bytes());
+        }
+        write_nibbles(&mut st.out, &light.sections[sy].sky);
+        write_nibbles(&mut st.out, &light.sections[sy].block);
+    }
+    st.out.len()
+}
+/// # Safety
+/// ptr..ptr+len must be readable; input must not alias the client state.
+#[no_mangle]
+pub unsafe extern "C" fn client_apply_light_updates(ptr: *const u8, len: usize) -> usize {
+    let bytes = input(ptr, len);
+    if !len.is_multiple_of(LIGHT_RECORD_BYTES) {
+        return 0;
+    }
+    let st = state();
+    if !st.external_light {
+        return 0;
+    }
+    let mut changes = Vec::new();
+    for record in bytes.as_chunks::<LIGHT_RECORD_BYTES>().0 {
+        let word = |i| u32::from_le_bytes(record[i..i + 4].try_into().unwrap());
+        let (cx, sy, cz, generation) = (word(0) as i32, word(4) as usize, word(8) as i32, word(12));
+        if sy >= SECTIONS {
+            continue;
+        }
+        let Some(value) = st.light_generations.get_mut(&(cx, cz)) else {
+            continue;
+        };
+        if value.0 != generation {
+            continue;
+        }
+        let Some(chunk) = st.world.chunks.get_mut(&(cx, cz)) else {
+            continue;
+        };
+        let light = chunk.lighting.get_or_insert_with(Default::default);
+        light.sections[sy] = world::light::LightSection {
+            sky: read_nibbles(&record[16..2064]),
+            block: read_nibbles(&record[2064..]),
+        };
+        value.1 |= 1 << sy;
+        if value.1 == (1 << SECTIONS) - 1 {
+            st.light_pending.remove(&(cx, cz));
+        }
+        changes.push((cx, sy, cz));
+    }
+    let count = changes.len();
+    // Reuse the same conservative mesh invalidation as locally computed light.
+    for (cx, sy, cz) in changes {
+        dirty_light_section(st, cx, sy, cz);
+    }
+    count
+}
+
+fn light_ready(st: &State, cx: i32, cz: i32) -> bool {
+    (-1..=1).all(|dz| (-1..=1).all(|dx| !st.light_pending.contains(&(cx + dx, cz + dz))))
+}
+#[no_mangle]
+pub extern "C" fn client_light_pending() -> usize {
+    state().light_pending.len()
+}
+/// Process one nearest chunk. The host checks its clock between calls, so a
+/// single chunk may overrun the frame deadline, but no second chunk starts.
+#[no_mangle]
+pub extern "C" fn client_light_step(cam_x: f64, cam_z: f64) -> u32 {
+    let st = state();
+    if st.external_light {
+        return 0;
+    }
+    let distance = |&(x, z): &(i32, i32)| {
+        let dx = (x * 16 + 8) as f64 - cam_x;
+        let dz = (z * 16 + 8) as f64 - cam_z;
+        dx * dx + dz * dz
+    };
+    let Some(key) = st
+        .light_pending
+        .iter()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .copied()
+    else {
+        return 0;
+    };
+    st.light_pending.remove(&key);
+    st.world.light_chunk(key.0, key.1);
+    mark_light_dirty(st);
+    1
+}
+
 /// Picks the stale section nearest to the camera. Output: `[cx][sy][cz]` as
 /// i32 LE. Returns 0 when nothing is stale.
 #[no_mangle]
@@ -267,6 +493,9 @@ pub extern "C" fn client_pop_dirty(cam_x: f64, cam_y: f64, cam_z: f64) -> u32 {
     let mut best: Option<(f64, (i32, i32, i32))> = None;
     for &key in &st.dirty {
         let (cx, sy, cz) = key;
+        if !light_ready(st, cx, cz) {
+            continue;
+        }
         let dx = (cx * 16 + 8) as f64 - cam_x;
         let dy = (MIN_Y + sy * 16 + 8) as f64 - cam_y;
         let dz = (cz * 16 + 8) as f64 - cam_z;
@@ -287,12 +516,24 @@ pub extern "C" fn client_pop_dirty(cam_x: f64, cam_y: f64, cam_z: f64) -> u32 {
 /// Requeues work if a worker fails after taking it from the dirty set.
 #[no_mangle]
 pub extern "C" fn client_requeue_dirty(cx: i32, sy: i32, cz: i32) {
-    state().dirty.insert((cx, sy, cz));
+    let st = state();
+    if st.light_exports.is_none() {
+        st.dirty.insert((cx, sy, cz));
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn client_is_dirty(cx: i32, sy: i32, cz: i32) -> u32 {
-    state().dirty.contains(&(cx, sy, cz)) as u32
+    let st = state();
+    if !light_ready(st, cx, cz) {
+        // A discarded result must be rebuilt after lighting arrives, even if
+        // its section is now empty and light invalidation would skip it.
+        if st.light_exports.is_none() && st.world.chunks.contains_key(&(cx, cz)) {
+            st.dirty.insert((cx, sy, cz));
+        }
+        return 1;
+    }
+    st.dirty.contains(&(cx, sy, cz)) as u32
 }
 
 /// Copies the section and its border into the padded buffer; returns u16 count.
@@ -355,15 +596,35 @@ pub extern "C" fn client_padded_light(cx: i32, sy: i32, cz: i32) -> usize {
     {
         return 0;
     }
-    st.padded_sky.resize(PADDED_LEN, 0);
-    st.padded_block.resize(PADDED_LEN, 0);
+    st.padded_lights.resize(PADDED_LEN * 2, 0);
+    let columns: [Option<&world::light::ChunkLighting>; 9] = std::array::from_fn(|i| {
+        st.world
+            .chunks
+            .get(&(cx + i as i32 % 3 - 1, cz + i as i32 / 3 - 1))
+            .and_then(|c| c.lighting.as_deref())
+    });
     for y in -1..=16 {
-        for z in -1..=16 {
-            for x in -1..=16 {
+        let wy = MIN_Y + sy * 16 + y;
+        for z in -1..=16i32 {
+            for x in -1..=16i32 {
                 let i = padded_index(x, y, z);
-                let (wx, wy, wz) = (cx * 16 + x, MIN_Y + sy * 16 + y, cz * 16 + z);
-                st.padded_sky[i] = st.world.sky_light(wx, wy, wz);
-                st.padded_block[i] = st.world.block_light(wx, wy, wz);
+                let light = columns[(((z >> 4) + 1) * 3 + (x >> 4) + 1) as usize];
+                let (sky, block) = if let (Some(s), Some(light)) = (world::section_index(wy), light)
+                {
+                    let idx = world::Section::index(
+                        (x & 15) as usize,
+                        (wy & 15) as usize,
+                        (z & 15) as usize,
+                    );
+                    (
+                        light.sections[s].sky.get(idx),
+                        light.sections[s].block.get(idx),
+                    )
+                } else {
+                    ((wy >= MIN_Y + HEIGHT) as u8 * 15, 0)
+                };
+                st.padded_lights[i] = sky;
+                st.padded_lights[PADDED_LEN + i] = block;
             }
         }
     }
@@ -371,11 +632,11 @@ pub extern "C" fn client_padded_light(cx: i32, sy: i32, cz: i32) -> usize {
 }
 #[no_mangle]
 pub extern "C" fn client_padded_sky_ptr() -> *const u8 {
-    state().padded_sky.as_ptr()
+    state().padded_lights.as_ptr()
 }
 #[no_mangle]
 pub extern "C" fn client_padded_block_ptr() -> *const u8 {
-    state().padded_block.as_ptr()
+    state().padded_lights.as_ptr().wrapping_add(PADDED_LEN)
 }
 
 /// Meshes padded u16 block data without requiring client_new or a world.
@@ -383,14 +644,29 @@ pub extern "C" fn client_padded_block_ptr() -> *const u8 {
 ///
 /// # Safety
 /// For PADDED_LEN elements, ptr must point to that many readable, aligned u16s.
+/// If both light pointers are non-null, each must contain PADDED_LEN readable bytes
+/// with levels in 0..=15. A null light pointer selects the daylight fallback.
 #[no_mangle]
-pub unsafe extern "C" fn mesh_padded(ptr: *const u16, len: usize) -> u32 {
+pub unsafe extern "C" fn mesh_padded(
+    ptr: *const u16,
+    len: usize,
+    sky: *const u8,
+    block: *const u8,
+) -> u32 {
     let mesh = &mut *MESH_OUTPUT.0.get();
     mesh.clear();
     if len != PADDED_LEN {
         return 0;
     }
-    mesher::mesh_section(std::slice::from_raw_parts(ptr, len), mesh)
+    let light = if sky.is_null() || block.is_null() {
+        None
+    } else {
+        Some((
+            std::slice::from_raw_parts(sky, PADDED_LEN),
+            std::slice::from_raw_parts(block, PADDED_LEN),
+        ))
+    };
+    mesher::mesh_section_lit(std::slice::from_raw_parts(ptr, len), light, mesh)
 }
 
 /// Meshes one section into the mesh buffer and returns the quad count.
@@ -398,7 +674,13 @@ pub unsafe extern "C" fn mesh_padded(ptr: *const u16, len: usize) -> u32 {
 pub extern "C" fn client_mesh(cx: i32, sy: i32, cz: i32) -> u32 {
     let len = client_padded(cx, sy, cz);
     // SAFETY: the padded buffer remains valid throughout the call.
-    unsafe { mesh_padded(client_padded_ptr(), len) }
+    let lights = client_padded_light(cx, sy, cz);
+    let (sky, block) = if lights == PADDED_LEN {
+        (client_padded_sky_ptr(), client_padded_block_ptr())
+    } else {
+        (std::ptr::null(), std::ptr::null())
+    };
+    unsafe { mesh_padded(client_padded_ptr(), len, sky, block) }
 }
 
 /// Output: repeated `[cx i32 LE][cz i32 LE]` of chunks removed since the last call.
@@ -613,14 +895,299 @@ mod tests {
 
     static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn receive(chunk: &Chunk) {
+        let packet = S2C::ChunkData {
+            cx: chunk.cx,
+            cz: chunk.cz,
+            data: chunk.to_bytes(),
+        }
+        .encode();
+        assert_ne!(
+            unsafe { client_packet(packet.as_ptr(), packet.len()) },
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn light_wait_requeues_empty_sections_but_not_unloaded_chunks() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        for unload in [false, true] {
+            client_new();
+            let mut chunk = Chunk::empty(0, 0);
+            chunk.set(8, 8, 8, blocks::STONE);
+            receive(&chunk);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            while client_pop_dirty(8.0, 8.0, 8.0) != 0 {}
+
+            assert_eq!(client_predict_block(8, 8, 8, blocks::AIR as u32), 1);
+            assert!(state().world.chunks[&(0, 0)].sections[4].is_empty());
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 1);
+            let section: Vec<_> = state()
+                .out
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| i32::from_le_bytes(*word))
+                .collect();
+            assert_eq!(section, vec![0, 4, 0]);
+            assert_eq!(client_mesh(0, 4, 0), 0);
+
+            // This arrives while the empty mesh result is in flight. Neither
+            // arrival nor lighting invalidation marks an empty section dirty.
+            receive(&Chunk::empty(1, 0));
+            assert!(!state().dirty.contains(&(0, 4, 0)));
+            if unload {
+                let packet = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+                unsafe {
+                    client_packet(packet.as_ptr(), packet.len());
+                }
+            }
+            assert_eq!(client_is_dirty(0, 4, 0), 1);
+            assert_eq!(state().dirty.contains(&(0, 4, 0)), !unload);
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 0);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), u32::from(!unload));
+            if !unload {
+                let section: Vec<_> = state()
+                    .out
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| i32::from_le_bytes(*word))
+                    .collect();
+                assert_eq!(section, vec![0, 4, 0]);
+                assert_eq!(client_mesh(0, 4, 0), 0);
+            }
+            assert_eq!(client_pop_dirty(8.0, 8.0, 8.0), 0);
+        }
+    }
+
+    #[test]
+    fn light_export_mode_never_retains_render_work() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        // Enabling export mode also discards any previously queued render work.
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set(8, 0, 8, blocks::STONE);
+        receive(&chunk);
+        client_reset_world();
+        assert!(!state().unloaded.is_empty());
+        receive(&chunk);
+        assert!(!state().dirty.is_empty());
+        client_light_export_mode();
+        client_reset_world();
+
+        let assert_no_render_work = || {
+            assert!(state().dirty.is_empty());
+            assert!(state().unloaded.is_empty());
+        };
+        assert_no_render_work();
+        for generation in 1..=8 {
+            receive(&chunk);
+            client_light_generation(0, 0, generation);
+            assert_eq!(client_light_pending(), 1);
+            assert_eq!(client_is_dirty(0, 4, 0), 1);
+            assert_no_render_work();
+            assert_eq!(client_predict_block(8, 0, 8, blocks::LAMP_BLOCK as u32), 1);
+            assert_no_render_work();
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(state().world.block_light(9, 0, 8), 14);
+            assert_eq!(client_take_light_updates(), SECTIONS * LIGHT_RECORD_BYTES);
+            assert_eq!(client_take_light_updates(), 0);
+            assert_no_render_work();
+
+            client_requeue_dirty(0, 4, 0);
+            dirty_light_section(state(), 0, 4, 0);
+            assert_no_render_work();
+            let edit = S2C::BlockUpdate {
+                x: 8,
+                y: 0,
+                z: 8,
+                state: blocks::AIR,
+            }
+            .encode();
+            unsafe {
+                client_packet(edit.as_ptr(), edit.len());
+            }
+            assert_eq!(state().world.block_light(9, 0, 8), 0);
+            assert!(client_take_light_updates() > 0);
+            assert_no_render_work();
+
+            let unload = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+            unsafe {
+                client_packet(unload.as_ptr(), unload.len());
+            }
+            assert_eq!(client_light_pending(), 0);
+            assert_no_render_work();
+            receive(&chunk);
+            client_light_generation(0, 0, generation + 8);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert!(client_take_light_updates() > 0);
+            assert_no_render_work();
+            client_reset_world();
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(client_take_light_updates(), 0);
+            assert!(state().world.chunks.is_empty());
+            assert_no_render_work();
+        }
+
+        // Normal clients still queue meshes and removals for their renderer.
+        client_new();
+        receive(&chunk);
+        assert!(!state().dirty.is_empty());
+        let unload = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+        unsafe {
+            client_packet(unload.as_ptr(), unload.len());
+        }
+        assert_eq!(state().unloaded, vec![(0, 0)]);
+        receive(&chunk);
+        client_reset_world();
+        assert_eq!(state().unloaded, vec![(0, 0), (0, 0)]);
+    }
+
+    #[test]
+    fn external_light_matches_computed_world_and_rejects_old_generations() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        client_light_export_mode();
+        let mut left = Chunk::empty(-1, 0);
+        left.set(15, 0, 8, blocks::LAMP_BLOCK);
+        let mut center = Chunk::empty(0, 0);
+        for x in 0..16 {
+            for z in 0..16 {
+                center.set(x, 1, z, blocks::STONE);
+            }
+        }
+        for (c, generation) in [(&left, 7), (&center, 8)] {
+            receive(c);
+            client_light_generation(c.cx, c.cz, generation);
+        }
+        while client_light_step(0.0, 0.0) != 0 {}
+        let expected: BTreeMap<_, _> = state()
+            .world
+            .chunks
+            .iter()
+            .map(|(key, c)| (*key, c.lighting.clone().unwrap()))
+            .collect();
+        let len = client_take_light_updates();
+        let updates = state().out[..len].to_vec();
+        assert_eq!(len, 2 * SECTIONS * LIGHT_RECORD_BYTES);
+        client_new();
+        client_external_light(1);
+        for (c, generation) in [(&left, 7), (&center, 8)] {
+            receive(c);
+            client_light_generation(c.cx, c.cz, generation);
+        }
+        assert_eq!(client_light_step(0.0, 0.0), 0);
+        assert!(state().world.chunks.values().all(|c| c.lighting.is_none()));
+        assert_eq!(client_light_pending(), 2);
+        assert_eq!(
+            unsafe { client_apply_light_updates(updates.as_ptr(), updates.len()) },
+            2 * SECTIONS
+        );
+        assert_eq!(client_light_pending(), 0);
+        for (key, light) in &expected {
+            assert_eq!(
+                state().world.chunks[key]
+                    .lighting
+                    .as_ref()
+                    .unwrap()
+                    .sections,
+                light.sections
+            );
+        }
+        assert_eq!(client_is_dirty(0, 4, 0), 1);
+        // A replacement must receive all of its own sections before becoming ready.
+        receive(&center);
+        client_light_generation(0, 0, 9);
+        let old_center: Vec<_> = updates
+            .as_chunks::<LIGHT_RECORD_BYTES>()
+            .0
+            .iter()
+            .filter(|r| i32::from_le_bytes(r[0..4].try_into().unwrap()) == 0)
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(
+            unsafe { client_apply_light_updates(old_center.as_ptr(), old_center.len()) },
+            0
+        );
+        assert!(state().world.chunks[&(0, 0)].lighting.is_none());
+        assert_eq!(client_light_pending(), 1);
+        let unload = S2C::UnloadChunk { cx: -1, cz: 0 }.encode();
+        unsafe {
+            client_packet(unload.as_ptr(), unload.len());
+        }
+        assert_eq!(
+            unsafe { client_apply_light_updates(updates.as_ptr(), updates.len()) },
+            0
+        );
+        // Editing externally supplied light never starts incremental lighting.
+        assert_eq!(client_predict_block(0, 0, 8, blocks::LAMP_BLOCK as u32), 1);
+        assert!(state().world.chunks[&(0, 0)].lighting.is_none());
+        client_external_light(0);
+        assert_eq!(client_light_pending(), 1);
+        assert_eq!(client_light_step(0.0, 0.0), 1);
+        assert_eq!(state().world.block_light(0, 0, 8), 15);
+    }
+
+    #[test]
+    fn deferred_chunks_match_rebuild_and_edits_dirty_neighbors() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let mut left = Chunk::empty(0, 0);
+        left.set(15, 0, 8, blocks::LAMP_BLOCK);
+        let mut right = Chunk::empty(1, 0);
+        right.set(0, 0, 7, blocks::STONE);
+        receive(&right);
+        receive(&left);
+        assert_eq!(client_light_pending(), 2);
+        assert!(state().world.chunks.values().all(|c| c.lighting.is_none()));
+        assert_eq!(client_pop_dirty(0.0, 0.0, 0.0), 0);
+        assert_eq!(client_light_step(0.0, 0.0), 1);
+        assert!(state().world.chunks[&(0, 0)].lighting.is_some());
+        assert_eq!(client_light_pending(), 1);
+        assert_eq!(client_pop_dirty(0.0, 0.0, 0.0), 0);
+        assert_eq!(client_light_step(0.0, 0.0), 1);
+        assert_eq!(client_light_step(0.0, 0.0), 0);
+        let mut rebuilt = World::with_lighting(true);
+        rebuilt.insert_chunk(right);
+        rebuilt.insert_chunk(left);
+        for (key, chunk) in &state().world.chunks {
+            assert_eq!(chunk.lighting, rebuilt.chunks[key].lighting);
+        }
+        state().dirty.clear();
+        assert_eq!(client_predict_block(15, 0, 8, blocks::AIR as u32), 1);
+        assert_eq!(state().world.block_light(16, 0, 8), 0);
+        assert_eq!(client_is_dirty(1, 4, 0), 1);
+        assert_eq!(client_is_dirty(0, 4, 0), 1);
+        state().dirty.clear();
+        let packet = S2C::BlockUpdate {
+            x: 15,
+            y: 0,
+            z: 8,
+            state: blocks::LAMP_BLOCK,
+        }
+        .encode();
+        unsafe {
+            client_packet(packet.as_ptr(), packet.len());
+        }
+        assert_eq!(state().world.block_light(16, 0, 8), 14);
+        assert_eq!(client_is_dirty(1, 4, 0), 1);
+        client_reset_world();
+        assert_eq!(client_light_pending(), 0);
+    }
+
     #[test]
     fn padded_lighting_includes_neighbors_and_vertical_limits() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         client_new();
-        assert!(!state().world.lighting_enabled());
+        assert!(state().world.lighting_enabled());
+        state().world.set_lighting_enabled(false);
         assert_eq!(client_padded_light(0, 0, 0), 0);
-        assert_eq!(state().padded_sky.capacity(), 0);
-        assert_eq!(state().padded_block.capacity(), 0);
+        assert_eq!(state().padded_lights.capacity(), 0);
         state().world.set_lighting_enabled(true);
         let mut left = Chunk::empty(-1, 0);
         left.set(15, MIN_Y + 15, 8, blocks::LAMP_BLOCK);
@@ -637,6 +1204,7 @@ mod tests {
                 u32::MAX
             );
         }
+        while client_light_step(0.0, 0.0) != 0 {}
         assert_eq!(client_padded_light(0, 0, 0), PADDED_LEN);
         let sky = unsafe { std::slice::from_raw_parts(client_padded_sky_ptr(), PADDED_LEN) };
         let block = unsafe { std::slice::from_raw_parts(client_padded_block_ptr(), PADDED_LEN) };
@@ -655,7 +1223,7 @@ mod tests {
         assert_eq!(sky[padded_index(0, -1, 8)], 0);
         assert_eq!(sky[padded_index(16, 0, 8)], 0);
         assert_eq!(client_padded_light(0, SECTIONS as i32 - 1, 0), PADDED_LEN);
-        assert_eq!(state().padded_sky[padded_index(0, 16, 8)], 15);
+        assert_eq!(state().padded_lights[padded_index(0, 16, 8)], 15);
         assert_eq!(client_padded_light(0, -1, 0), 0);
         assert_eq!(client_padded_light(1, 0, 0), 0);
         assert_eq!(
@@ -671,7 +1239,17 @@ mod tests {
         // The mesh-only entry point works before client_new.
         let mut padded = vec![blocks::AIR; PADDED_LEN];
         padded[padded_index(0, 0, 0)] = blocks::STONE;
-        assert_eq!(unsafe { mesh_padded(padded.as_ptr(), padded.len()) }, 6);
+        assert_eq!(
+            unsafe {
+                mesh_padded(
+                    padded.as_ptr(),
+                    padded.len(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            6
+        );
         client_new();
         let mut chunk = Chunk::empty(0, 0);
         for y in MIN_Y..MIN_Y + 32 {
@@ -684,11 +1262,10 @@ mod tests {
             }
         }
         state().world.insert_chunk(chunk);
-        assert!(!state().world.lighting_enabled());
-        assert!(state().world.chunks[&(0, 0)].lighting.is_none());
-        assert_eq!(client_padded_light(0, 0, 0), 0);
-        assert_eq!(state().padded_sky.capacity(), 0);
-        assert_eq!(state().padded_block.capacity(), 0);
+        assert!(state().world.lighting_enabled());
+        assert!(state().world.chunks[&(0, 0)].lighting.is_some());
+        assert_eq!(client_padded_light(0, 0, 0), PADDED_LEN);
+
         for (cx, sy, cz) in [(0, 0, 0), (0, 1, 0), (0, 2, 0), (1, 0, 0), (0, -1, 0)] {
             let quads = client_mesh(cx, sy, cz);
             let expected = unsafe {
@@ -699,7 +1276,14 @@ mod tests {
             }
             .to_vec();
             let len = client_padded(cx, sy, cz);
-            let actual = unsafe { mesh_padded(client_padded_ptr(), len) };
+            let actual = unsafe {
+                mesh_padded(
+                    client_padded_ptr(),
+                    len,
+                    client_padded_sky_ptr(),
+                    client_padded_block_ptr(),
+                )
+            };
             assert_eq!(actual, quads);
             assert_eq!(
                 unsafe {

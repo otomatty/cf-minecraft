@@ -3,7 +3,8 @@ export interface MeshRequest {
 	id: number;
 	section: Section;
 	padded: Uint16Array<ArrayBuffer>;
-	// #14: optional padded light data can accompany the block data here.
+	sky?: Uint8Array<ArrayBuffer>;
+	block?: Uint8Array<ArrayBuffer>;
 }
 export type MeshReply = { type: "ready" } | { type: "mesh"; id: number; vertices: Uint32Array<ArrayBuffer> };
 export interface MeshWorker {
@@ -37,6 +38,7 @@ export class MeshPool {
 	private serial = 0;
 	private pop: (() => Section | null) | undefined;
 	private padded: ((section: Section) => Uint16Array<ArrayBuffer>) | undefined;
+	private light: ((section: Section) => { sky: Uint8Array<ArrayBuffer>; block: Uint8Array<ArrayBuffer> }) | undefined;
 	private mainThreadMs = 0;
 	private failed = false;
 	private timer: ReturnType<typeof setTimeout> | undefined;
@@ -123,6 +125,7 @@ export class MeshPool {
 		this.latest.clear();
 		this.pop = undefined;
 		this.padded = undefined;
+		this.light = undefined;
 	}
 
 	/** Drain once per animation frame, including reply handling since the last frame. */
@@ -133,9 +136,10 @@ export class MeshPool {
 	}
 
 	/** Register the latest camera-aware source, then fill workers within the frame budget. */
-	pump(pop: () => Section | null, padded: (section: Section) => Uint16Array<ArrayBuffer>): void {
+	pump(pop: () => Section | null, padded: (section: Section) => Uint16Array<ArrayBuffer>, light?: (section: Section) => { sky: Uint8Array<ArrayBuffer>; block: Uint8Array<ArrayBuffer> }): void {
 		this.pop = pop;
 		this.padded = padded;
+		this.light = light;
 		const start = performance.now();
 		try {
 			this.refill(MESH_FRAME_BUDGET_MS);
@@ -172,11 +176,11 @@ export class MeshPool {
 			if (!slot) break;
 			const section = this.pop();
 			if (!section) break;
-			const job = { id: ++this.serial, section, padded: this.padded(section) };
+			const job = { id: ++this.serial, section, padded: this.padded(section), ...this.light?.(section) };
 			slot.jobs.set(job.id, job);
 			this.latest.set(key(section), job.id);
 			try {
-				slot.worker.postMessage(job, [job.padded.buffer]);
+				slot.worker.postMessage(job, [...new Set([job.padded.buffer, ...(job.sky ? [job.sky.buffer] : []), ...(job.block ? [job.block.buffer] : [])])]);
 			} catch {
 				this.fallback();
 				return;

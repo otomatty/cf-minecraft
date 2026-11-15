@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::blocks;
 use crate::io::{DecodeError, Reader, Writer};
@@ -162,6 +162,7 @@ pub struct World {
     /// use `insert_chunk` / `remove_chunk` to keep derived lighting in sync.
     pub chunks: BTreeMap<(i32, i32), Chunk>,
     pub(crate) lighting_enabled: bool,
+    pub(crate) light_changes: Option<BTreeSet<(i32, usize, i32)>>,
 }
 
 impl World {
@@ -211,6 +212,7 @@ impl World {
             let before = blocks::info(old);
             let after = blocks::info(state);
             if self.lighting_enabled
+                && chunk.lighting.is_some()
                 && (before.opacity, before.emission) != (after.opacity, after.emission)
             {
                 self.update_light(x, y, z);

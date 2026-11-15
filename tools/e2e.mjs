@@ -73,7 +73,7 @@ async function settle(page, label, chunks) {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
 				const autopilot = new URLSearchParams(location.search).get("autopilot") === "1";
-				return s.joined && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && window.__mc.frames > 5 ? s : false;
+				return s.joined && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && s.lightQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
 			{ timeout: 120000, polling: 250 },
 			chunks,
@@ -134,6 +134,44 @@ async function dayNight() {
 	const [day, night] = measurements;
 	check(day.sky > 0.9 && night.sky < 0.1, "sky: clock selects noon and midnight", `${day.sky} / ${night.sky}`);
 	check(night.brightness < day.brightness * 0.65, "sky: midnight frame is darker than noon", `${night.brightness.toFixed(1)} / ${day.brightness.toFixed(1)}`);
+}
+
+/** A sealed underground chamber removes all sky paths; the lamp must relight it. */
+async function undergroundLighting() {
+	const { page, errors } = await open(`server=local&world=e2e-light-${run}&seed=2026&view=3&time=6000`);
+	try {
+		const stats = await settle(page, "lighting surface", chunksInView(3));
+		await page.evaluate(spawn => {
+			document.getElementById("overlay").hidden = true;
+			window.__mc.setCamera(spawn[0], spawn[1]+3, spawn[2], 0, 65);
+		}, stats.spawn);
+		const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+		await frames();
+		const surface = await distinctColours(page, join(shots,"lighting-surface.png"), true);
+		const center = [Math.floor(stats.spawn[0]), -48, Math.floor(stats.spawn[2])];
+		await page.evaluate(([cx,cy,cz]) => {
+			window.__mc.setCamera(cx+0.5, cy+0.5, cz+0.5, 0, 10);
+			for (let dy=-2;dy<=2;dy++) for (let dz=-2;dz<=2;dz++) for (let dx=-2;dx<=2;dx++) {
+				const shell = Math.abs(dx)===2 || Math.abs(dy)===2 || Math.abs(dz)===2;
+				window.__mc.setBlock(cx+dx,cy+dy,cz+dz,shell ? 1 : 0);
+			}
+		}, center);
+		// Give server confirmations a turn before waiting for the final mesh.
+		await new Promise(resolve => setTimeout(resolve,500));
+		await settle(page,"lighting underground",chunksInView(3));
+		await frames();
+		const dark = await distinctColours(page, join(shots,"lighting-dark.png"), true);
+		await page.evaluate(([x,y,z]) => window.__mc.setBlock(x+1,y-1,z,10),center); // registry: lamp_block
+		await new Promise(resolve => setTimeout(resolve,500));
+		await settle(page,"lighting lamp",chunksInView(3));
+		await frames();
+		const lit = await distinctColours(page, join(shots,"lighting-lamp.png"), true);
+		const placed = await page.evaluate(([x,y,z]) => window.__mc.getBlock(x+1,y-1,z),center);
+		check(placed===10,"lighting: lamp placement confirmed");
+		check(dark < surface*0.5,"lighting: underground darker than surface",`${dark.toFixed(1)} / ${surface.toFixed(1)}`);
+		check(lit > dark*2,"lighting: lamp brightens underground",`${lit.toFixed(1)} / ${dark.toFixed(1)}`);
+		check(errors.length===0,"lighting: no page errors",errors.slice(0,3).join(" | "));
+	} finally { await page.close(); }
 }
 
 /**
@@ -368,6 +406,7 @@ try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await dayNight();
+	await undergroundLighting();
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
 	const inBrowser = await page.evaluate(() => window.__mc.runScenario("2026", 600));
