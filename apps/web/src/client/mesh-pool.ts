@@ -1,3 +1,4 @@
+import type { LayerCounts } from "./mesh-layers.ts";
 export type Section = [number, number, number];
 export interface MeshRequest {
 	id: number;
@@ -6,7 +7,7 @@ export interface MeshRequest {
 	sky?: Uint8Array<ArrayBuffer>;
 	block?: Uint8Array<ArrayBuffer>;
 }
-export type MeshReply = { type: "ready" } | { type: "mesh"; id: number; vertices: Uint32Array<ArrayBuffer> };
+export type MeshReply = { type: "ready" } | { type: "mesh"; id: number; vertices: Uint32Array<ArrayBuffer>; counts: LayerCounts };
 export interface MeshWorker {
 	onmessage: ((event: MessageEvent<MeshReply>) => void) | null;
 	onerror: ((event: ErrorEvent) => void) | null;
@@ -33,7 +34,7 @@ export function meshWorkerCount(concurrency: number): number {
  */
 export class MeshPool {
 	private slots: { worker: MeshWorker; ready: boolean; jobs: Map<number, MeshRequest> }[] = [];
-	private results = new Map<number, { job: MeshRequest; vertices: Uint32Array<ArrayBuffer> }>();
+	private results = new Map<number, { job: MeshRequest; vertices: Uint32Array<ArrayBuffer>; counts: LayerCounts }>();
 	private latest = new Map<string, number>();
 	private serial = 0;
 	private pop: (() => Section | null) | undefined;
@@ -42,12 +43,12 @@ export class MeshPool {
 	private mainThreadMs = 0;
 	private failed = false;
 	private timer: ReturnType<typeof setTimeout> | undefined;
-	private readonly apply: (section: Section, vertices: Uint32Array) => void;
+	private readonly apply: (section: Section, vertices: Uint32Array, counts: LayerCounts) => void;
 	private readonly requeue: (section: Section) => void;
 	private readonly current: (section: Section) => boolean;
 
 	constructor(count: number, create: () => MeshWorker,
-		apply: (section: Section, vertices: Uint32Array) => void,
+		apply: (section: Section, vertices: Uint32Array, counts: LayerCounts) => void,
 		requeue: (section: Section) => void, current: (section: Section) => boolean) {
 		this.apply = apply;
 		this.requeue = requeue;
@@ -71,7 +72,7 @@ export class MeshPool {
 							slot.jobs.delete(data.id);
 							// Upload and world validation happen only in the frame loop.
 							if (this.latest.get(key(job.section)) === job.id) {
-								this.results.set(job.id, { job, vertices: data.vertices });
+								this.results.set(job.id, { job, vertices: data.vertices, counts: data.counts });
 							}
 						}
 						this.refill(MESH_REFILL_BUDGET_MS);
@@ -154,11 +155,11 @@ export class MeshPool {
 		try {
 			// One GPU upload is indivisible and may finish past the deadline.
 			while (this.results.size && performance.now() - start < MESH_APPLY_BUDGET_MS) {
-				const [id, { job, vertices }] = this.results.entries().next().value!;
+				const [id, { job, vertices, counts }] = this.results.entries().next().value!;
 				this.results.delete(id);
 				if (this.latest.get(key(job.section)) !== id) continue;
 				this.latest.delete(key(job.section));
-				if (this.current(job.section)) this.apply(job.section, vertices);
+				if (this.current(job.section)) this.apply(job.section, vertices, counts);
 			}
 		} finally {
 			this.mainThreadMs += performance.now() - start;

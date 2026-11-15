@@ -17,7 +17,7 @@ class FakeWorker {
 	terminate() { this.terminated = true; }
 	ready() { this.onmessage({ data: { type: "ready" } }); }
 	finish(index = this.jobs.length - 1) {
-		this.onmessage({ data: { type: "mesh", id: this.jobs[index].id, vertices: new Uint32Array([42]) } });
+		this.onmessage({ data: { type: "mesh", id: this.jobs[index].id, vertices: new Uint32Array([42]), counts: [1, 2, 3] } });
 	}
 }
 function fixture(t, count = 2) {
@@ -27,7 +27,7 @@ function fixture(t, count = 2) {
 	let current = true;
 	const pool = new MeshPool(count, () => {
 		const worker = new FakeWorker(); workers.push(worker); return worker;
-	}, (section, vertices) => { clock.now += clock.uploadCost; applied.push([section, [...vertices]]); }, section => requeued.push(section), () => current);
+	}, (section, vertices, counts) => { assert.deepEqual(counts, [1, 2, 3]); clock.now += clock.uploadCost; applied.push([section, [...vertices]]); }, section => requeued.push(section), () => current);
 	t.after(() => { pool.reset(); workers[0]?.onerror({}); });
 	const pump = queue => pool.pump(() => {
 		clock.now += clock.popCost;

@@ -12,19 +12,26 @@
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
+import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
 import { MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
-import { downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
+import { downsample, GRASS_TINT, LEAVES_TINT, WATER_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 
 const MAX_SECTIONS = 16384;
-/** Worst case for one section: a 3D checkerboard, 2048 blocks with six faces each. */
-const MAX_QUADS = 2048 * 6;
+/** Leaves retain internal faces: every block can emit six quads. */
+const MAX_QUADS = 4096 * 6;
 const GLOBALS_BYTES = 272;
 const MIP_LEVELS = 5;
 
 export const FOV_Y = 70;
 const NEAR = 0.05;
+export const CLOUD_HEIGHT = 192;
+
+/** Below the cloud plane, water must blend over clouds already drawn behind it. */
+export function cloudsBeforeTranslucent(cameraY: number, cloudHeight = CLOUD_HEIGHT): boolean {
+	return cameraY < cloudHeight;
+}
 
 const TERRAIN_WGSL = /* wgsl */ `
 struct Globals {
@@ -83,18 +90,33 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	return out;
 }
 
+override renderLayer: u32 = 0u;
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-	var color = textureSample(tex, samp, in.uv, in.layer).rgb;
+	let pixel = textureSample(tex, samp, in.uv, in.layer);
+	var color = pixel.rgb;
 	if (in.tint == 1u) {
-		color = color * g.grassTint.rgb;
+		var tint = g.grassTint.rgb;
+		if (in.layer == __LEAVES_LAYER__u) { tint = vec3<f32>(${LEAVES_TINT.map(v => (v / 255).toFixed(6)).join(", ")}); }
+		if (in.layer == __WATER_LAYER__u) { tint = vec3<f32>(${WATER_TINT.map(v => (v / 255).toFixed(6)).join(", ")}); }
+		color = color * tint;
 	}
 	color = color * in.shade * textureSample(lightTex, lightSampler, in.light).rgb;
+	if (renderLayer == 1u && pixel.a < 0.5) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
-	return vec4<f32>(mix(color, g.fogColor.rgb, fog), 1.0);
+	return vec4<f32>(mix(color, g.fogColor.rgb, fog), select(1.0, pixel.a, renderLayer == 2u));
 }
 `;
+
+/** Resolve tint layers from the same ordered names used to upload the texture array. */
+export function terrainShader(textureNames: readonly string[]): string {
+	// Missing names use an impossible packed texture index rather than tinting layer zero.
+	return TERRAIN_WGSL
+		.replace("__LEAVES_LAYER__", String(textureNames.indexOf("oak_leaves") >>> 0))
+		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
+}
 
 const OUTLINE_WGSL = /* wgsl */ `
 struct Globals {
@@ -187,7 +209,7 @@ struct CloudOut {
 	let corners = array<vec2<f32>, 6>(vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,-1.0), vec2<f32>(1.0,1.0), vec2<f32>(-1.0,-1.0), vec2<f32>(1.0,1.0), vec2<f32>(-1.0,1.0));
 	var out: CloudOut;
 	let p = corners[id] * g.cloudOrigin.w;
-	out.rel = vec3<f32>(p.x, 192.0 - g.skyCamera.z, p.y);
+	out.rel = vec3<f32>(p.x, ${CLOUD_HEIGHT.toFixed(1)} - g.skyCamera.z, p.y);
 	out.pos = g.viewProj * vec4<f32>(out.rel, 1.0);
 	return out;
 }
@@ -206,6 +228,11 @@ interface SectionMesh {
 	slot: number;
 	buffer: GPUBuffer;
 	quads: number;
+	counts: LayerCounts;
+	origin: Point;
+	centers: Float32Array;
+	translucentIndices: GPUBuffer | null;
+	sortedAt: string;
 	cx: number;
 	sy: number;
 	cz: number;
@@ -238,10 +265,13 @@ export class Renderer {
 	private readonly clouds: GPURenderPipeline;
 	private readonly skyBind: GPUBindGroup;
 	private readonly terrain: GPURenderPipeline;
+	private readonly cutout: GPURenderPipeline;
+	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
 	private readonly globals: GPUBuffer;
 	private readonly origins: GPUBuffer;
 	private readonly quadIndices: GPUBuffer;
+	private readonly quadIndexData: Uint32Array<ArrayBuffer>;
 	private readonly outlineVertices: GPUBuffer;
 	private readonly terrainBind: GPUBindGroup;
 	private readonly lightTexture: GPUTexture;
@@ -281,6 +311,7 @@ export class Renderer {
 		for (let q = 0; q < MAX_QUADS; q++) {
 			indices.set([q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3], q * 6);
 		}
+		this.quadIndexData = indices;
 		this.quadIndices = device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
 		device.queue.writeBuffer(this.quadIndices, 0, indices);
 
@@ -300,7 +331,7 @@ export class Renderer {
 					{ bytesPerRow: size * 4 },
 					[size, size, 1],
 				);
-				if (size > 1) pixels = downsample(pixels, size);
+				if (size > 1) pixels = downsample(pixels, size, name === "glass" || name === "oak_leaves");
 			}
 		});
 		const sampler = device.createSampler({
@@ -344,18 +375,36 @@ export class Renderer {
 			{ binding: 2, resource: sampler },
 		] });
 
-		const terrainModule = device.createShaderModule({ code: TERRAIN_WGSL });
-		this.terrain = device.createRenderPipeline({
-			layout: "auto",
+		const terrainModule = device.createShaderModule({ code: terrainShader(textureNames) });
+		// Explicit shared layout permits the same bind group in all three pipelines.
+		const terrainLayout = device.createBindGroupLayout({ entries: [
+			{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+			{ binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+			{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: "2d-array" } },
+			{ binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+			{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+			{ binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+		] });
+		const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [terrainLayout] });
+		const terrainPipeline = (layer: number) => device.createRenderPipeline({
+			layout: pipelineLayout,
 			vertex: {
-				module: terrainModule,
-				entryPoint: "vs",
+				module: terrainModule, entryPoint: "vs",
 				buffers: [{ arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: "uint32x2" }] }],
 			},
-			fragment: { module: terrainModule, entryPoint: "fs", targets: [{ format: this.format }] },
-			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
-			depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+			fragment: { module: terrainModule, entryPoint: "fs", constants: { renderLayer: layer }, targets: [{
+				format: this.format,
+				...(layer === 2 ? { blend: {
+					color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const },
+					alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const },
+				} } : {}),
+			}] },
+			primitive: { topology: "triangle-list", cullMode: layer === 2 ? "none" : "back", frontFace: "ccw" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: layer !== 2, depthCompare: "less" },
 		});
+		this.terrain = terrainPipeline(0);
+		this.cutout = terrainPipeline(1);
+		this.translucent = terrainPipeline(2);
 		this.lightTexture = device.createTexture({ size: [16, 16], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		this.terrainBind = device.createBindGroup({
 			layout: this.terrain.getBindGroupLayout(0),
@@ -412,10 +461,12 @@ export class Renderer {
 	}
 
 	/** Replaces (or removes, when empty) the mesh of one section. */
-	setSection(cx: number, sy: number, cz: number, words: Uint32Array): void {
+	setSection(cx: number, sy: number, cz: number, words: Uint32Array, counts: LayerCounts): void {
 		const k = key(cx, sy, cz);
 		const old = this.sections.get(k);
-		const quads = Math.min(words.length / WORDS_PER_QUAD, MAX_QUADS);
+		const layers = splitMeshLayers(words, counts);
+		const quads = words.length / WORDS_PER_QUAD;
+		if (quads > MAX_QUADS) throw new Error("Section mesh exceeds cube face limit");
 		if (quads === 0) {
 			if (old) this.dropSection(k, old);
 			return;
@@ -428,6 +479,7 @@ export class Renderer {
 		if (old) {
 			slot = old.slot;
 			old.buffer.destroy();
+			old.translucentIndices?.destroy();
 		} else {
 			const free = this.freeSlots.pop();
 			if (free !== undefined) slot = free;
@@ -438,11 +490,15 @@ export class Renderer {
 			}
 			this.device.queue.writeBuffer(this.origins, slot * 16, new Int32Array([cx * 16, MIN_Y + sy * 16, cz * 16, 0]));
 		}
-		this.sections.set(k, { slot, buffer, quads, cx, sy, cz });
+		const translucentIndices = counts[2] ? this.device.createBuffer({ size: counts[2] * 24, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }) : null;
+		// Initial order is valid even before this section receives its budgeted sort.
+		if (translucentIndices) this.device.queue.writeBuffer(translucentIndices, 0, this.quadIndexData.subarray(0, counts[2] * 6));
+		this.sections.set(k, { slot, buffer, quads, counts, origin: [cx * 16, MIN_Y + sy * 16, cz * 16], centers: quadCenters(layers[2]), translucentIndices, sortedAt: "", cx, sy, cz });
 	}
 
 	private dropSection(k: string, mesh: SectionMesh): void {
 		mesh.buffer.destroy();
+		mesh.translucentIndices?.destroy();
 		this.freeSlots.push(mesh.slot);
 		this.sections.delete(k);
 	}
@@ -536,27 +592,37 @@ export class Renderer {
 		pass.draw(3);
 
 		const planes = frustumPlanes(viewProj);
-		let drawn = 0;
-		let quads = 0;
-		pass.setPipeline(this.terrain);
-		pass.setBindGroup(0, this.terrainBind);
-		pass.setIndexBuffer(this.quadIndices, "uint32");
-		for (const mesh of this.sections.values()) {
-			const x = mesh.cx * 16 - block[0] - frac[0];
-			const y = MIN_Y + mesh.sy * 16 - block[1] - frac[1];
-			const z = mesh.cz * 16 - block[2] - frac[2];
-			if (!boxInFrustum(planes, x, y, z, 16)) continue;
-			pass.setVertexBuffer(0, mesh.buffer);
-			// The instance index doubles as the section's slot in the origin table.
-			pass.drawIndexed(mesh.quads * 6, 1, 0, 0, mesh.slot);
-			drawn++;
-			quads += mesh.quads;
+		const visible = [...this.sections.values()].filter(mesh => boxInFrustum(planes,
+			mesh.origin[0] - block[0] - frac[0], mesh.origin[1] - block[1] - frac[1], mesh.origin[2] - block[2] - frac[2], 16));
+		const cameraPoint: Point = [camera.x, camera.y, camera.z];
+		const transparent = sortSections(visible.filter(mesh => mesh.counts[2] > 0), cameraPoint);
+		updateTranslucentSort(transparent, cameraPoint, (mesh, local) => {
+			this.device.queue.writeBuffer(mesh.translucentIndices!, 0, sortedQuadIndices(mesh.centers, local));
+		});
+		const cloudsFirst = cloudsBeforeTranslucent(camera.y);
+		// Clouds test opaque/cutout depth without writing it, on either side of the plane.
+		const drawClouds = () => {
+			pass.setPipeline(this.clouds);
+			pass.setBindGroup(0, this.skyBind);
+			pass.draw(6);
+		};
+		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
+			if (layer === 2 && cloudsFirst) drawClouds();
+			pass.setPipeline(pipeline);
+			pass.setBindGroup(0, this.terrainBind);
+			for (const mesh of layer === 2 ? transparent : visible) {
+				const count = mesh.counts[layer];
+				if (!count) continue;
+				const offset = layer === 0 ? 0 : layer === 1 ? mesh.counts[0] : mesh.counts[0] + mesh.counts[1];
+				pass.setVertexBuffer(0, mesh.buffer);
+				pass.setIndexBuffer(layer === 2 ? mesh.translucentIndices! : this.quadIndices, "uint32");
+				pass.drawIndexed(count * 6, 1, layer === 2 ? 0 : offset * 6, layer === 2 ? offset * 4 : 0, mesh.slot);
+			}
 		}
+		const drawn = visible.length;
+		const quads = visible.reduce((sum, mesh) => sum + mesh.quads, 0);
 
-		// Alpha-blended clouds test terrain depth from either side, without writing it.
-		pass.setPipeline(this.clouds);
-		pass.setBindGroup(0, this.skyBind);
-		pass.draw(6);
+		if (!cloudsFirst) drawClouds();
 
 		if (target) {
 			pass.setPipeline(this.outline);

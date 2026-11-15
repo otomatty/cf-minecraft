@@ -56,7 +56,8 @@ pub fn run_detailed(seed: i64, ticks: u32) -> Outcome {
             let bx = x.floor() as i32 + rng.next_int_bound(9) - 4;
             let by = 64 + rng.next_int_bound(12);
             let bz = z.floor() as i32 + rng.next_int_bound(9) - 4;
-            let state = rng.next_int_bound(blocks::COUNT as i32) as u16;
+            // Keep the original script and RNG sequence stable as the registry grows.
+            let state = rng.next_int_bound(blocks::LAMP_BLOCK as i32 + 1) as u16;
             server.handle_packet(
                 1,
                 &C2S::SetBlock {
@@ -108,6 +109,11 @@ pub fn run_detailed(seed: i64, ticks: u32) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_scenario_fingerprint_is_unchanged() {
+        assert_eq!(run(2026, 600), 0x88d6e0e1abd58ec4);
+    }
 
     #[test]
     fn scenario_is_repeatable_and_seed_sensitive() {

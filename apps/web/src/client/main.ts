@@ -21,7 +21,7 @@ import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
-import { TEX_SIZE } from "./textures.ts";
+import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
 
 const EYE_HEIGHT = 1.62;
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
-		(section, vertices) => renderer.setSection(...section, vertices),
+		(section, vertices, counts) => renderer.setSection(...section, vertices, counts),
 		section => core.requeueDirty(...section),
 		section => !core.isDirty(...section) && core.getBlock(section[0] * 16, -64, section[2] * 16) !== -1);
 	function removeUnloaded(): void {
@@ -277,7 +277,7 @@ async function main(): Promise<void> {
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
-	const hotbarBlocks = [1, 2, 3, 4, 5, 6, 7, 8, blockNames.indexOf("lamp_block")];
+	const hotbarBlocks = ["stone", "dirt", "cobblestone", "oak_planks", "oak_log", "glass", "oak_leaves", "water", "lamp_block"].map(name => blockNames.indexOf(name));
 	const textureNames = new Set(core.textureNames());
 	for (const block of hotbarBlocks) {
 		const c = document.createElement("canvas");
@@ -286,7 +286,7 @@ async function main(): Promise<void> {
 		const tex = textureNames.has(name) ? name : `${name}_side`;
 		const pixels = renderer.texturePixels.get(tex);
 		if (pixels) {
-			c.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+			c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(tex, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
 		}
 		c.title = name;
 		hotbar.append(c);
@@ -494,7 +494,8 @@ async function main(): Promise<void> {
 		} else if (button === 2) {
 			const n = FACE_NORMALS[hit.face];
 			const [x, y, z] = [hit.x + n[0], hit.y + n[1], hit.z + n[2]];
-			if (core.getBlock(x, y, z) === 0) setBlock(x, y, z, selected);
+			const current = core.getBlock(x, y, z);
+			if (current === 0 || blockNames[current] === "water") setBlock(x, y, z, selected);
 		} else if (button === 1) {
 			const block = core.getBlock(hit.x, hit.y, hit.z);
 			if (block > 0) select(block);
@@ -608,7 +609,8 @@ async function main(): Promise<void> {
 				do {
 					const section = pop();
 					if (!section) break;
-					renderer.setSection(...section, core.mesh(...section));
+					const words = core.mesh(...section);
+					renderer.setSection(...section, words, core.meshCounts());
 				} while (performance.now() - start < MESH_BUDGET_MS);
 				fallbackMeshMs = performance.now() - start;
 			} else {

@@ -46,6 +46,17 @@ static STATE: Global = Global(UnsafeCell::new(None));
 struct MeshOutput(UnsafeCell<Vec<u32>>);
 // SAFETY: each instance is entered by only one thread.
 unsafe impl Sync for MeshOutput {}
+struct MeshCounts(UnsafeCell<[u32; 3]>);
+// SAFETY: each instance is entered by only one thread.
+unsafe impl Sync for MeshCounts {}
+static MESH_COUNTS: MeshCounts = MeshCounts(UnsafeCell::new([0; 3]));
+
+/// Quad count for opaque (0), cutout (1), or translucent (2), from the last mesh call.
+#[no_mangle]
+pub extern "C" fn client_mesh_count(layer: usize) -> u32 {
+    unsafe { (*MESH_COUNTS.0.get()).get(layer).copied().unwrap_or(0) }
+}
+
 static MESH_OUTPUT: MeshOutput = MeshOutput(UnsafeCell::new(Vec::new()));
 
 #[allow(clippy::mut_from_ref)]
@@ -655,6 +666,7 @@ pub unsafe extern "C" fn mesh_padded(
 ) -> u32 {
     let mesh = &mut *MESH_OUTPUT.0.get();
     mesh.clear();
+    *MESH_COUNTS.0.get() = [0; 3];
     if len != PADDED_LEN {
         return 0;
     }
@@ -666,7 +678,9 @@ pub unsafe extern "C" fn mesh_padded(
             std::slice::from_raw_parts(block, PADDED_LEN),
         ))
     };
-    mesher::mesh_section_lit(std::slice::from_raw_parts(ptr, len), light, mesh)
+    let counts = mesher::mesh_section_layers(std::slice::from_raw_parts(ptr, len), light, mesh);
+    *MESH_COUNTS.0.get() = counts;
+    counts.iter().sum()
 }
 
 /// Meshes one section into the mesh buffer and returns the quad count.
@@ -743,7 +757,7 @@ pub extern "C" fn client_raycast(
     let mut face = -1i32;
     loop {
         if let Some(b) = st.world.get_block(cell[0], cell[1], cell[2]) {
-            if b != blocks::AIR && face >= 0 {
+            if blocks::is_solid(b) && face >= 0 {
                 st.out.clear();
                 for v in [cell[0], cell[1], cell[2], face] {
                     st.out.extend_from_slice(&v.to_le_bytes());
@@ -848,7 +862,7 @@ impl physics::CollisionWorld for Collisions<'_> {
         // Unknown chunks are solid: never predict a fall into unloaded terrain.
         self.0
             .get_block(x, y, z)
-            .is_none_or(blocks::is_opaque)
+            .is_none_or(blocks::is_solid)
             .then(|| physics::Aabb::block(x, y, z))
     }
 }
@@ -905,6 +919,65 @@ mod tests {
         assert_ne!(
             unsafe { client_packet(packet.as_ptr(), packet.len()) },
             u32::MAX
+        );
+    }
+
+    #[test]
+    fn material_collisions_raycast_and_mesh_abi() {
+        use physics::CollisionWorld;
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        for material in [blocks::WATER, blocks::GLASS, blocks::OAK_LEAVES] {
+            state().world.set_block(2, 80, 2, material);
+            state().world.set_block(3, 80, 2, blocks::STONE);
+            let collision = Collisions(&state().world).collision_box(2, 80, 2);
+            assert_eq!(collision.is_some(), material != blocks::WATER);
+            assert_eq!(client_raycast(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
+            let hit_x = i32::from_le_bytes(state().out[..4].try_into().unwrap());
+            assert_eq!(hit_x, if material == blocks::WATER { 3 } else { 2 });
+        }
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        for (x, material) in [(2, blocks::STONE), (5, blocks::GLASS), (8, blocks::WATER)] {
+            state().world.set_block(x, 80, 3, material);
+        }
+        assert_eq!(client_mesh(0, 9, 0), 18);
+        assert_eq!(
+            [
+                client_mesh_count(0),
+                client_mesh_count(1),
+                client_mesh_count(2)
+            ],
+            [6, 6, 6]
+        );
+        let mut p = vec![blocks::AIR; PADDED_LEN];
+        for (x, material) in [(2, blocks::STONE), (5, blocks::GLASS), (8, blocks::WATER)] {
+            p[padded_index(x, 3, 3)] = material;
+        }
+        assert_eq!(
+            unsafe { mesh_padded(p.as_ptr(), p.len(), std::ptr::null(), std::ptr::null()) },
+            18
+        );
+        assert_eq!(
+            [
+                client_mesh_count(0),
+                client_mesh_count(1),
+                client_mesh_count(2)
+            ],
+            [6, 6, 6]
+        );
+        assert_eq!(
+            unsafe { mesh_padded(p.as_ptr(), 0, std::ptr::null(), std::ptr::null()) },
+            0
+        );
+        assert_eq!(
+            [
+                client_mesh_count(0),
+                client_mesh_count(1),
+                client_mesh_count(2)
+            ],
+            [0; 3]
         );
     }
 

@@ -111,12 +111,21 @@ pub fn mesh_section_lit(
     light: Option<(&[u8], &[u8])>,
     out: &mut Vec<u32>,
 ) -> u32 {
+    mesh_section_layers(padded, light, out).iter().sum()
+}
+
+/// Appends opaque, cutout, then translucent quads; returns counts in that order.
+pub fn mesh_section_layers(
+    padded: &[BlockState],
+    light: Option<(&[u8], &[u8])>,
+    out: &mut Vec<u32>,
+) -> [u32; 3] {
     assert_eq!(padded.len(), PADDED_LEN);
     if let Some((sky, block)) = light {
         assert_eq!(sky.len(), PADDED_LEN);
         assert_eq!(block.len(), PADDED_LEN);
     }
-    let mut quads = 0u32;
+    let mut layers: [Vec<u32>; 3] = std::array::from_fn(|_| Vec::new());
     for y in 0..16i32 {
         for z in 0..16i32 {
             for x in 0..16i32 {
@@ -125,10 +134,12 @@ pub fn mesh_section_lit(
                     continue;
                 }
                 let info = blocks::info(state);
+                let out = &mut layers[info.layer as usize];
                 for (f, face) in FACES.iter().enumerate() {
                     let n = face.normal;
                     let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
-                    if blocks::is_opaque(padded[padded_index(ax, ay, az)]) {
+                    let neighbor = padded[padded_index(ax, ay, az)];
+                    if blocks::occludes(neighbor) || (state == neighbor && info.cull_same) {
                         continue;
                     }
 
@@ -137,7 +148,7 @@ pub fn mesh_section_lit(
                     for (k, &(i, j)) in CORNERS.iter().enumerate() {
                         let (si, sj) = (2 * i - 1, 2 * j - 1);
                         let solid = |d: [i32; 3]| -> bool {
-                            blocks::is_opaque(padded[padded_index(ax + d[0], ay + d[1], az + d[2])])
+                            blocks::occludes(padded[padded_index(ax + d[0], ay + d[1], az + d[2])])
                         };
                         let side1 = solid([face.b[0] * si, face.b[1] * si, face.b[2] * si]);
                         let side2 = solid([face.c[0] * sj, face.c[1] * sj, face.c[2] * sj]);
@@ -178,7 +189,7 @@ pub fn mesh_section_lit(
                                     ay + face.b[1] * db + face.c[1] * dc,
                                     az + face.b[2] * db + face.c[2] * dc,
                                 );
-                                if !blocks::is_opaque(padded[idx]) {
+                                if !blocks::occludes(padded[idx]) {
                                     let (sky, block) =
                                         light.map_or((15, 0), |(s, b)| (s[idx], b[idx]));
                                     sums[0] += sky as u32;
@@ -187,6 +198,8 @@ pub fn mesh_section_lit(
                                 }
                             }
                         }
+                        // The face's direct neighbor is always a non-occluding sample.
+                        debug_assert!(count > 0);
                         let sky = (sums[0] + count / 2) / count;
                         let block = (sums[1] + count / 2) / count;
                         words[k][1] = info.tex[f] as u32
@@ -202,12 +215,15 @@ pub fn mesh_section_lit(
                         out.push(w[0]);
                         out.push(w[1]);
                     }
-                    quads += 1;
                 }
             }
         }
     }
-    quads
+    let counts = layers.each_ref().map(|v| (v.len() / WORDS_PER_QUAD) as u32);
+    for layer in layers {
+        out.extend(layer);
+    }
+    counts
 }
 
 #[cfg(test)]
@@ -216,6 +232,87 @@ mod tests {
 
     fn empty() -> Vec<BlockState> {
         vec![blocks::AIR; PADDED_LEN]
+    }
+
+    #[test]
+    fn layer_counts_and_material_boundaries() {
+        for (a, b, expected) in [
+            (blocks::GLASS, blocks::GLASS, [0, 10, 0]),
+            (blocks::WATER, blocks::WATER, [0, 0, 10]),
+            (blocks::OAK_LEAVES, blocks::OAK_LEAVES, [0, 12, 0]),
+            (blocks::STONE, blocks::GLASS, [6, 5, 0]),
+            (blocks::GLASS, blocks::STONE, [6, 5, 0]),
+            (blocks::STONE, blocks::WATER, [6, 0, 5]),
+            (blocks::STONE, blocks::OAK_LEAVES, [6, 5, 0]),
+        ] {
+            let mut p = empty();
+            p[padded_index(3, 3, 3)] = a;
+            p[padded_index(4, 3, 3)] = b;
+            let mut out = Vec::new();
+            assert_eq!(mesh_section_layers(&p, None, &mut out), expected);
+            assert_eq!(
+                out.len(),
+                expected.iter().sum::<u32>() as usize * WORDS_PER_QUAD
+            );
+            // Same culling rules across a section boundary.
+            p[padded_index(3, 3, 3)] = blocks::AIR;
+            p[padded_index(4, 3, 3)] = blocks::AIR;
+            p[padded_index(15, 3, 3)] = a;
+            p[padded_index(16, 3, 3)] = b;
+            out.clear();
+            let count = if blocks::occludes(b) || (a == b && blocks::info(a).cull_same) {
+                5
+            } else {
+                6
+            };
+            assert_eq!(mesh_section(&p, &mut out), count);
+        }
+        let mut p = empty();
+        for (x, state) in [
+            (2, blocks::WATER),
+            (5, blocks::OAK_LEAVES),
+            (8, blocks::STONE),
+        ] {
+            p[padded_index(x, 3, 3)] = state;
+        }
+        let mut out = Vec::new();
+        assert_eq!(mesh_section_layers(&p, None, &mut out), [6, 6, 6]);
+        for (quads, texture) in out.chunks(48).zip([0, 13, 14]) {
+            assert!(quads.chunks(2).all(|v| v[1] & 4095 == texture));
+        }
+    }
+
+    #[test]
+    fn transparent_solids_do_not_occlude_ao_or_light_samples() {
+        for state in [blocks::GLASS, blocks::OAK_LEAVES, blocks::WATER] {
+            let mut p = empty();
+            p[padded_index(5, 5, 5)] = blocks::STONE;
+            p[padded_index(4, 6, 4)] = state;
+            let mut sky = vec![15; PADDED_LEN];
+            sky[padded_index(4, 6, 4)] = 3;
+            let block = vec![0; PADDED_LEN];
+            let mut out = Vec::new();
+            mesh_section_lit(&p, Some((&sky, &block)), &mut out);
+            let v = out
+                .chunks(2)
+                .find(|v| {
+                    v[0] & 31 == 5
+                        && (v[0] >> 5) & 31 == 6
+                        && (v[0] >> 10) & 31 == 5
+                        && (v[0] >> 15) & 7 == UP as u32
+                })
+                .unwrap();
+            assert_eq!((v[0] >> 18) & 3, 3);
+            assert_eq!((v[1] >> 13) & 15, 12);
+        }
+        // Glass fully enclosed by opaque cubes has no faces of its own.
+        let mut p = vec![blocks::STONE; PADDED_LEN];
+        p[padded_index(5, 5, 5)] = blocks::GLASS;
+        let mut out = Vec::new();
+        mesh_section(&p, &mut out);
+        let glass: Vec<_> = out.chunks(2).filter(|v| v[1] & 4095 == 12).collect();
+        assert!(glass.is_empty());
+        assert_eq!(mesh_section_layers(&p, None, &mut Vec::new())[1], 0);
     }
 
     #[derive(Debug, Clone, Copy, PartialEq)]

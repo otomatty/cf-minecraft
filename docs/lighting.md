@@ -20,7 +20,7 @@
 初期計算の終了時には均一な配列を再圧縮する。
 高さマップはチャンク内 `z * 16 + x` 順の256列で、opacity が正の最も高い
 ブロックの直上の Y。遮蔽物のない列は `MIN_Y`、最上部が塞がった列は320。
-`is_opaque` は引き続き面の遮蔽・AO 用で、光の属性とは独立している。
+`occludes` は面の遮蔽・AO・光採取の除外用で、光の属性とは独立している。
 独自の `lamp_block` は全面不透明で opacity=15、emission=15、テクスチャも
 コードで描く独自の枠・菱形模様。
 
@@ -28,7 +28,7 @@
 
 出典: [Minecraft Wiki: Light — Block light / Sky light](https://minecraft.wiki/w/Light)
 （2026-11-14 確認）。逆コンパイルしたコードは使用していない。
-対象は現在の空気と完全な立方体。方向別の遮蔽・半透明ブロックはこの PR の対象外。
+対象は空気と完全な立方体。方向別の遮蔽は対象外。ガラス・葉・水の追加は末尾を参照。
 
 隣接セル `p → q` に対し、移動先の opacity を `o(q)`、発光を `e(q)` とする。
 ブロックライトは `max(e(q), max_p max(0, B(p) - max(1, o(q))))`。
@@ -242,3 +242,20 @@ Worker にブロックと2種類の光のスナップショットを Transferabl
 ライトマップと Worker の3配列転送を検証する。
 `tools/e2e.mjs` に密閉地下室の暗さとランプ設置後の明るさの画素比較を追加した。
 E2E・描画性能計測はレビュー側で実行する。
+
+
+## ガラス・葉・水（issue #16、第1 PR）
+
+公開出典（2026-11-15確認）:
+[Minecraft Wiki: Opacity](https://minecraft.wiki/w/Opacity)、
+[Minecraft Wiki: Light — Sky light / Block light](https://minecraft.wiki/w/Light)。
+逆コンパイルしたコードは参照していない。Java Edition の説明を対象とする。
+
+ガラスは光を遮らず、葉と水はスカイライトを1段階ずつ弱めるという説明に基づき、
+このレジストリの opacity は glass=0、oak_leaves=1、water=1、いずれも emission=0 とした。
+ガラスを通るレベル15の直射光は真下へ15のまま伝わる。
+葉・水の縦列は15→14→13と減る。横方向や拡散した光はガラスでも通常の距離減衰を受ける。
+ブロックライトにも元から各セル最低1の距離減衰があるので、葉・水の opacity=1 は
+追加の距離減衰を与えない。opacity と見た目の alpha、衝突、AO は独立している。
+葉・水・ガラスは occludes=false なので、AO を落とさず頂点の光採取からも除外しない。
+面の遮蔽規則とサンプリングの扱いは [render-layers.md](render-layers.md) を参照。
