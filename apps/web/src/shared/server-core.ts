@@ -9,7 +9,8 @@ interface ServerExports {
 	server_abi_version(): number;
 	server_new(seed: bigint, generator: number): void;
 	server_set_time(gameTime: bigint, dayTime: bigint): void;
-	server_connect(client: number): void;
+	server_connect(client: number, allowTeleport: number, hasPosition: number, x: number, y: number, z: number): void;
+	server_client_position(client: number): number;
 	server_disconnect(client: number): void;
 	server_packet(client: number, ptr: number, len: number): void;
 	server_tick(): void;
@@ -29,7 +30,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 1;
+export const SERVER_ABI_VERSION = 3;
 
 export const Generator = { Flat: 0, DebugHills: 1 } as const;
 
@@ -92,8 +93,16 @@ export class ServerCore {
 		this.x.server_set_time(gameTime, dayTime);
 	}
 
-	connect(client: number): void {
-		this.x.server_connect(client);
+	connect(client: number, allowTeleport = false, position?: readonly [number, number, number]): void {
+		this.x.server_connect(client, Number(allowTeleport), Number(position !== undefined), ...(position ?? [0, 0, 0] as const));
+	}
+
+	clientPosition(client: number): [number, number, number] | undefined {
+		const len = this.x.server_client_position(client);
+		if (len === 0) return undefined;
+		const bytes = this.output(len);
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		return [view.getFloat64(0, true), view.getFloat64(8, true), view.getFloat64(16, true)];
 	}
 
 	disconnect(client: number): void {

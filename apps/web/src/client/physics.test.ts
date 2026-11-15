@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ClientCore } from "./client-core.ts";
+import { advancePlayerFrame, ClientCore, S2C } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 
 const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
@@ -89,4 +89,84 @@ test("WASM and native flight share the same sine-table trajectory", () => {
 		assert.equal(state.onGround, false);
 		assert.equal(state.flying, true);
 	}
+});
+
+
+test("server correction resets WASM prediction position and velocity", () => {
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const server = ServerCore.fromModule(serverModule);
+	server.start(1n, Generator.Flat);
+	server.connect(1);
+	server.packet(1, client.encodeHello(2));
+	for (let i = 0; i < 20; i++) {
+		server.tick();
+		for (const packet of server.takeOutbox()) client.packet(packet.data);
+	}
+	client.resetPlayer(...client.spawn);
+	for (let i = 0; i < 10; i++) client.tickPlayer(1, 0, 0, true, true, false);
+	server.packet(1, client.encodePos(10000, 200, 10000, 0, 0));
+	server.tick();
+	const corrections = server.takeOutbox().filter(p => p.data[0] === S2C.PlayerCorrect);
+	assert.equal(corrections.length, 1);
+	assert.equal(client.packet(corrections[0].data), S2C.PlayerCorrect);
+	assert.deepEqual(client.playerPosition, client.spawn);
+	const state = client.tickPlayer(0, 0, 0, false, false, false);
+	assert.deepEqual(state.position, client.spawn);
+	assert.deepEqual(state.velocity, [0, 0, 0]);
+});
+
+
+test("position reports use resolved physics feet while rendering crosses a rising corner", () => {
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const server = ServerCore.fromModule(serverModule);
+	const start: [number, number, number] = [0.69, 64.9, 0.5];
+	server.start(1n, Generator.Flat);
+	server.connect(1, false, start);
+	server.packet(1, client.encodeHello(2));
+	for (let i = 0; i < 20; i++) {
+		server.tick();
+		for (const packet of server.takeOutbox()) client.packet(packet.data);
+	}
+	server.packet(1, client.encodeSetBlock(1, 64, 0, 9));
+	server.tick();
+	for (const packet of server.takeOutbox()) client.packet(packet.data);
+	assert.equal(client.getBlock(1, 64, 0), 9);
+	client.resetPlayer(...start);
+	const state = client.tickPlayer(0, -1, 0, true, false, false);
+	assert.ok(state.position[1] >= 65);
+	// A rendered point can overlap the block despite clear physics endpoints.
+	const rendered = start.map((v, axis) => v + (state.position[axis] - v) * 0.3);
+	assert.ok(rendered[0] + Math.fround(0.6) / 2 > 1 && rendered[1] < 65);
+	// This is the same encoder used by main.ts's sendPosition, with no camera input.
+	const report = client.encodePlayerPos(0, 0);
+	const view = new DataView(report.buffer, report.byteOffset, report.byteLength);
+	assert.deepEqual([1, 9, 17].map(offset => view.getFloat64(offset)), state.position);
+	server.packet(1, report);
+	server.tick();
+	assert.deepEqual(server.clientPosition(1), state.position);
+	assert.equal(server.takeOutbox().filter(p => p.data[0] === S2C.PlayerCorrect).length, 0);
+});
+
+
+test("a two-tick frame sends both resolved positions before advancing again", () => {
+	const client = fixture();
+	const resolved: Array<[number, number, number]> = [];
+	const reported: Array<[number, number, number]> = [];
+	const events: string[] = [];
+	const remaining = advancePlayerFrame(0.1, () => {
+		events.push("tick");
+		resolved.push(client.tickPlayer(1, 0, 0, true, true, false).position);
+	}, () => {
+		events.push("report");
+		const packet = client.encodePlayerPos(0, 0);
+		const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+		reported.push([view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)]);
+	});
+	assert.equal(remaining, 0);
+	assert.deepEqual(events, ["tick", "report", "tick", "report"]);
+	assert.equal(reported.length, 2);
+	assert.notDeepEqual(reported[0], reported[1]);
+	assert.deepEqual(reported, resolved);
+	// A frame shorter than a physics tick must not add a periodic report.
+	assert.equal(advancePlayerFrame(0.01, () => assert.fail("unexpected tick"), () => assert.fail("unexpected report")), 0.01);
 });

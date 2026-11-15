@@ -226,7 +226,8 @@ fn occupied(world: &impl CollisionWorld, bounds: Aabb) -> bool {
 fn supported(world: &impl CollisionWorld, bounds: Aabb, x: f64, z: f64) -> bool {
     occupied(world, bounds.translated([x, -STEP_HEIGHT, z]))
 }
-fn resolve(world: &impl CollisionWorld, mut bounds: Aabb, mut delta: [f64; 3]) -> [f64; 3] {
+/// Sweep an AABB using the same Y/X/Z clipping as player prediction.
+pub fn resolve(world: &impl CollisionWorld, mut bounds: Aabb, mut delta: [f64; 3]) -> [f64; 3] {
     let mut swept = bounds;
     for (a, d) in delta.iter().copied().enumerate() {
         swept.min[a] += d.min(0.0);

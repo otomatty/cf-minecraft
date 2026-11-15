@@ -14,7 +14,7 @@ import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { ClientCore, FACE_NORMALS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, ClientCore, FACE_NORMALS, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
@@ -27,9 +27,7 @@ import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
 const REACH = 5;
-const TICK_SECONDS = 1 / 20;
 const DOUBLE_TAP_TICKS = 7;
-const POSITION_INTERVAL_MS = 50;
 const MESH_BUDGET_MS = 4;
 
 const params = new URLSearchParams(location.search);
@@ -59,6 +57,7 @@ interface DebugHandle {
 	error: string | null;
 	frames: number;
 	stats(): Record<string, unknown>;
+	sendRawPosition(x: number, y: number, z: number): void;
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
 	getBlock(x: number, y: number, z: number): number;
@@ -146,6 +145,7 @@ async function main(): Promise<void> {
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
+	let positionsCorrected = 0;
 	let closed: string | null = null;
 	let selected = 1;
 	let lightMs = 0;
@@ -182,6 +182,8 @@ async function main(): Promise<void> {
 					camera.z = sz;
 					resetPlayer();
 				} else {
+					// Keep camera/prediction at the previous location. The DO restores
+					// its accepted position; PlayerCorrect still wins if they differ.
 					reconnects++;
 					sendPosition();
 				}
@@ -190,6 +192,14 @@ async function main(): Promise<void> {
 				statusLine.className = "";
 				statusLine.textContent = "クリックして開始";
 				if (autopilot) overlay.hidden = true;
+			} else if (id === S2C.PlayerCorrect) {
+				positionsCorrected++;
+				position = core.playerPosition;
+				previousPosition = [...position];
+				movementTime = 0;
+				camera.x = position[0];
+				camera.y = position[1] + EYE_HEIGHT;
+				camera.z = position[2];
 			} else if (id === S2C.TimeUpdate) {
 				timeReceivedAt = performance.now();
 				timeSamples.push([performance.now(), core.gameTime]);
@@ -462,10 +472,10 @@ async function main(): Promise<void> {
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-	let lastPositionSent = 0;
 	const sendPosition = () => {
-		lastPositionSent = performance.now();
-		transport.send(core.encodePos(camera.x, camera.y - EYE_HEIGHT, camera.z, camera.yaw, camera.pitch));
+		if (autopilot) return;
+		// Rendering may interpolate through a corner; report only resolved physics feet.
+		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
 		if (connection !== "open") return false;
@@ -522,8 +532,7 @@ async function main(): Promise<void> {
 			camera.pitch = 28;
 			return;
 		}
-		movementTime += dt;
-		while (movementTime >= TICK_SECONDS) {
+		movementTime = advancePlayerFrame(movementTime + dt, () => {
 			previousPosition = [...position];
 			if (pendingFlightToggle) core.toggleFlight();
 			pendingFlightToggle = false;
@@ -534,9 +543,8 @@ async function main(): Promise<void> {
 			pendingJump = false;
 			position = state.position;
 			movementTick++;
-			movementTime -= TICK_SECONDS;
-		}
-		const alpha = movementTime / TICK_SECONDS;
+		}, sendPosition);
+		const alpha = movementTime / PLAYER_TICK_SECONDS;
 		camera.x = previousPosition[0] + (position[0] - previousPosition[0]) * alpha;
 		camera.y = previousPosition[1] + (position[1] - previousPosition[1]) * alpha + EYE_HEIGHT;
 		camera.z = previousPosition[2] + (position[2] - previousPosition[2]) * alpha;
@@ -591,7 +599,6 @@ async function main(): Promise<void> {
 
 		if (joined) {
 			move(dt, now);
-			if (now - lastPositionSent >= POSITION_INTERVAL_MS) sendPosition();
 
 			removeUnloaded();
 			lightMs = lightPool.step(camera.x, camera.z);
@@ -648,6 +655,7 @@ async function main(): Promise<void> {
 			closed,
 			connection,
 			reconnects,
+			positionsCorrected,
 			fps,
 			...frame,
 			meshQueue: core.dirtyCount + meshPool.inFlight + meshPool.pendingResults,
@@ -668,7 +676,9 @@ async function main(): Promise<void> {
 			spawn: core.spawn,
 			seed: core.seed.toString(),
 		}),
+		sendRawPosition: (x, y, z) => transport.send(core.encodePos(x, y, z, camera.yaw, camera.pitch)),
 		setCamera: (x, y, z, yaw, pitch) => {
+			transport.send(core.encodeTeleport(x, y - EYE_HEIGHT, z));
 			Object.assign(camera, { x, y, z, yaw, pitch });
 			resetPlayer();
 		},
@@ -687,6 +697,7 @@ window.__mc = {
 	error: null,
 	frames: 0,
 	stats: () => ({}),
+	sendRawPosition: () => {},
 	setCamera: () => {},
 	setBlock: () => false,
 	getBlock: () => -1,

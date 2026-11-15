@@ -56,6 +56,7 @@ name = "sim"
 version = "0.0.1"
 dependencies = [
  "jmath",
+ "physics",
  "protocol",
  "world",
  "worldgen",
