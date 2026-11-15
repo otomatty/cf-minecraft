@@ -27,6 +27,7 @@ interface ServerExports {
 	server_day_time(): bigint;
 	server_loaded_chunks(): number;
 	server_client_count(): number;
+	server_noise_fingerprint(seed: bigint): bigint;
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
@@ -199,5 +200,9 @@ export class ServerCore {
 	/** Scripted session in a throwaway server; see crates/sim/src/scenario.rs. */
 	runScenario(seed: bigint, ticks: number): string {
 		return hashToHex(this.x.server_run_scenario(BigInt.asIntN(64, seed), ticks));
+	}
+
+	noiseFingerprint(seed: bigint): string {
+		return hashToHex(this.x.server_noise_fingerprint(BigInt.asIntN(64, seed)));
 	}
 }

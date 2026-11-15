@@ -1,53 +1,5 @@
 use crate::BlockState;
 
-pub const AIR: BlockState = 0;
-pub const STONE: BlockState = 1;
-pub const GRASS_BLOCK: BlockState = 2;
-pub const DIRT: BlockState = 3;
-pub const COBBLESTONE: BlockState = 4;
-pub const OAK_PLANKS: BlockState = 5;
-pub const BEDROCK: BlockState = 6;
-pub const SAND: BlockState = 7;
-pub const OAK_LOG: BlockState = 8;
-pub const BRICKS: BlockState = 9;
-pub const LAMP_BLOCK: BlockState = 10;
-pub const GLASS: BlockState = 11;
-pub const OAK_LEAVES: BlockState = 12;
-pub const WATER: BlockState = 13;
-pub const OAK_SLAB: BlockState = 14;
-pub const COBBLESTONE_SLAB: BlockState = 17;
-pub const RED_FLOWER: BlockState = 20;
-pub const YELLOW_FLOWER: BlockState = 21;
-pub const SHORT_GRASS: BlockState = 22;
-pub const OAK_STAIRS: BlockState = 23;
-pub const COBBLESTONE_STAIRS: BlockState = 31;
-pub const OAK_FENCE: BlockState = 39;
-pub const COUNT: BlockState = 40;
-pub const LEGACY_COUNT: BlockState = 14;
-
-/// Texture layers, in atlas order. The client generates one 16x16 image per
-/// name; the mesher refers to them by index.
-pub const TEXTURES: &[&str] = &[
-    "stone",
-    "grass_block_top",
-    "grass_block_side",
-    "dirt",
-    "cobblestone",
-    "oak_planks",
-    "bedrock",
-    "sand",
-    "oak_log",
-    "oak_log_top",
-    "bricks",
-    "lamp_block",
-    "glass",
-    "oak_leaves",
-    "water",
-    "red_flower",
-    "yellow_flower",
-    "short_grass",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum RenderLayer {
@@ -108,208 +60,7 @@ pub struct BlockInfo {
     pub tint: [bool; 6],
 }
 
-const fn all(t: u16) -> [u16; 6] {
-    [t; 6]
-}
-
-const NO_TINT: [bool; 6] = [false; 6];
-
-static INFO: [BlockInfo; COUNT as usize] = [
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: false,
-        solid: false,
-        cull_same: false,
-        opacity: 0,
-        emission: 0,
-        name: "air",
-        tex: all(0),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "stone",
-        tex: all(0),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "grass_block",
-        tex: [3, 1, 2, 2, 2, 2],
-        tint: [false, true, false, false, false, false],
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "dirt",
-        tex: all(3),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "cobblestone",
-        tex: all(4),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "oak_planks",
-        tex: all(5),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "bedrock",
-        tex: all(6),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "sand",
-        tex: all(7),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "oak_log",
-        tex: [9, 9, 8, 8, 8, 8],
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 0,
-        name: "bricks",
-        tex: all(10),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Opaque,
-        occludes: true,
-        solid: true,
-        cull_same: false,
-        opacity: 15,
-        emission: 15,
-        name: "lamp_block",
-        tex: all(11),
-        tint: NO_TINT,
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Cutout,
-        occludes: false,
-        solid: true,
-        cull_same: true,
-        opacity: 0,
-        emission: 0,
-        name: "glass",
-        tex: all(12),
-        tint: [false; 6],
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Cutout,
-        occludes: false,
-        solid: true,
-        cull_same: false,
-        opacity: 1,
-        emission: 0,
-        name: "oak_leaves",
-        tex: all(13),
-        tint: [true; 6],
-    },
-    BlockInfo {
-        model: Model::Cube,
-        layer: RenderLayer::Translucent,
-        occludes: false,
-        solid: false,
-        cull_same: true,
-        opacity: 1,
-        emission: 0,
-        name: "water",
-        tex: all(14),
-        tint: [true; 6],
-    },
-    slab("oak_slab", 5, 0),
-    slab("oak_slab", 5, 1),
-    slab("oak_slab", 5, 2),
-    slab("cobblestone_slab", 4, 0),
-    slab("cobblestone_slab", 4, 1),
-    slab("cobblestone_slab", 4, 2),
-    plant("red_flower", 15, false),
-    plant("yellow_flower", 16, false),
-    plant("short_grass", 17, true),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("oak_stairs", 5, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("cobblestone_stairs", 4, Model::Stairs),
-    shaped("oak_fence", 5, Model::Fence),
-];
+include!(concat!(env!("OUT_DIR"), "/blocks.rs"));
 
 #[inline]
 pub fn info(state: BlockState) -> &'static BlockInfo {
@@ -336,53 +87,6 @@ pub fn is_solid(state: BlockState) -> bool {
     info(state).solid
 }
 
-const fn slab(name: &'static str, texture: u16, kind: u8) -> BlockInfo {
-    BlockInfo {
-        name,
-        tex: all(texture),
-        tint: NO_TINT,
-        model: match kind {
-            0 => Model::Boxes(&BOTTOM),
-            1 => Model::Boxes(&TOP),
-            _ => Model::Cube,
-        },
-        layer: RenderLayer::Opaque,
-        occludes: kind == 2,
-        solid: true,
-        cull_same: false,
-        opacity: if kind == 2 { 15 } else { 0 },
-        emission: 0,
-    }
-}
-const fn shaped(name: &'static str, texture: u16, model: Model) -> BlockInfo {
-    BlockInfo {
-        name,
-        tex: all(texture),
-        tint: NO_TINT,
-        model,
-        layer: RenderLayer::Opaque,
-        occludes: false,
-        solid: true,
-        cull_same: false,
-        opacity: 0,
-        emission: 0,
-    }
-}
-const fn plant(name: &'static str, texture: u16, tint: bool) -> BlockInfo {
-    BlockInfo {
-        name,
-        tex: all(texture),
-        tint: [tint; 6],
-        model: Model::Cross,
-        layer: RenderLayer::Cutout,
-        occludes: false,
-        solid: false,
-        cull_same: false,
-        opacity: 0,
-        emission: 0,
-    }
-}
-
 /// A block owns a contiguous range; its first state is the inventory default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
@@ -391,42 +95,13 @@ pub struct Block {
     pub count: u16,
 }
 pub fn registry() -> impl Iterator<Item = Block> {
-    (0..COUNT)
-        .filter(|s| !matches!(*s, 15 | 16 | 18 | 19 | 24..=30 | 32..=38))
-        .map(|first| Block {
-            name: info(first).name,
-            first,
-            count: if matches!(first, OAK_STAIRS | COBBLESTONE_STAIRS) {
-                8
-            } else if matches!(first, OAK_SLAB | COBBLESTONE_SLAB) {
-                3
-            } else {
-                1
-            },
-        })
+    BLOCKS.iter().copied()
 }
 pub fn block(state: BlockState) -> Option<Block> {
     registry().find(|b| (b.first..b.first + b.count).contains(&state))
 }
 pub fn properties(state: BlockState) -> &'static [(&'static str, &'static str)] {
-    // Facing order north/south/west/east, each with bottom then top.
-    const STAIRS: [[(&str, &str); 2]; 8] = [
-        [("facing", "north"), ("half", "bottom")],
-        [("facing", "north"), ("half", "top")],
-        [("facing", "south"), ("half", "bottom")],
-        [("facing", "south"), ("half", "top")],
-        [("facing", "west"), ("half", "bottom")],
-        [("facing", "west"), ("half", "top")],
-        [("facing", "east"), ("half", "bottom")],
-        [("facing", "east"), ("half", "top")],
-    ];
-    match state {
-        OAK_STAIRS..=38 => &STAIRS[((state - OAK_STAIRS) % 8) as usize],
-        14 | 17 => &[("type", "bottom")],
-        15 | 18 => &[("type", "top")],
-        16 | 19 => &[("type", "double")],
-        _ => &[],
-    }
+    PROPERTIES.get(state as usize).copied().unwrap_or(&[])
 }
 pub fn state_name(state: BlockState) -> String {
     let mut name = info(state).name.to_owned();
@@ -460,7 +135,7 @@ pub enum ShapePurpose {
 const CARDINAL: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
 fn stair(state: BlockState) -> Option<(usize, bool)> {
     (info(state).model == Model::Stairs).then(|| {
-        let index = (state - OAK_STAIRS) % 8;
+        let index = state - block(state).unwrap().first;
         ((index / 2) as usize, index % 2 == 1)
     })
 }
@@ -616,6 +291,9 @@ pub fn can_place(_old: BlockState, new: BlockState, below: BlockState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const fn all(t: u16) -> [u16; 6] {
+        [t; 6]
+    }
     fn boxes_at(state: BlockState, cells: &[(i32, i32, BlockState)]) -> Vec<Box16> {
         selection_boxes(state, |x, _, z| {
             cells

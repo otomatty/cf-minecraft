@@ -1,0 +1,17 @@
+[[biomes]]
+name = "mild_meadow"
+surface = "grass_block"
+subsurface = "dirt"
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.25, 0.8]
+humidity = [0.3, 0.85]
+
+[[biomes]]
+name = "dry_sands"
+surface = "sand"
+subsurface = "sand"
+grass_color = [183, 170, 95]
+leaves_color = [142, 151, 77]
+temperature = [0.65, 1.0]
+humidity = [0.0, 0.35]

@@ -8,6 +8,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+noise = { path = "crates/noise" }
 jmath = { path = "crates/jmath" }
 world = { path = "crates/world" }
 worldgen = { path = "crates/worldgen" }

@@ -4,6 +4,7 @@
 //! Hash maps iterate in an order that depends on a random seed, which would
 //! break "same inputs, same world" across hosts.
 
+pub mod biomes;
 pub mod blocks;
 pub mod chunk;
 pub mod io;
