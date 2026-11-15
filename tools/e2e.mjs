@@ -232,6 +232,16 @@ async function transparentMaterials() {
 			if (name === "glass") {
 				const matching = warm.filter((v, i) => Math.abs(v - bare[i]) < 4).length / warm.length;
 				check(matching > 0.35, "glass: clear pixels retain terrain colour", `${(matching * 100).toFixed(1)}%`);
+				// The 16x16 glass has an opaque border and a five-texel diagonal accent
+				// crossing this central sample area. Their pale blue differs strongly from
+				// the warm planks: require a >=24 change in any RGB channel for only 2%
+				// of pixels, leaving margin for sampling. Undrawn glass changes 0%.
+				let changedPixels = 0;
+				for (let i = 0; i < warm.length; i += 3) {
+					if (Math.max(...warm.slice(i, i + 3).map((v, c) => Math.abs(v - bare[i + c]))) >= 24) changedPixels++;
+				}
+				const changed = changedPixels / (warm.length / 3);
+				check(changed >= 0.02, "glass: opaque markings are rendered", `${(changed * 100).toFixed(1)}% changed pixels`);
 			} else {
 				check(difference(warm, bare) > 5, "water: translucent colour is rendered");
 			}
