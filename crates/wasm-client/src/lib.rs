@@ -112,7 +112,9 @@ pub extern "C" fn client_new() {
 #[no_mangle]
 pub extern "C" fn client_reset_world() {
     let st = state();
-    st.unloaded.extend(st.world.chunks.keys().copied());
+    if st.light_exports.is_none() {
+        st.unloaded.extend(st.world.chunks.keys().copied());
+    }
     st.world.chunks.clear();
     st.dirty.clear();
     st.light_pending.clear();
@@ -134,6 +136,9 @@ pub extern "C" fn client_mesh_ptr() -> *const u32 {
 }
 
 fn mark_chunk_dirty(st: &mut State, cx: i32, cz: i32) {
+    if st.light_exports.is_some() {
+        return;
+    }
     if let Some(chunk) = st.world.chunks.get(&(cx, cz)) {
         for (i, section) in chunk.sections.iter().enumerate() {
             if !section.is_empty() {
@@ -192,7 +197,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             } else {
                 st.world.remove_chunk(cx, cz)
             };
-            if removed.is_some() {
+            if removed.is_some() && st.light_exports.is_none() {
                 st.unloaded.push((cx, cz));
             }
         }
@@ -232,12 +237,14 @@ fn set_block(st: &mut State, x: i32, y: i32, z: i32, block: u16) -> bool {
         Some(old) if old != block => {
             // Faces and ambient occlusion of every block touching this one,
             // including diagonally, may change: mark each section in reach.
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    for dx in -1..=1 {
-                        let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                        if let Some(s) = world::section_index(ny) {
-                            st.dirty.insert((nx >> 4, s as i32, nz >> 4));
+            if st.light_exports.is_none() {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                            if let Some(s) = world::section_index(ny) {
+                                st.dirty.insert((nx >> 4, s as i32, nz >> 4));
+                            }
                         }
                     }
                 }
@@ -301,6 +308,9 @@ fn mark_light_dirty(st: &mut State) {
     }
 }
 fn dirty_light_section(st: &mut State, cx: i32, sy: usize, cz: i32) {
+    if st.light_exports.is_some() {
+        return;
+    }
     for dz in -1..=1 {
         for dx in -1..=1 {
             for dy in -1..=1 {
@@ -339,7 +349,11 @@ pub extern "C" fn client_light_generation(cx: i32, cz: i32, generation: u32) {
 }
 #[no_mangle]
 pub extern "C" fn client_light_export_mode() {
-    state().light_exports = Some(Default::default());
+    let st = state();
+    st.light_exports = Some(Default::default());
+    // This instance only produces light updates; it has no renderer to drain these.
+    st.dirty.clear();
+    st.unloaded.clear();
 }
 
 // Wire record: cx, sy, cz, generation (four LE u32s), then 2048 sky
@@ -499,7 +513,10 @@ pub extern "C" fn client_pop_dirty(cam_x: f64, cam_y: f64, cam_z: f64) -> u32 {
 /// Requeues work if a worker fails after taking it from the dirty set.
 #[no_mangle]
 pub extern "C" fn client_requeue_dirty(cx: i32, sy: i32, cz: i32) {
-    state().dirty.insert((cx, sy, cz));
+    let st = state();
+    if st.light_exports.is_none() {
+        st.dirty.insert((cx, sy, cz));
+    }
 }
 
 #[no_mangle]
@@ -866,6 +883,89 @@ mod tests {
             unsafe { client_packet(packet.as_ptr(), packet.len()) },
             u32::MAX
         );
+    }
+
+    #[test]
+    fn light_export_mode_never_retains_render_work() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        // Enabling export mode also discards any previously queued render work.
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set(8, 0, 8, blocks::STONE);
+        receive(&chunk);
+        client_reset_world();
+        assert!(!state().unloaded.is_empty());
+        receive(&chunk);
+        assert!(!state().dirty.is_empty());
+        client_light_export_mode();
+        client_reset_world();
+
+        let assert_no_render_work = || {
+            assert!(state().dirty.is_empty());
+            assert!(state().unloaded.is_empty());
+        };
+        assert_no_render_work();
+        for generation in 1..=8 {
+            receive(&chunk);
+            client_light_generation(0, 0, generation);
+            assert_eq!(client_light_pending(), 1);
+            assert_no_render_work();
+            assert_eq!(client_predict_block(8, 0, 8, blocks::LAMP_BLOCK as u32), 1);
+            assert_no_render_work();
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(state().world.block_light(9, 0, 8), 14);
+            assert_eq!(client_take_light_updates(), SECTIONS * LIGHT_RECORD_BYTES);
+            assert_eq!(client_take_light_updates(), 0);
+            assert_no_render_work();
+
+            client_requeue_dirty(0, 4, 0);
+            dirty_light_section(state(), 0, 4, 0);
+            assert_no_render_work();
+            let edit = S2C::BlockUpdate {
+                x: 8,
+                y: 0,
+                z: 8,
+                state: blocks::AIR,
+            }
+            .encode();
+            unsafe {
+                client_packet(edit.as_ptr(), edit.len());
+            }
+            assert_eq!(state().world.block_light(9, 0, 8), 0);
+            assert!(client_take_light_updates() > 0);
+            assert_no_render_work();
+
+            let unload = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+            unsafe {
+                client_packet(unload.as_ptr(), unload.len());
+            }
+            assert_eq!(client_light_pending(), 0);
+            assert_no_render_work();
+            receive(&chunk);
+            client_light_generation(0, 0, generation + 8);
+            assert_eq!(client_light_step(0.0, 0.0), 1);
+            assert!(client_take_light_updates() > 0);
+            assert_no_render_work();
+            client_reset_world();
+            assert_eq!(client_light_pending(), 0);
+            assert_eq!(client_take_light_updates(), 0);
+            assert!(state().world.chunks.is_empty());
+            assert_no_render_work();
+        }
+
+        // Normal clients still queue meshes and removals for their renderer.
+        client_new();
+        receive(&chunk);
+        assert!(!state().dirty.is_empty());
+        let unload = S2C::UnloadChunk { cx: 0, cz: 0 }.encode();
+        unsafe {
+            client_packet(unload.as_ptr(), unload.len());
+        }
+        assert_eq!(state().unloaded, vec![(0, 0)]);
+        receive(&chunk);
+        client_reset_world();
+        assert_eq!(state().unloaded, vec![(0, 0), (0, 0)]);
     }
 
     #[test]
