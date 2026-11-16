@@ -5,6 +5,7 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>cf-minecraft</title>
 		<link rel="icon" href="data:," />
+		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=M+PLUS+1p:wght@400;500;700&display=swap" />
 		<style>
 			html,
 			body {
@@ -12,7 +13,7 @@
 				height: 100%;
 				overflow: hidden;
 				background: #c0d8ff;
-				font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+				font-family: "M PLUS 1p", "Hiragino Sans", sans-serif;
 			}
 			#view {
 				position: fixed;
@@ -22,6 +23,7 @@
 				display: block;
 			}
 			#hud {
+				font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
 				position: fixed;
 				top: 6px;
 				left: 6px;
@@ -83,76 +85,44 @@
 			#hotbar canvas.selected {
 				border-color: #fff;
 			}
-			#overlay {
-				position: fixed;
-				inset: 0;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				background: rgba(0, 0, 0, 0.55);
-				color: #fff;
-				cursor: pointer;
-			}
-			#overlay[hidden] {
-				display: none;
-			}
-			#panel {
-				max-width: 520px;
-				max-height: 85vh;
-				overflow-y: auto;
-				padding: 20px 26px;
-				background: rgba(20, 20, 20, 0.85);
-				border: 2px solid #888;
-				font-size: 14px;
-				line-height: 1.7;
-			}
-			#panel h1 {
-				margin: 0 0 8px;
-				font-size: 20px;
-				font-weight: 600;
-			}
-			#panel p {
-				margin: 6px 0;
-			}
-			#panel a { color: #aaccff; }
-			#panel .error {
-				color: #ff9a9a;
-				white-space: pre-wrap;
-			}
-			#key-bindings label,
-			#settings-panel > label {
-				display: flex;
-				justify-content: space-between;
-				align-items: center;
-				gap: 16px;
-				margin: 6px 0;
-			}
-			#settings-warning {
-				color: #ffcf80;
-				min-height: 1.7em;
-			}
-			#settings-panel [data-action] {
-				min-width: 150px;
-			}
-			kbd {
-				padding: 0 5px;
-				border: 1px solid #aaa;
-				border-radius: 3px;
-				background: #333;
-			}
-			#panel form {
-				display: flex;
-				gap: 8px;
-				margin-top: 10px;
-			}
-			#panel input,
-			#panel button {
-				font: inherit;
-				color: #fff;
-				background: #222;
-				border: 1px solid #888;
-				padding: 4px 8px;
-			}
+			#overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.5); backdrop-filter: blur(3px); color: #fff; font-family: "M PLUS 1p", sans-serif; font-size: 14px; line-height: 1.7; }
+			#overlay [hidden], #overlay[hidden] { display: none; }
+			.menu-panel { box-sizing: border-box; width: 440px; max-width: calc(100vw - 32px); max-height: 90vh; overflow-y: auto; padding: 26px 30px; background: rgba(12,18,28,.82); border: 2px solid rgba(255,255,255,.2); display: flex; flex-direction: column; gap: 14px; }
+			#controls-panel, #settings-panel { width: 780px; }
+			#start-panel { width: auto; overflow-wrap: anywhere; }
+			#overlay h2, #overlay h3, #status, #overlay button, kbd { font-family: "DotGothic16", monospace; font-weight: 400; }
+			#overlay h2, #status { margin: 0; font-size: 24px; }
+			#status.error { font-family: "M PLUS 1p", sans-serif; font-size: 14px; }
+			#overlay h3 { margin: 0 0 8px; font-size: 18px; }
+			#overlay p { margin: 0; }
+			#overlay .error { color: #ff9a9a; white-space: pre-wrap; }
+			.btn { display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 54px; padding: 10px 16px; border: 2px solid; text-align: center; color: white; font-family: "DotGothic16", monospace; font-size: 18px; line-height: 1.5; text-decoration: none; cursor: pointer; box-sizing: border-box; box-shadow: inset 0 -4px 0 rgba(0,0,0,.35), inset 0 2px 0 rgba(255,255,255,.18); overflow-wrap: anywhere; }
+			.green { background: #3a7a25; border-color: #1d3d12; }
+			.gray { background: #4a5566; border-color: #262d38; }
+			.btn:hover:not(:disabled) { filter: brightness(1.12); }
+			.btn:active:not(:disabled) { transform: translateY(1px); box-shadow: inset 0 4px 0 rgba(0,0,0,.35), inset 0 -2px 0 rgba(255,255,255,.18); }
+			.btn:disabled { opacity: .45; cursor: not-allowed; }
+			.btn.outline { min-height: 36px; padding: 6px 12px; font-size: 14px; background: transparent; border: 1px solid rgba(255,255,255,.3); box-shadow: none; }
+			.btn.small { min-height: 44px; font-size: 15px; padding: 8px 10px; white-space: nowrap; }
+			#overlay :focus-visible { outline: 3px solid #ffd45c; outline-offset: 2px; }
+			.two-columns, #key-bindings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+			#key-bindings { gap: 6px 30px; }
+			.panel-actions { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+			#overlay hr { border: 0; border-top: 1px solid rgba(255,255,255,.2); margin: 2px 0; width: 100%; }
+			#menu-world, #menu-hint, .controls-note { font-size: 12px; color: #c3cedd; }
+			.world-kind { display: inline-block; font-size: 11px; border: 1px solid #6c7686; padding: 0 5px; margin-left: 8px; }
+			#menu-message:empty, #archive-status:empty { display: none; }
+			#key-bindings label, #mouse-tab-panel label { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0; }
+			#key-bindings label { margin: 0; }
+			#key-bindings .btn { min-width: 100px; min-height: 36px; padding: 6px 12px; font-size: 14px; }
+			#settings-warning { color: #ffcf80; min-height: 1.7em; }
+			[role="tablist"] { display: flex; gap: 4px; border-bottom: 2px solid rgba(255,255,255,.2); }
+			[role="tab"] { background: transparent; border: 0; box-shadow: none; color: #c3cedd; font-family: "DotGothic16", monospace; font-size: 16px; padding: 8px 18px; border-bottom: 3px solid transparent; margin-bottom: -2px; cursor: pointer; }
+			[role="tab"][aria-selected="true"] { color: #fff; border-bottom-color: #7cc35a; }
+			#controls-panel dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 0; }
+			#controls-panel dd { margin: 0; }
+			kbd { display: inline-block; padding: 0 5px; border: 1px solid #6c7686; border-radius: 3px; background: #3a4352; box-shadow: inset 0 -2px 0 rgba(0,0,0,.35); }
+			@media (max-width: 639px) { .two-columns, #key-bindings { grid-template-columns: 1fr; } .menu-panel { padding: 26px 20px; } }
 			#block-picker {
 				position: fixed;
 				inset: 8vh 10vw;
@@ -177,34 +147,60 @@
 		<div id="crosshair"></div>
 		<div id="hotbar"></div>
 		<div id="overlay">
-			<div id="panel">
-				<h1>cf-minecraft</h1>
+			<section id="start-panel" class="menu-panel">
 				<p id="status">読み込み中…</p>
-				<p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動（<kbd>R</kbd> / 前進を2回でダッシュ）　<kbd>Space</kbd> 上昇　<kbd>Shift</kbd> 下降</p>
-				<p>左クリック 破壊　右クリック 設置　中クリック ブロック選択　<kbd>1</kbd>〜<kbd>9</kbd> / ホイール 切替</p>
-				<p><kbd>F</kbd> 全画面切替（Keyboard Lock 成功時は左 Ctrl でダッシュ）</p>
-				<p><kbd>E</kbd> ブロック一覧（選ぶと現在のホットバー枠に設定）</p>
-				<p><kbd>F8</kbd> 決定論チェック　<kbd>Esc</kbd> 一時停止</p>
-				<a id="to-title" href="/">タイトルに戻る</a>
-				<button id="settings-open" type="button">設定</button>
-				<section id="settings-panel" hidden aria-label="入力設定">
-					<h2>入力設定</h2>
-					<p>項目をクリックして次に押すキーを割り当てます。Esc で取り消し。</p>
+				<p><kbd>Esc</kbd> でメニュー（操作方法・設定・タイトルへ戻る）</p>
+				<a id="start-to-title" class="btn gray" href="/" hidden>タイトルに戻る</a>
+			</section>
+			<section id="game-menu" class="menu-panel" role="dialog" aria-labelledby="game-menu-title" hidden>
+				<h2 id="game-menu-title">ゲームメニュー</h2>
+				<button id="menu-resume" class="btn green" type="button">ゲームに戻る</button>
+				<div class="two-columns">
+					<button id="menu-controls" class="btn gray" type="button">操作方法</button>
+					<button id="settings-open" class="btn gray" type="button">設定…</button>
+				</div>
+				<hr />
+				<div id="world-archive" hidden>
+					<div class="two-columns">
+						<button id="world-export" class="btn gray small" type="button">ワールドを書き出す</button>
+						<button id="world-import" class="btn gray small" type="button">ワールドを読み込む</button>
+					</div>
+					<input id="world-file" type="file" accept=".mcworld" hidden />
+					<p id="archive-status" role="status" aria-live="polite"></p>
+				</div>
+				<a id="to-title" class="btn gray" href="/">タイトルに戻る</a>
+				<p id="menu-message" role="status"></p>
+				<p id="menu-hint"><span id="menu-world"></span><br />画面のどこかをクリックしても再開できます</p>
+			</section>
+			<section id="controls-panel" class="menu-panel" hidden>
+				<h2>操作方法</h2>
+				<div id="controls-groups" class="two-columns"></div>
+				<div class="panel-actions">
+					<button id="controls-to-settings" class="btn outline" type="button">キー割り当てを変更…</button>
+					<button id="controls-close" class="btn green" type="button">完了</button>
+				</div>
+			</section>
+			<section id="settings-panel" class="menu-panel" hidden aria-labelledby="settings-title">
+				<h2 id="settings-title">設定</h2>
+				<div role="tablist" aria-label="設定の種類">
+					<button id="keys-tab" type="button" role="tab" aria-selected="true" aria-controls="keys-tab-panel">キー割り当て</button>
+					<button id="mouse-tab" type="button" role="tab" aria-selected="false" aria-controls="mouse-tab-panel" tabindex="-1">マウス・視点</button>
+				</div>
+				<div id="keys-tab-panel" role="tabpanel" aria-labelledby="keys-tab">
 					<div id="key-bindings"></div>
+					<p>項目をクリックして次に押すキーを割り当てます。Esc で取り消し。</p>
 					<p>R は全画面の Keyboard Lock 成功時に左 Ctrl に切り替わります。Ctrl の指定はロックがない間 R になります。前進キーの2回押しでもダッシュできます。</p>
+				</div>
+				<div id="mouse-tab-panel" role="tabpanel" aria-labelledby="mouse-tab" hidden>
 					<label>マウス感度 <span><input id="sensitivity" type="range" min="0" max="200" step="1" /><output id="sensitivity-value"></output></span></label>
 					<label>視野角（縦） <span><input id="fov" type="range" min="30" max="110" step="1" /><output id="fov-value"></output></span></label>
-					<p id="settings-warning" role="status" aria-live="polite"></p>
-					<div id="world-archive" hidden>
-						<button id="world-export" type="button">ワールドを書き出す</button>
-						<button id="world-import" type="button">ワールドを読み込む</button>
-						<input id="world-file" type="file" accept=".mcworld" hidden />
-						<p id="archive-status" role="status" aria-live="polite"></p>
-					</div>
-					<button id="settings-reset" type="button">既定に戻す</button>
-					<button id="settings-close" type="button">閉じる</button>
-				</section>
-			</div>
+				</div>
+				<p id="settings-warning" role="status" aria-live="polite"></p>
+				<div class="panel-actions">
+					<button id="settings-reset" class="btn outline" type="button">既定に戻す</button>
+					<button id="settings-close" class="btn green" type="button">完了</button>
+				</div>
+			</section>
 		</div>
 		<div id="block-picker" role="dialog" aria-modal="true" aria-labelledby="block-picker-title" hidden>
 			<h2 id="block-picker-title">ブロック選択</h2>

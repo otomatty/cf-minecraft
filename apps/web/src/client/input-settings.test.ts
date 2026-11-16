@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTIONS, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
+import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
 
 const memory = () => {
 	const values = new Map<string, string>();
@@ -265,4 +265,13 @@ test("saved sprint fallback conflicts reset to defaults; safe custom bindings st
 	settings.keys.sprint = "ControlRight";
 	assert.equal(saveSettings(storage, settings), true);
 	assert.deepEqual(loadSettings(storage), settings);
+});
+
+test("key labels shorten letter, digit, modifier and arrow codes and preserve other codes", () => {
+	for (const [code, label] of Object.entries({
+		KeyW: "W", KeyZ: "Z", Digit1: "1", Digit0: "0", Space: "Space",
+		ShiftLeft: "Shift", ShiftRight: "Shift", ControlLeft: "Ctrl", AltLeft: "Alt",
+		ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+		ControlRight: "ControlRight", AltRight: "AltRight", F8: "F8", Numpad1: "Numpad1", Unknown: "Unknown", KeyWW: "KeyWW", toString: "toString",
+	})) assert.equal(keyLabel(code), label);
 });

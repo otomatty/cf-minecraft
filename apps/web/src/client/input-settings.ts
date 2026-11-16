@@ -93,3 +93,14 @@ export function sprintKey(settings: InputSettings, keyboardLocked: boolean): str
 	if (code === "ControlLeft" || code === "ControlRight") return keyboardLocked ? code : "KeyR";
 	return code === "KeyR" && keyboardLocked ? "ControlLeft" : code;
 }
+
+/** Short, readable labels for physical keyboard codes. */
+export function keyLabel(code: string): string {
+	if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+	if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+	const labels: Record<string, string> = {
+		Space: "Space", ShiftLeft: "Shift", ShiftRight: "Shift", ControlLeft: "Ctrl", AltLeft: "Alt",
+		ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+	};
+	return Object.hasOwn(labels, code) ? labels[code] : code;
+}

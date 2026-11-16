@@ -18,7 +18,7 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
-import { ACTIONS, type Action, defaultSettings, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { defaultHotbar, loadHotbar, saveHotbar } from "./hotbar.ts";
 import { placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -51,10 +51,30 @@ const overlay = $<HTMLDivElement>("overlay");
 const statusLine = $<HTMLParagraphElement>("status");
 const hotbar = $<HTMLDivElement>("hotbar");
 
+type MenuView = "start" | "menu" | "controls" | "settings";
+let failed = false;
+let menuView: MenuView = "start";
+let prepareMenuView: (view: MenuView) => void = () => {};
+function showMenuView(view: MenuView): void {
+	if (failed) view = "start";
+	menuView = view;
+	prepareMenuView(view);
+	for (const [name, id] of Object.entries({ start: "start-panel", menu: "game-menu", controls: "controls-panel", settings: "settings-panel" })) {
+		$(id).hidden = name !== view;
+	}
+	if (view === "menu") $("menu-message").textContent = "";
+	overlay.hidden = autopilot || document.pointerLockElement !== null;
+	if (!overlay.hidden) overlay.querySelector<HTMLElement>(".menu-panel:not([hidden]) button")?.focus();
+}
+
 function fail(message: string): void {
+	failed = true;
 	statusLine.textContent = message;
 	statusLine.className = "error";
-	overlay.hidden = false;
+	$("start-to-title").hidden = false;
+	$("block-picker").hidden = true;
+	if (document.pointerLockElement !== null) document.exitPointerLock();
+	showMenuView("start");
 	hud.textContent = message;
 }
 
@@ -93,7 +113,7 @@ async function canEnterWorld(): Promise<boolean> {
 		link.href = accountURL;
 		link.textContent = "タイトル画面でログイン";
 		link.style.color = "#aaccff";
-		document.getElementById("panel")!.append(link);
+		$("start-panel").append(link);
 		return false;
 	};
 	const response = await fetch("/api/me");
@@ -195,6 +215,7 @@ async function main(): Promise<void> {
 				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
+				const wasJoined = joined;
 				if (!joined) {
 					joined = true;
 					const [sx, sy, sz] = core.spawn;
@@ -210,8 +231,12 @@ async function main(): Promise<void> {
 				}
 				connection = "open";
 				timeSamples.length = 0;
-				statusLine.className = "";
-				statusLine.textContent = "クリックして開始";
+				if (!failed) {
+					$("start-to-title").hidden = true;
+					statusLine.className = "";
+					statusLine.textContent = "クリックして開始";
+				}
+				if (!locked()) showMenuView(wasJoined ? "menu" : "start");
 				if (autopilot) overlay.hidden = true;
 			} else if (id === S2C.PlayerCorrect) {
 				positionsCorrected++;
@@ -232,15 +257,22 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
+			picker.hidden = true;
+			$("start-to-title").hidden = false;
+			showMenuView("start");
 			timeSamples.length = 0;
-			statusLine.className = "";
-			statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+			if (!failed) {
+				statusLine.className = "";
+				statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+			}
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
 			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
+			picker.hidden = true;
+			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
 	};
@@ -273,8 +305,7 @@ async function main(): Promise<void> {
 			returningToTitle = false;
 			toTitle.removeAttribute("aria-disabled");
 			toTitle.textContent = text;
-			statusLine.textContent = error instanceof Error ? error.message : String(error);
-			statusLine.className = "error";
+			$("menu-message").textContent = error instanceof Error ? error.message : String(error);
 		}
 	});
 	$("world-archive").hidden = serverKind !== "local";
@@ -367,14 +398,13 @@ async function main(): Promise<void> {
 		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
 	};
-	const settingsPanel = $<HTMLElement>("settings-panel");
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
 	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
-			button.textContent = capturing === action ? "キーを押してください…" : settings.keys[action];
+			button.textContent = capturing === action ? "キーを押してください…" : keyLabel(settings.keys[action]);
 		}
 		for (const name of ["sensitivity", "fov"] as const) {
 			$<HTMLInputElement>(name).value = String(settings[name]);
@@ -386,6 +416,7 @@ async function main(): Promise<void> {
 			warning.textContent = saveSettings(localStorage, settings) ? "" : "設定を保存できません。再読み込みまで適用します。";
 		} catch { warning.textContent = "設定を保存できません。再読み込みまで適用します。"; }
 		refreshSettings();
+		refreshControls();
 		if (document.fullscreenElement === document.documentElement) void updateKeyboardLock();
 	}
 	for (const action of ACTIONS) {
@@ -394,19 +425,90 @@ async function main(): Promise<void> {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.dataset.action = action;
+		button.className = "btn gray";
 		button.addEventListener("click", () => { capturing = action; warning.textContent = ""; refreshSettings(); });
 		label.append(button);
 		$("key-bindings").append(label);
 		bindingButtons.set(action, button);
 	}
-	$("settings-open").addEventListener("click", (event) => {
-		event.stopPropagation();
-		clearInput();
-		settingsPanel.hidden = false;
+	function selectSettingsTab(tab: "keys" | "mouse"): void {
+		capturing = null;
 		refreshSettings();
-	});
-	settingsPanel.addEventListener("click", event => event.stopPropagation());
-	$("settings-close").addEventListener("click", () => { settingsPanel.hidden = true; capturing = null; });
+		for (const name of ["keys", "mouse"] as const) {
+			$(name + "-tab").setAttribute("aria-selected", String(name === tab));
+			$(name + "-tab").tabIndex = name === tab ? 0 : -1;
+			$(name + "-tab-panel").hidden = name !== tab;
+		}
+	}
+	for (const name of ["keys", "mouse"] as const) {
+		$(name + "-tab").addEventListener("click", () => selectSettingsTab(name));
+		$(name + "-tab").addEventListener("keydown", event => {
+			if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+			event.preventDefault();
+			const next = event.key === "Home" ? "keys" : event.key === "End" ? "mouse" : name === "keys" ? "mouse" : "keys";
+			selectSettingsTab(next);
+			$(next + "-tab").focus();
+		});
+	}
+	function refreshControls(): void {
+		const kbd = (code: string) => {
+			const element = document.createElement("kbd");
+			element.textContent = keyLabel(code);
+			return element;
+		};
+		const key = (action: Action) => kbd(action === "sprint" ? sprintKey(settings, keyboardLocked) : settings.keys[action]);
+		const groups: Array<[string, Array<[string, Array<Node | string>]>]> = [
+			["移動", [
+				["前後左右", [key("forward"), " / ", key("left"), " / ", key("backward"), " / ", key("right")]],
+				["ジャンプ / 上昇", [key("up")]], ["スニーク / 下降", [key("down")]],
+				["ダッシュ", [key("sprint"), " または前進を2回"]], ["飛行の切替", [key("up"), " を2回"]],
+			]],
+			["ブロック", [
+				["壊す", ["左クリック"]], ["置く", ["右クリック"]], ["見ているブロックを持つ", ["中クリック"]],
+				["ブロック一覧", [key("inventory")]], ["ホットバーの切替", ["1〜9 / ホイール"]],
+			]],
+			["画面", [["メニュー", [kbd("Esc")]], ["全画面", [key("fullscreen")]]]],
+			["開発者向け", [["決定論チェック", [kbd("F8")]]]],
+		];
+		$("controls-groups").replaceChildren(...groups.map(([title, rows]) => {
+			const group = document.createElement("section");
+			const heading = document.createElement("h3");
+			heading.textContent = title;
+			const list = document.createElement("dl");
+			for (const [label, value] of rows) {
+				const dt = document.createElement("dt");
+				dt.textContent = label;
+				const dd = document.createElement("dd");
+				dd.append(...value);
+				list.append(dt, dd);
+			}
+			group.append(heading, list);
+			if (title === "画面") {
+				const note = document.createElement("p");
+				note.className = "controls-note";
+				note.textContent = "全画面でキーボードを確保できたときは、ダッシュが左 Ctrl になります。";
+				group.append(note);
+			}
+			return group;
+		}));
+	}
+	prepareMenuView = view => {
+		clearInput();
+		capturing = null;
+		if (view === "controls") refreshControls();
+		if (view === "settings") selectSettingsTab("keys");
+	};
+	$("menu-world").textContent = worldName;
+	const worldKind = document.createElement("span");
+	worldKind.className = "world-kind";
+	worldKind.textContent = serverKind === "local" ? "シングル" : "マルチ";
+	$("menu-world").append(worldKind);
+	$("menu-resume").addEventListener("click", () => { void requestPointerLock(); });
+	$("menu-controls").addEventListener("click", () => showMenuView("controls"));
+	$("settings-open").addEventListener("click", () => showMenuView("settings"));
+	$("controls-to-settings").addEventListener("click", () => showMenuView("settings"));
+	$("controls-close").addEventListener("click", () => showMenuView("menu"));
+	$("settings-close").addEventListener("click", () => showMenuView("menu"));
 	$("settings-reset").addEventListener("click", () => { settings = defaultSettings(); capturing = null; persistSettings(); });
 	for (const name of ["sensitivity", "fov"] as const) {
 		$<HTMLInputElement>(name).addEventListener("input", event => {
@@ -444,8 +546,7 @@ async function main(): Promise<void> {
 	function closePicker(reason: "inventory" | "escape" | "button"): void {
 		picker.hidden = true;
 		clearInput();
-		overlay.hidden = false;
-		statusLine.textContent = "一時停止中：クリックして再開";
+		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 		if (reason !== "escape") void requestPointerLock();
 	}
 	$("block-picker-close").addEventListener("click", () => closePicker("button"));
@@ -474,24 +575,41 @@ async function main(): Promise<void> {
 		try {
 			if (document.fullscreenElement) await document.exitFullscreen();
 			else await document.documentElement.requestFullscreen();
-		} catch { statusLine.textContent = "全画面に切り替えられませんでした。"; }
+		} catch {
+			if (failed) return;
+			if (menuView === "start") statusLine.textContent = "全画面に切り替えられませんでした。";
+			else $("menu-message").textContent = "全画面に切り替えられませんでした。";
+		}
 	}
 	async function requestPointerLock(): Promise<void> {
+		if (failed) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
+			if (failed) return;
 			try { await canvas.requestPointerLock(); }
-			catch { statusLine.textContent = "マウスをロックできませんでした。クリックして再試行してください。"; }
+			catch { pointerLockFailed(); }
 		}
 	}
-	overlay.addEventListener("click", () => {
-		if (joined && !closed && settingsPanel.hidden && picker.hidden) void requestPointerLock();
+	function pointerLockFailed(): void {
+		if (failed) return;
+		if (menuView === "start") statusLine.textContent = "マウスをロックできませんでした。クリックして再試行してください。";
+		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
+	}
+	overlay.addEventListener("click", event => {
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
-		if (autopilot || closed) return;
-		overlay.hidden = locked() || !picker.hidden;
-		if (!locked() && connection !== "reconnecting") statusLine.textContent = "一時停止中：クリックして再開";
+		if (failed) {
+			if (locked()) document.exitPointerLock();
+			showMenuView("start");
+			return;
+		}
+		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
+		if (autopilot) { overlay.hidden = true; return; }
+		if (!picker.hidden) { overlay.hidden = true; return; }
+		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
 		if (!locked()) return;
@@ -500,7 +618,7 @@ async function main(): Promise<void> {
 		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
 	});
 	window.addEventListener("keydown", (e) => {
-		if (!settingsPanel.hidden) {
+		if (!overlay.hidden && menuView === "settings") {
 			if (capturing) {
 				e.preventDefault();
 				if (e.repeat) return;
@@ -512,6 +630,9 @@ async function main(): Promise<void> {
 				settings.keys = next;
 				capturing = null;
 				persistSettings();
+			} else if (e.code === "Escape" && !locked()) {
+				e.preventDefault();
+				showMenuView("menu");
 			}
 			return;
 		}
@@ -522,7 +643,12 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
-		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed) {
+		if (e.code === "Escape" && !locked() && !overlay.hidden) {
+			e.preventDefault();
+			if (menuView === "controls") showMenuView("menu");
+			return;
+		}
+		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {
 			e.preventDefault();
 			if (!e.repeat) openPicker();
 			return;
