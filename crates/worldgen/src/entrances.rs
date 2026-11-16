@@ -102,9 +102,37 @@ impl Entrance {
                 footprint[(progress + FOOTPRINT_REACH) as usize] |= 1u16 << (side + 4);
             });
             self.footprint = Some(footprint);
-            return true;
+            return self.clear_of_surface_water(&mut surface);
         }
         false
+    }
+
+    fn clear_of_surface_water(&self, surface: &mut impl FnMut(i32, i32) -> i32) -> bool {
+        let [dx, dz] = self.direction;
+        // Visit each fitted column once, even where cross sections overlap.
+        for (row, &sides) in self.footprint.as_ref().unwrap().iter().enumerate() {
+            let progress = row as i32 - FOOTPRINT_REACH;
+            for side in -4..=4 {
+                if sides & (1u16 << (side + 4)) == 0 {
+                    continue;
+                }
+                let x = self.root[0] + dx * progress - dz * side;
+                let z = self.root[2] + dz * progress + dx * side;
+                let floor = self.floor_at(x, z);
+                if floor >= SEA_LEVEL {
+                    continue;
+                }
+                let ceiling = (floor + 4).min(SEA_LEVEL);
+                // Own-column water (including sea-level ice), or the same
+                // adjacent-water protection used by removable, blocks the route.
+                for (nx, nz) in [(x, z), (x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+                    if surface(nx, nz) < ceiling {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     fn covers(&self, x: i32, z: i32) -> bool {
@@ -847,6 +875,61 @@ mod tests {
     }
 
     #[test]
+    fn fitted_passages_reject_water_ice_and_adjacent_water() {
+        let dry = SEA_LEVEL + 12;
+        let candidate = || {
+            let mut e = synthetic_entrance([1, 0], 2.25, 1.0, 0.775);
+            e.root[1] = dry;
+            e
+        };
+        let mut fitted = candidate();
+        assert!(fitted.fit_floor(|_, _| dry));
+        let edge = fitted
+            .block_list()
+            .into_iter()
+            .filter(|&[x, _, _]| x == 20)
+            .map(|[_, _, z]| z)
+            .max()
+            .unwrap();
+        for wet in [(20, 0), (20, edge), (20, edge + 1)] {
+            let surface = |x, z| if (x, z) == wet { SEA_LEVEL - 6 } else { dry };
+            // Model a frozen coastal column: water capped by ice at sea level.
+            let state = |y| {
+                if y == SEA_LEVEL {
+                    blocks::ICE
+                } else if y > surface(wet.0, wet.1) && y < SEA_LEVEL {
+                    blocks::WATER
+                } else {
+                    blocks::STONE
+                }
+            };
+            let floor = fitted.floor_at(20, 0);
+            assert!((floor + 1..=floor + 4).any(|y| state(y) == blocks::WATER));
+            assert!((floor + 1..=floor + 4).any(|y| state(y) == blocks::ICE));
+            assert!(!candidate().fit_floor(surface), "wet column={wet:?}");
+        }
+        // Water below the entire passage, and a seabed exactly at sea level,
+        // do not overlap the open interval above the geological surface.
+        for top in [SEA_LEVEL - 6, SEA_LEVEL] {
+            assert!(candidate().fit_floor(|x, z| {
+                if (x, z) == (0, edge) {
+                    top
+                } else {
+                    dry
+                }
+            }));
+        }
+        let floor = fitted.floor_at(20, 0);
+        for top in [floor, floor + 1, floor + 3, floor + 4] {
+            assert_eq!(
+                candidate().fit_floor(|x, z| if (x, z) == (20, edge + 1) { top } else { dry }),
+                top >= (floor + 4).min(SEA_LEVEL),
+                "neighbor top={top}"
+            );
+        }
+    }
+
+    #[test]
     fn player_can_return_from_all_shapes_on_flat_and_sloping_ground() {
         for direction in [[1, 0], [-1, 0], [0, 1], [0, -1]] {
             for radius in [1.75, 2.0, 2.25] {
@@ -901,6 +984,29 @@ mod tests {
                     for x in (e.root[0] - 48).div_euclid(16)..=(e.root[0] + 48).div_euclid(16) {
                         chunks.insert((x, z), t.generate(x, z));
                     }
+                }
+                let mut surface = t.surface_sampler();
+                for [x, y, z] in e.block_list() {
+                    let state = chunks[&(x.div_euclid(16), z.div_euclid(16))].get(
+                        x.rem_euclid(16) as usize,
+                        y,
+                        z.rem_euclid(16) as usize,
+                    );
+                    assert!(
+                        state != blocks::WATER && state != blocks::ICE,
+                        "seed={seed}, root={:?}, water/ice at {x},{y},{z}",
+                        e.root
+                    );
+                    let lowest = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)]
+                        .map(|(x, z)| surface(x, z))
+                        .into_iter()
+                        .min()
+                        .unwrap();
+                    assert!(
+                        !(lowest < y && y <= SEA_LEVEL),
+                        "seed={seed}, root={:?}, protected route at {x},{y},{z}",
+                        e.root
+                    );
                 }
                 walk_back(
                     &e,
