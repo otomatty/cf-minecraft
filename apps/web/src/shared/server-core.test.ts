@@ -52,3 +52,41 @@ test("external generation delivers the same chunks through Node WASM wrappers", 
 		assert.equal(server.loadedChunks, 5);
 	}
 });
+
+test("inventory and game mode cross the server/client ABI and survive reconnect", () => {
+	const server = ServerCore.fromModule(module);
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const join = (inventory?: Uint8Array) => {
+		server.connect(1, false, undefined, inventory);
+		server.packet(1, client.encodeHello(2)); server.tick();
+		const packets = server.takeOutbox();
+		assert.equal(packets[0].data[0], 0);
+		assert.equal(packets[1].data[0], 6);
+		for (const { data } of packets) assert.notEqual(client.packet(data), -1);
+	};
+	server.start(2026n, Generator.Flat);
+	server.setGameMode("survival"); join();
+	assert.equal(client.gameMode, "survival");
+	assert.deepEqual(client.inventory, Array(36).fill(null));
+	server.packet(1, client.encodeCreativeSetSlot(0, 1, 64)); server.tick();
+	for (const { data } of server.takeOutbox()) client.packet(data);
+	assert.equal(client.inventory[0], null);
+	server.disconnect(1);
+	server.setGameMode("creative"); join(new Uint8Array([0]));
+	const items = client.itemRegistry();
+	assert.equal(items.find(i => i.id === client.inventory[0]!.item)?.name, "stone");
+	const slab = items.find(i => i.name === "oak_slab")!;
+	assert.equal(slab.maxStack, 64);
+	assert.equal(client.blockRegistry()[slab.block!].name, "oak_slab");
+	server.packet(1, client.encodeSelectSlot(8));
+	server.packet(1, client.encodeCreativeSetSlot(35, slab.id, 17)); server.tick();
+	assert.equal(server.takeOutbox().filter(p => p.data[0] === 6).length, 1);
+	const saved = server.inventoryData(1)!;
+	assert.equal(saved[0], 1);
+	server.disconnect(1);
+	assert.equal(server.inventoryData(1), undefined);
+	join(saved);
+	assert.equal(client.selectedSlot, 8);
+	assert.deepEqual(client.inventory[35], { item: slab.id, count: 17 });
+	assert.deepEqual(server.inventoryData(1), saved);
+});

@@ -109,6 +109,7 @@ let core: ServerCore | null = null;
 let store: OpfsStore | null = null;
 let seed = 0n;
 let generator: number = Generator.Terrain;
+let gameMode: "creative" | "survival" = "creative";
 let currentWorld = "";
 let archiveQueue: Promise<unknown> = Promise.resolve();
 let persistence: PendingChunkSaves | null = null;
@@ -121,8 +122,8 @@ function save(): Promise<void> {
 	// Drain synchronously so the snapshot is consistent, then write in order.
 	const chunks: DirtyChunk[] = [];
 	for (let d = c.takeDirty(); d !== null; d = c.takeDirty()) chunks.push(d);
-	const meta: Meta = { generator, seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
-	return s.save(chunks, meta);
+	const meta: Meta = { gameMode, generator, seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
+	return s.save(chunks, meta, c.inventoryData(CLIENT));
 }
 
 async function serveRequests(c: ServerCore): Promise<void> {
@@ -148,18 +149,22 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	store = openedStore;
 	persistence = store ? new PendingChunkSaves(store) : null;
 	const requestedSeed = msg.seed ?? crypto.getRandomValues(new BigInt64Array(1))[0].toString();
-	const meta = store ? await store.initializeMeta(requestedSeed, msg.generator) : null;
+	const meta = store ? await store.initializeMeta(requestedSeed, msg.generator, msg.gameMode) : null;
 	if (epoch !== initEpoch) return;
 	seed = BigInt.asIntN(64, BigInt(meta?.seed ?? requestedSeed));
 	generator = meta?.generator ?? msg.generator;
+	gameMode = meta?.gameMode ?? msg.gameMode ?? "creative";
 	c.start(seed, generator);
+	c.setGameMode(gameMode);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
 	if (epoch !== initEpoch) return;
 	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
 	if (epoch !== initEpoch) return;
-	c.connect(CLIENT, import.meta.env.DEV);
+	const player = store ? await store.readPlayer() : null;
+	if (epoch !== initEpoch) return;
+	c.connect(CLIENT, import.meta.env.DEV, undefined, player ?? undefined);
 	core = c;
 	post({ type: "ready", generator, seed: seed.toString(), persistence: store ? "opfs" : "off" });
 

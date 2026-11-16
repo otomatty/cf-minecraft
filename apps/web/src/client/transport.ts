@@ -39,7 +39,7 @@ export interface Transport {
 }
 
 export type WorkerRequest =
-	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null; genworkers?: boolean }
+	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null; genworkers?: boolean; gameMode?: "creative" | "survival" }
 	| { type: "packet"; data: ArrayBuffer }
 	| { type: "save" }
 	| { type: "saveNow"; id: number }
@@ -68,7 +68,7 @@ export class LocalTransport implements Transport {
 		this.pending.clear();
 	}
 
-	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers, startTime: number | null = null, genworkers = true) {
+	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers, startTime: number | null = null, genworkers = true, gameMode: "creative" | "survival" = "creative") {
 		this.worker = new Worker(new URL("./sim.worker.ts", import.meta.url), { type: "module" });
 		this.worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
 			const msg = event.data;
@@ -106,7 +106,7 @@ export class LocalTransport implements Transport {
 			this.rejectPending(event.message || "sim worker failed");
 			handlers.onClose(event.message || "sim worker failed");
 		};
-		this.post({ type: "init", wasmUrl, world, seed, generator, startTime, genworkers });
+		this.post({ type: "init", wasmUrl, world, seed, generator, startTime, genworkers, gameMode });
 	}
 
 	private post(msg: WorkerRequest, transfer: Transferable[] = []): void {

@@ -69,3 +69,10 @@ test("archive rejects oversized counts, lengths, invalid UTF-8, and total size",
 	assert.throws(() => encodeArchive([{ name: "meta.json", data: { length: MAX_ARCHIVE_BYTES } as Uint8Array }]));
 	assert.throws(() => decodeArchive({ length: MAX_ARCHIVE_BYTES + 1 } as Uint8Array));
 });
+
+test("player.dat is optional and round trips as opaque player bytes", () => {
+	for (const entries of [[meta], [meta, { name: "player.dat", data: new Uint8Array([1, 0, 255]) }]]) {
+		assert.deepEqual(decodeArchive(encodeArchive(entries)), entries);
+	}
+	assert.throws(() => encodeArchive([meta, { name: "player.dat", data: new Uint8Array() }, { name: "player.dat", data: new Uint8Array() }]));
+});

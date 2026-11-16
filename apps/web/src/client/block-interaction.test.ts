@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
 import { placementState } from "./placement.ts";
-import { defaultHotbar, HOTBAR_KEY, loadHotbar, saveHotbar } from "./hotbar.ts";
+import { hotbarStates } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 const registry = core.blockRegistry();
@@ -143,33 +143,23 @@ test("plants require an occluding block directly beneath the destination", () =>
 	}
 });
 
-test("hotbar defaults include slabs; names round trip and restore block defaults", () => {
-	const values = new Map<string, string>();
-	const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-	const defaults = defaultHotbar(registry);
-	assert.equal(defaults.length, 9);
-	assert.equal(defaults[3], slab);
-	assert.deepEqual(loadHotbar(storage, registry), defaults);
-	const slots = [...defaults];
-	slots[3] = slab + 1;
-	slots[0] = id("red_flower");
-	assert.equal(saveHotbar(storage, slots, registry), true);
-	assert.deepEqual(JSON.parse(values.get(HOTBAR_KEY)!), slots.map(state => registry[state].name));
-	assert.deepEqual(loadHotbar(storage, registry), slots.map(state => registry[state].first));
-	const duplicate = Array(9).fill(slab);
-	assert.equal(saveHotbar(storage, duplicate, registry), true);
-	assert.deepEqual(loadHotbar(storage, registry), duplicate);
+test("hotbar mirrors authoritative items including default slab block states", () => {
+	const items = [{ id: 101, block: stone }, { id: 102, block: slab }];
+	const slots = Array.from({ length: 36 }, () => null as { item: number; count: number } | null);
+	slots[0] = { item: 101, count: 64 };
+	slots[3] = { item: 102, count: 2 };
+	slots[9] = { item: 101, count: 1 };
+	assert.deepEqual(hotbarStates(slots, items), [stone, 0, 0, slab, 0, 0, 0, 0, 0]);
+	assert.equal(slots[0]?.count, 64);
 });
 
-test("corrupt hotbars and denied storage use fresh defaults without throwing", () => {
-	for (const data of ["{", "null", "{}", "[]", JSON.stringify(Array(8).fill("stone")), JSON.stringify(Array(9).fill("air")), JSON.stringify(Array(9).fill(1)), JSON.stringify(Array(9).fill("missing")), JSON.stringify(Array(9).fill("oak_slab[type=top]"))]) {
-		assert.deepEqual(loadHotbar({ getItem: () => data }, registry), defaultHotbar(registry));
-	}
-	assert.deepEqual(loadHotbar({ getItem() { throw new Error("denied"); } }, registry), defaultHotbar(registry));
-	assert.equal(saveHotbar({ setItem() { throw new Error("quota"); } }, defaultHotbar(registry), registry), false);
-	const first = defaultHotbar(registry);
-	first[0] = air;
-	assert.equal(defaultHotbar(registry)[0], stone);
+test("empty, unknown and non-block items have empty hotbar icons", () => {
+	const items = [{ id: 8, block: null }, { id: 9, block: stone }];
+	const slots = [{ item: 8 }, { item: 65535 }, null, { item: 9 }, ...Array(32).fill(null)];
+	const states = hotbarStates(slots, items);
+	assert.deepEqual(states, [0, 0, 0, stone, 0, 0, 0, 0, 0]);
+	states[3] = air;
+	assert.equal(hotbarStates(slots, items)[3], stone);
 });
 
 

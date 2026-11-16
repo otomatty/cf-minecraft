@@ -2,6 +2,7 @@ import { decodeArchive, encodeArchive, isRegionName, type ArchiveEntry, MAX_ARCH
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
+	gameMode?: "creative" | "survival";
 	generator: number;
 	seed: string;
 	gameTime: string;
@@ -201,13 +202,13 @@ export class OpfsStore {
 	 * Web Locks are required; the final read confirms the saved metadata while
 	 * the world lock is still held.
 	 */
-	async initializeMeta(seed: string, generator: number): Promise<Meta> {
+	async initializeMeta(seed: string, generator: number, gameMode: "creative" | "survival" = "creative"): Promise<Meta> {
 		return withWorldLock(this.world, async () => {
 			// Do not enqueue this callback: writeMeta itself awaits the write queue.
 			await this.queue;
 			const existing = await this.readMeta();
 			if (existing) return existing;
-			await this.writeMeta({ seed, generator, gameTime: "0", dayTime: "0" });
+			await this.writeMeta({ seed, generator, gameMode, gameTime: "0", dayTime: "0" });
 			const saved = await this.readMeta();
 			if (!saved) throw new Error("Cannot read initialized world metadata");
 			return saved;
@@ -226,7 +227,7 @@ export class OpfsStore {
 			const entries: ArchiveEntry[] = [];
 			let size = 12;
 			for await (const name of this.dir.keys()) {
-				if (name !== "meta.json" && !isRegionName(name)) continue;
+				if (name !== "meta.json" && name !== "player.dat" && !isRegionName(name)) continue;
 				const file = await (await this.dir.getFileHandle(name)).getFile();
 				size += 10 + new TextEncoder().encode(name).length + file.size;
 				if (size > MAX_ARCHIVE_BYTES) throw new Error("アーカイブは 1 GiB 以下にしてください");
@@ -243,7 +244,7 @@ export class OpfsStore {
 		const entries = decodeArchive(bytes);
 		const meta = parseMeta(entries.find(entry => entry.name === "meta.json")!.data, true);
 		for (const { name, data } of entries) {
-			if (name === "meta.json") continue;
+			if (name === "meta.json" || name === "player.dat") continue;
 			const input = new Uint8Array(8 + 49152);
 			new DataView(input.buffer).setUint32(0, data.length, true);
 			input.set(data.subarray(0, 49152), 8);
@@ -273,6 +274,14 @@ export class OpfsStore {
 		});
 	}
 
+	readPlayer(): Promise<Uint8Array | null> { return this.readFile("player.dat"); }
+
+	writePlayer(bytes: Uint8Array): Promise<void> {
+		const run = this.queue.then(() => this.writeFile("player.dat", bytes));
+		this.queue = run.catch(() => {});
+		return run;
+	}
+
 	writeMeta(meta: Meta): Promise<void> {
 		const run = this.queue.then(() => this.writeFile("meta.json", new TextEncoder().encode(JSON.stringify(meta))));
 		this.queue = run.catch(() => {});
@@ -281,7 +290,7 @@ export class OpfsStore {
 }
 
 /** Shared validation for saved and imported metadata. */
-function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
+export function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
 	const meta = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as Partial<Meta> | null;
 	if (!meta || typeof meta.seed !== "string" || !/^-?\d{1,19}$/.test(meta.seed)) throw new Error("meta.json のシードが不正です");
 	const time = (value: unknown): string => {
@@ -291,7 +300,9 @@ function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
 		return "0";
 	};
 	if (meta.generator !== undefined && (!Number.isInteger(meta.generator) || meta.generator < 0 || meta.generator > 0xffffffff)) throw new Error("meta.json のジェネレーターが不正です");
+	if (meta.gameMode !== undefined && meta.gameMode !== "creative" && meta.gameMode !== "survival") throw new Error("meta.json のゲームモードが不正です");
 	return {
+		gameMode: meta.gameMode ?? "creative",
 		generator: meta.generator ?? 1,
 		seed: BigInt.asIntN(64, BigInt(meta.seed)).toString(),
 		gameTime: time(meta.gameTime),
@@ -321,7 +332,7 @@ export class PendingChunkSaves {
 		return chunk ? Promise.resolve(chunk.data) : this.store.readChunk(cx, cz);
 	}
 
-	save(chunks: PendingChunk[], meta: Meta): Promise<void> {
+	save(chunks: PendingChunk[], meta: Meta, player?: Uint8Array): Promise<void> {
 		for (const chunk of chunks) this.pending.set(`${chunk.cx},${chunk.cz}`, chunk);
 		this.saving = this.saving.then(async () => {
 			for (const [key, chunk] of this.pending) {
@@ -329,6 +340,7 @@ export class PendingChunkSaves {
 				// A newer snapshot may have arrived while this write was in progress.
 				if (this.pending.get(key) === chunk) this.pending.delete(key);
 			}
+			if (player) await this.store.writePlayer(player);
 			await this.store.writeMeta(meta);
 			this.retrying = false;
 		}).catch((error) => {

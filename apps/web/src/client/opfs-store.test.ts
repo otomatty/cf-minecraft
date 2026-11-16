@@ -152,12 +152,12 @@ test("OPFS retries contended access handles for chunks and metadata", async () =
 	assert.equal(dir.accessAttempts, 3);
 	assert.deepEqual(await store.readChunk(0, 0), old);
 	dir.failAccess = 2;
-	const meta = { seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
+	const meta = { gameMode: "creative" as const, seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
 	await store.writeMeta(meta);
 	assert.deepEqual(await store.readMeta(), meta);
 });
 
-const meta = { seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
+const meta = { gameMode: "creative" as const, seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
 
 test("failed saves retain drained chunks, read the latest snapshot, and recover on the next save", async (t) => {
 	const dir = new MemoryDirectory();
@@ -242,7 +242,7 @@ test("regenerating a missing stored chunk in the real core does not make it dirt
 	core.start(1n, Generator.Flat);
 	core.setStored([[0, 0]]);
 	core.connect(1);
-	core.packet(1, new Uint8Array([0, 2, 2])); // Hello: protocol 2, view distance 2.
+	core.packet(1, new Uint8Array([0, 3, 2])); // Hello: protocol 3, view distance 2.
 	core.tick();
 	assert.ok(core.takeRequests().some(([cx, cz]) => cx === 0 && cz === 0));
 	core.chunkMissing(0, 0);
@@ -500,6 +500,7 @@ test("existing and imported metadata normalize seeds and times to signed i64", a
 		{ seed: "2026" },
 	]) {
 		const normalized = {
+			gameMode: "creative",
 			generator: Generator.DebugHills,
 			seed: BigInt.asIntN(64, BigInt(values.seed)).toString(),
 			gameTime: BigInt.asIntN(64, BigInt(values.gameTime ?? "0")).toString(),
@@ -570,7 +571,7 @@ test("concurrent stores initialize one world's metadata under the shared lock", 
 		a.initializeMeta("2026", Generator.Terrain),
 		b.initializeMeta("7", Generator.Flat),
 	]);
-	assert.deepEqual(first, { seed: "2026", generator: Generator.Terrain, gameTime: "0", dayTime: "0" });
+	assert.deepEqual(first, { gameMode: "creative", seed: "2026", generator: Generator.Terrain, gameTime: "0", dayTime: "0" });
 	assert.deepEqual(second, first);
 	assert.deepEqual(await b.readMeta(), first);
 	assert.deepEqual(await b.initializeMeta("42", Generator.DebugHills), first);
@@ -610,4 +611,35 @@ test("archives preserve Terrain and migrate generator-less metadata to DebugHill
 		const exported = decodeArchive(await imported.exportArchive());
 		assert.equal(JSON.parse(new TextDecoder().decode(exported[0].data)).generator, generator ?? Generator.DebugHills);
 	}
+});
+
+test("game mode validates metadata, defaults legacy worlds, and ignores new-world options on reopen", async () => {
+	const { parseMeta } = await import("./opfs-store.ts");
+	const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+	assert.equal(parseMeta(bytes({ seed: "1" }), false).gameMode, "creative");
+	for (const gameMode of ["creative", "survival"] as const) {
+		assert.equal(parseMeta(bytes({ seed: "1", gameMode }), true).gameMode, gameMode);
+	}
+	for (const gameMode of [null, 0, "", "hard", {}]) {
+		for (const strict of [false, true]) assert.throws(() => parseMeta(bytes({ seed: "1", gameMode }), strict), /ゲームモード/);
+	}
+	const dir = new MemoryDirectory(), store = await open(dir);
+	assert.equal((await store.initializeMeta("1", Generator.Flat, "survival")).gameMode, "survival");
+	assert.equal((await store.initializeMeta("2", Generator.Terrain, "creative")).gameMode, "survival");
+	const legacy = new MemoryDirectory(); legacy.seed("meta.json", bytes({ seed: "1" }));
+	assert.equal((await (await open(legacy)).initializeMeta("2", Generator.Terrain, "survival")).gameMode, "creative");
+});
+
+test("player inventory saves with chunks and metadata and participates in OPFS archives", async () => {
+	const dir = new MemoryDirectory(), store = await open(dir);
+	assert.equal(await store.readPlayer(), null);
+	const player = new Uint8Array([1, 0, 0, 1, 4]);
+	await new PendingChunkSaves(store).save([], meta, player);
+	assert.deepEqual(await store.readPlayer(), player);
+	const archive = await store.exportArchive();
+	assert.deepEqual(decodeArchive(archive).find(e => e.name === "player.dat")?.data, player);
+	// Imports validate regions, while the core alone interprets the optional player bytes.
+	const dirs = importRoot();
+	await store.importArchive("inventory-copy", archive);
+	assert.deepEqual(dirs.get("world-inventory-copy")?.files.get("player.dat")?.durable, player);
 });

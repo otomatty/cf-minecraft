@@ -63,6 +63,7 @@ export class WorldDO extends DurableObject<Env> {
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
 	// Memory only: eviction/recreation starts players at spawn, not a saved position.
+	private readonly inventories = new Map<string, Uint8Array>();
 	private readonly positions = new Map<string, [number, number, number]>();
 	private readonly sessions = new Map<number, string>();
 	private worldName: string | null = null;
@@ -133,6 +134,9 @@ export class WorldDO extends DurableObject<Env> {
 		const core = new ServerCore(instance);
 		this.codec = new RegionCodec(instance);
 		core.start(this.seed, this.generator);
+		const gameMode = this.meta("gamemode") ?? "creative";
+		this.setMeta("gamemode", gameMode);
+		core.setGameMode(gameMode === "survival" ? "survival" : "creative");
 		core.setTime(BigInt(this.meta("gameTime") ?? "0"), BigInt(this.meta("dayTime") ?? "0"));
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
 		core.setStored(stored.map((r) => [r.cx, r.cz] as const));
@@ -215,7 +219,7 @@ export class WorldDO extends DurableObject<Env> {
 		server.binaryType = "arraybuffer";
 
 		const id = this.nextClient++;
-		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user));
+		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user));
 		this.sockets.set(id, server);
 		this.users.set(id, user);
 		const session = request.headers.get("X-MC-Session");
@@ -260,6 +264,8 @@ export class WorldDO extends DurableObject<Env> {
 		const user = this.users.get(id);
 		const position = this.ensureCore().clientPosition(id);
 		if (user !== undefined && position !== undefined) this.positions.set(user, position);
+		const inventory = this.ensureCore().inventoryData(id);
+		if (user !== undefined && inventory !== undefined) this.inventories.set(user, inventory);
 	}
 
 	revoke(userId: string): number {
@@ -313,6 +319,7 @@ export class WorldDO extends DurableObject<Env> {
 		this.save();
 		this.stopTicking();
 		this.positions.clear();
+		this.inventories.clear();
 		this.generation?.reset();
 		this.generation = null;
 		this.core = null;

@@ -106,6 +106,7 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	t.after(authDB.close);
 	const world = new WorldDO(context, { DB: authDB.db });
 	world.ensureCore = () => ({
+		inventoryData() { return undefined; },
 		connect(id, allowTeleport, position) {
 			connected.push(id);
 			teleportPermissions.push(allowTeleport);
@@ -754,4 +755,41 @@ test("DO disables unresponsive generation and streams synchronous fallback chunk
 	assert.equal(pending.length, 8, "no RPCs issued after timeout");
 	assert.equal(f.world.metrics().generation.delivered, 0);
 	assert.equal(warnings.mock.callCount(), 1);
+});
+
+test("DO keeps each user's inventory across socket replacement", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	const core = f.world.ensureCore();
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	assert.equal((await f.join("user")).status, 101);
+	core.packet(1, client.encodeHello(2)); core.tick(); core.takeOutbox();
+	core.packet(1, client.encodeCreativeSetSlot(0, 1, 23));
+	core.packet(1, client.encodeSelectSlot(5)); core.tick();
+	const saved = core.inventoryData(1)!;
+	assert.equal((await f.join("user")).status, 101);
+	assert.equal(core.inventoryData(1), undefined);
+	assert.deepEqual(core.inventoryData(2), saved);
+	assert.equal((await f.join("another-user")).status, 101);
+	assert.notDeepEqual(core.inventoryData(3), saved);
+});
+
+test("DO restores the saved mode and persists creative for a missing gamemode", t => {
+	for (const gameMode of [undefined, "survival"] as const) {
+		const f = fixture(t);
+		delete f.world.ensureCore;
+		f.world.setMeta("seed", "2026"); f.world.setMeta("generator", String(Generator.Flat));
+		if (gameMode) f.world.setMeta("gamemode", gameMode);
+		const core = f.world.ensureCore();
+		const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		core.connect(1); core.packet(1, client.encodeHello(2)); core.tick();
+		for (const { data } of core.takeOutbox()) client.packet(data);
+		assert.equal(client.gameMode, gameMode ?? "creative");
+		assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, gameMode ?? "creative");
+		if (gameMode === "survival") assert.deepEqual(client.inventory, Array(36).fill(null));
+	}
 });
