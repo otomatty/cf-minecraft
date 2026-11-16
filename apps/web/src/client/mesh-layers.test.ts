@@ -35,12 +35,20 @@ test("leaf and water icons use terrain tints without changing alpha or shared te
 test("terrain tint layers follow texture names when the texture array is reordered", () => {
 	for (const names of [["water", "stone", "oak_leaves"], ["oak_leaves", "water", "stone"]]) {
 		const shader = terrainShader(names);
-		assert.ok(shader.includes(`if (in.layer == ${names.indexOf("oak_leaves")}u) { tint =`));
-		assert.ok(shader.includes(`if (in.layer == ${names.indexOf("water")}u) { tint =`));
+		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("oak_leaves")}u) { tintLayer =`));
+		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("water")}u) { tintLayer =`));
 		assert.ok(!shader.includes("__LEAVES_LAYER__") && !shader.includes("__WATER_LAYER__"));
 	}
+	const shader = terrainShader(["water", "oak_leaves"]);
+	const vertex = shader.slice(shader.indexOf("@vertex"), shader.indexOf("override renderLayer"));
+	assert.equal(vertex.match(/textureSampleLevel\(tintTex/g)?.length, 4);
+	assert.ok(vertex.includes("origins[section].xz & vec2<i32>(1023)"));
+	assert.ok(vertex.includes("out.tintColor = vec3<f32>(1.0)"));
+	assert.ok(shader.includes("@location(4) @interpolate(perspective, center) tintColor: vec3<f32>"));
+	assert.ok(shader.includes("color = color * in.tintColor"));
+	assert.ok(!shader.includes("g.grassTint"));
 	const absent = terrainShader(["stone"]);
-	assert.equal(absent.match(/if \(in.layer == 4294967295u\)/g)?.length, 2);
+	assert.equal(absent.match(/if \(out.layer == 4294967295u\)/g)?.length, 2);
 });
 
 function quad(x, y, z, rotated = false) {

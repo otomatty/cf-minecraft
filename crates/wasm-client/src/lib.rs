@@ -10,8 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
 use protocol::{C2S, PROTOCOL_VERSION, S2C};
+use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
+use worldgen::{Generator, TerrainGenerator};
 
 /// Stand-in for blocks of chunks that have not arrived yet: treated as solid
 /// so no faces are built against the unknown, then re-meshed on arrival.
@@ -42,6 +44,60 @@ struct Global(UnsafeCell<Option<State>>);
 // SAFETY: a WebAssembly instance without threads is only ever entered from one thread.
 unsafe impl Sync for Global {}
 static STATE: Global = Global(UnsafeCell::new(None));
+
+struct TintState {
+    terrain: Option<(i64, TerrainGenerator)>,
+    out: [u8; 16],
+}
+struct TintGlobal(UnsafeCell<TintState>);
+// SAFETY: each WebAssembly instance is entered by only one thread.
+unsafe impl Sync for TintGlobal {}
+static TINT: TintGlobal = TintGlobal(UnsafeCell::new(TintState {
+    terrain: None,
+    out: [0; 16],
+}));
+
+// A biome ID is one byte in the tint worker ABI, including ID 255.
+const _: () = assert!(BIOMES.len() <= u8::MAX as usize + 1);
+
+/// Writes grass RGB, leaves RGB, water RGB for each biome ID to client_out_ptr.
+/// Requires client_new; the result remains valid until the next client out write.
+#[no_mangle]
+pub extern "C" fn client_biome_colors() -> usize {
+    let out = &mut state().out;
+    out.clear();
+    for biome in BIOMES {
+        out.extend_from_slice(&biome.grass_color);
+        out.extend_from_slice(&biome.leaves_color);
+        out.extend_from_slice(&biome.water_color);
+    }
+    out.len()
+}
+
+/// Writes sixteen cell biome IDs to tint_out_ptr without requiring client_new.
+/// Keeps the last seed's prepared terrain generator across calls.
+#[no_mangle]
+pub extern "C" fn tint_biome_cells(seed: i64, generator: u32, cx: i32, cz: i32) -> usize {
+    // SAFETY: single-threaded; no exported function re-enters another.
+    let tint = unsafe { &mut *TINT.0.get() };
+    let cells = if Generator::from_id(generator) == Generator::Terrain {
+        if tint.terrain.as_ref().map(|(cached_seed, _)| *cached_seed) != Some(seed) {
+            tint.terrain = Some((seed, TerrainGenerator::new(seed)));
+        }
+        tint.terrain.as_ref().unwrap().1.biome_cells(cx, cz)
+    } else {
+        [0; 16]
+    };
+    tint.out = cells.map(|id| u8::try_from(id).expect("biome ID must fit in u8"));
+    tint.out.len()
+}
+
+/// Last tint_biome_cells result; valid until the next tint_biome_cells call.
+#[no_mangle]
+pub extern "C" fn tint_out_ptr() -> *const u8 {
+    // SAFETY: single-threaded, as for TINT writes.
+    unsafe { (&*TINT.0.get()).out.as_ptr() }
+}
 
 struct MeshOutput(UnsafeCell<Vec<u32>>);
 // SAFETY: each instance is entered by only one thread.
@@ -964,6 +1020,53 @@ mod tests {
             unsafe { client_packet(packet.as_ptr(), packet.len()) },
             u32::MAX
         );
+    }
+
+    #[test]
+    fn biome_colors_are_rgb_triples_in_registry_order() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let len = client_biome_colors();
+        assert_eq!(len, BIOMES.len() * 9);
+        let bytes = unsafe { std::slice::from_raw_parts(client_out_ptr(), len) };
+        for (id, biome) in BIOMES.iter().enumerate() {
+            assert_eq!(&bytes[id * 9..id * 9 + 3], biome.grass_color);
+            assert_eq!(&bytes[id * 9 + 3..id * 9 + 6], biome.leaves_color);
+            assert_eq!(&bytes[id * 9 + 6..id * 9 + 9], biome.water_color);
+        }
+    }
+
+    #[test]
+    fn tint_cells_work_without_world_and_match_worldgen() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        // Explicitly discard any world left by other tests to exercise Worker startup.
+        unsafe { *STATE.0.get() = None };
+        assert!(BIOMES.len() <= u8::MAX as usize + 1);
+        for seed in [2026, -71, 2026] {
+            for (cx, cz) in [(0, 0), (-3, -1), (32, -64)] {
+                assert_eq!(tint_biome_cells(seed, 2, cx, cz), 16);
+                let cells = unsafe { std::slice::from_raw_parts(tint_out_ptr(), 16) };
+                for (index, &id) in cells.iter().enumerate() {
+                    assert_eq!(
+                        u16::from(id),
+                        worldgen::biome_at(
+                            Generator::Terrain,
+                            seed,
+                            cx * 16 + (index % 4) as i32 * 4 + 2,
+                            cz * 16 + (index / 4) as i32 * 4 + 2,
+                        )
+                    );
+                }
+            }
+            for generator in [0, 1, 3, u32::MAX] {
+                assert_eq!(tint_biome_cells(seed, generator, -1, 2), 16);
+                assert_eq!(
+                    unsafe { std::slice::from_raw_parts(tint_out_ptr(), 16) },
+                    [0; 16]
+                );
+            }
+        }
+        assert!(unsafe { (&*STATE.0.get()).is_none() });
     }
 
     #[test]

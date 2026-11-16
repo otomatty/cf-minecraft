@@ -7,7 +7,7 @@ mod terrain;
 pub use terrain::{terrain_fingerprint, TerrainGenerator, SEA_LEVEL};
 
 use jmath::mix_stafford13;
-use world::{blocks, Chunk, Section, MIN_Y};
+use world::{biomes::BiomeId, blocks, Chunk, Section, MIN_Y};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Generator {
@@ -159,9 +159,45 @@ pub fn biome_at(gen: Generator, seed: i64, x: i32, z: i32) -> world::biomes::Bio
     }
 }
 
+/// Chunk cell biomes in z-major order; legacy generators retain the meadow default.
+/// Retain a `TerrainGenerator` and call its method to reuse seed-specific tables.
+pub fn biome_cells(gen: Generator, seed: i64, cx: i32, cz: i32) -> [BiomeId; 16] {
+    match gen {
+        Generator::Terrain => TerrainGenerator::new(seed).biome_cells(cx, cz),
+        _ => [0; 16],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_biomes_match_columns_across_land_sea_and_mountains() {
+        let mut sea = false;
+        let mut mountain = false;
+        for seed in [0, 2026, -71] {
+            let terrain = TerrainGenerator::new(seed);
+            for cz in [-64, -32, -1, 0, 32, 64] {
+                for cx in [-64, -32, -1, 0, 32, 64] {
+                    let cells = terrain.biome_cells(cx, cz);
+                    assert_eq!(cells, biome_cells(Generator::Terrain, seed, cx, cz));
+                    for (index, id) in cells.into_iter().enumerate() {
+                        let x = cx * 16 + (index % 4) as i32 * 4 + 2;
+                        let z = cz * 16 + (index / 4) as i32 * 4 + 2;
+                        assert_eq!(id, terrain.biome_at(x, z), "seed={seed}, x={x}, z={z}");
+                        let kind = world::biomes::BIOMES[id as usize].terrain;
+                        sea |= kind == world::biomes::TerrainKind::Sea;
+                        mountain |= kind == world::biomes::TerrainKind::Mountain;
+                    }
+                    for gen in [Generator::Flat, Generator::DebugHills] {
+                        assert_eq!(biome_cells(gen, seed, cx, cz), [0; 16]);
+                    }
+                }
+            }
+        }
+        assert!(sea && mountain, "samples must cover sea and mountains");
+    }
 
     #[test]
     fn classic_flat_layers() {

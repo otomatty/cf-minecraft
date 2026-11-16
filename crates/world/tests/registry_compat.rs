@@ -77,3 +77,56 @@ fn snapshot() -> String {
     }
     out
 }
+
+#[test]
+fn biome_ids_and_original_tint_palette_match() {
+    use world::biomes::BIOMES;
+
+    let expected = [
+        ("mild_meadow", [124, 184, 84], [88, 152, 70], [62, 128, 200]),
+        ("dry_sands", [190, 182, 100], [158, 160, 78], [60, 150, 190]),
+        ("rain_grove", [72, 170, 74], [48, 140, 58], [56, 132, 170]),
+        ("sun_steppe", [176, 178, 88], [140, 150, 70], [66, 140, 190]),
+        ("quiet_snow", [128, 176, 140], [96, 148, 120], [58, 96, 170]),
+        ("reed_mire", [98, 138, 72], [90, 124, 60], [76, 112, 96]),
+        ("open_tide", [118, 178, 86], [86, 150, 72], [52, 104, 196]),
+        (
+            "silent_floe",
+            [128, 176, 140],
+            [96, 148, 120],
+            [56, 84, 150],
+        ),
+        ("clear_shoal", [126, 186, 90], [90, 154, 74], [64, 170, 200]),
+        (
+            "pale_strand",
+            [150, 186, 96],
+            [110, 156, 78],
+            [64, 150, 200],
+        ),
+        (
+            "shingle_edge",
+            [122, 160, 104],
+            [96, 136, 88],
+            [60, 110, 160],
+        ),
+        (
+            "bare_ridge",
+            [134, 170, 112],
+            [100, 140, 92],
+            [60, 120, 190],
+        ),
+        (
+            "white_crest",
+            [128, 176, 150],
+            [96, 148, 124],
+            [58, 100, 176],
+        ),
+    ];
+    assert_eq!(BIOMES.len(), expected.len());
+    for (biome, (name, grass, leaves, water)) in BIOMES.iter().zip(expected) {
+        assert_eq!(biome.name, name);
+        assert_eq!(biome.grass_color, grass);
+        assert_eq!(biome.leaves_color, leaves);
+        assert_eq!(biome.water_color, water);
+    }
+}

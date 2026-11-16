@@ -192,3 +192,31 @@ fn omitted_defaults_match_explicit_values() {
         generate_fixture(&explicit, BIOMES).unwrap()
     );
 }
+
+#[test]
+fn biome_colors_are_required_rgb_bytes_and_unknown_fields_are_rejected() {
+    for (field, value) in [
+        ("grass_color", "[124, 184, 84]"),
+        ("leaves_color", "[88, 152, 70]"),
+        ("water_color", "[62, 128, 200]"),
+    ] {
+        let line = format!("{field} = {value}\n");
+        assert!(BIOMES.contains(&line));
+        let error = generate_fixture(BLOCKS, &BIOMES.replacen(&line, "", 1)).unwrap_err();
+        assert!(
+            error.contains(&format!("missing field `{field}`")),
+            "{error}"
+        );
+        for invalid in ["[256, 0, 0]", "[-1, 0, 0]", "[0, 0]", "[0, 0, 0, 0]"] {
+            let error = generate_fixture(
+                BLOCKS,
+                &BIOMES.replacen(&line, &format!("{field} = {invalid}\n"), 1),
+            )
+            .unwrap_err();
+            assert!(error.contains("biomes.toml"), "{error}");
+        }
+    }
+    let error =
+        generate_fixture(BLOCKS, &BIOMES.replacen("water_color", "water_colour", 1)).unwrap_err();
+    assert!(error.contains("unknown field `water_colour`"), "{error}");
+}
