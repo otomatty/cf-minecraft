@@ -12,11 +12,12 @@
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
+import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
-import { downsample, GRASS_TINT, LEAVES_TINT, WATER_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
+import { downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 
 const MAX_SECTIONS = 16384;
 /** A fence has a post and up to eight rails, with six faces per box. */
@@ -57,6 +58,8 @@ struct Globals {
 @group(0) @binding(3) var samp: sampler;
 @group(0) @binding(4) var lightTex: texture_2d<f32>;
 @group(0) @binding(5) var lightSampler: sampler;
+@group(0) @binding(6) var tintTex: texture_2d_array<f32>;
+@group(0) @binding(7) var tintSampler: sampler;
 
 struct VOut {
 	@builtin(position) pos: vec4<f32>,
@@ -64,7 +67,7 @@ struct VOut {
 	@location(1) shade: f32,
 	@location(2) rel: vec3<f32>,
 	@location(3) @interpolate(flat) layer: u32,
-	@location(4) @interpolate(flat) tint: u32,
+	@location(4) @interpolate(perspective, center) tintColor: vec3<f32>,
 	@location(5) light: vec2<f32>,
 };
 
@@ -88,7 +91,21 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	out.shade = faceShade[face] * aoShade[ao];
 	out.rel = rel;
 	out.layer = a.y & 4095u;
-	out.tint = (a.y >> 12u) & 1u;
+	out.tintColor = vec3<f32>(1.0);
+	if (((a.y >> 12u) & 1u) == 1u) {
+		var tintLayer = 0;
+		if (out.layer == __LEAVES_LAYER__u) { tintLayer = 1; }
+		if (out.layer == __WATER_LAYER__u) { tintLayer = 2; }
+		let worldXZ = vec2<f32>(origins[section].xz & vec2<i32>(1023)) + local.xz;
+		let uv = worldXZ / 4.0 / 256.0;
+		let step = 1.0 / 256.0;
+		out.tintColor = (
+			textureSampleLevel(tintTex, tintSampler, uv + vec2<f32>(-step, -step), tintLayer, 0.0).rgb +
+			textureSampleLevel(tintTex, tintSampler, uv + vec2<f32>(step, -step), tintLayer, 0.0).rgb +
+			textureSampleLevel(tintTex, tintSampler, uv + vec2<f32>(-step, step), tintLayer, 0.0).rgb +
+			textureSampleLevel(tintTex, tintSampler, uv + vec2<f32>(step, step), tintLayer, 0.0).rgb
+		) * 0.25;
+	}
 	out.light = (vec2<f32>(f32((a.y >> 17u) & 15u), f32((a.y >> 13u) & 15u)) + vec2<f32>(0.5)) / 16.0;
 	return out;
 }
@@ -99,12 +116,7 @@ override renderLayer: u32 = 0u;
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
 	var color = pixel.rgb;
-	if (in.tint == 1u) {
-		var tint = g.grassTint.rgb;
-		if (in.layer == __LEAVES_LAYER__u) { tint = vec3<f32>(${LEAVES_TINT.map(v => (v / 255).toFixed(6)).join(", ")}); }
-		if (in.layer == __WATER_LAYER__u) { tint = vec3<f32>(${WATER_TINT.map(v => (v / 255).toFixed(6)).join(", ")}); }
-		color = color * tint;
-	}
+	color = color * in.tintColor;
 	color = color * in.shade * textureSample(lightTex, lightSampler, in.light).rgb;
 	if (renderLayer == 1u && pixel.a < 0.5) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
@@ -278,6 +290,7 @@ export class Renderer {
 	private readonly outlineVertices: GPUBuffer;
 	private readonly terrainBind: GPUBindGroup;
 	private readonly lightTexture: GPUTexture;
+	private readonly tintTexture: GPUTexture;
 	private readonly outlineBind: GPUBindGroup;
 	private depth: GPUTexture | null = null;
 	private readonly sections = new Map<string, SectionMesh>();
@@ -387,6 +400,8 @@ export class Renderer {
 			{ binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
 			{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} },
 			{ binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+			{ binding: 6, visibility: GPUShaderStage.VERTEX, texture: { viewDimension: "2d-array" } },
+			{ binding: 7, visibility: GPUShaderStage.VERTEX, sampler: {} },
 		] });
 		const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [terrainLayout] });
 		const terrainPipeline = (layer: number) => device.createRenderPipeline({
@@ -409,6 +424,7 @@ export class Renderer {
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
 		this.lightTexture = device.createTexture({ size: [16, 16], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.tintTexture = device.createTexture({ size: [256, 256, 3], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		this.terrainBind = device.createBindGroup({
 			layout: this.terrain.getBindGroupLayout(0),
 			entries: [
@@ -418,6 +434,8 @@ export class Renderer {
 				{ binding: 3, resource: sampler },
 				{ binding: 4, resource: this.lightTexture.createView() },
 				{ binding: 5, resource: device.createSampler({ minFilter: "linear", magFilter: "linear" }) },
+				{ binding: 6, resource: this.tintTexture.createView({ dimension: "2d-array" }) },
+				{ binding: 7, resource: device.createSampler({ addressModeU: "repeat", addressModeV: "repeat", minFilter: "linear", magFilter: "linear" }) },
 			],
 		});
 
@@ -449,6 +467,12 @@ export class Renderer {
 			layout: this.outline.getBindGroupLayout(0),
 			entries: [{ binding: 0, resource: { buffer: this.globals } }],
 		});
+	}
+
+	writeTints(rects: readonly TintRect[]): void {
+		for (const r of rects) this.device.queue.writeTexture(
+			{ texture: this.tintTexture, origin: [r.x, r.y, 0] }, r.data,
+			{ bytesPerRow: r.width * 4, rowsPerImage: r.height }, [r.width, r.height, 3]);
 	}
 
 	static async create(canvas: HTMLCanvasElement, textureNames: string[]): Promise<Renderer> {

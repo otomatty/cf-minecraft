@@ -256,6 +256,31 @@ impl TerrainGenerator {
         self.biome_for_height(x, z, self.surface_y(x, z))
     }
 
+    /// Biomes at the centers of 4x4-block cells, in z-major order (j * 4 + i).
+    /// Shares the chunk's 5x5 density lines across all sixteen samples.
+    pub fn biome_cells(&self, cx: i32, cz: i32) -> [BiomeId; 16] {
+        let grid = self.grid(cx, cz);
+        std::array::from_fn(|index| {
+            let (i, j) = (index % 4, index / 4);
+            let corner = j * 5 + i;
+            let line = Self::column(
+                [
+                    &grid[corner],
+                    &grid[corner + 1],
+                    &grid[corner + 5],
+                    &grid[corner + 6],
+                ],
+                0.5,
+                0.5,
+            );
+            self.biome_for_height(
+                cx * 16 + i as i32 * 4 + 2,
+                cz * 16 + j as i32 * 4 + 2,
+                Self::top(&line),
+            )
+        })
+    }
+
     fn coating(b: &Biome, top: i32, y: i32, steep: bool) -> world::BlockState {
         if top - y > i32::from(b.depth) {
             blocks::STONE
@@ -270,7 +295,6 @@ impl TerrainGenerator {
         }
     }
 
-    #[cfg(test)]
     fn grid(&self, cx: i32, cz: i32) -> [[f64; Y_POINTS]; 25] {
         std::array::from_fn(|i| {
             self.density_line(

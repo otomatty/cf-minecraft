@@ -76,11 +76,22 @@ struct Biome {
     name: String,
     surface: String,
     subsurface: String,
+    #[serde(deserialize_with = "rgb")]
     grass_color: [u8; 3],
+    #[serde(deserialize_with = "rgb")]
     leaves_color: [u8; 3],
+    #[serde(deserialize_with = "rgb")]
+    water_color: [u8; 3],
     temperature: [f64; 2],
     humidity: [f64; 2],
 }
+fn rgb<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<[u8; 3], D::Error> {
+    let channels = Vec::<u8>::deserialize(deserializer)?;
+    channels
+        .try_into()
+        .map_err(|_| serde::de::Error::custom("expected exactly 3 RGB bytes"))
+}
+
 fn stone() -> String {
     "stone".into()
 }
@@ -424,7 +435,7 @@ fn generate(root: &Path, dest: &Path) {
                 b.name
             );
         }
-        writeln!(out, "Biome {{ terrain: TerrainKind::{}, depth: {}, underwater: {}, slope: {}, freeze: {}, name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.terrain, b.depth, resolve(&b.underwater), resolve(&b.slope), b.freeze, b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.temperature, b.humidity).unwrap();
+        writeln!(out, "Biome {{ terrain: TerrainKind::{}, depth: {}, underwater: {}, slope: {}, freeze: {}, name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, water_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.terrain, b.depth, resolve(&b.underwater), resolve(&b.slope), b.freeze, b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.water_color, b.temperature, b.humidity).unwrap();
     }
     out.push_str("];\n");
     fs::write(dest.join("biomes.rs"), out).unwrap();

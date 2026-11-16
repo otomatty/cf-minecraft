@@ -51,6 +51,9 @@ export interface ClientExports {
 	client_enc_teleport(x: number, y: number, z: number): number;
 	client_enc_pos(x: number, y: number, z: number, yaw: number, pitch: number): number;
 	client_enc_set_block(x: number, y: number, z: number, block: number): number;
+	client_biome_colors(): number;
+	tint_biome_cells(seed: bigint, generator: number, cx: number, cz: number): number;
+	tint_out_ptr(): number;
 	client_texture_names(): number;
 	client_block_names(): number;
 	client_block_registry(): number;
@@ -304,6 +307,15 @@ export class ClientCore {
 
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_set_block(x, y, z, block));
+	}
+
+	biomeColors(): Uint8Array<ArrayBuffer> {
+		return this.out(this.x.client_biome_colors());
+	}
+
+	tintCells(seed: bigint, generator: number, cx: number, cz: number): Uint8Array<ArrayBuffer> {
+		const len = this.x.tint_biome_cells(seed, generator, cx, cz);
+		return new Uint8Array(this.x.memory.buffer, this.x.tint_out_ptr(), len).slice();
 	}
 
 	textureNames(): string[] {
