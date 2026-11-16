@@ -12,6 +12,7 @@
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
+import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderItem } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -289,6 +290,8 @@ export class Renderer {
 	private readonly clouds: GPURenderPipeline;
 	private readonly skyBind: GPUBindGroup;
 	private readonly terrain: GPURenderPipeline;
+	private readonly items: GPURenderPipeline;
+	private readonly itemBuffer: GPUBuffer;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
@@ -430,6 +433,35 @@ export class Renderer {
 			primitive: { topology: "triangle-list", cullMode: layer === 2 ? "none" : "back", frontFace: "ccw" },
 			depthStencil: { format: "depth24plus", depthWriteEnabled: layer !== 2, depthCompare: "less" },
 		});
+		const terrainSource = terrainShader(textureNames);
+		const itemVertexShader = terrainSource.replace(/@vertex[\s\S]*?override renderLayer/, `
+@vertex fn vs(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>) -> VOut {
+    var out: VOut;
+    out.pos = g.viewProj * vec4<f32>(pos,1.0); out.rel = pos; out.uv = uv; out.shade = shade;
+    out.layer = u32(layer); out.light = light; out.tintColor = vec3<f32>(1.0); return out;
+}
+override renderLayer`);
+		if (itemVertexShader === terrainSource) throw new Error("Item shader vertex replacement did not match terrain shader");
+		const itemShader = itemVertexShader.replace("pixel.a < 0.5", "pixel.a <= 0.0");
+		if (itemShader === itemVertexShader) throw new Error("Item shader alpha replacement did not match terrain shader");
+		const itemModule = device.createShaderModule({ code: itemShader });
+		this.items = device.createRenderPipeline({
+			layout: pipelineLayout,
+			vertex: {
+				module: itemModule, entryPoint: "vs",
+				buffers: [{ arrayStride: 36, attributes: [
+					{ shaderLocation: 0, offset: 0, format: "float32x3" },
+					{ shaderLocation: 1, offset: 12, format: "float32x2" },
+					{ shaderLocation: 2, offset: 20, format: "float32" },
+					{ shaderLocation: 3, offset: 24, format: "float32" },
+					{ shaderLocation: 4, offset: 28, format: "float32x2" },
+				] }],
+			},
+			fragment: { module: itemModule, entryPoint: "fs", constants: { renderLayer: 1 }, targets: [{ format: this.format }] },
+			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+		});
+		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -567,7 +599,7 @@ export class Renderer {
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -605,6 +637,8 @@ export class Renderer {
 			this.device.queue.writeBuffer(this.outlineVertices, 0, outlineBox(target, block, frac));
 		}
 
+		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
+		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({
 			colorAttachments: [
@@ -644,7 +678,15 @@ export class Renderer {
 			pass.draw(6);
 		};
 		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
-			if (layer === 2 && cloudsFirst) drawClouds();
+			if (layer === 2) {
+				if (itemData.length) {
+					pass.setPipeline(this.items);
+					pass.setBindGroup(0, this.terrainBind);
+					pass.setVertexBuffer(0, this.itemBuffer);
+					pass.draw(itemData.length / 9);
+				}
+				if (cloudsFirst) drawClouds();
+			}
 			pass.setPipeline(pipeline);
 			pass.setBindGroup(0, this.terrainBind);
 			for (const mesh of layer === 2 ? transparent : visible) {

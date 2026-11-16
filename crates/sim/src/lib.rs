@@ -16,6 +16,7 @@
 //! Given the same seed and the same sequence of calls, every host ends up in
 //! the same state. `state_hash` makes that checkable.
 
+pub mod entity;
 pub mod inventory;
 pub mod scenario;
 use inventory::{Inventory, Stack};
@@ -60,6 +61,7 @@ const COLLISION_TOLERANCE: f64 = 0.1;
 type ChunkPos = (i32, i32);
 
 struct Client {
+    visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     inventory: Inventory,
     inventory_dirty: bool,
     joined: bool,
@@ -100,6 +102,8 @@ pub struct Stats {
 }
 
 pub struct Server {
+    entities: BTreeMap<u32, entity::Entity>,
+    next_entity_id: u32,
     game_mode: GameMode,
     seed: i64,
     generator: Generator,
@@ -128,6 +132,8 @@ impl Server {
             (generator == Generator::Terrain).then(|| worldgen::TerrainGenerator::new(seed));
         let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
+            entities: BTreeMap::new(),
+            next_entity_id: 1,
             game_mode: GameMode::Creative,
             seed,
             generator,
@@ -172,6 +178,197 @@ impl Server {
             }
             .encode(),
         ));
+    }
+
+    pub fn entities(&self) -> &BTreeMap<u32, entity::Entity> {
+        &self.entities
+    }
+
+    fn spawn_item(
+        &mut self,
+        item: u16,
+        count: u8,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+        pickup_delay: u32,
+    ) {
+        // Exhaustion never reuses an ID.
+        if self.next_entity_id == 0 {
+            return;
+        }
+        let id = self.next_entity_id;
+        self.next_entity_id = id.checked_add(1).unwrap_or(0);
+        if self.entities.len() >= 1024 {
+            self.entities.pop_first();
+        }
+        self.entities.insert(
+            id,
+            entity::Entity {
+                kind: entity::EntityKind::Item,
+                pos,
+                velocity,
+                item,
+                count,
+                age: 0,
+                pickup_delay,
+                on_ground: false,
+            },
+        );
+    }
+    fn tick_entities(&mut self) {
+        for e in self.entities.values_mut() {
+            if self.world.chunks.contains_key(&e.chunk()) {
+                e.tick(&self.world);
+            }
+        }
+        self.entities
+            .retain(|_, e| e.age < 6000 && e.pos[1] >= (MIN_Y - 64) as f64);
+        if (self.game_time + 1) % 10 == 0 {
+            self.merge_entities();
+        }
+        for e in self.entities.values_mut() {
+            if e.pickup_delay != 0 || !self.world.chunks.contains_key(&e.chunk()) {
+                continue;
+            }
+            for c in self.clients.values_mut().filter(|c| c.joined) {
+                let mut bounds = physics::Player::new(c.pos).bounds();
+                for (a, amount) in [1.0, 0.5, 1.0].into_iter().enumerate() {
+                    bounds.min[a] -= amount;
+                    bounds.max[a] += amount;
+                }
+                if bounds.intersects(e.bounds()) {
+                    let remaining = c.inventory.add(e.item, e.count as u32) as u8;
+                    c.inventory_dirty |= remaining != e.count;
+                    e.count = remaining;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        self.entities.retain(|_, e| e.count != 0);
+    }
+    /// Returns the number of candidate pairs compared, also used by budget tests.
+    fn merge_entities(&mut self) -> usize {
+        const MAX_COMPARISONS: usize = 4096;
+        let mut grid: BTreeMap<(u16, i32, i32, i32), Vec<u32>> = BTreeMap::new();
+        for (&id, e) in &self.entities {
+            if e.count == items::info(e.item).unwrap().max_stack
+                || !self.world.chunks.contains_key(&e.chunk())
+            {
+                continue;
+            }
+            let [x, y, z] = e.pos.map(|v| v.floor() as i32);
+            grid.entry((e.item, x, y, z)).or_default().push(id);
+        }
+        let ids: Vec<_> = self.entities.keys().copied().collect();
+        let mut comparisons = 0;
+        for id in ids {
+            let Some(a) = self.entities.get(&id) else {
+                continue;
+            };
+            let max_stack = items::info(a.item).unwrap().max_stack;
+            if a.count == max_stack || !self.world.chunks.contains_key(&a.chunk()) {
+                continue;
+            }
+            let [x, y, z] = a.pos.map(|v| v.floor() as i32);
+            // Merge sorted bucket iterators without copying every nearby ID.
+            // The queue holds at most one next candidate per neighboring cell.
+            let mut candidates = BTreeMap::new();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(bucket) = grid.get(&(a.item, x + dx, y + dy, z + dz)) {
+                            let start = bucket.partition_point(|&other| other <= id);
+                            let mut rest = bucket[start..].iter();
+                            if let Some(&first) = rest.next() {
+                                candidates.insert(first, rest);
+                            }
+                        }
+                    }
+                }
+            }
+            while let Some((other, mut rest)) = candidates.pop_first() {
+                if let Some(&next) = rest.next() {
+                    candidates.insert(next, rest);
+                }
+                let a = &self.entities[&id];
+                if a.count == max_stack {
+                    break;
+                }
+                let Some(b) = self.entities.get(&other) else {
+                    continue;
+                };
+                if b.count == max_stack {
+                    continue;
+                }
+                if comparisons == MAX_COMPARISONS {
+                    return comparisons;
+                }
+                comparisons += 1;
+                if (0..3).all(|axis| (a.pos[axis] - b.pos[axis]).abs() <= 0.5)
+                    && a.count as u16 + b.count as u16 <= max_stack as u16
+                {
+                    let b = self.entities.remove(&other).unwrap();
+                    let a = self.entities.get_mut(&id).unwrap();
+                    a.count += b.count;
+                    a.age = a.age.max(b.age);
+                    a.pickup_delay = a.pickup_delay.max(b.pickup_delay);
+                }
+            }
+        }
+        comparisons
+    }
+
+    fn sync_entities(&mut self) {
+        for (&client_id, c) in &mut self.clients {
+            if !c.joined {
+                continue;
+            }
+            let visible: BTreeMap<_, _> = self
+                .entities
+                .iter()
+                .filter(|(_, e)| c.sent.contains(&e.chunk()))
+                .map(|(&id, e)| (id, (e.pos, e.count)))
+                .collect();
+            for &id in c
+                .visible_entities
+                .keys()
+                .filter(|id| !visible.contains_key(id))
+            {
+                self.outbox
+                    .push((client_id, S2C::EntityRemove { id }.encode()));
+            }
+            for (&id, &(pos, count)) in &visible {
+                let [x, y, z] = pos;
+                if let Some(&(old_pos, old_count)) = c.visible_entities.get(&id) {
+                    if old_pos != pos {
+                        self.outbox
+                            .push((client_id, S2C::EntityMove { id, x, y, z }.encode()));
+                    }
+                    if old_count != count {
+                        self.outbox
+                            .push((client_id, S2C::EntityCount { id, count }.encode()));
+                    }
+                } else {
+                    let e = &self.entities[&id];
+                    self.outbox.push((
+                        client_id,
+                        S2C::EntitySpawn {
+                            id,
+                            kind: e.kind as u8,
+                            item: e.item,
+                            count,
+                            x,
+                            y,
+                            z,
+                        }
+                        .encode(),
+                    ));
+                }
+            }
+            c.visible_entities = visible;
+        }
     }
 
     pub fn seed(&self) -> i64 {
@@ -243,6 +440,7 @@ impl Server {
         self.clients.insert(
             id,
             Client {
+                visible_entities: BTreeMap::new(),
                 inventory: inventory
                     .and_then(|bytes| Inventory::from_bytes(bytes).ok())
                     .unwrap_or_else(|| match self.game_mode {
@@ -298,6 +496,7 @@ impl Server {
             self.apply(id, packet);
         }
         self.stream_chunks();
+        self.tick_entities();
 
         self.game_time += 1;
         self.day_time += 1;
@@ -320,6 +519,7 @@ impl Server {
         if self.game_time % UNLOAD_INTERVAL == 0 {
             self.unload_far_chunks();
         }
+        self.sync_entities();
         let changed: Vec<_> = self
             .clients
             .iter()
@@ -333,6 +533,32 @@ impl Server {
 
     fn apply(&mut self, id: u32, packet: C2S) {
         match packet {
+            C2S::DropItem { dir } => {
+                let client = self.clients.get_mut(&id).unwrap();
+                if !client.joined || !dir.iter().all(|v| v.is_finite()) {
+                    self.stats.packets_rejected += 1;
+                    return;
+                }
+                if self.next_entity_id == 0 {
+                    return;
+                }
+                let Some(item) = client.inventory.take_selected() else {
+                    return;
+                };
+                client.inventory_dirty = true;
+                let mut pos = client.pos;
+                pos[1] += 1.3;
+                let mut velocity = dir.map(f64::from);
+                let length = (velocity[0] * velocity[0]
+                    + velocity[1] * velocity[1]
+                    + velocity[2] * velocity[2])
+                    .sqrt();
+                for v in &mut velocity {
+                    *v = *v / length.max(1.0) * 0.3;
+                }
+                velocity[1] += 0.1;
+                self.spawn_item(item, 1, pos, velocity, 40);
+            }
             C2S::Hello {
                 protocol,
                 view_distance,
@@ -410,17 +636,29 @@ impl Server {
                 if let Some(old) = self.world.set_block(x, y, z, state) {
                     if old != state {
                         if self.game_mode == GameMode::Survival {
-                            let client = self.clients.get_mut(&id).unwrap();
-                            let before = client.inventory.clone();
                             if state == blocks::AIR {
                                 if let Some(item) = items::for_block(old) {
-                                    // Overflow is discarded until dropped items arrive in the next PR.
-                                    client.inventory.add(item, 1);
+                                    let mut random = jmath::JavaRandom::new(
+                                        self.seed.wrapping_add(self.next_entity_id as i64),
+                                    );
+                                    let velocity = [
+                                        random.next_double() * 0.1 - 0.05,
+                                        0.1,
+                                        random.next_double() * 0.1 - 0.05,
+                                    ];
+                                    self.spawn_item(
+                                        item,
+                                        1,
+                                        [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
+                                        velocity,
+                                        10,
+                                    );
                                 }
                             } else {
+                                let client = self.clients.get_mut(&id).unwrap();
                                 client.inventory.take_selected();
+                                client.inventory_dirty = true;
                             }
-                            client.inventory_dirty |= before != client.inventory;
                         }
                         self.stats.blocks_changed += 1;
                         self.broadcast_block(x, y, z, state);
@@ -699,6 +937,7 @@ impl Server {
             .collect();
         for (cx, cz) in removed {
             self.world.remove_chunk(cx, cz);
+            self.entities.retain(|_, e| e.chunk() != (cx, cz));
         }
     }
 
@@ -775,6 +1014,20 @@ impl Server {
         for (&id, client) in &self.clients {
             h.bytes(&id.to_be_bytes());
             h.bytes(&client.inventory.to_bytes());
+        }
+        h.bytes(&self.next_entity_id.to_be_bytes());
+        h.i64(self.entities.len() as i64);
+        for (&id, e) in &self.entities {
+            h.bytes(&id.to_be_bytes());
+            h.u8(e.kind as u8);
+            for v in e.pos.into_iter().chain(e.velocity) {
+                h.bytes(&v.to_bits().to_be_bytes());
+            }
+            h.bytes(&e.item.to_be_bytes());
+            h.u8(e.count);
+            h.bytes(&e.age.to_be_bytes());
+            h.bytes(&e.pickup_delay.to_be_bytes());
+            h.u8(e.on_ground as u8);
         }
         self.world.hash_into(&mut h);
         h.finish()
@@ -876,6 +1129,43 @@ mod tests {
         s
     }
 
+    #[test]
+    fn crowded_unmergeable_items_respect_comparison_budget() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.generate_now(0, 0);
+        for _ in 0..1024 {
+            s.spawn_item(1, 40, [2.5, 80.0, 2.5], [0.0; 3], 40);
+        }
+        assert_eq!(s.merge_entities(), 4096);
+        assert_eq!(s.entities.len(), 1024);
+        assert!(s.entities.values().all(|e| e.count == 40));
+        assert_eq!(s.merge_entities(), 4096);
+    }
+
+    #[test]
+    fn merge_grid_filters_full_distant_and_other_items_and_orders_neighbor_ids() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.generate_now(0, 0);
+        // Both neighboring cells are visited before comparing, in global ID order.
+        s.spawn_item(1, 40, [2.0, 80.0, 2.5], [0.0; 3], 40);
+        s.spawn_item(1, 24, [2.5, 80.0, 2.5], [0.0; 3], 40);
+        s.spawn_item(1, 24, [1.5, 80.0, 2.5], [0.0; 3], 40);
+        assert_eq!(s.merge_entities(), 1);
+        assert_eq!(s.entities[&1].count, 64);
+        assert!(!s.entities.contains_key(&2));
+        assert_eq!(s.entities[&3].count, 24);
+        s.entities.clear();
+        for _ in 0..1024 {
+            s.spawn_item(1, 64, [2.5, 80.0, 2.5], [0.0; 3], 40);
+        }
+        assert_eq!(s.merge_entities(), 0);
+        s.entities.clear();
+        s.spawn_item(1, 40, [2.5, 80.0, 2.5], [0.0; 3], 40);
+        s.spawn_item(2, 40, [2.5, 80.0, 2.5], [0.0; 3], 40);
+        s.spawn_item(1, 40, [8.5, 80.0, 2.5], [0.0; 3], 40);
+        assert_eq!(s.merge_entities(), 0);
+    }
+
     fn survival() -> (Server, [i32; 3]) {
         let mut s = Server::new(1, Generator::Flat);
         s.set_game_mode(GameMode::Survival);
@@ -910,6 +1200,12 @@ mod tests {
             s.world.set_block(pos[0], pos[1], pos[2], state);
             edit(&mut s, pos, blocks::AIR);
             s.tick();
+            assert_eq!(s.entities.len(), 1);
+            assert!(s.clients[&1].inventory.selected_stack().is_none());
+            for _ in 0..9 {
+                s.tick();
+            }
+            assert!(s.entities.is_empty());
             assert_eq!(
                 s.clients[&1].inventory.selected_stack(),
                 Some(Stack {
@@ -1016,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn full_survival_inventory_discards_collected_overflow() {
+    fn full_survival_inventory_preserves_dropped_overflow() {
         let (mut s, pos) = survival();
         let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
         assert_eq!(inv.add(1, 36 * 64), 0);
@@ -1024,6 +1320,10 @@ mod tests {
         s.world.set_block(pos[0], pos[1], pos[2], blocks::DIRT);
         edit(&mut s, pos, blocks::AIR);
         s.tick();
+        for _ in 0..10 {
+            s.tick();
+        }
+        assert_eq!(s.entities.len(), 1);
         assert_eq!(s.clients[&1].inventory, before);
         assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
         assert!(inventories(&mut s).is_empty());

@@ -8,7 +8,11 @@ import type { LightMutation } from "./light-pool.ts";
 export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null }
 export interface InventorySlot { item: number; count: number }
 
+export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ClientExports {
+	client_entities(): number;
+	client_entity_light(x: number, y: number, z: number): number;
+	client_enc_drop_item(x: number, y: number, z: number): number;
 	client_game_mode(): number;
 	client_selected_slot(): number;
 	client_slot_item(slot: number): number;
@@ -73,7 +77,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -121,6 +125,30 @@ export const FACE_NORMALS: ReadonlyArray<readonly [number, number, number]> = [
 ];
 
 export class ClientCore {
+	get entities(): ItemEntity[] {
+		const bytes = this.out(this.x.client_entities());
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const result: ItemEntity[] = [];
+		// Each packed record has a seven-byte header followed by six f64 coordinates.
+		for (let offset = 0; offset < bytes.length; offset += 55) {
+			result.push({
+				id: view.getUint32(offset), item: view.getUint16(offset + 4), count: view.getUint8(offset + 6),
+				position: [view.getFloat64(offset + 7), view.getFloat64(offset + 15), view.getFloat64(offset + 23)],
+				previous: [view.getFloat64(offset + 31), view.getFloat64(offset + 39), view.getFloat64(offset + 47)],
+			});
+		}
+		return result;
+	}
+
+	entityLight(position: readonly number[]): [number, number] {
+		const value = this.x.client_entity_light(Math.floor(position[0]), Math.floor(position[1]), Math.floor(position[2]));
+		return [value >> 4, value & 15];
+	}
+
+	encodeDropItem(dir: readonly number[]): Uint8Array<ArrayBuffer> {
+		return this.out(this.x.client_enc_drop_item(dir[0], dir[1], dir[2]));
+	}
+
 	private readonly x: ClientExports;
 	private readonly decoder = new TextDecoder();
 	observeLight: ((change: LightMutation) => void) | undefined;

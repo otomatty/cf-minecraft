@@ -23,6 +23,7 @@ import { hotbarStates } from "./hotbar.ts";
 import { placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
+import { interpolateEntity } from "./entities.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
@@ -140,10 +141,12 @@ async function main(): Promise<void> {
 	if (serverKind === "ws" && !await canEnterWorld()) return;
 	const core = await ClientCore.load(clientWasmUrl);
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
-	const renderer = await Renderer.create(canvas, core.textureNames());
+	const textureNames = core.textureNames();
+	const renderer = await Renderer.create(canvas, textureNames);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
+	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(registry[item.block ?? 0]?.texture))]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -193,6 +196,7 @@ async function main(): Promise<void> {
 	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0, skyBrightness: 1 };
 	let timeReceivedAt = performance.now();
 	let fps = 0;
+	const entityReceivedAt = new Map<number, number>();
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
@@ -204,6 +208,7 @@ async function main(): Promise<void> {
 			if (opened) {
 				meshPool.reset();
 				core.resetWorld();
+				entityReceivedAt.clear();
 				removeUnloaded();
 			}
 			opened = true;
@@ -213,6 +218,11 @@ async function main(): Promise<void> {
 			const id = core.packet(data);
 			removeUnloaded();
 			if (id === S2C.Inventory) syncInventory();
+			if (id === S2C.EntitySpawn || id === S2C.EntityMove) {
+				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				entityReceivedAt.set(view.getUint32(1), performance.now());
+			}
+			if (id === S2C.EntityRemove) entityReceivedAt.delete(new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1));
 			if (id === S2C.Welcome) {
 				pendingSelectedSlot = null;
 				seedReady = true;
@@ -437,7 +447,7 @@ async function main(): Promise<void> {
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
-	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択" };
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択", drop: "アイテムを捨てる" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
@@ -696,6 +706,11 @@ async function main(): Promise<void> {
 			void toggleFullscreen();
 			return;
 		}
+		if (matchesKey(e.code, settings.keys.drop) && locked() && joined && connection === "open") {
+			e.preventDefault();
+			if (!e.repeat) transport.send(core.encodeDropItem(forward(camera.yaw, camera.pitch)));
+			return;
+		}
 		if (e.code === "F8") {
 			e.preventDefault();
 			scenarioLine = "Scenario: 実行中…";
@@ -849,7 +864,7 @@ async function main(): Promise<void> {
 				(serverStats
 					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
-			`Biome: ${serverStats?.biome ?? "?"}  Game mode: ${core.gameMode}`,
+			`Biome: ${serverStats?.biome ?? "?"}  Game mode: ${core.gameMode}  Entities: ${core.entities.length}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
@@ -910,7 +925,12 @@ async function main(): Promise<void> {
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
+		const renderItems = core.entities.map(entity => ({
+			position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
+			texture: itemTextures.get(entity.item) ?? 0,
+			light: core.entityLight(entity.position),
+		}));
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now);
 		window.__mc.frames++;
 
 		frames++;
@@ -933,6 +953,7 @@ async function main(): Promise<void> {
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
 			gameMode: core.gameMode,
+			entities: core.entities,
 			inventory: core.inventory,
 			selectedSlot: core.selectedSlot,
 			joined,
