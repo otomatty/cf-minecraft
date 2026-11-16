@@ -12,6 +12,7 @@
 //   autopilot=1       no input needed: the camera circles above the spawn point
 
 import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
+import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
@@ -61,6 +62,7 @@ interface DebugHandle {
 	error: string | null;
 	frames: number;
 	stats(): Record<string, unknown>;
+	tint(x: number, z: number): CellTint | null;
 	sendRawPosition(x: number, y: number, z: number): void;
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
@@ -118,6 +120,7 @@ async function main(): Promise<void> {
 	const core = await ClientCore.load(clientWasmUrl);
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const renderer = await Renderer.create(canvas, core.textureNames());
+	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
@@ -161,6 +164,7 @@ async function main(): Promise<void> {
 	let serverStats: ServerStats | null = null;
 	let scenarioLine = "";
 	let generator: number | null = null;
+	let seedReady = false;
 	const generatorName = () => generator === null ? "unknown" : generator === Generator.Flat ? "Flat" : generator === Generator.Terrain ? "Terrain" : "DebugHills";
 	const timeSamples: Array<[number, number]> = [];
 	let target: RayHit | null = null;
@@ -172,6 +176,9 @@ async function main(): Promise<void> {
 	const handlers = {
 		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
+			seedReady = false;
+			if (transport.kind !== "local") generator = null;
+			tintMap.setWorld(null, null);
 			if (opened) {
 				meshPool.reset();
 				core.resetWorld();
@@ -184,6 +191,7 @@ async function main(): Promise<void> {
 			const id = core.packet(data);
 			removeUnloaded();
 			if (id === S2C.Welcome) {
+				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
 				if (!joined) {
@@ -667,7 +675,8 @@ async function main(): Promise<void> {
 		}
 		let fallbackMeshMs = 0;
 		lightMs = 0;
-		const dt = Math.min(0.1, (now - last) / 1000);
+		const frameDtMs = now - last;
+		const dt = Math.min(0.1, frameDtMs / 1000);
 		last = now;
 
 		if (joined) {
@@ -702,6 +711,9 @@ async function main(): Promise<void> {
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
+		tintMap.setWorld(seedReady ? core.seed : null, generator);
+		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
+		renderer.writeTints(tintMap.takeUploads());
 		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
 		window.__mc.frames++;
 
@@ -722,6 +734,7 @@ async function main(): Promise<void> {
 		ready: true,
 		error: null,
 		frames: 0,
+		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
 			joined,
 			joinedGameTime,
@@ -778,6 +791,7 @@ window.__mc = {
 	error: null,
 	frames: 0,
 	stats: () => ({}),
+	tint: () => null,
 	sendRawPosition: () => {},
 	setCamera: () => {},
 	setBlock: () => false,

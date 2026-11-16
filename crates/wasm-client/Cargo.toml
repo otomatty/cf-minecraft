@@ -12,3 +12,4 @@ world.workspace = true
 protocol.workspace = true
 mesher.workspace = true
 physics.workspace = true
+worldgen.workspace = true

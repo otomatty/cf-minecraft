@@ -24,6 +24,7 @@ pub struct Biome {
     pub subsurface: BlockState,
     pub grass_color: [u8; 3],
     pub leaves_color: [u8; 3],
+    pub water_color: [u8; 3],
     /// Climate representative is the midpoint of each normalized range.
     pub temperature: [f64; 2],
     pub humidity: [f64; 2],

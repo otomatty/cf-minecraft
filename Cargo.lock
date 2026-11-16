@@ -229,6 +229,7 @@ dependencies = [
  "physics",
  "protocol",
  "world",
+ "worldgen",
 ]
 
 [[package]]

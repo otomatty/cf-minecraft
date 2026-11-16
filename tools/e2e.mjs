@@ -718,7 +718,48 @@ async function partialModels() {
 	} finally { await page.close(); }
 }
 
+async function biomeTints() {
+	// IDs and colors follow the registry order, just like client_biome_colors.
+	const registry = readFileSync(join(root, "data/registry/biomes.toml"), "utf8").split("[[biomes]]").slice(1).map(entry => ({
+		name: entry.match(/name = "([^"]+)"/)[1],
+		grass: JSON.parse(entry.match(/grass_color = (\[[^\]]+\])/)[1]),
+	}));
+	const { page, errors } = await open(`server=local&world=e2e-tint-${run}&seed=2026&view=3&time=6000`);
+	try {
+		await settle(page, "tint Terrain", chunksInView(3));
+		await page.waitForFunction(() => {
+			const p = window.__mc.playerPosition();
+			return window.__mc.tint(p[0], p[2]) !== null;
+		});
+		const spawn = await page.evaluate(() => {
+			const p = window.__mc.playerPosition();
+			return { tint: window.__mc.tint(p[0], p[2]), biome: window.__mc.stats().server.biome };
+		});
+		check(registry[spawn.tint.biome]?.name === spawn.biome, "tint: spawn cell agrees with server biome", JSON.stringify(spawn));
+		check(JSON.stringify(spawn.tint.grass) === JSON.stringify(registry[spawn.tint.biome].grass), "tint: spawn grass matches registry");
+		for (const [z, name, grass] of [[0, "rain_grove", [72, 170, 74]], [144, "mild_meadow", [124, 184, 84]]]) {
+			await page.evaluate(z => window.__mc.setCamera(0, 140, z, 0, 0), z);
+			await page.waitForFunction(z => window.__mc.tint(0, z) !== null, {}, z);
+			const tint = await page.evaluate(z => window.__mc.tint(0, z), z);
+			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
+		}
+		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
+	} finally { await page.close(); }
+	for (const gen of ["flat", "hills"]) {
+		const { page, errors } = await open(`server=local&world=e2e-tint-${gen}-${run}&gen=${gen}&seed=2026&view=2`);
+		try {
+			await settle(page, `tint ${gen}`, chunksInView(2));
+			check(await page.evaluate(() => {
+				const p = window.__mc.playerPosition();
+				return window.__mc.tint(p[0], p[2]) === null;
+			}), `tint: ${gen} keeps uncomputed default colors`);
+			check(errors.length === 0, `tint: no ${gen} page errors`, errors.slice(0, 3).join(" | "));
+		} finally { await page.close(); }
+	}
+}
+
 try {
+	await biomeTints();
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await partialModels();
