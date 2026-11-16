@@ -7,10 +7,12 @@ import { nextDelayMs, shouldReconnect } from "./reconnect.ts";
 const WORLD_CHECK_TIMEOUT_MS = 10_000;
 
 export interface ServerStats {
+	biome: string;
 	gameTime: number;
 	tps: number;
-	msptMean: number;
-	msptMax: number;
+	// null for Durable Objects: Workers clocks do not advance during synchronous work.
+	msptMean: number | null;
+	msptMax: number | null;
 	loadedChunks: number;
 	persistence: string;
 	memoryBytes: number;
@@ -171,6 +173,7 @@ export class WebSocketTransport implements Transport {
 			if (typeof event.data === "string") {
 				try {
 					const info = JSON.parse(event.data);
+					if (info.type === "stats") this.handlers.onStats(info.stats);
 					if (info.type === "worldInfo" && Number.isInteger(info.generator)) this.handlers.onGenerator?.(info.generator);
 				} catch { /* Ignore unknown host metadata. */ }
 				return;

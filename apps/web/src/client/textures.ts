@@ -153,6 +153,14 @@ const PAINTERS: Record<string, (rand: () => number) => Painter> = {
 	cobblestone,
 	oak_planks: planks,
 	bedrock,
+	snow_block: speckled([229, 240, 246], 0.06, 0.06, 0.94),
+	sandstone: () => (x, y, r) => shade([202, 180, 132], 0.92 + (y % 5) * 0.025 + (r() - 0.5) * 0.07 + (x % 7 === 0 ? 0.03 : 0)),
+	gravel: (rand) => {
+		const pebble = blotches(rand, 2);
+		return (x, y, r) => shade([134, 129, 124], 0.65 + pebble(x, y) * 0.65 + r() * 0.12);
+	},
+	ice: () => (x, y) => shade([161, 211, 232], (x + 2 * y) % 13 < 2 ? 1.12 : 0.95),
+	coarse_dirt: speckled([154, 128, 81], 0.32, 0.19, 0.72),
 	sand: speckled([219, 207, 163], 0.1, 0.06, 0.92),
 	oak_log: logSide,
 	oak_log_top: logTop,
@@ -187,6 +195,7 @@ export function paintTexture(name: string): Uint8Array {
 			px[i + 3] = plant ? (visible ? 255 : 0) : name === "glass"
 				? (x === 0 || y === 0 || x === 15 || y === 15 || (x === y + 3 && y > 3 && y < 9) ? 255 : 0)
 				: name === "oak_leaves" ? ((x * 7 + y * 11 + (x >> 1) * (y >> 1)) % 17 < 5 ? 0 : 255)
+				: name === "ice" ? 150 + (x + y) % 24
 				: name === "water" ? 168 + (x + y * 3) % 20 : 255;
 		}
 	}

@@ -152,6 +152,21 @@ impl Server {
         self.world.chunks.len()
     }
 
+    /// Biome at the last server-accepted player column (spawn before connection).
+    pub fn client_biome(&self, id: u32) -> &'static str {
+        let [x, _, z] = self.client_position(id).unwrap_or(self.spawn);
+        let biome = match &self.terrain {
+            Some(t) => t.biome_at(x.floor() as i32, z.floor() as i32),
+            None => worldgen::biome_at(
+                self.generator,
+                self.seed,
+                x.floor() as i32,
+                z.floor() as i32,
+            ),
+        };
+        world::biomes::BIOMES[biome as usize].name
+    }
+
     pub fn client_count(&self) -> usize {
         self.clients.len()
     }

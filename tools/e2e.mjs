@@ -73,7 +73,7 @@ async function settle(page, label, chunks) {
 				if (window.__mc.error) throw new Error(window.__mc.error);
 				const s = window.__mc.stats();
 				const autopilot = new URLSearchParams(location.search).get("autopilot") === "1";
-				return s.joined && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && s.lightQueue === 0 && window.__mc.frames > 5 ? s : false;
+				return s.joined && typeof s.server?.biome === "string" && s.server.biome.length > 0 && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && s.lightQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
 			{ timeout: 120000, polling: 250 },
 			chunks,
@@ -314,14 +314,15 @@ async function playthrough(kind) {
 
 	// Place a block through the same path a mouse click takes.
 	const [sx, sy, sz] = drawn.spawn.map(Math.floor);
+	check(typeof drawn.server?.biome === "string" && drawn.server.biome.length > 0, `${kind}: server stats include the player biome`, drawn.server?.biome);
 	check(drawn.generator === 2, `${kind}: new world uses Terrain`, `${drawn.generatorName}`);
 	const ground = await page.evaluate(([x, y, z]) => ({
-		foot: window.__mc.getBlock(x, y - 1, z),
+		foot: window.__mc.stateName(window.__mc.getBlock(x, y - 1, z)),
 		body: window.__mc.getBlock(x, y, z),
 		head: window.__mc.getBlock(x, y + 1, z),
 	}), [sx, sy, sz]);
-	// Terrain produces only stone/grass/dirt/sand solids above the ocean floor.
-	check(sy > 57 && [1, 2, 3, 7].includes(ground.foot) && ground.body === 0 && ground.head === 0,
+	// Terrain uses only air/water as non-solid blocks; every surface recipe is solid.
+	check(sy > 57 && ground.foot !== "air" && ground.foot !== "water" && ground.foot !== "?" && ground.body === 0 && ground.head === 0,
 		`${kind}: spawn is dry land above sea level with headroom`, JSON.stringify({spawn: drawn.spawn, ...ground}));
 	const pos = [sx, sy + 4, sz]; // Above both terrain and the player's head. Highest solid in this column is below spawn.
 	const before = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
@@ -453,9 +454,9 @@ async function inputs() {
 		return page.evaluate(() => document.getElementById("hud").textContent.split("\n").find((l) => l.startsWith("Target")));
 	};
 	const top = sy - 1;
-	const sandy = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("sand"), [sx, top, sz]);
-	const topName = sandy ? "sand" : "grass_block";
-	const underName = sandy ? "sand" : "dirt";
+	const [topName, underName] = await page.evaluate(([x, y, z]) => {
+		return [window.__mc.stateName(window.__mc.getBlock(x, y, z)), window.__mc.stateName(window.__mc.getBlock(x, y - 1, z))];
+	}, [sx, top, sz]);
 	check(stats.generator === 2, "input: movement and mouse placement run on Terrain");
 	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below", await targetLine());
 

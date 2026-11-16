@@ -65,6 +65,7 @@ interface DebugHandle {
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
 	getBlock(x: number, y: number, z: number): number;
+	stateName(id: number): string;
 	stateId(name: string): number;
 	playerPosition(): readonly number[];
 	raycast(origin: readonly number[], direction: readonly number[], max: number): RayHit | null;
@@ -628,6 +629,9 @@ async function main(): Promise<void> {
 		return ((g1 - g0) / (t1 - t0)) * 1000;
 	}
 	function updateHud(): void {
+		const mspt = serverStats && serverStats.msptMean !== null
+			? `${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax?.toFixed(2) ?? "n/a"})`
+			: "n/a";
 		const yaw = ((camera.yaw % 360) + 360) % 360;
 		const day = core.dayTime;
 		// Day time 0 is 06:00, 24000 ticks per day.
@@ -641,8 +645,9 @@ async function main(): Promise<void> {
 			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount} pending + ${meshPool.inFlight} in flight + ${meshPool.pendingResults} awaiting upload  chunks ${core.chunkCount}`,
 			`Server: ${transport.kind} "${worldName}"${connection === "reconnecting" ? "  reconnecting" : ""}  TPS ${measuredTps().toFixed(2)}` +
 				(serverStats
-					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
+					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
+			`Biome: ${serverStats?.biome ?? "?"}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
@@ -755,6 +760,7 @@ async function main(): Promise<void> {
 		},
 		setBlock,
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
+		stateName: id => registry[id]?.stateName ?? "?",
 		stateId: name => registry.findIndex(info => info.stateName === name || info.name === name),
 		playerPosition: () => core.playerPosition,
 		raycast: (origin, direction, max) => core.raycast(origin, direction, max),
@@ -776,6 +782,7 @@ window.__mc = {
 	setCamera: () => {},
 	setBlock: () => false,
 	getBlock: () => -1,
+	stateName: () => "?",
 	stateId: () => -1,
 	playerPosition: () => [],
 	raycast: () => null,

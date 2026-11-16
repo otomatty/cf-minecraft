@@ -78,20 +78,59 @@ fn data_errors_identify_the_problem() {
 }
 
 #[test]
+fn biome_recipes_validate_all_block_references_and_terrain_kinds() {
+    for field in ["subsurface", "underwater", "slope"] {
+        let from = format!(
+            "{field} = \"{}\"",
+            if field == "subsurface" {
+                "dirt"
+            } else if field == "underwater" {
+                "sand"
+            } else {
+                "stone"
+            }
+        );
+        let to = format!("{field} = \"missing\"");
+        assert!(BIOMES.contains(&from));
+        assert!(generate_fixture(BLOCKS, &BIOMES.replacen(&from, &to, 1))
+            .unwrap_err()
+            .contains("unknown block missing"));
+    }
+    assert!(
+        generate_fixture(BLOCKS, &BIOMES.replace("depth = 3", "depth = 9"))
+            .unwrap_err()
+            .contains("depth must be <= 8")
+    );
+    assert!(generate_fixture(
+        BLOCKS,
+        &BIOMES.replacen("terrain = \"Land\"", "terrain = \"Unknown\"", 1)
+    )
+    .unwrap_err()
+    .contains("unknown terrain kind"));
+    assert!(generate_fixture(
+        BLOCKS,
+        &BIOMES.replace("terrain = \"Mountain\"", "terrain = \"Land\"")
+    )
+    .unwrap_err()
+    .contains("missing terrain kind Mountain"));
+    assert!(generate_fixture(BLOCKS, &BIOMES.replace("slope = \"stone\"\n", "")).is_ok());
+}
+
+#[test]
 fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
     let data = BLOCKS.replacen(
-        "\"short_grass\",\n]",
-        "\"short_grass\", \"test_clay\",\n]",
+        "\"coarse_dirt\",\n]",
+        "\"coarse_dirt\", \"test_clay\",\n]",
         1,
     );
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 40\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 45\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 40;"));
-    assert!(output.contains("pub const COUNT: BlockState = 41;"));
-    assert!(output.contains("tex: [18, 18, 18, 18, 18, 18]"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 45;"));
+    assert!(output.contains("pub const COUNT: BlockState = 46;"));
+    assert!(output.contains("tex: [23, 23, 23, 23, 23, 23]"));
 }
 
 #[test]
@@ -122,7 +161,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 40
+        id = 45
         texture = "stone"
         top = "grass_block_top"
         side = "grass_block_side"
@@ -135,7 +174,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 40\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 45\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"

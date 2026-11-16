@@ -363,6 +363,19 @@ export class WorldDO extends DurableObject<Env> {
 			this.accessCheckRunning = true;
 			void this.recheckAccess().finally(() => { this.accessCheckRunning = false; });
 		}
+		if (core.gameTime % 20n === 0n) {
+			for (const [client, socket] of this.sockets) {
+				try {
+					socket.send(JSON.stringify({ type: "stats", stats: {
+						biome: core.clientBiome(client), gameTime: Number(core.gameTime),
+						tps: this.pacer?.measuredTps ?? 0,
+						// Workers clocks do not advance during synchronous work, so MSPT is unavailable.
+						msptMean: null, msptMax: null,
+						loadedChunks: core.loadedChunks, persistence: "sqlite", memoryBytes: core.memoryBytes,
+					} }));
+				} catch { /* Close event cleans up the socket. */ }
+			}
+		}
 		this.packetCounts.clear();
 
 		for (const { client, data } of core.takeOutbox()) {

@@ -1,6 +1,9 @@
 use jmath::mix_stafford13;
 use noise::Fbm;
-use world::{blocks, Chunk, Fnv64, Section, MIN_Y};
+use world::{
+    biomes::{self, Biome, BiomeId, TerrainKind, BIOMES},
+    blocks, Chunk, Fnv64, Section, MIN_Y,
+};
 
 pub const SEA_LEVEL: i32 = 56;
 const CELL_XZ: i32 = 4;
@@ -15,7 +18,6 @@ const BASE_CENTER: f64 = 64.0;
 const CONTINENT_HEIGHT: f64 = 85.0;
 const RELIEF_HEIGHT: f64 = 110.0;
 const DETAIL_HEIGHT: f64 = 8.0;
-const SURFACE_DEPTH: i32 = 3;
 const BEACH_HEIGHT: i32 = 2;
 const FBM_LACUNARITY: f64 = 2.0;
 const FBM_PERSISTENCE: f64 = 0.5;
@@ -46,6 +48,9 @@ pub struct TerrainGenerator {
     relief: Fbm,
     detail: Fbm,
     density: Fbm,
+    temperature: Fbm,
+    humidity: Fbm,
+    warp: Fbm,
 }
 
 fn lerp(t: f64, a: f64, b: f64) -> f64 {
@@ -83,6 +88,9 @@ impl TerrainGenerator {
             relief: field(RELIEF_SALT, LOCAL_OCTAVES),
             detail: field(DETAIL_SALT, LOCAL_OCTAVES),
             density: field(DENSITY_SALT, LOCAL_OCTAVES),
+            temperature: field(0xa197_854b_32cd_601e, 2),
+            humidity: field(0x732e_b190_4ac5_d86f, 3),
+            warp: field(0xc931_467a_f208_5bed, 2),
         }
     }
 
@@ -148,6 +156,7 @@ impl TerrainGenerator {
             .unwrap_or(MIN_Y)
     }
 
+    /// Geological surface height; unchanged by coatings and sea-surface ice.
     pub fn surface_y(&self, x: i32, z: i32) -> i32 {
         let gx = x.div_euclid(CELL_XZ) * CELL_XZ;
         let gz = z.div_euclid(CELL_XZ) * CELL_XZ;
@@ -164,6 +173,104 @@ impl TerrainGenerator {
         ))
     }
 
+    /// Piecewise linear, symmetric approximation of this fBm's cumulative distribution.
+    /// Expands the common central values without turning the tails into hard plateaus.
+    fn climate_map(v: f64) -> f64 {
+        let knots = [
+            (-1.0, 0.0),
+            (-0.3, 0.005),
+            (-0.2, 0.04),
+            (-0.15, 0.1),
+            (-0.1, 0.2),
+            (-0.05, 0.34),
+            (0.0, 0.5),
+            (0.05, 0.66),
+            (0.1, 0.8),
+            (0.15, 0.9),
+            (0.2, 0.96),
+            (0.3, 0.995),
+            (1.0, 1.0),
+        ];
+        for pair in knots.windows(2) {
+            let [(a, va), (b, vb)] = [pair[0], pair[1]];
+            if v <= b {
+                return lerp(((v - a) / (b - a)).clamp(0.0, 1.0), va, vb);
+            }
+        }
+        1.0
+    }
+
+    /// Gentler temperature mapping keeps intermediate climate belts broad.
+    /// Humidity retains the more even distribution used by `climate_map`.
+    fn temperature_map(v: f64) -> f64 {
+        let knots = [
+            (-1.0, 0.0),
+            (-0.3, 0.04),
+            (-0.15, 0.2),
+            (0.0, 0.5),
+            (0.15, 0.8),
+            (0.3, 0.96),
+            (1.0, 1.0),
+        ];
+        for pair in knots.windows(2) {
+            let [(a, va), (b, vb)] = [pair[0], pair[1]];
+            if v <= b {
+                return lerp(((v - a) / (b - a)).clamp(0.0, 1.0), va, vb);
+            }
+        }
+        1.0
+    }
+
+    fn climate_at(&self, x: i32, z: i32, top: i32) -> (f64, f64) {
+        let (x, z) = (x as f64, z as f64);
+        let wx = x + 18.0 * self.warp.sample2(x / 47.0, z / 47.0);
+        let wz = z + 18.0 * self.warp.sample2((x + 791.0) / 47.0, (z - 313.0) / 47.0);
+        let temperature =
+            (Self::temperature_map(self.temperature.sample2(wx / 3000.0, wz / 3000.0))
+                - (top - 80).max(0) as f64 * 0.002)
+                .clamp(0.0, 1.0);
+        let humidity = Self::climate_map(self.humidity.sample2(wx / 900.0, wz / 900.0));
+        (temperature, humidity)
+    }
+
+    fn biome_for_height(&self, x: i32, z: i32, top: i32) -> BiomeId {
+        let (temperature, humidity) = self.climate_at(x, z, top);
+        let kind = if top < SEA_LEVEL {
+            // Cold water can freeze all the way to shore.
+            if top >= SEA_LEVEL - 7 && temperature >= 0.38 {
+                TerrainKind::Shallows
+            } else {
+                TerrainKind::Sea
+            }
+        } else if top <= SEA_LEVEL + BEACH_HEIGHT {
+            TerrainKind::Beach
+        } else if top >= 122 {
+            TerrainKind::Mountain
+        } else {
+            TerrainKind::Land
+        };
+        biomes::select(temperature, humidity, kind)
+    }
+
+    pub fn biome_at(&self, x: i32, z: i32) -> BiomeId {
+        self.biome_for_height(x, z, self.surface_y(x, z))
+    }
+
+    fn coating(b: &Biome, top: i32, y: i32, steep: bool) -> world::BlockState {
+        if top - y > i32::from(b.depth) {
+            blocks::STONE
+        } else if top < SEA_LEVEL {
+            b.underwater
+        } else if steep {
+            b.slope
+        } else if y == top {
+            b.surface
+        } else {
+            b.subsurface
+        }
+    }
+
+    #[cfg(test)]
     fn grid(&self, cx: i32, cz: i32) -> [[f64; Y_POINTS]; 25] {
         std::array::from_fn(|i| {
             self.density_line(
@@ -174,50 +281,70 @@ impl TerrainGenerator {
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> Chunk {
-        let grid = self.grid(cx, cz);
+        // A one-cell halo supplies exact neighbouring column heights for slopes.
+        let grid: [[f64; Y_POINTS]; 49] = std::array::from_fn(|i| {
+            self.density_line(
+                cx * 16 + (i % 7) as i32 * 4 - 4,
+                cz * 16 + (i / 7) as i32 * 4 - 4,
+            )
+        });
+        let column = |x: i32, z: i32| {
+            let i = ((z + 4).div_euclid(4) * 7 + (x + 4).div_euclid(4)) as usize;
+            Self::column(
+                [&grid[i], &grid[i + 1], &grid[i + 7], &grid[i + 8]],
+                x.rem_euclid(4) as f64 / 4.0,
+                z.rem_euclid(4) as f64 / 4.0,
+            )
+        };
+        let heights: [[i32; 18]; 18] = std::array::from_fn(|z| {
+            std::array::from_fn(|x| Self::top(&column(x as i32 - 1, z as i32 - 1)))
+        });
         let mut chunk = Chunk::empty(cx, cz);
         // Positive lattice endpoints bound every interpolated density below them.
         // Leave room for the surface coating before filling uniform stone sections.
+        let surface_depth = BIOMES.iter().map(|b| i32::from(b.depth)).max().unwrap_or(0);
         let lowest = grid
             .iter()
-            .map(|line| {
+            .enumerate()
+            // Halo columns do not bound densities inside this chunk.
+            .filter(|(i, _)| (1..=5).contains(&(i % 7)) && (1..=5).contains(&(i / 7)))
+            .map(|(_, line)| {
                 line.iter().position(|&d| d <= 0.0).unwrap_or(Y_POINTS) as i32 * CELL_Y + MIN_Y
                     - CELL_Y
             })
             .min()
             .unwrap();
-        let filled_to = ((lowest - SURFACE_DEPTH).div_euclid(16) * 16).max(MIN_Y + 16);
+        let filled_to = ((lowest - surface_depth).div_euclid(16) * 16).max(MIN_Y + 16);
         for y in ((MIN_Y + 16)..filled_to).step_by(16) {
             chunk.sections[((y - MIN_Y) / 16) as usize] = Section::uniform(blocks::STONE);
         }
         for z in 0..16 {
             for x in 0..16 {
-                let i = (z / 4) * 5 + x / 4;
-                let line = Self::column(
-                    [&grid[i], &grid[i + 1], &grid[i + 5], &grid[i + 6]],
-                    (x % 4) as f64 / 4.0,
-                    (z % 4) as f64 / 4.0,
-                );
-                let top = Self::top(&line);
+                let line = column(x as i32, z as i32);
+                let top = heights[z + 1][x + 1];
+                let b = &BIOMES
+                    [self.biome_for_height(cx * 16 + x as i32, cz * 16 + z as i32, top) as usize];
+                let steep = [
+                    heights[z + 1][x],
+                    heights[z + 1][x + 2],
+                    heights[z][x + 1],
+                    heights[z + 2][x + 1],
+                ]
+                .iter()
+                .any(|&h| (h - top).abs() >= 3);
                 chunk.set(x, MIN_Y, z, blocks::BEDROCK);
                 for y in (MIN_Y + 1)..=top.max(SEA_LEVEL) {
                     if y >= MIN_Y + 16 && y < filled_to {
                         continue;
                     }
                     let state = if Self::solid(&line, y) {
-                        if y >= top - SURFACE_DEPTH {
-                            if top <= SEA_LEVEL + BEACH_HEIGHT {
-                                blocks::SAND
-                            } else if y == top {
-                                blocks::GRASS_BLOCK
-                            } else {
-                                blocks::DIRT
-                            }
-                        } else {
-                            blocks::STONE
-                        }
+                        Self::coating(b, top, y, steep)
                     } else if y <= SEA_LEVEL {
-                        blocks::WATER
+                        if y == SEA_LEVEL && b.freeze {
+                            blocks::ICE
+                        } else {
+                            blocks::WATER
+                        }
                     } else {
                         blocks::AIR
                     };
@@ -266,6 +393,11 @@ pub fn terrain_fingerprint(seed: i64) -> u64 {
                     continue;
                 }
                 let chunk = terrain.generate(gx * spacing, gz * spacing);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        hash.u16(terrain.biome_at(gx * spacing * 16 + x, gz * spacing * 16 + z));
+                    }
+                }
                 for y in MIN_Y..320 {
                     for z in 0..16 {
                         for x in 0..16 {
@@ -283,6 +415,21 @@ pub fn terrain_fingerprint(seed: i64) -> u64 {
 mod tests {
     use super::*;
     use crate::{generate, spawn_point, surface_y, Generator};
+
+    fn terrain_column(t: &TerrainGenerator, x: i32, z: i32) -> [f64; Y_POINTS] {
+        let (gx, gz) = (x.div_euclid(4) * 4, z.div_euclid(4) * 4);
+        let c = [
+            t.density_line(gx, gz),
+            t.density_line(gx + 4, gz),
+            t.density_line(gx, gz + 4),
+            t.density_line(gx + 4, gz + 4),
+        ];
+        TerrainGenerator::column(
+            c.each_ref(),
+            x.rem_euclid(4) as f64 / 4.0,
+            z.rem_euclid(4) as f64 / 4.0,
+        )
+    }
 
     fn chunk_hash(chunk: &Chunk) -> u64 {
         let mut hash = Fnv64::new();
@@ -322,26 +469,26 @@ mod tests {
                             .rev()
                             .find(|&y| blocks::info(chunk.get(x, y, z)).solid)
                             .unwrap();
-                        assert_eq!(
-                            top,
-                            terrain.surface_y(cx * 16 + x as i32, cz * 16 + z as i32)
-                        );
+                        let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                        let shape_top = terrain.surface_y(wx, wz);
+                        let b = &BIOMES[terrain.biome_at(wx, wz) as usize];
+                        assert_eq!(top, if b.freeze { SEA_LEVEL } else { shape_top });
+                        if b.freeze {
+                            assert_eq!(chunk.get(x, SEA_LEVEL, z), blocks::ICE);
+                        }
+                        let steep = [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
+                            .iter()
+                            .any(|&(nx, nz)| (terrain.surface_y(nx, nz) - shape_top).abs() >= 3);
                         assert_eq!(chunk.get(x, MIN_Y, z), blocks::BEDROCK);
                         for y in (MIN_Y + 1)..=SEA_LEVEL {
                             assert_ne!(chunk.get(x, y, z), blocks::AIR);
                         }
-                        for depth in 0..=3 {
-                            let state = chunk.get(x, top - depth, z);
-                            if blocks::info(state).solid {
+                        for depth in 0..=i32::from(b.depth) + 1 {
+                            let y = shape_top - depth;
+                            if TerrainGenerator::solid(&terrain_column(&terrain, wx, wz), y) {
                                 assert_eq!(
-                                    state,
-                                    if top <= SEA_LEVEL + BEACH_HEIGHT {
-                                        blocks::SAND
-                                    } else if depth == 0 {
-                                        blocks::GRASS_BLOCK
-                                    } else {
-                                        blocks::DIRT
-                                    }
+                                    chunk.get(x, y, z),
+                                    TerrainGenerator::coating(b, shape_top, y, steep)
                                 );
                             }
                         }
@@ -467,7 +614,7 @@ mod tests {
                     if (1..top).any(|y| !TerrainGenerator::solid(&line, y)) {
                         let chunk = terrain.generate(x.div_euclid(16), z.div_euclid(16));
                         let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
-                        for y in 1..top - SURFACE_DEPTH - 1 {
+                        for y in 1..top - 3 - 1 {
                             if !TerrainGenerator::solid(&line, y)
                                 && TerrainGenerator::solid(&line, y + 1)
                             {
@@ -512,7 +659,255 @@ mod tests {
     }
 
     #[test]
+    fn climate_mapping_spreads_central_fbm_values() {
+        let mut bins = [[0usize; 10]; 2];
+        for seed in [0, 2026, -71] {
+            let t = TerrainGenerator::new(seed);
+            for iz in -64..64 {
+                for ix in -64..64 {
+                    for (i, field) in [&t.temperature, &t.humidity].iter().enumerate() {
+                        let raw = field.sample2(ix as f64 * 0.31, iz as f64 * 0.31);
+                        let v = if i == 0 {
+                            TerrainGenerator::temperature_map(raw)
+                        } else {
+                            TerrainGenerator::climate_map(raw)
+                        };
+                        bins[i][((v * 10.0) as usize).min(9)] += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("temperature/humidity histograms: {bins:?}");
+        for count in bins[0] {
+            // Temperature retains broad intermediate belts instead of requiring uniformity.
+            assert!((500..11000).contains(&count));
+        }
+        for count in bins[1] {
+            assert!((3500..6500).contains(&count));
+        }
+    }
+
+    #[test]
+    fn climate_coverage_and_ties() {
+        for kind in [
+            TerrainKind::Sea,
+            TerrainKind::Shallows,
+            TerrainKind::Beach,
+            TerrainKind::Land,
+            TerrainKind::Mountain,
+        ] {
+            for ti in 0..=100 {
+                for hi in 0..=100 {
+                    let (t, h) = (ti as f64 / 100.0, hi as f64 / 100.0);
+                    let id = biomes::select(t, h, kind);
+                    assert_eq!(BIOMES[id as usize].terrain, kind);
+                    // Independent ordered scan also fixes how equal distances resolve.
+                    let mut best = (f64::INFINITY, 0);
+                    for (i, b) in BIOMES.iter().enumerate().filter(|(_, b)| b.terrain == kind) {
+                        let d = (t - (b.temperature[0] + b.temperature[1]) / 2.0).powi(2)
+                            + (h - (b.humidity[0] + b.humidity[1]) / 2.0).powi(2);
+                        if d < best.0 {
+                            best = (d, i);
+                        }
+                    }
+                    assert_eq!(id as usize, best.1);
+                }
+            }
+        }
+        assert_eq!(biomes::select(0.385, 0.5, TerrainKind::Sea), 6);
+        for gen in [Generator::Flat, Generator::DebugHills] {
+            assert_eq!(crate::biome_at(gen, 2026, -17, 16), 0);
+        }
+    }
+
+    #[test]
+    fn biome_distribution_and_representative_surfaces() {
+        let mut seen = vec![false; BIOMES.len()];
+        for seed in [0, 2026, -71] {
+            let t = TerrainGenerator::new(seed);
+            let mut counts = vec![0usize; BIOMES.len()];
+            let mut land = 0;
+            for iz in -256..256 {
+                for ix in -256..256 {
+                    let (x, z) = (ix * 32, iz * 32);
+                    let top = t.surface_y(x, z);
+                    let id = t.biome_for_height(x, z, top) as usize;
+                    let b = &BIOMES[id];
+                    counts[id] += 1;
+                    if b.terrain == TerrainKind::Land {
+                        land += 1;
+                    }
+                    if seen[id] {
+                        continue;
+                    }
+                    let steep = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)]
+                        .iter()
+                        .any(|&(nx, nz)| (t.surface_y(nx, nz) - top).abs() >= 3);
+                    if steep {
+                        continue;
+                    }
+                    seen[id] = true;
+                    let c = t.generate(x.div_euclid(16), z.div_euclid(16));
+                    let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+                    assert_eq!(t.biome_at(x, z) as usize, id);
+                    assert_eq!(crate::biome_at(Generator::Terrain, seed, x, z) as usize, id);
+                    assert_eq!(
+                        c.get(lx, top, lz),
+                        if top < SEA_LEVEL {
+                            b.underwater
+                        } else {
+                            b.surface
+                        }
+                    );
+                    if b.name == "dry_sands" {
+                        assert_eq!(c.get(lx, top - 1, lz), blocks::SANDSTONE);
+                    }
+                    if b.name == "quiet_snow" {
+                        assert_eq!(c.get(lx, top, lz), blocks::SNOW_BLOCK);
+                    }
+                    if b.freeze {
+                        assert_eq!(c.get(lx, SEA_LEVEL, lz), blocks::ICE);
+                        assert_eq!(c.get(lx, SEA_LEVEL - 1, lz), blocks::WATER);
+                    }
+                    assert_eq!(c, t.generate(x.div_euclid(16), z.div_euclid(16)));
+                }
+            }
+            eprintln!("biomes seed={seed}: {counts:?}");
+            for (i, b) in BIOMES.iter().enumerate() {
+                if b.terrain == TerrainKind::Land {
+                    assert!(counts[i] * 10 < land * 7);
+                }
+            }
+        }
+        for (i, b) in BIOMES.iter().enumerate() {
+            assert!(seen[i], "missing {}", b.name);
+        }
+    }
+
+    #[test]
+    fn ambient_temperature_changes_gradually() {
+        for seed in [2026, 1, 777] {
+            let t = TerrainGenerator::new(seed);
+            let mut max_delta = 0.0f64;
+            for z in (-8192..8192).step_by(128) {
+                for x in (-8192..8192).step_by(128) {
+                    let (temperature, _) = t.climate_at(x, z, 80);
+                    for (nx, nz) in [(x + 16, z), (x, z + 16)] {
+                        max_delta = max_delta.max((temperature - t.climate_at(nx, nz, 80).0).abs());
+                    }
+                    // Height cooling is still applied independently of ambient climate.
+                    assert!(
+                        (t.climate_at(x, z, 130).0 - (temperature - 0.1).max(0.0)).abs() < 1e-12
+                    );
+                }
+            }
+            eprintln!("ambient temperature seed={seed}: max 16-block delta={max_delta:.5}");
+            assert!(max_delta < 0.05, "seed={seed}: {max_delta}");
+        }
+    }
+
+    #[test]
+    fn hot_and_cold_neighbours_are_rare() {
+        for seed in [2026, 1, 777] {
+            let t = TerrainGenerator::new(seed);
+            let grid: Vec<_> = (-128..128)
+                .flat_map(|iz| {
+                    let t = &t;
+                    (-128..128).map(move |ix| t.biome_at(ix * 16, iz * 16))
+                })
+                .collect();
+            let (mut pairs, mut abrupt) = (0usize, 0usize);
+            let mut contacts = std::collections::BTreeMap::new();
+            let hot = |b: &Biome| matches!(b.name, "dry_sands" | "sun_steppe");
+            let cold = |b: &Biome| matches!(b.name, "quiet_snow" | "silent_floe");
+            let land = |b: &Biome| matches!(b.terrain, TerrainKind::Land | TerrainKind::Beach);
+            for z in 0..256 {
+                for x in 0..256 {
+                    let a = &BIOMES[grid[z * 256 + x] as usize];
+                    for (nx, nz) in [(x + 1, z), (x, z + 1)] {
+                        if nx >= 256 || nz >= 256 {
+                            continue;
+                        }
+                        let b = &BIOMES[grid[nz * 256 + nx] as usize];
+                        // Include coasts to catch steppe/frozen-sea contacts as well.
+                        if a.terrain == TerrainKind::Mountain
+                            || b.terrain == TerrainKind::Mountain
+                            || !(land(a) || land(b))
+                        {
+                            continue;
+                        }
+                        pairs += 1;
+                        let opposite = (hot(a) && cold(b)) || (cold(a) && hot(b));
+                        abrupt += usize::from(opposite);
+                        if opposite {
+                            let key = if hot(a) {
+                                (a.name, b.name)
+                            } else {
+                                (b.name, a.name)
+                            };
+                            *contacts.entry(key).or_insert(0usize) += 1;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "climate neighbours seed={seed}: {abrupt}/{pairs} ({:.4}%)",
+                abrupt as f64 * 100.0 / pairs as f64
+            );
+            eprintln!("contacts: {contacts:?}");
+            assert!(pairs > 10000);
+            assert!(abrupt * 200 <= pairs, "seed={seed}: {abrupt}/{pairs}");
+        }
+    }
+
+    #[test]
+    fn border_columns_use_world_coordinates() {
+        for seed in [0, 2026, -71] {
+            let t = TerrainGenerator::new(seed);
+            for (cx, cz) in [(-1, -1), (0, 0), (31, -32)] {
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1)] {
+                    let (cx, cz) = (cx + dx, cz + dz);
+                    let c = t.generate(cx, cz);
+                    for i in 0..16 {
+                        for (lx, lz) in [(0, i), (15, i), (i, 0), (i, 15)] {
+                            let (x, z) = (cx * 16 + lx as i32, cz * 16 + lz as i32);
+                            let top = t.surface_y(x, z);
+                            let b = &BIOMES[t.biome_at(x, z) as usize];
+                            let steep = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)]
+                                .iter()
+                                .any(|&(nx, nz)| (t.surface_y(nx, nz) - top).abs() >= 3);
+                            let expected = if top < SEA_LEVEL {
+                                b.underwater
+                            } else if steep {
+                                b.slope
+                            } else {
+                                b.surface
+                            };
+                            assert_eq!(c.get(lx, top, lz), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn heights_match_pre_biome_baseline() {
+        // Captured by running the HEAD (pre-biome) generator on these probes.
+        let mut hash = Fnv64::new();
+        for seed in [0, 2026, -71] {
+            let t = TerrainGenerator::new(seed);
+            for z in (-2048..=2048).step_by(64) {
+                for x in (-2048..=2048).step_by(64) {
+                    hash.u16(t.surface_y(x, z) as u16);
+                }
+            }
+        }
+        assert_eq!(hash.finish(), 0xf3c5543374b0b4b8);
+    }
+
+    #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0x31bc3acc726368fc);
+        assert_eq!(terrain_fingerprint(2026), 0xd3a977090d68e9eb);
     }
 }

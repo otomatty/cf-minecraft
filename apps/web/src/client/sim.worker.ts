@@ -84,6 +84,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 			if (t % AUTOSAVE_TICKS === 0) void save();
 			if (t % STATS_TICKS === 0) {
 				const stats: ServerStats = {
+					biome: c.clientBiome(CLIENT),
 					gameTime: t,
 					tps: pacer.measuredTps,
 					msptMean: spent.reduce((a, b) => a + b, 0) / spent.length,

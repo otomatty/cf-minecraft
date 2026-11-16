@@ -27,7 +27,7 @@ impl Generator {
     }
 }
 
-/// Y of the highest solid block in the column, as generated.
+/// Highest terrain solid in the column; excludes sea-surface ice in Terrain.
 pub fn surface_y(gen: Generator, seed: i64, x: i32, z: i32) -> i32 {
     match gen {
         // Classic Flat: bedrock, two dirt, one grass block, starting at the world bottom.
@@ -149,6 +149,14 @@ fn generate_hills(seed: i64, cx: i32, cz: i32) -> Chunk {
         }
     }
     chunk
+}
+
+/// Column biome; legacy generators retain the meadow default.
+pub fn biome_at(gen: Generator, seed: i64, x: i32, z: i32) -> world::biomes::BiomeId {
+    match gen {
+        Generator::Terrain => TerrainGenerator::new(seed).biome_at(x, z),
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
