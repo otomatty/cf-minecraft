@@ -152,14 +152,15 @@ test("WASM mesh output exposes the same layer counts and boundaries in the worke
 	const x = new WebAssembly.Instance(module, {}).exports;
 	const padded = new Uint16Array(18 ** 3);
 	const index = (x, y, z) => ((y + 1) * 18 + z + 1) * 18 + x + 1;
-	for (const [x, block] of [[2, 1], [5, 11], [8, 13]]) padded[index(x, 3, 3)] = block;
+	// Two adjacent leaves contribute ten cutout faces; their shared faces are absent.
+	for (const [x, block] of [[2, 1], [5, 11], [8, 13], [11, 12], [12, 12]]) padded[index(x, 3, 3)] = block;
 	const ptr = x.mc_alloc(padded.byteLength);
 	try {
 		new Uint16Array(x.memory.buffer, ptr, padded.length).set(padded);
-		assert.equal(x.mesh_padded(ptr, padded.length, 0, 0), 18);
-		const words = new Uint32Array(x.memory.buffer, x.client_mesh_ptr(), 18 * 8).slice();
+		assert.equal(x.mesh_padded(ptr, padded.length, 0, 0), 28);
+		const words = new Uint32Array(x.memory.buffer, x.client_mesh_ptr(), 28 * 8).slice();
 		const counts = [0, 1, 2].map(i => x.client_mesh_count(i));
-		assert.deepEqual(counts, [6, 6, 6]);
+		assert.deepEqual(counts, [6, 16, 6]);
 		assert.deepEqual(splitMeshLayers(words, counts).map(v => v[1] & 4095), [0, 12, 14]);
 		// Main-thread world meshing uses the identical counts ABI, even when empty.
 		const core = new ClientCore(new WebAssembly.Instance(module, {}));

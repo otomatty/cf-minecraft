@@ -718,11 +718,15 @@ mod tests {
         for (a, b, expected) in [
             (blocks::GLASS, blocks::GLASS, [0, 10, 0]),
             (blocks::WATER, blocks::WATER, [0, 0, 10]),
-            (blocks::OAK_LEAVES, blocks::OAK_LEAVES, [0, 12, 0]),
+            (blocks::OAK_LEAVES, blocks::OAK_LEAVES, [0, 10, 0]),
+            (blocks::OAK_LEAVES, blocks::AIR, [0, 6, 0]),
+            (blocks::OAK_LEAVES, blocks::GLASS, [0, 12, 0]),
+            (blocks::GLASS, blocks::OAK_LEAVES, [0, 12, 0]),
             (blocks::STONE, blocks::GLASS, [6, 5, 0]),
             (blocks::GLASS, blocks::STONE, [6, 5, 0]),
             (blocks::STONE, blocks::WATER, [6, 0, 5]),
             (blocks::STONE, blocks::OAK_LEAVES, [6, 5, 0]),
+            (blocks::OAK_LEAVES, blocks::STONE, [6, 5, 0]),
         ] {
             let mut p = empty();
             p[padded_index(3, 3, 3)] = a;
@@ -758,6 +762,26 @@ mod tests {
         assert_eq!(mesh_section_layers(&p, None, &mut out), [6, 6, 6]);
         for (quads, texture) in out.chunks(48).zip([0, 13, 14]) {
             assert!(quads.chunks(2).all(|v| v[1] & 4095 == texture));
+        }
+    }
+
+    #[test]
+    fn adjacent_leaves_have_no_internal_faces_in_any_direction() {
+        for axis in 0..3 {
+            let mut p = empty();
+            let a = [5, 5, 5];
+            let mut b = a;
+            b[axis] += 1;
+            for [x, y, z] in [a, b] {
+                p[padded_index(x, y, z)] = blocks::OAK_LEAVES;
+            }
+            let mut out = Vec::new();
+            assert_eq!(mesh_section_layers(&p, None, &mut out), [0, 10, 0]);
+            let internal_faces = decode(&out)
+                .iter()
+                .filter(|quad| quad.iter().all(|v| v.pos[axis] == b[axis]))
+                .count();
+            assert_eq!(internal_faces, 0, "axis={axis}");
         }
     }
 

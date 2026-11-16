@@ -220,3 +220,75 @@ fn biome_colors_are_required_rgb_bytes_and_unknown_fields_are_rejected() {
         generate_fixture(BLOCKS, &BIOMES.replacen("water_color", "water_colour", 1)).unwrap_err();
     assert!(error.contains("unknown field `water_colour`"), "{error}");
 }
+
+#[test]
+fn tree_data_is_required_and_validated() {
+    for line in [
+        "tree_density = 0.03\n",
+        "tree_shape = \"round\"\n",
+        "tree_height = [4, 6]\n",
+    ] {
+        assert!(BIOMES.contains(line));
+        let field = line.split(" =").next().unwrap();
+        let error = generate_fixture(BLOCKS, &BIOMES.replacen(line, "", 1)).unwrap_err();
+        assert!(
+            error.contains(&format!("missing field `{field}`")),
+            "{error}"
+        );
+    }
+    for (from, to, message) in [
+        (
+            "tree_density = 0.03",
+            "tree_density = -0.1",
+            "tree_density must be in 0..=1",
+        ),
+        (
+            "tree_density = 0.03",
+            "tree_density = 1.1",
+            "tree_density must be in 0..=1",
+        ),
+        (
+            "tree_density = 0.03",
+            "tree_density = nan",
+            "tree_density must be in 0..=1",
+        ),
+        (
+            "tree_shape = \"round\"",
+            "tree_shape = \"unknown\"",
+            "unknown tree_shape",
+        ),
+        (
+            "tree_shape = \"round\"",
+            "tree_shape = \"none\"",
+            "none requires zero",
+        ),
+        (
+            "tree_height = [0, 0]",
+            "tree_height = [0, 1]",
+            "none requires zero",
+        ),
+        (
+            "tree_height = [4, 6]",
+            "tree_height = [2, 6]",
+            "tree_height must satisfy",
+        ),
+        (
+            "tree_height = [4, 6]",
+            "tree_height = [7, 6]",
+            "tree_height must satisfy",
+        ),
+        (
+            "tree_height = [4, 6]",
+            "tree_height = [4, 13]",
+            "tree_height must satisfy",
+        ),
+        (
+            "tree_density = 0.03",
+            "tree_densitty = 0.03",
+            "unknown field `tree_densitty`",
+        ),
+    ] {
+        let error = generate_fixture(BLOCKS, &BIOMES.replacen(from, to, 1)).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+}

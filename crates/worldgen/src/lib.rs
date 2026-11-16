@@ -4,6 +4,7 @@
 //! legacy output. Prepared generators own their noise tables, with no global state.
 
 mod terrain;
+mod trees;
 pub use terrain::{terrain_fingerprint, TerrainGenerator, SEA_LEVEL};
 
 use jmath::mix_stafford13;
