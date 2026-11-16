@@ -710,3 +710,48 @@ test("ChunkGen validates RPC arguments and reuses a generation-only WASM core", 
 	for (const seed of ["-9223372036854775808", "9223372036854775807", "2026"])
 		assert.deepEqual(await entry.generate(seed, Generator.Flat, -2, 3), expected.generate(BigInt(seed), Generator.Flat, -2, 3));
 });
+
+test("DO disables unresponsive generation and streams synchronous fallback chunks after timeout", async t => {
+	let now = 0;
+	t.mock.method(performance, "now", () => now);
+	const warnings = t.mock.method(console, "warn", () => {});
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	const pending: Array<{ cx: number; cz: number; resolve(bytes: Uint8Array): void }> = [];
+	f.context.exports = { ChunkGen: {
+		generate(_seed, _generator, cx, cz) {
+			return new Promise<Uint8Array>(resolve => pending.push({ cx, cz, resolve }));
+		},
+	} };
+	await f.join("dev:player");
+	const core = f.world.core;
+	const mode = t.mock.method(core, "setExternalGeneration");
+	const client = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
+	core.packet(1, client.encodeHello(2));
+	const socket = f.world.sockets.get(1);
+	let consumed = 0;
+	const step = () => {
+		f.world.step();
+		for (const data of socket.sent.slice(consumed)) if (typeof data !== "string") client.packet(data);
+		consumed = socket.sent.length;
+	};
+	step();
+	assert.equal(pending.length, 8);
+	assert.equal(client.chunkCount, 0);
+	now = 5000;
+	step();
+	assert.equal(f.world.generation.failed, true);
+	assert.equal(f.world.generationFailed, true);
+	assert.ok(mode.mock.calls.some(call => call.arguments[0] === 0));
+	assert.equal(f.world.metrics().generation.fallback, 8);
+	assert.ok(client.chunkCount > 0, "timed-out chunks stream synchronously in the same tick");
+	const gen = ChunkGenCore.fromModule(storageModule);
+	for (const request of pending) request.resolve(gen.generate(2026n, Generator.Flat, request.cx, request.cz));
+	await new Promise(resolve => setImmediate(resolve));
+	for (let i = 0; i < 10; i++) step();
+	assert.equal(pending.length, 8, "no RPCs issued after timeout");
+	assert.equal(f.world.metrics().generation.delivered, 0);
+	assert.equal(warnings.mock.callCount(), 1);
+});

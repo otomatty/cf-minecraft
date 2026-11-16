@@ -19,6 +19,7 @@ type Job = { cx: number; cz: number; started: number; done: boolean; bytes?: Uin
 
 export class GenerationDispatcher {
 	private epoch = 0;
+	private failure = false;
 	private queue: Array<[number, number]> = [];
 	private active = new Set<Job>();
 	private completed: Job[] = [];
@@ -46,13 +47,24 @@ export class GenerationDispatcher {
 	}
 
 	pump(core: GenerationTarget): void {
-		// Completed callbacks have a stable FIFO order, including failures.
+		// A timed-out request still runs at the destination. Never reuse its slot.
 		for (const job of this.active) {
-			if (!job.done && this.now() - job.started >= this.timeoutMs) {
-				job.done = true;
-				this.recordDuration(this.now() - job.started);
-				this.completed.push(job);
+			if (!job.done && this.now() - job.started >= this.timeoutMs) this.failure = true;
+		}
+		if (this.failure) {
+			for (const job of this.active) {
+				if (!job.done) this.recordDuration(this.now() - job.started);
+				core.generateNow(job.cx, job.cz);
+				this.fallback++;
 			}
+			this.active.clear();
+			this.completed = [];
+			this.queue.push(...core.takeGenerationRequests());
+			for (const [cx, cz] of this.queue.splice(0)) {
+				core.generateNow(cx, cz);
+				this.fallback++;
+			}
+			return;
 		}
 		const completed = this.completed.splice(0);
 		for (const job of completed) {
@@ -67,16 +79,17 @@ export class GenerationDispatcher {
 			this.fallback++;
 		}
 		this.queue.push(...core.takeGenerationRequests());
-		while (this.active.size < this.limit && this.queue.length) {
+		while (!this.failure && this.active.size < this.limit && this.queue.length) {
 			const [cx, cz] = this.queue.shift()!;
 			const job: Job = { cx, cz, started: this.now(), done: false };
 			const epoch = this.epoch;
 			this.active.add(job);
 			this.requested++;
 			const finish = (bytes?: Uint8Array) => {
-				if (epoch !== this.epoch || job.done) return;
+				if (epoch !== this.epoch || this.failure || job.done) return;
 				job.done = true;
-				job.bytes = this.now() - job.started < this.timeoutMs ? bytes : undefined;
+				if (this.now() - job.started >= this.timeoutMs) this.failure = true;
+				job.bytes = bytes;
 				this.recordDuration(this.now() - job.started);
 				this.completed.push(job);
 			};
@@ -90,8 +103,13 @@ export class GenerationDispatcher {
 		if (this.durations.length > 100) this.durations.shift();
 	}
 
+	get failed(): boolean {
+		return this.failure;
+	}
+
 	reset(): void {
 		this.epoch++;
+		this.failure = false;
 		this.queue = [];
 		this.active.clear();
 		this.completed = [];

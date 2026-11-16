@@ -384,13 +384,21 @@ export class WorldDO extends DurableObject<Env> {
 		for (let i = 0; i < due; i++) this.step();
 	}
 
+	private pumpGeneration(core: ServerCore): void {
+		this.generation?.pump(core);
+		if (this.generation?.failed && !this.generationFailed) {
+			console.warn("Generation offload disabled: request timed out");
+			this.generationFailed = true;
+		}
+		if (this.generationFailed) core.setExternalGeneration(0);
+	}
+
 	private step(): void {
 		const core = this.core;
 		if (!core) return;
-		this.generation?.pump(core);
+		this.pumpGeneration(core);
 		core.tick();
-		this.generation?.pump(core);
-		if (this.generationFailed) core.setExternalGeneration(0);
+		this.pumpGeneration(core);
 		const now = Date.now();
 		if (!this.accessCheckRunning && now - this.lastAccessCheck >= ACCESS_RECHECK_MS) {
 			this.lastAccessCheck = now;

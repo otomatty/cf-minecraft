@@ -884,18 +884,24 @@ clientの型チェック (`pnpm --filter web exec tsc -p tsconfig.client.json`) 
 ## サーバーの外部生成モード（ABI 5）
 
 `sim::Server::set_external_generation(max_in_flight)` で外部生成を有効にする。
-既定値は 0（同期生成）で、`world-do.ts` と `sim.worker.ts` は引き続きこの既定を使う。
+`sim::Server` の既定値は 0（外部生成なし、同期生成）。ホストの既定とは別で、
+`world-do.ts` は `GEN_OFFLOAD=0` 以外では外部生成を有効にする。`sim.worker.ts` は
+`genworkers=0` の指定がなく、生成用 Worker の起動に成功した場合に有効にする。
 メモリにあるチャンク、保存済みチャンクの読み込みを優先し、それ以外は
 `stream_chunks` の近い順に生成を依頼する。待っている間も他のチャンクを送信できる。
 
 `take_generation_requests()` は座標のキューを取り出す。取り出したあとも依頼中の集合に残り、
 重複を防ぐ。依頼中の数が上限なら新たな依頼を積まず、次の tick で再試行する。
 `deliver_generated(cx, cz, bytes)` は `Chunk::to_bytes` 形式を `Chunk::read` で検証して挿入する。
-既存チャンクは上書きせず false を返す。破損データは同期生成で置き換えて false を返す。
+依頼中の `generating` にない座標は何もせず false を返す。メモリ上・保存済みのチャンクも
+上書きせず false を返す。依頼中の破損データは同期生成で置き換えて false を返す。
 ホスト側の生成失敗には `generate_now(cx, cz)` で同期生成できる。どちらも依頼中から外す。
+`generate_now` はメモリ上・保存済み（`stored`）の座標を生成しない。保存済みなら
+通常の `ensure_chunk` が保存からの読み込みを依頼するため、アンロード済みの編集も隠さない。
 生成直後のチャンクは同期生成と同じく dirty ではなく、編集されるまで保存の対象にならない。
 不要になった座標でも受け取り、遠方なら既存のアンロード処理で破棄する。
-上限を 0 に戻した場合も到着済みでない依頼は受け取れるが、必要なチャンクは同期生成を再開する。
+上限を 0 に戻した場合も依頼中の印が残る結果は受け取れるが、必要なチャンクは同期生成を再開する。
+同期生成などで依頼中から外れた後の遅い結果は無視する。
 `stats.chunks_generated` は生成総数、`chunks_generated_externally` は外部のバイト列を受理した数。
 
 server.wasm の追加 ABI（版は 4 から 5）：
@@ -923,9 +929,13 @@ TypeScript は `ServerCore` の薄いラッパーと、同じ WASM モジュー�
 
 ### ホストからの外部生成
 
-各 tick の直後に共通の `GenerationDispatcher.pump(core)` を呼ぶ。前の pump 以降に
-完了した結果をコールバックの到着順（FIFO）で反映し、失敗・5 秒の時間切れは
+各 tick の前後に共通の `GenerationDispatcher.pump(core)` を呼ぶ。前の pump 以降に
+完了した結果をコールバックの到着順（FIFO）で反映し、例外・拒否はその依頼を
 `generateNow` へ戻す。その後、同時実行上限まで次の依頼を送り、超過分は FIFO で待つ。
+1 件でも 5 秒の時間切れになったら dispatcher は `failed` になり、新しい依頼を出さない。
+動いている依頼と待ち行列の全件を同期生成に戻し、遅い応答をすべて捨てる。
+時間切れの依頼は実際には動き続け得るため、その枠を次の外部依頼に再利用しない。
+ホストは外部生成を 0 に戻す。reset は失敗状態も初期化する。
 非同期コールバックは世界を変更しない。reset は待ち行列と結果を破棄し、世代番号で
 古い世界の遅い応答も捨てる。統計の `generation` は requested / delivered / fallback、
 queued / inFlight、直近 100 件の latencyMean / latencyMax（ms）を公開する。
@@ -937,13 +947,17 @@ Durable Object は同じ Worker の `ChunkGen` 入口へ `ctx.exports.ChunkGen.g
 生成専用 WASM インスタンスは isolate ごとに再利用する。
 `GEN_OFFLOAD=0` で無効。それ以外・未設定は有効で、開発・本番の設定値は `1`。
 入口が存在しない場合や呼び出しが一度でも失敗した場合は警告を一度出し、同期生成へ戻す。
-時間切れだけの場合はその依頼を同期生成し、以後の外部生成は続ける。
+時間切れでも外部生成を無効にする。RPC は取り消せないため、新しい依頼を出さず結果を捨てる。
 
 ブラウザ内サーバーは生成用 Web Worker を `min(4, max(1, hardwareConcurrency - 2))` 本起動し、
-空いている Worker へ順に割り振る。各 Worker が生成専用 WASM を持ち、結果のバッファを
+待ち件数が最少の Worker（同数なら番号が小さい方）へ割り振る。依頼上限は本数 × 4
+（最低 8、最大 32）で、各 Worker は複数の依頼を ID ごとに管理する。
+各 Worker が生成専用 WASM を持ち、結果のバッファを
 transfer で返す。Worker の起動を確認してから外部生成を有効にする。子 Worker の作成・
 起動ができない環境、実行時エラーでは同期生成へ戻す。URL の `genworkers=0` で無効にできる。
-init のやり直しでは旧 Worker を終了し dispatcher を reset する。
+時間切れと Worker エラーは共通の停止処理を通り、全生成 Worker を terminate し、
+全未完了 Promise を拒否して ID 対応表を空にする。init のやり直しでも旧 Worker と
+未完了の依頼を停止し、dispatcher を reset する。
 
 同じ seed・generator・座標のチャンク内容は同期生成と同じで、到着する tick だけが変わる。
 シナリオは外部生成を使用しない。プロトコル・保存形式の変更はない。

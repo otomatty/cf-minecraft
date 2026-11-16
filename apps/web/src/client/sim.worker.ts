@@ -17,41 +17,50 @@ import { generationInFlightLimit, leastPendingWorker } from "./gen-scheduling.ts
 let generation: GenerationDispatcher | null = null;
 let generationWorkers: Worker[] = [];
 let generationFailed = false;
+let stopGeneration: ((error: Error) => void) | null = null;
 let tickTimer: ReturnType<typeof setInterval> | undefined;
 let initEpoch = 0;
 
 async function startGeneration(wasmUrl: string, c: ServerCore): Promise<void> {
 	const workers = generationWorkers;
-	const cancelStartup: Array<() => void> = [];
+	const cancelStartup: Array<(error: Error) => void> = [];
+	const startups: Promise<void>[] = [];
+	const queues: Array<Map<number, { resolve(bytes: Uint8Array): void; reject(error: Error): void }>> = [];
+	let stopped = false;
+	const stop = (error: Error) => {
+		if (stopped) return;
+		stopped = true;
+		for (const cancel of cancelStartup.splice(0)) cancel(error);
+		for (const worker of workers.splice(0)) worker.terminate();
+		for (const pending of queues) {
+			for (const request of pending.values()) request.reject(error);
+			pending.clear();
+		}
+		if (generationWorkers === workers) {
+			if (generation && !generationFailed) console.warn("Generation workers disabled", error);
+			generationFailed = true;
+			c.setExternalGeneration(0);
+			stopGeneration = null;
+		}
+	};
+	stopGeneration = stop;
 	try {
 		const count = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 3) - 2));
 		let id = 0;
-		const queues: Array<Map<number, { resolve(bytes: Uint8Array): void; reject(error: Error): void }>> = [];
 		const requests: Array<(cx: number, cz: number) => Promise<Uint8Array>> = [];
-		const startups: Promise<void>[] = [];
 		for (let i = 0; i < count; i++) {
 			const worker = new Worker(new URL("./gen.worker.ts", import.meta.url), { type: "module" });
 			workers.push(worker);
 			const pending = new Map<number, { resolve(bytes: Uint8Array): void; reject(error: Error): void }>();
 			queues.push(pending);
 			startups.push(new Promise<void>((resolve, reject) => {
-				const timer = setTimeout(() => reject(new Error("Generation worker startup timed out")), 5000);
-				cancelStartup.push(() => clearTimeout(timer));
-				const fail = (error: Error) => {
-					clearTimeout(timer);
-					reject(error);
-					for (const request of pending.values()) request.reject(error);
-					pending.clear();
-					if (generationWorkers === workers) {
-						if (generation && !generationFailed) console.warn("Generation workers disabled", error);
-						generationFailed = true;
-					}
-				};
-				worker.onerror = () => fail(new Error("Generation worker failed"));
+				const timer = setTimeout(() => stop(new Error("Generation worker startup timed out")), 5000);
+				cancelStartup.push(error => { clearTimeout(timer); reject(error); });
+				worker.onerror = () => stop(new Error("Generation worker failed"));
 				worker.onmessage = (event: MessageEvent<GenReply>) => {
 					const msg = event.data;
 					if (msg.type === "ready") { clearTimeout(timer); resolve(); }
-					else if (msg.type === "error") fail(new Error(msg.message));
+					else if (msg.type === "error") stop(new Error(msg.message));
 					else {
 						pending.get(msg.id)?.resolve(msg.bytes);
 						pending.delete(msg.id);
@@ -60,22 +69,29 @@ async function startGeneration(wasmUrl: string, c: ServerCore): Promise<void> {
 				worker.postMessage({ type: "init", wasmUrl, seed: seed.toString(), generator } satisfies GenRequest);
 			}));
 			requests.push((cx, cz) => new Promise((resolve, reject) => {
+				if (stopped) { reject(new Error("Generation workers disabled")); return; }
 				const requestId = ++id;
 				pending.set(requestId, { resolve, reject });
 				try { worker.postMessage({ type: "generate", id: requestId, cx, cz } satisfies GenRequest); }
-				catch (error) { pending.delete(requestId); reject(error); }
+				catch (error) { stop(error instanceof Error ? error : new Error(String(error))); }
 			}));
 		}
 		await Promise.all(startups);
-		if (generationWorkers !== workers) return;
+		if (generationWorkers !== workers || stopped) return;
 		const limit = generationInFlightLimit(count);
 		generation = new GenerationDispatcher((cx, cz) => requests[leastPendingWorker(queues)](cx, cz), limit, 5000);
 		c.setExternalGeneration(limit);
 	} catch (error) {
-		for (const cancel of cancelStartup) cancel();
-		for (const worker of workers) worker.terminate();
+		stop(error instanceof Error ? error : new Error(String(error)));
+		await Promise.allSettled(startups);
 		console.warn("Generation workers unavailable", error);
 	}
+}
+
+function pumpGeneration(c: ServerCore): void {
+	generation?.pump(c);
+	if (generation?.failed) stopGeneration?.(new Error("Generation request timed out"));
+	if (generationFailed) c.setExternalGeneration(0);
 }
 
 const CLIENT = 1;
@@ -118,7 +134,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	clearInterval(tickTimer);
 	generation?.reset();
 	generation = null;
-	for (const worker of generationWorkers) worker.terminate();
+	stopGeneration?.(new Error("World reset"));
 	generationWorkers = [];
 	generationFailed = false;
 	core = null;
@@ -153,10 +169,9 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 		const due = pacer.due(performance.now());
 		for (let i = 0; i < due; i++) {
 			const start = performance.now();
-			generation?.pump(c);
+			pumpGeneration(c);
 			c.tick();
-			generation?.pump(c);
-			if (generationFailed) c.setExternalGeneration(0);
+			pumpGeneration(c);
 			const packets = c.takeOutbox();
 			spent.push(performance.now() - start);
 
