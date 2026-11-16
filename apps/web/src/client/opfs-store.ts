@@ -2,33 +2,38 @@ import { decodeArchive, encodeArchive, isRegionName, type ArchiveEntry, MAX_ARCH
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
+	generator: number;
 	seed: string;
 	gameTime: string;
 	dayTime: string;
 }
 
-/** Keep persistence available in browsers without Web Locks. */
+/** Persistence requires cross-tab exclusion, including for imports. */
 function withWorldLock<T>(world: string, fn: () => Promise<T>): Promise<T> {
-	return navigator.locks ? navigator.locks.request(`mcworld-import-${world}`, fn) : fn();
+	if (!navigator.locks) throw new Error("Web Locks are required for OPFS persistence");
+	return navigator.locks.request(`mcworld-import-${world}`, fn);
 }
 
 /** Region files in OPFS. Sync access handles exist only in workers, which is where we are. */
 export class OpfsStore {
 	private readonly dir: FileSystemDirectoryHandle;
+	private readonly world: string;
 
 	private readonly codec: RegionCodec;
 	private queue: Promise<unknown> = Promise.resolve();
 
-	private constructor(dir: FileSystemDirectoryHandle, codec: RegionCodec) {
+	private constructor(world: string, dir: FileSystemDirectoryHandle, codec: RegionCodec) {
+		this.world = world;
 		this.dir = dir;
 		this.codec = codec;
 	}
 
 	static async open(world: string, codec: RegionCodec): Promise<OpfsStore | null> {
 		try {
+			if (!navigator.locks) return null;
 			const root = await navigator.storage.getDirectory();
 			return await withWorldLock(world, async () =>
-				new OpfsStore(await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
+				new OpfsStore(world, await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
 		} catch {
 			// Private browsing or an old browser: play without saving.
 			return null;
@@ -191,6 +196,24 @@ export class OpfsStore {
 		return this.region(cx, cz, 2, data).then(() => {});
 	}
 
+	/**
+	 * Persist the choice under the same world lock as imports, before generation.
+	 * Web Locks are required; the final read confirms the saved metadata while
+	 * the world lock is still held.
+	 */
+	async initializeMeta(seed: string, generator: number): Promise<Meta> {
+		return withWorldLock(this.world, async () => {
+			// Do not enqueue this callback: writeMeta itself awaits the write queue.
+			await this.queue;
+			const existing = await this.readMeta();
+			if (existing) return existing;
+			await this.writeMeta({ seed, generator, gameTime: "0", dayTime: "0" });
+			const saved = await this.readMeta();
+			if (!saved) throw new Error("Cannot read initialized world metadata");
+			return saved;
+		});
+	}
+
 	async readMeta(): Promise<Meta | null> {
 		const bytes = await this.readFile("meta.json");
 		if (!bytes) return null;
@@ -239,7 +262,7 @@ export class OpfsStore {
 				if (existing === name) throw new Error("同じ名前のワールドが既に存在します");
 			}
 			const dir = await root.getDirectoryHandle(name, { create: true });
-			const target = new OpfsStore(dir, this.codec);
+			const target = new OpfsStore(world, dir, this.codec);
 			try {
 				for (const entry of entries) if (entry.name !== "meta.json") await target.writeFile(entry.name, entry.data);
 				await target.writeMeta(meta);
@@ -267,7 +290,9 @@ function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
 		if (strictTimes) throw new Error("meta.json の時刻が不正です");
 		return "0";
 	};
+	if (meta.generator !== undefined && (!Number.isInteger(meta.generator) || meta.generator < 0 || meta.generator > 0xffffffff)) throw new Error("meta.json のジェネレーターが不正です");
 	return {
+		generator: meta.generator ?? 1,
 		seed: BigInt.asIntN(64, BigInt(meta.seed)).toString(),
 		gameTime: time(meta.gameTime),
 		dayTime: time(meta.dayTime),

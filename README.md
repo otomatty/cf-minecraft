@@ -17,7 +17,7 @@
 crates/
   jmath/          Java互換の乱数（JDKの実値で検証）
   world/          ブロック、パレット圧縮セクション、チャンク
-  worldgen/       地形生成（M0はクラシックフラットと仮の丘陵）
+  worldgen/       地形生成（Terrain・クラシックフラット・仮の丘陵）
   protocol/       パケット定義とコーデック
   sim/            サーバー本体。20TPSのtick、チャンク配信、保存要求
   mesher/         セクション → 頂点（面ごとのクアッド、AO）
@@ -168,3 +168,9 @@ Actions の「Deploy」から「Run workflow」を選び、`run_id` に公開し
 `crates/jmath` の `StrictMath` 相当の関数は、Sun Microsystems の fdlibm 5.3 から移植しています。Rust への書き写しは rust-lang/libm（MIT ライセンス）を土台にしています。許諾表示は `crates/jmath/src/strict_math.rs` と `crates/jmath/src/strict_math/` 内の該当ファイルにあります。詳しくは [docs/jmath.md](docs/jmath.md) を参照してください。
 
 そのほかの依存ライブラリは、それぞれのライセンスに従います。依存ライブラリの一覧は、Rust は `Cargo.lock`、JavaScript は `pnpm-lock.yaml` にあります。
+
+新しいワールドはオリジナル地形の Terrain (id 2) を使います。
+ローカルの新規ワールドは `?gen=flat|hills|terrain` で選択できます。
+ジェネレーターはワールドと `.mcworld` に保存され、既存ワールドでは URL の選択より保存値を優先します。
+ジェネレーター情報のない既存ワールド・旧アーカイブは DebugHills (id 1) を維持します。
+F3 に実際のジェネレーター名を表示します。詳細は [地形生成](docs/worldgen.md) を参照してください。

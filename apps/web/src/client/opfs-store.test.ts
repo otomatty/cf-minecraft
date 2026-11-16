@@ -152,12 +152,12 @@ test("OPFS retries contended access handles for chunks and metadata", async () =
 	assert.equal(dir.accessAttempts, 3);
 	assert.deepEqual(await store.readChunk(0, 0), old);
 	dir.failAccess = 2;
-	const meta = { seed: "1", gameTime: "2", dayTime: "3" };
+	const meta = { seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
 	await store.writeMeta(meta);
 	assert.deepEqual(await store.readMeta(), meta);
 });
 
-const meta = { seed: "1", gameTime: "2", dayTime: "3" };
+const meta = { seed: "1", generator: Generator.DebugHills, gameTime: "2", dayTime: "3" };
 
 test("failed saves retain drained chunks, read the latest snapshot, and recover on the next save", async (t) => {
 	const dir = new MemoryDirectory();
@@ -445,24 +445,18 @@ test("concurrent imports of the same world serialize and only one succeeds", asy
 });
 
 
-test("OPFS opens, saves, and imports without Web Locks", async () => {
-	const descriptor = Object.getOwnPropertyDescriptor(navigator, "locks")!;
-	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
-	try {
-		const store = await open(new MemoryDirectory());
-		await store.writeChunk(-1, 33, newer);
-		await store.writeMeta(meta);
-		assert.deepEqual(await store.readChunk(-1, 33), newer);
-		assert.deepEqual(await store.readMeta(), meta);
-		const bytes = await store.exportArchive();
-		const dirs = importRoot();
-		await store.importArchive("without-locks", bytes);
-		const imported = await open(dirs.get("world-without-locks")!);
-		assert.deepEqual(await imported.readChunk(-1, 33), newer);
-		assert.deepEqual(await imported.readMeta(), meta);
-	} finally {
-		Object.defineProperty(navigator, "locks", descriptor);
-	}
+test("OPFS opens, saves, and imports with the injected Web Locks", async () => {
+	const store = await open(new MemoryDirectory());
+	await store.writeChunk(-1, 33, newer);
+	await store.writeMeta(meta);
+	assert.deepEqual(await store.readChunk(-1, 33), newer);
+	assert.deepEqual(await store.readMeta(), meta);
+	const bytes = await store.exportArchive();
+	const dirs = importRoot();
+	await store.importArchive("with-locks", bytes);
+	const imported = await open(dirs.get("world-with-locks")!);
+	assert.deepEqual(await imported.readChunk(-1, 33), newer);
+	assert.deepEqual(await imported.readMeta(), meta);
 });
 
 test("archive import reports corrupt regions in Japanese before creating a directory", async (t) => {
@@ -506,6 +500,7 @@ test("existing and imported metadata normalize seeds and times to signed i64", a
 		{ seed: "2026" },
 	]) {
 		const normalized = {
+			generator: Generator.DebugHills,
 			seed: BigInt.asIntN(64, BigInt(values.seed)).toString(),
 			gameTime: BigInt.asIntN(64, BigInt(values.gameTime ?? "0")).toString(),
 			dayTime: BigInt.asIntN(64, BigInt(values.dayTime ?? "0")).toString(),
@@ -547,4 +542,72 @@ test("real WASM standalone compression uses the fixed native bytes and decodes e
 	]));
 	assert.deepEqual(codec.call(3, encoded), data);
 	assert.deepEqual(codec.call(3, codec.call(4, new Uint8Array())), new Uint8Array());
+});
+
+
+test("OPFS selects Terrain only for new worlds and persists the saved choice", async () => {
+	const dir = new MemoryDirectory();
+	let store = await open(dir);
+	assert.equal((await store.initializeMeta("2026", Generator.Terrain)).generator, Generator.Terrain);
+	dir.crash();
+	store = await open(dir);
+	assert.equal((await store.initializeMeta("7", Generator.Flat)).generator, Generator.Terrain);
+	assert.equal((await store.readMeta())!.seed, "2026");
+	const legacy = new MemoryDirectory();
+	legacy.seed("meta.json", new TextEncoder().encode(JSON.stringify({seed: "42"})));
+	const oldStore = await open(legacy);
+	assert.equal((await oldStore.initializeMeta("7", Generator.Terrain)).generator, Generator.DebugHills);
+	assert.equal((await oldStore.readMeta())!.seed, "42");
+	const freshFlat = await open(new MemoryDirectory());
+	assert.equal((await freshFlat.initializeMeta("1", Generator.Flat)).generator, Generator.Flat);
+});
+
+test("concurrent stores initialize one world's metadata under the shared lock", async () => {
+	const dir = new MemoryDirectory();
+	const a = await open(dir);
+	const b = await open(dir);
+	const [first, second] = await Promise.all([
+		a.initializeMeta("2026", Generator.Terrain),
+		b.initializeMeta("7", Generator.Flat),
+	]);
+	assert.deepEqual(first, { seed: "2026", generator: Generator.Terrain, gameTime: "0", dayTime: "0" });
+	assert.deepEqual(second, first);
+	assert.deepEqual(await b.readMeta(), first);
+	assert.deepEqual(await b.initializeMeta("42", Generator.DebugHills), first);
+});
+
+test("OPFS requires Web Locks for opening, initialization and imports", async t => {
+	const dir = new MemoryDirectory();
+	const store = await open(dir);
+	const originalLocks = navigator.locks;
+	const originalStorage = navigator.storage;
+	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+	let storageReads = 0;
+	Object.defineProperty(navigator, "storage", { configurable: true, value: {
+		async getDirectory() { storageReads++; return dir; },
+	} });
+	t.after(() => {
+		Object.defineProperty(navigator, "locks", { configurable: true, value: originalLocks });
+		Object.defineProperty(navigator, "storage", { configurable: true, value: originalStorage });
+	});
+	const codec = new RegionCodec(new WebAssembly.Instance(module, {}));
+	assert.equal(await OpfsStore.open("test", codec), null);
+	assert.equal(storageReads, 0, "do not access OPFS without Web Locks");
+	await assert.rejects(store.initializeMeta("2026", Generator.Terrain), /Web Locks/);
+	const bytes = encodeArchive([{ name: "meta.json", data: new TextEncoder().encode(JSON.stringify(meta)) }]);
+	await assert.rejects(store.importArchive("unlocked", bytes), /Web Locks/);
+	assert.equal(dir.files.size, 0);
+});
+
+test("archives preserve Terrain and migrate generator-less metadata to DebugHills", async () => {
+	for (const generator of [undefined, Generator.Flat, Generator.Terrain, 99]) {
+		const store = await open(new MemoryDirectory());
+		const bytes = encodeArchive([{name: "meta.json", data: new TextEncoder().encode(JSON.stringify({seed: "2026", generator}))}]);
+		const dirs = importRoot();
+		await store.importArchive("generator", bytes);
+		const imported = await open(dirs.get("world-generator")!);
+		assert.equal((await imported.readMeta())!.generator, generator ?? Generator.DebugHills);
+		const exported = decodeArchive(await imported.exportArchive());
+		assert.equal(JSON.parse(new TextDecoder().decode(exported[0].data)).generator, generator ?? Generator.DebugHills);
+	}
 });

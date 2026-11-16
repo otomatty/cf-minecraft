@@ -29,37 +29,39 @@ const run = promisify(execFile);
 
 const native = join(root, "target/release/native-server");
 if (existsSync(native)) {
-	const [scenario, probe] = await Promise.all([
+	const [scenario, probe, terrainProbe] = await Promise.all([
 		run(native, ["scenario", seed, String(ticks)], { encoding: "utf8" }),
 		run(native, ["noise", seed], { encoding: "utf8" }),
+		run(native, ["terrain", seed], { encoding: "utf8" }),
 	]);
 	const out = JSON.parse(scenario.stdout);
 	const noise = probe.stdout.trim();
-	results.push({ host: "native (x86-64)", hash: out.hash, noise });
+	results.push({ host: "native (x86-64)", hash: out.hash, noise, terrain: terrainProbe.stdout.trim() });
 } else {
 	console.warn("skipped native: build it with `cargo build --release -p native-server`");
 }
 
 const wasm = readFileSync(join(root, "apps/web/src/wasm/server.wasm"));
 const core = ServerCore.fromModule(new WebAssembly.Module(wasm));
-results.push({ host: `node ${process.version} (wasm)`, hash: core.runScenario(BigInt(seed), ticks), noise: core.noiseFingerprint(BigInt(seed)) });
+results.push({ host: `node ${process.version} (wasm)`, hash: core.runScenario(BigInt(seed), ticks), noise: core.noiseFingerprint(BigInt(seed)), terrain: core.terrainFingerprint(BigInt(seed)) });
 
 if (edge) {
 	const res = await fetch(`${edge}/api/debug/scenario?seed=${seed}&ticks=${ticks}`);
 	if (!res.ok) throw new Error(`edge scenario failed: ${res.status} ${await res.text()}`);
 	const out = await res.json();
-	results.push({ host: "workerd Durable Object (wasm)", hash: out.hash, noise: out.noise });
+	results.push({ host: "workerd Durable Object (wasm)", hash: out.hash, noise: out.noise, terrain: out.terrain });
 }
 
-for (const r of results) console.log(`${r.hash}  noise=${r.noise}  ${r.host}`);
+for (const r of results) console.log(`${r.hash}  noise=${r.noise}  terrain=${r.terrain}  ${r.host}`);
 const distinct = new Set(results.map((r) => r.hash));
 if (results.length < 2) {
 	console.error("need at least two hosts to compare");
 	process.exit(2);
 }
 const noiseDistinct = new Set(results.map((r) => r.noise));
-if (distinct.size !== 1 || noiseDistinct.size !== 1 || results.some((r) => !/^[0-9a-f]{16}$/.test(r.noise))) {
-	console.error(`MISMATCH: ${distinct.size} scenario / ${noiseDistinct.size} noise results for seed ${seed}, ${ticks} ticks`);
+const terrainDistinct = new Set(results.map((r) => r.terrain));
+if (terrainDistinct.size !== 1 || results.some((r) => !/^[0-9a-f]{16}$/.test(r.terrain)) || distinct.size !== 1 || noiseDistinct.size !== 1 || results.some((r) => !/^[0-9a-f]{16}$/.test(r.noise))) {
+	console.error(`MISMATCH: ${distinct.size} scenario / ${noiseDistinct.size} noise / ${terrainDistinct.size} terrain results for seed ${seed}, ${ticks} ticks`);
 	process.exit(1);
 }
 console.log(`OK: ${results.length} hosts agree (seed ${seed}, ${ticks} ticks)`);

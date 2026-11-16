@@ -257,3 +257,9 @@ pub unsafe extern "C" fn storage_call(op: u32, ptr: *const u8, len: usize) -> i3
 pub extern "C" fn server_noise_fingerprint(seed: i64) -> i64 {
     noise::fingerprint(seed) as i64
 }
+
+/// Pure terrain block probe, separate from the legacy scenario hash.
+#[no_mangle]
+pub extern "C" fn server_terrain_fingerprint(seed: i64) -> i64 {
+    worldgen::terrain_fingerprint(seed) as i64
+}

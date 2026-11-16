@@ -18,6 +18,7 @@ export interface ServerStats {
 
 export interface TransportHandlers {
 	onOpen(): void;
+	onGenerator?(generator: number): void;
 	onPacket(data: Uint8Array): void;
 	onStats(stats: ServerStats): void;
 	onReconnecting(info: { attempt: number; delayMs: number; reason: string }): void;
@@ -41,7 +42,7 @@ export type WorkerRequest =
 	| { type: "import"; id: number; world: string; data: ArrayBuffer };
 
 export type WorkerEvent =
-	| { type: "ready"; seed: string; persistence: string }
+	| { type: "ready"; generator: number; seed: string; persistence: string }
 	| { type: "packets"; list: ArrayBuffer[] }
 	| { type: "stats"; stats: ServerStats }
 	| { type: "error"; message: string }
@@ -67,6 +68,7 @@ export class LocalTransport implements Transport {
 			const msg = event.data;
 			switch (msg.type) {
 				case "ready":
+					handlers.onGenerator?.(msg.generator);
 					handlers.onOpen();
 					break;
 				case "packets":
@@ -165,7 +167,15 @@ export class WebSocketTransport implements Transport {
 		};
 		socket.onmessage = (event) => {
 			if (this.socket !== socket) return;
-			if (this.stopped || !(event.data instanceof ArrayBuffer)) return;
+			if (this.stopped) return;
+			if (typeof event.data === "string") {
+				try {
+					const info = JSON.parse(event.data);
+					if (info.type === "worldInfo" && Number.isInteger(info.generator)) this.handlers.onGenerator?.(info.generator);
+				} catch { /* Ignore unknown host metadata. */ }
+				return;
+			}
+			if (!(event.data instanceof ArrayBuffer)) return;
 			const packet = new Uint8Array(event.data);
 			this.handlers.onPacket(packet);
 			if (packet[0] === S2C.Welcome) this.attempt = 0;

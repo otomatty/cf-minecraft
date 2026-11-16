@@ -3,7 +3,7 @@
 // Web Worker for single player. Edited chunks are saved to the origin private
 // file system (OPFS), in crash-safe compressed region files.
 
-import { type DirtyChunk, ServerCore } from "../shared/server-core.ts";
+import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
 import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
 import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
@@ -24,6 +24,7 @@ function post(event: WorkerEvent, transfer: Transferable[] = []): void {
 let core: ServerCore | null = null;
 let store: OpfsStore | null = null;
 let seed = 0n;
+let generator: number = Generator.Terrain;
 let currentWorld = "";
 let archiveQueue: Promise<unknown> = Promise.resolve();
 let persistence: PendingChunkSaves | null = null;
@@ -36,7 +37,7 @@ function save(): Promise<void> {
 	// Drain synchronously so the snapshot is consistent, then write in order.
 	const chunks: DirtyChunk[] = [];
 	for (let d = c.takeDirty(); d !== null; d = c.takeDirty()) chunks.push(d);
-	const meta: Meta = { seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
+	const meta: Meta = { generator, seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
 	return s.save(chunks, meta);
 }
 
@@ -51,16 +52,17 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 
 	store = await OpfsStore.open(msg.world, new RegionCodec(instance));
 	persistence = store ? new PendingChunkSaves(store) : null;
-	const meta = store ? await store.readMeta() : null;
-	// An existing world keeps its seed; otherwise the page's choice or a random one.
-	seed = BigInt.asIntN(64, meta ? BigInt(meta.seed) : msg.seed !== null ? BigInt(msg.seed) : crypto.getRandomValues(new BigInt64Array(1))[0]);
-	c.start(seed, msg.generator);
+	const requestedSeed = msg.seed ?? crypto.getRandomValues(new BigInt64Array(1))[0].toString();
+	const meta = store ? await store.initializeMeta(requestedSeed, msg.generator) : null;
+	seed = BigInt.asIntN(64, BigInt(meta?.seed ?? requestedSeed));
+	generator = meta?.generator ?? msg.generator;
+	c.start(seed, generator);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
 	c.connect(CLIENT, import.meta.env.DEV);
 	core = c;
-	post({ type: "ready", seed: seed.toString(), persistence: store ? "opfs" : "off" });
+	post({ type: "ready", generator, seed: seed.toString(), persistence: store ? "opfs" : "off" });
 
 	const pacer = new TickPacer(performance.now());
 	let spent: number[] = [];

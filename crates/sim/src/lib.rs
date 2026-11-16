@@ -90,6 +90,8 @@ pub struct Stats {
 pub struct Server {
     seed: i64,
     generator: Generator,
+    terrain: Option<worldgen::TerrainGenerator>,
+    spawn: [f64; 3],
     game_time: i64,
     day_time: i64,
     world: World,
@@ -106,9 +108,14 @@ pub struct Server {
 
 impl Server {
     pub fn new(seed: i64, generator: Generator) -> Self {
+        let terrain =
+            (generator == Generator::Terrain).then(|| worldgen::TerrainGenerator::new(seed));
+        let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
             seed,
             generator,
+            terrain,
+            spawn: [x as f64 + 0.5, y as f64, z as f64 + 0.5],
             game_time: 0,
             day_time: 0,
             // Lighting is unused by simulation until mob spawning needs it.
@@ -150,8 +157,7 @@ impl Server {
     }
 
     pub fn spawn(&self) -> [f64; 3] {
-        let y = worldgen::surface_y(self.generator, self.seed, 0, 0) + 1;
-        [0.5, y as f64, 0.5]
+        self.spawn
     }
 
     pub fn connect(&mut self, id: u32) {
@@ -397,7 +403,10 @@ impl Server {
             }
             return false;
         }
-        let chunk = worldgen::generate(self.generator, self.seed, c.0, c.1);
+        let chunk = match &self.terrain {
+            Some(terrain) => terrain.generate(c.0, c.1),
+            None => worldgen::generate(self.generator, self.seed, c.0, c.1),
+        };
         self.world.insert_chunk(chunk);
         self.stats.chunks_generated += 1;
         true
@@ -678,6 +687,25 @@ mod tests {
             pitch: 0.0,
         }
         .encode()
+    }
+
+    #[test]
+    fn terrain_spawn_and_prepared_chunks_match_worldgen() {
+        for seed in [0, 2026, -71] {
+            let mut server = Server::new(seed, Generator::Terrain);
+            let [x, y, z] = worldgen::spawn_point(Generator::Terrain, seed);
+            assert_eq!(server.spawn(), [x as f64 + 0.5, y as f64, z as f64 + 0.5]);
+            assert!(y > worldgen::SEA_LEVEL + 1);
+            let coords = (x.div_euclid(16), z.div_euclid(16));
+            assert!(server.ensure_chunk(coords));
+            assert_eq!(
+                server.world.chunks[&coords],
+                worldgen::generate(Generator::Terrain, seed, coords.0, coords.1)
+            );
+            assert_eq!(server.spawn(), server.spawn);
+            assert!(server.terrain.is_some());
+        }
+        assert!(Server::new(2026, Generator::DebugHills).terrain.is_none());
     }
 
     #[test]
