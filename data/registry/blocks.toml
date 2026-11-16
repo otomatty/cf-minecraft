@@ -5,6 +5,7 @@ textures = [
   "oak_log", "oak_log_top", "bricks", "lamp_block",
   "glass", "oak_leaves", "water", "red_flower",
   "yellow_flower", "short_grass",
+  "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
 ]
 legacy_count = 14
 
@@ -174,3 +175,32 @@ name = "oak_fence"
 id = 39
 model = "fence"
 texture = "oak_planks"
+
+[[blocks]]
+name = "snow_block"
+id = 40
+texture = "snow_block"
+
+[[blocks]]
+name = "sandstone"
+id = 41
+texture = "sandstone"
+
+[[blocks]]
+name = "gravel"
+id = 42
+texture = "gravel"
+
+[[blocks]]
+name = "ice"
+id = 43
+texture = "ice"
+layer = "translucent"
+cull_same = true
+opacity = 1
+solid = true
+
+[[blocks]]
+name = "coarse_dirt"
+id = 44
+texture = "coarse_dirt"

@@ -66,6 +66,13 @@ struct Biomes {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Biome {
+    terrain: String,
+    depth: u8,
+    underwater: String,
+    #[serde(default = "stone")]
+    slope: String,
+    #[serde(default)]
+    freeze: bool,
     name: String,
     surface: String,
     subsurface: String,
@@ -73,6 +80,9 @@ struct Biome {
     leaves_color: [u8; 3],
     temperature: [f64; 2],
     humidity: [f64; 2],
+}
+fn stone() -> String {
+    "stone".into()
 }
 fn cube() -> String {
     "cube".into()
@@ -377,7 +387,18 @@ fn generate(root: &Path, dest: &Path) {
     let biomes: Biomes = read(&root.join("biomes.toml"));
     let mut names = BTreeSet::new();
     let mut out = String::from("pub const BIOMES: &[Biome] = &[\n");
+    for kind in ["Sea", "Shallows", "Beach", "Land", "Mountain"] {
+        assert!(
+            biomes.biomes.iter().any(|b| b.terrain == kind),
+            "biomes.toml: missing terrain kind {kind}"
+        );
+    }
     for b in biomes.biomes {
+        assert!(
+            ["Sea", "Shallows", "Beach", "Land", "Mountain"].contains(&b.terrain.as_str()),
+            "biomes.toml: unknown terrain kind"
+        );
+        assert!(b.depth <= 8, "biomes.toml: depth must be <= 8");
         identifier(&b.name);
         assert!(
             names.insert(b.name.clone()),
@@ -403,7 +424,7 @@ fn generate(root: &Path, dest: &Path) {
                 b.name
             );
         }
-        writeln!(out, "Biome {{ name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.temperature, b.humidity).unwrap();
+        writeln!(out, "Biome {{ terrain: TerrainKind::{}, depth: {}, underwater: {}, slope: {}, freeze: {}, name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.terrain, b.depth, resolve(&b.underwater), resolve(&b.slope), b.freeze, b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.temperature, b.humidity).unwrap();
     }
     out.push_str("];\n");
     fs::write(dest.join("biomes.rs"), out).unwrap();

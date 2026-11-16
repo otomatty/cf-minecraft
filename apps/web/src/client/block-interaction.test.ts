@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
+import { paintTexture } from "./textures.ts";
 import { placementState } from "./placement.ts";
 import { defaultHotbar, HOTBAR_KEY, loadHotbar, saveHotbar } from "./hotbar.ts";
 
@@ -19,7 +20,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 40);
+	assert.equal(registry.length, 45);
 	assert.equal(slab, 14);
 	assert.equal(registry[slab + 1].stateName, "oak_slab[type=top]");
 	assert.equal(registry[slab + 2].occludes, true);
@@ -169,4 +170,21 @@ test("corrupt hotbars and denied storage use fresh defaults without throwing", (
 	const first = defaultHotbar(registry);
 	first[0] = air;
 	assert.equal(defaultHotbar(registry)[0], stone);
+});
+
+
+test("biome blocks expose picker entries and original art, with translucent ice", () => {
+	for (const [index, name] of ["snow_block", "sandstone", "gravel", "ice", "coarse_dirt"].entries()) {
+		const state = id(name);
+		assert.equal(state, 40 + index);
+		assert.equal(registry[state].model, "cube");
+		assert.equal(registry[state].first, state);
+		const pixels = paintTexture(name);
+		assert.deepEqual(pixels, paintTexture(name));
+		assert.equal(pixels.length, 16 * 16 * 4);
+		for (let i = 0; i < pixels.length; i += 4) {
+			assert.ok(pixels[i + 1] > 0, "no missing-texture magenta/black");
+			assert.ok(name === "ice" ? pixels[i+3] > 0 && pixels[i+3] < 255 : pixels[i+3] === 255);
+		}
+	}
 });

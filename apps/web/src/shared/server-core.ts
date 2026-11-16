@@ -10,6 +10,7 @@ interface ServerExports {
 	server_new(seed: bigint, generator: number): void;
 	server_set_time(gameTime: bigint, dayTime: bigint): void;
 	server_connect(client: number, allowTeleport: number, hasPosition: number, x: number, y: number, z: number): void;
+	server_client_biome(client: number): number;
 	server_client_position(client: number): number;
 	server_disconnect(client: number): void;
 	server_packet(client: number, ptr: number, len: number): void;
@@ -32,7 +33,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 3;
+export const SERVER_ABI_VERSION = 4;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
@@ -89,6 +90,10 @@ export class ServerCore {
 
 	start(seed: bigint, generator: number): void {
 		this.x.server_new(BigInt.asIntN(64, seed), generator);
+	}
+
+	clientBiome(client: number): string {
+		return new TextDecoder().decode(this.output(this.x.server_client_biome(client)));
 	}
 
 	setTime(gameTime: bigint, dayTime: bigint): void {

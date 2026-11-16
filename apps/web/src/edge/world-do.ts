@@ -346,11 +346,23 @@ export class WorldDO extends DurableObject<Env> {
 		this.pacer = null;
 	}
 
+	private stepTimes: number[] = [];
+	private stepMean = 0;
+	private stepMax = 0;
+
 	private onTimer(): void {
 		const pacer = this.pacer;
 		if (!pacer) return;
 		const due = pacer.due(Date.now());
-		for (let i = 0; i < due; i++) this.step();
+		for (let i = 0; i < due; i++) {
+			const start = performance.now();
+			this.step();
+			const ms = performance.now() - start;
+			this.stepTimes.push(ms);
+			if (this.stepTimes.length > 20) this.stepTimes.shift();
+			this.stepMean = this.stepTimes.reduce((a, b) => a + b, 0) / this.stepTimes.length;
+			this.stepMax = Math.max(...this.stepTimes);
+		}
 	}
 
 	private step(): void {
@@ -362,6 +374,17 @@ export class WorldDO extends DurableObject<Env> {
 			this.lastAccessCheck = now;
 			this.accessCheckRunning = true;
 			void this.recheckAccess().finally(() => { this.accessCheckRunning = false; });
+		}
+		if (core.gameTime % 20n === 0n) {
+			for (const [client, socket] of this.sockets) {
+				try {
+					socket.send(JSON.stringify({ type: "stats", stats: {
+						biome: core.clientBiome(client), gameTime: Number(core.gameTime),
+						tps: this.pacer?.measuredTps ?? 0, msptMean: this.stepMean, msptMax: this.stepMax,
+						loadedChunks: core.loadedChunks, persistence: "sqlite", memoryBytes: core.memoryBytes,
+					} }));
+				} catch { /* Close event cleans up the socket. */ }
+			}
 		}
 		this.packetCounts.clear();
 

@@ -64,7 +64,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn server_abi_version() -> u32 {
-    3
+    4
 }
 
 #[no_mangle]
@@ -262,4 +262,14 @@ pub extern "C" fn server_noise_fingerprint(seed: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn server_terrain_fingerprint(seed: i64) -> i64 {
     worldgen::terrain_fingerprint(seed) as i64
+}
+
+/// Output: UTF-8 name of the biome at the accepted player position.
+#[no_mangle]
+pub extern "C" fn server_client_biome(client: u32) -> usize {
+    let st = state();
+    let name = st.server.as_ref().expect("server").client_biome(client);
+    st.out.clear();
+    st.out.extend_from_slice(name.as_bytes());
+    st.out.len()
 }

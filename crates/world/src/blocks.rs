@@ -304,6 +304,22 @@ mod tests {
     }
 
     #[test]
+    fn biome_blocks_append_and_ice_uses_existing_translucency() {
+        assert_eq!(
+            [SNOW_BLOCK, SANDSTONE, GRAVEL, ICE, COARSE_DIRT],
+            [40, 41, 42, 43, 44]
+        );
+        for state in [SNOW_BLOCK, SANDSTONE, GRAVEL, COARSE_DIRT] {
+            assert!(info(state).solid && info(state).occludes);
+            assert_eq!(info(state).opacity, 15);
+        }
+        let ice = info(ICE);
+        assert!(ice.solid && ice.cull_same && !ice.occludes);
+        assert_eq!(ice.layer, RenderLayer::Translucent);
+        assert_eq!(ice.opacity, 1);
+    }
+
+    #[test]
     fn appended_state_ids_and_properties() {
         let old = [
             "oak_slab[type=bottom]",
@@ -321,7 +337,7 @@ mod tests {
         }
         assert_eq!(
             (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
-            (23, 31, 39, 40)
+            (23, 31, 39, 45)
         );
         for base in [OAK_STAIRS, COBBLESTONE_STAIRS] {
             assert_eq!(block(base).unwrap().count, 8);
@@ -333,7 +349,7 @@ mod tests {
             }
         }
         assert_eq!(block(OAK_FENCE).unwrap().count, 1);
-        for state in OAK_STAIRS..COUNT {
+        for state in OAK_STAIRS..=OAK_FENCE {
             assert!(is_solid(state));
             assert!(!occludes(state));
             assert_eq!(info(state).opacity, 0);

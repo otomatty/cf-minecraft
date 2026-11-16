@@ -1,17 +1,181 @@
 [[biomes]]
 name = "mild_meadow"
+terrain = "Land"
 surface = "grass_block"
 subsurface = "dirt"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
 grass_color = [113, 169, 82]
 leaves_color = [85, 145, 76]
 temperature = [0.25, 0.8]
-humidity = [0.3, 0.85]
+humidity = [0.3, 0.66]
 
 [[biomes]]
 name = "dry_sands"
+terrain = "Land"
+surface = "sand"
+subsurface = "sandstone"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.83, 0.93]
+humidity = [0.07, 0.17]
+
+[[biomes]]
+name = "rain_grove"
+terrain = "Land"
+surface = "grass_block"
+subsurface = "dirt"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.57, 0.67]
+humidity = [0.8, 0.9]
+
+[[biomes]]
+name = "sun_steppe"
+terrain = "Land"
+surface = "coarse_dirt"
+subsurface = "dirt"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.69, 0.79]
+humidity = [0.3, 0.4]
+
+[[biomes]]
+name = "quiet_snow"
+terrain = "Land"
+surface = "snow_block"
+subsurface = "dirt"
+depth = 3
+underwater = "gravel"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.07, 0.17]
+humidity = [0.35, 0.45]
+
+[[biomes]]
+name = "reed_mire"
+terrain = "Land"
+surface = "grass_block"
+subsurface = "dirt"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.23, 0.33]
+humidity = [0.85, 0.95]
+
+[[biomes]]
+name = "open_tide"
+terrain = "Sea"
 surface = "sand"
 subsurface = "sand"
-grass_color = [183, 170, 95]
-leaves_color = [142, 151, 77]
-temperature = [0.65, 1.0]
-humidity = [0.0, 0.35]
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.6, 0.7]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "silent_floe"
+terrain = "Sea"
+surface = "gravel"
+subsurface = "gravel"
+depth = 3
+underwater = "gravel"
+slope = "stone"
+freeze = true
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.07, 0.17]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "clear_shoal"
+terrain = "Shallows"
+surface = "sand"
+subsurface = "sand"
+depth = 3
+underwater = "sand"
+slope = "stone"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.55, 0.65]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "pale_strand"
+terrain = "Beach"
+surface = "sand"
+subsurface = "sand"
+depth = 3
+underwater = "sand"
+slope = "gravel"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.65, 0.75]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "shingle_edge"
+terrain = "Beach"
+surface = "gravel"
+subsurface = "gravel"
+depth = 3
+underwater = "gravel"
+slope = "gravel"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.1, 0.2]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "bare_ridge"
+terrain = "Mountain"
+surface = "stone"
+subsurface = "gravel"
+depth = 3
+underwater = "gravel"
+slope = "gravel"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.7, 0.8]
+humidity = [0.45, 0.55]
+
+[[biomes]]
+name = "white_crest"
+terrain = "Mountain"
+surface = "snow_block"
+subsurface = "stone"
+depth = 3
+underwater = "gravel"
+slope = "gravel"
+freeze = false
+grass_color = [113, 169, 82]
+leaves_color = [85, 145, 76]
+temperature = [0.1, 0.2]
+humidity = [0.45, 0.55]

@@ -617,3 +617,40 @@ test("DO announces the saved generator to clients", async t => {
 	await f.join("user");
 	assert.deepEqual(JSON.parse(f.world.sockets.get(1).sent[0]), { type: "worldInfo", generator: Generator.Terrain });
 });
+
+
+test("WASM biome metadata follows the accepted player column for both hosts", () => {
+	const core = ServerCore.fromModule(storageModule);
+	for (const gen of [Generator.Flat, Generator.DebugHills]) {
+		core.start(2026n, gen);
+		core.connect(1, true, [-1000.5,240,2000.5]);
+		assert.equal(core.clientBiome(1), "mild_meadow");
+	}
+	core.start(2026n, Generator.Terrain);
+	const names = new Set<string>();
+	for (const [i, [x,z]] of [[0,0],[-2048,-2048],[2040,2040],[640,-640]].entries()) {
+		core.connect(i+1,true,[x+0.5,240,z+0.5]);
+		const name = core.clientBiome(i+1);
+		assert.match(name,/^[a-z]+_[a-z]+$/);
+		assert.equal(name,core.clientBiome(i+1));
+		names.add(name);
+	}
+	assert.ok(names.size > 1);
+});
+
+
+test("DO sends per-player biome names through stats text metadata", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.setMeta("seed","2026");
+	f.world.setMeta("generator",String(Generator.Terrain));
+	await f.join("player");
+	f.world.lastAccessCheck = Date.now();
+	for (let i = 0; i < 20; i++) f.world.step();
+	const frames = f.world.sockets.get(1).sent.filter(frame => typeof frame === "string").map(frame => JSON.parse(frame));
+	const stats = frames.find(frame => frame.type === "stats")?.stats;
+	assert.ok(stats);
+	assert.equal(stats.biome, f.world.core.clientBiome(1));
+	assert.match(stats.biome,/^[a-z]+_[a-z]+$/);
+	assert.equal(stats.persistence,"sqlite");
+});
