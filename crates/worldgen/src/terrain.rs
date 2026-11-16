@@ -309,15 +309,22 @@ impl TerrainGenerator {
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> Chunk {
-        self.generate_features(cx, cz, true, true)
+        self.generate_features(cx, cz, true, true, true)
     }
 
     #[cfg(test)]
     pub(crate) fn generate_geology(&self, cx: i32, cz: i32) -> Chunk {
-        self.generate_features(cx, cz, false, true)
+        self.generate_features(cx, cz, false, true, true)
     }
 
-    fn generate_features(&self, cx: i32, cz: i32, trees: bool, caves: bool) -> Chunk {
+    pub(crate) fn generate_features(
+        &self,
+        cx: i32,
+        cz: i32,
+        trees: bool,
+        caves: bool,
+        ores: bool,
+    ) -> Chunk {
         // A one-cell halo supplies exact neighbouring column heights for slopes.
         let grid: [[f64; Y_POINTS]; 49] = std::array::from_fn(|i| {
             self.density_line(
@@ -393,6 +400,9 @@ impl TerrainGenerator {
         }
         if caves {
             self.caves.carve(&mut chunk, cx, cz, &heights);
+        }
+        if ores {
+            crate::ores::place(self.seed, &mut chunk, cx, cz);
         }
         if trees {
             self.plant_trees(&mut chunk, cx, cz, |x, z| {
@@ -553,8 +563,17 @@ mod tests {
                         for depth in 0..=i32::from(b.depth) + 1 {
                             let y = shape_top - depth;
                             if TerrainGenerator::solid(&terrain_column(&terrain, wx, wz), y) {
+                                let actual = chunk.get(x, y, z);
+                                // Exposed stone can now carry minerals. The ore tests
+                                // independently check the exact species and positions.
+                                let material =
+                                    if (blocks::COAL_ORE..=blocks::GOLD_ORE).contains(&actual) {
+                                        blocks::STONE
+                                    } else {
+                                        actual
+                                    };
                                 assert_eq!(
-                                    chunk.get(x, y, z),
+                                    material,
                                     TerrainGenerator::coating(b, shape_top, y, steep)
                                 );
                             }
@@ -1012,8 +1031,8 @@ mod tests {
             let (mut air, mut water) = (0, 0);
             for cz in -1..=1 {
                 for cx in -1..=1 {
-                    let before = t.generate_features(cx, cz, true, false);
-                    let after = t.generate(cx, cz);
+                    let before = t.generate_features(cx, cz, true, false, false);
+                    let after = t.generate_features(cx, cz, true, true, false);
                     for z in 0..16 {
                         for x in 0..16 {
                             let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
@@ -1069,8 +1088,8 @@ mod tests {
             for cz in -4..=4 {
                 for cx in -4..=4 {
                     let (cx, cz) = (cx * 8, cz * 8);
-                    let before = t.generate_features(cx, cz, false, false);
-                    let after = t.generate_geology(cx, cz);
+                    let before = t.generate_features(cx, cz, false, false, false);
+                    let after = t.generate_features(cx, cz, false, true, false);
                     for z in 0..16 {
                         for x in 0..16 {
                             let top = t.surface_y(cx * 16 + x as i32, cz * 16 + z as i32);
@@ -1135,6 +1154,6 @@ mod tests {
 
     #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0x4cd857db4701f1cb);
+        assert_eq!(terrain_fingerprint(2026), 0xc4a48cdc0d6a60a1);
     }
 }

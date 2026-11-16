@@ -4,6 +4,7 @@
 //! legacy output. Prepared generators own their noise tables, with no global state.
 
 mod caves;
+mod ores;
 mod terrain;
 mod trees;
 pub use terrain::{terrain_fingerprint, TerrainGenerator, SEA_LEVEL};
@@ -199,6 +200,33 @@ mod tests {
             }
         }
         assert!(sea && mountain, "samples must cover sea and mountains");
+    }
+
+    #[test]
+    fn legacy_chunk_fingerprints_are_unchanged_by_ores() {
+        // Captured by running the HEAD worldgen sources before the ore change.
+        // Hash every block, including empty upper sections, across three seeds.
+        for (gen, expected) in [
+            (Generator::Flat, 0x378628a8583b8b25),
+            (Generator::DebugHills, 0x3ab804f867ce25ad),
+        ] {
+            let mut hash = 0xcbf29ce484222325u64;
+            for seed in [2026, 0, -71] {
+                for (cx, cz) in [(-2, 1), (0, 0), (17, -33)] {
+                    let chunk = generate(gen, seed, cx, cz);
+                    for y in MIN_Y..MIN_Y + world::HEIGHT {
+                        for z in 0..16 {
+                            for x in 0..16 {
+                                for byte in chunk.get(x, y, z).to_le_bytes() {
+                                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(hash, expected, "{gen:?}");
+        }
     }
 
     #[test]

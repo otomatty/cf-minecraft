@@ -141,7 +141,32 @@ function grassSide(rand: () => number): Painter {
 	};
 }
 
+// Original angular mineral grains over the same stone recipe used below.
+function ore(colors: readonly Rgb[], count: number): (rand: () => number) => Painter {
+	return (rand) => {
+		const base = speckled([125, 125, 125], 0.16, 0.08, 0.85)(rand);
+		const grains = Array.from({ length: count }, () => ({
+			x: 1 + Math.floor(rand() * 13), y: 1 + Math.floor(rand() * 13),
+			width: 1 + Math.floor(rand() * 3), height: 1 + Math.floor(rand() * 2),
+			color: colors[Math.floor(rand() * colors.length)],
+		}));
+		return (x, y, r) => {
+			const stone = base(x, y, r);
+			for (const g of grains) {
+				if (x >= g.x && x < g.x + g.width && y >= g.y && y < g.y + g.height) {
+					return shade(g.color, 0.85 + r() * 0.3);
+				}
+			}
+			return stone;
+		};
+	};
+}
+
 const PAINTERS: Record<string, (rand: () => number) => Painter> = {
+	coal_ore: ore([[32, 34, 39], [46, 45, 48]], 9),
+	copper_ore: ore([[194, 100, 55], [219, 126, 65], [62, 153, 125]], 9),
+	iron_ore: ore([[172, 117, 60], [148, 77, 51]], 8),
+	gold_ore: ore([[243, 201, 50], [255, 224, 83]], 4),
 	glass: () => (x, y) => [184 + (x + y) % 4 * 12, 220, 238],
 	oak_leaves: speckled([190, 190, 190], 0.4),
 	water: () => (x, y) => gray(185 + 25 * Math.sin((x * 2 + y + Math.sin(y)) * Math.PI / 8)),

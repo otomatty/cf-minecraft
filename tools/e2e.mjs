@@ -763,6 +763,31 @@ async function biomeTints() {
 			return { found: false, checked };
 		});
 		check(caves.found, "caves: Terrain seed 2026 has underground air in loaded spawn chunks", JSON.stringify(caves));
+		const ores = await page.evaluate(() => {
+			const api = window.__mc;
+			const [sx, , sz] = api.stats().spawn;
+			const [cx, cz] = [Math.floor(sx / 16), Math.floor(sz / 16)];
+			const names = ["coal_ore", "copper_ore", "iron_ore", "gold_ore"];
+			const ids = names.map(name => api.stateId(name));
+			const counts = [0, 0, 0, 0];
+			const excluded = new Set(["air", "water", "ice", "oak_log", "oak_leaves"].map(name => api.stateId(name)));
+			let checked = 0;
+			for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+				for (let z = 0; z < 16; z += 2) for (let x = 0; x < 16; x += 2) {
+					const [wx, wz] = [(cx + dx) * 16 + x, (cz + dz) * 16 + z];
+					if (api.getBlock(wx, -64, wz) < 0) continue;
+					let top = 319;
+					while (top > -60 && excluded.has(api.getBlock(wx, top, wz))) top--;
+					for (let y = -60; y <= Math.min(143, top - 1); y++) {
+						checked++;
+						const index = ids.indexOf(api.getBlock(wx, y, wz));
+						if (index >= 0) counts[index]++;
+					}
+				}
+			}
+			return { counts: Object.fromEntries(names.map((name, i) => [name, counts[i]])), checked };
+		});
+		check(ores.counts.coal_ore > 0 && ores.counts.iron_ore > 0, "ores: Terrain seed 2026 has underground coal and iron in loaded spawn chunks", JSON.stringify(ores));
 		const trees = await page.evaluate(() => {
 			const [sx, , sz] = window.__mc.stats().spawn.map(Math.floor);
 			const log = window.__mc.stateId("oak_log");

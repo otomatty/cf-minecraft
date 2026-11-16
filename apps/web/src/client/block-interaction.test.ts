@@ -20,7 +20,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 45);
+	assert.equal(registry.length, 49);
 	assert.equal(slab, 14);
 	assert.equal(registry[slab + 1].stateName, "oak_slab[type=top]");
 	assert.equal(registry[slab + 2].occludes, true);
