@@ -1,8 +1,38 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { finishWorldImport } from "./world-import.ts";
+import { confirmSaved, finishWorldImport } from "./world-import.ts";
 
 const request = { id: 7, world: "imported-world" };
+
+test("confirmSaved waits until saving finishes and checks the final persistence state", async () => {
+	let release!: () => void;
+	const blocked = new Promise<void>(resolve => { release = resolve; });
+	const persistence = { retrying: true };
+	let finished = false;
+	const saving = confirmSaved(async () => {
+		await blocked;
+		persistence.retrying = false;
+	}, persistence).then(() => { finished = true; });
+	await Promise.resolve();
+	assert.equal(finished, false);
+	release();
+	await saving;
+	assert.equal(finished, true);
+});
+
+test("confirmSaved blocks returning to the title when persistence is retrying", async () => {
+	await assert.rejects(confirmSaved(async () => {}, { retrying: true }), {
+		message: "ワールドの保存に失敗したため、タイトルに戻れません。もう一度お試しください",
+	});
+});
+
+test("confirmSaved preserves the cause when saving rejects", async () => {
+	const cause = new Error("I/O failure");
+	await assert.rejects(confirmSaved(async () => { throw cause; }, { retrying: false }), {
+		message: "ワールドの保存に失敗したため、タイトルに戻れません。もう一度お試しください",
+		cause,
+	});
+});
 
 test("imported is sent only after the current world finishes saving", async () => {
 	const events: unknown[] = [];

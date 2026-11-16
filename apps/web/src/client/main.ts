@@ -254,6 +254,28 @@ async function main(): Promise<void> {
 	};
 	const exportWorld = () => local().exportWorld();
 	const importWorld = (name: string, bytes: Uint8Array) => local().importWorld(name, bytes);
+	const toTitle = $<HTMLAnchorElement>("to-title");
+	let returningToTitle = false;
+	toTitle.addEventListener("click", async event => {
+		event.stopPropagation();
+		if (!(transport instanceof LocalTransport)) return;
+		event.preventDefault();
+		if (returningToTitle) return;
+		returningToTitle = true;
+		const text = toTitle.textContent;
+		toTitle.setAttribute("aria-disabled", "true");
+		toTitle.textContent = "保存しています…";
+		try {
+			await transport.saveNow();
+			location.assign("/");
+		} catch (error) {
+			returningToTitle = false;
+			toTitle.removeAttribute("aria-disabled");
+			toTitle.textContent = text;
+			statusLine.textContent = error instanceof Error ? error.message : String(error);
+			statusLine.className = "error";
+		}
+	});
 	$("world-archive").hidden = serverKind !== "local";
 	const exportButton = $<HTMLButtonElement>("world-export");
 	const importButton = $<HTMLButtonElement>("world-import");

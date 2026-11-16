@@ -1,5 +1,18 @@
 import type { WorkerEvent } from "./transport.ts";
 
+export async function confirmSaved(
+	save: () => Promise<void>,
+	persistence: { readonly retrying: boolean },
+): Promise<void> {
+	const message = "ワールドの保存に失敗したため、タイトルに戻れません。もう一度お試しください";
+	try {
+		await save();
+	} catch (error) {
+		throw new Error(message, { cause: error });
+	}
+	if (persistence.retrying) throw new Error(message);
+}
+
 /** The destination is durable; save the current world before allowing navigation. */
 export async function finishWorldImport(
 	request: { id: number; world: string },
