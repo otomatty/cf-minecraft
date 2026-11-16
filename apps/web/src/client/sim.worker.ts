@@ -8,7 +8,7 @@ import { TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import type { ServerStats, WorkerEvent, WorkerRequest } from "./transport.ts";
 import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
-import { finishWorldImport } from "./world-import.ts";
+import { confirmSaved, finishWorldImport } from "./world-import.ts";
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
@@ -123,6 +123,16 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
 					await store.importArchive(msg.world, new Uint8Array(msg.data));
 					await finishWorldImport(msg, save, persistence, post);
 				}
+			}).catch(error => post({ type: "archiveError", id: msg.id, message: error instanceof Error ? error.message : String(error) }));
+			break;
+		case "saveNow":
+			archiveQueue = archiveQueue.then(async () => {
+				if (!core || !store || !persistence) {
+					post({ type: "saved", id: msg.id });
+					return;
+				}
+				await confirmSaved(save, persistence);
+				post({ type: "saved", id: msg.id });
 			}).catch(error => post({ type: "archiveError", id: msg.id, message: error instanceof Error ? error.message : String(error) }));
 			break;
 		case "save":

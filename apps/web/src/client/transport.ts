@@ -40,6 +40,7 @@ export type WorkerRequest =
 	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null }
 	| { type: "packet"; data: ArrayBuffer }
 	| { type: "save" }
+	| { type: "saveNow"; id: number }
 	| { type: "export"; id: number }
 	| { type: "import"; id: number; world: string; data: ArrayBuffer };
 
@@ -48,6 +49,7 @@ export type WorkerEvent =
 	| { type: "packets"; list: ArrayBuffer[] }
 	| { type: "stats"; stats: ServerStats }
 	| { type: "error"; message: string }
+	| { type: "saved"; id: number }
 	| { type: "exported"; id: number; data: ArrayBuffer }
 	| { type: "imported"; id: number; world: string }
 	| { type: "archiveError"; id: number; message: string };
@@ -83,6 +85,7 @@ export class LocalTransport implements Transport {
 					this.pending.get(msg.id)?.resolve(msg.data);
 					this.pending.delete(msg.id);
 					break;
+				case "saved":
 				case "imported":
 					this.pending.get(msg.id)?.resolve();
 					this.pending.delete(msg.id);
@@ -115,6 +118,14 @@ export class LocalTransport implements Transport {
 
 	flush(): void {
 		this.post({ type: "save" });
+	}
+
+	async saveNow(): Promise<void> {
+		const id = this.nextId++;
+		await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
+			this.pending.set(id, { resolve, reject });
+			this.post({ type: "saveNow", id });
+		});
 	}
 
 	async exportWorld(): Promise<Uint8Array<ArrayBuffer>> {
