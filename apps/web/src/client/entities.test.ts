@@ -21,7 +21,7 @@ test("cube vertices remain camera relative, bounded, and use lightmap coordinate
 	assert.equal(vertices.length,36*9);
 	for(let i=0;i<vertices.length;i+=9) {
 		assert.ok(Math.abs(vertices[i])<=0.125); assert.ok(Math.abs(vertices[i+2])<=0.125);
-		assert.equal(vertices[i+6],7); assert.equal(vertices[i+7],15.5/16); assert.equal(vertices[i+8],3.5/16);
+		assert.equal(vertices[i+6],7); assert.equal(vertices[i+7],3.5/16); assert.equal(vertices[i+8],15.5/16);
 	}
 });
 

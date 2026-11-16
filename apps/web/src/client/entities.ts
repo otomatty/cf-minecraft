@@ -7,7 +7,8 @@ export function interpolateEntity(previous: readonly number[], current: readonly
 export interface RenderItem {
 	position: [number, number, number];
 	texture: number;
-	light: [number, number];
+	/** Sky light first, block light second; lightmap UVs use the reverse order. */
+	light: [sky: number, block: number];
 }
 
 export const MAX_RENDER_ITEMS = 1024;
@@ -34,7 +35,7 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 					item.position[1] - camera[1] + vertex[1] * 0.25 + 0.04 + Math.sin(timeMs / 500) * 0.03,
 					item.position[2] - camera[2] + x * s + z * c,
 					[0, 1, 1, 0][i], [1, 1, 0, 0][i], [0.5, 1, 0.8, 0.8, 0.6, 0.6][face], item.texture,
-					(item.light[0] + 0.5) / 16, (item.light[1] + 0.5) / 16,
+					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16,
 				);
 			}
 		}
