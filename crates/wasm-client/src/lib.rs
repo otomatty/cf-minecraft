@@ -21,6 +21,17 @@ const UNKNOWN: u16 = blocks::STONE;
 
 struct State {
     world: World,
+    connectivity: BTreeMap<world::visibility::Key, u16>,
+    connectivity_work: world::visibility::Connectivity,
+    connectivity_grid: Vec<u16>,
+    visibility: world::visibility::Search,
+    visibility_stale: bool,
+    visibility_camera: Option<world::visibility::Key>,
+    culling: bool,
+    visibility_all: bool,
+    visible_keys: Vec<world::visibility::Key>,
+    visible_next: Vec<world::visibility::Key>,
+    visibility_changed: bool,
     /// Sections whose mesh is stale: (chunk x, section index, chunk z).
     dirty: BTreeSet<(i32, i32, i32)>,
     unloaded: Vec<(i32, i32)>,
@@ -152,6 +163,17 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 pub extern "C" fn client_new() {
     let st = State {
         world: World::with_lighting(true),
+        connectivity: BTreeMap::new(),
+        connectivity_work: Default::default(),
+        connectivity_grid: Vec::new(),
+        visibility: Default::default(),
+        visibility_stale: true,
+        visibility_camera: None,
+        culling: true,
+        visibility_all: true,
+        visible_keys: Vec::new(),
+        visible_next: Vec::new(),
+        visibility_changed: true,
         dirty: BTreeSet::new(),
         unloaded: Vec::new(),
         light_pending: BTreeSet::new(),
@@ -182,6 +204,8 @@ pub extern "C" fn client_reset_world() {
     if st.light_exports.is_none() {
         st.unloaded.extend(st.world.chunks.keys().copied());
     }
+    st.connectivity.clear();
+    st.visibility_stale = true;
     st.world.chunks.clear();
     st.dirty.clear();
     st.light_pending.clear();
@@ -246,6 +270,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             let Ok(chunk) = Chunk::read(cx, cz, &mut Reader::new(&data)) else {
                 return u32::MAX;
             };
+            invalidate_connectivity(st, cx, cz);
             st.light_generations.remove(&(cx, cz));
             if st.external_light {
                 st.world.chunks.insert((cx, cz), chunk);
@@ -260,6 +285,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             }
         }
         S2C::UnloadChunk { cx, cz } => {
+            invalidate_connectivity(st, cx, cz);
             st.light_pending.remove(&(cx, cz));
             st.light_generations.remove(&(cx, cz));
             let removed = if st.external_light {
@@ -312,6 +338,10 @@ fn set_block(st: &mut State, x: i32, y: i32, z: i32, block: u16) -> bool {
     };
     match old {
         Some(old) if old != block => {
+            if let Some(sy) = world::section_index(y) {
+                st.connectivity.remove(&(x >> 4, sy as i32, z >> 4));
+                st.visibility_stale = true;
+            }
             // Faces, AO and derived stair/fence connections of touching blocks
             // may change. Shapes only query cardinal neighbors, so this one-cell
             // radius also covers their dependencies across section boundaries.
@@ -372,7 +402,111 @@ pub extern "C" fn client_chunk_count() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn client_dirty_count() -> u32 {
-    state().dirty.len() as u32
+    let st = state();
+    st.dirty.iter().filter(|&&k| is_visible(st, k)).count() as u32
+}
+
+fn invalidate_connectivity(st: &mut State, cx: i32, cz: i32) {
+    for sy in 0..SECTIONS as i32 {
+        st.connectivity.remove(&(cx, sy, cz));
+    }
+    st.visibility_stale = true;
+}
+fn is_visible(st: &State, key: world::visibility::Key) -> bool {
+    st.visibility_all || st.visibility.contains(key)
+}
+#[no_mangle]
+pub extern "C" fn client_hidden_dirty_count() -> u32 {
+    let st = state();
+    st.dirty.iter().filter(|&&k| !is_visible(st, k)).count() as u32
+}
+/// Called once per host frame before mesh scheduling. Output only changes when
+/// the loaded visible set changes: -1 unchanged, -2 all visible, otherwise count.
+#[no_mangle]
+pub extern "C" fn client_update_visibility(x: f64, y: f64, z: f64, enabled: u32) -> i32 {
+    let st = state();
+    let camera = (
+        (x.floor() as i32) >> 4,
+        ((y.floor() as i32) - MIN_Y) >> 4,
+        (z.floor() as i32) >> 4,
+    );
+    let culling = enabled != 0;
+    if !st.visibility_stale && st.visibility_camera == Some(camera) && st.culling == culling {
+        return -1;
+    }
+    st.visibility_stale = false;
+    st.visibility_camera = Some(camera);
+    st.culling = culling;
+    let all = !culling || !(0..SECTIONS as i32).contains(&camera.1);
+    if !all {
+        let r = st.view_distance as i32;
+        let bounds = [camera.0 - r, camera.0 + r, camera.2 - r, camera.2 + r];
+        // Scan the ordered cache once into reusable dense storage. BFS then
+        // avoids tree lookups for every entry face of every loaded section.
+        let width = bounds[1] - bounds[0] + 1;
+        let index = |key: world::visibility::Key| {
+            (((key.2 - bounds[2]) * width + key.0 - bounds[0]) as usize) * SECTIONS + key.1 as usize
+        };
+        st.connectivity_grid.clear();
+        st.connectivity_grid
+            .resize((width * width) as usize * SECTIONS, u16::MAX);
+        for (&key, &value) in &st.connectivity {
+            if (bounds[0]..=bounds[1]).contains(&key.0) && (bounds[2]..=bounds[3]).contains(&key.2)
+            {
+                st.connectivity_grid[index(key)] = value;
+            }
+        }
+        let grid = &mut st.connectivity_grid;
+        let world = &st.world;
+        let cache = &mut st.connectivity;
+        let work = &mut st.connectivity_work;
+        st.visibility.run(camera, bounds, |key| {
+            let i = index(key);
+            if grid[i] != u16::MAX {
+                return grid[i];
+            }
+            let value = if let Some(chunk) = world.chunks.get(&(key.0, key.2)) {
+                let value = work.compute(&chunk.sections[key.1 as usize]);
+                cache.insert(key, value);
+                value
+            } else {
+                world::visibility::ALL
+            };
+            grid[i] = value;
+            value
+        });
+    }
+    st.visible_next.clear();
+    for &(cx, cz) in st.world.chunks.keys() {
+        for sy in 0..SECTIONS as i32 {
+            let key = (cx, sy, cz);
+            if all || st.visibility.contains(key) {
+                st.visible_next.push(key);
+            }
+        }
+    }
+    let changed =
+        st.visibility_changed || st.visibility_all != all || st.visible_next != st.visible_keys;
+    std::mem::swap(&mut st.visible_keys, &mut st.visible_next);
+    st.visibility_all = all;
+    st.visibility_changed = false;
+    if !changed {
+        return -1;
+    }
+    if all {
+        return -2;
+    }
+    st.out.clear();
+    for &(cx, sy, cz) in &st.visible_keys {
+        for v in [cx, sy, cz] {
+            st.out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    st.visible_keys.len() as i32
+}
+#[no_mangle]
+pub extern "C" fn client_visible_count() -> u32 {
+    state().visible_keys.len() as u32
 }
 
 fn mark_light_dirty(st: &mut State) {
@@ -568,7 +702,7 @@ pub extern "C" fn client_pop_dirty(cam_x: f64, cam_y: f64, cam_z: f64) -> u32 {
     let mut best: Option<(f64, (i32, i32, i32))> = None;
     for &key in &st.dirty {
         let (cx, sy, cz) = key;
-        if !light_ready(st, cx, cz) {
+        if !is_visible(st, key) || !light_ready(st, cx, cz) {
             continue;
         }
         let dx = (cx * 16 + 8) as f64 - cam_x;
@@ -1020,6 +1154,110 @@ mod tests {
             unsafe { client_packet(packet.as_ptr(), packet.len()) },
             u32::MAX
         );
+    }
+
+    #[test]
+    fn visibility_crosses_missing_chunks_and_refreshes_replacements_and_unloads() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().view_distance = 2;
+        receive(&Chunk::empty(0, 0));
+        let mut far = Chunk::empty(2, 0);
+        far.sections.fill(world::Section::uniform(blocks::STONE));
+        receive(&far);
+        client_update_visibility(8.0, 8.0, 8.0, 1);
+        assert!(is_visible(state(), (2, 4, 0)));
+        assert_eq!(state().connectivity[&(2, 4, 0)], 0);
+        assert!(!state().connectivity.contains_key(&(1, 4, 0)));
+        far.sections.fill(world::Section::uniform(blocks::GLASS));
+        receive(&far);
+        assert!(!state().connectivity.contains_key(&(2, 4, 0)));
+        client_update_visibility(8.0, 8.0, 8.0, 1);
+        assert_eq!(state().connectivity[&(2, 4, 0)], world::visibility::ALL);
+        let unload = S2C::UnloadChunk { cx: 2, cz: 0 }.encode();
+        unsafe {
+            client_packet(unload.as_ptr(), unload.len());
+        }
+        assert!(!state().connectivity.contains_key(&(2, 4, 0)));
+        assert!(state().visibility_stale);
+        client_update_visibility(8.0, 8.0, 8.0, 1);
+        assert!(!state().visible_keys.contains(&(2, 4, 0)));
+        assert_eq!(client_visible_count(), SECTIONS as u32);
+    }
+
+    #[test]
+    fn cached_visibility_timing() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().view_distance = 12;
+        for z in -12..=12 {
+            for x in -12..=12 {
+                state().world.chunks.insert((x, z), Chunk::empty(x, z));
+            }
+        }
+        client_update_visibility(8.0, 100.0, 8.0, 1);
+        let start = std::time::Instant::now();
+        for i in 0..30 {
+            state().visibility_stale = true;
+            std::hint::black_box(client_update_visibility(8.0, 100.0, 8.0, 1));
+            assert_eq!(client_visible_count(), 15000, "run {i}");
+        }
+        eprintln!(
+            "cached client visibility: 15000 sections, {:?}/run (30 runs)",
+            start.elapsed() / 30
+        );
+    }
+
+    #[test]
+    fn visibility_keeps_hidden_meshes_dirty_and_invalidates_only_edited_section() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().view_distance = 1;
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut chunk = Chunk::empty(cx, cz);
+                chunk.sections[2] = world::Section::uniform(blocks::STONE);
+                chunk.sections[1].set(8, 8, 8, blocks::STONE);
+                receive(&chunk);
+            }
+        }
+        state().light_pending.clear();
+        let camera_y = (MIN_Y + 3 * 16 + 8) as f64;
+        assert!(client_update_visibility(8.0, camera_y, 8.0, 1) >= 0);
+        assert!(client_hidden_dirty_count() > 0);
+        let count = client_dirty_count();
+        for _ in 0..count {
+            assert_eq!(client_pop_dirty(8.0, camera_y, 8.0), 1);
+            let sy = i32::from_le_bytes(state().out[4..8].try_into().unwrap());
+            assert_ne!(sy, 1);
+        }
+        assert_eq!(client_dirty_count(), 0);
+        assert_eq!(client_pop_dirty(8.0, camera_y, 8.0), 0);
+        assert_eq!(client_update_visibility(8.0, camera_y, 8.0, 1), -1);
+        assert!(state().connectivity.contains_key(&(0, 2, 0)));
+        for y in MIN_Y + 32..MIN_Y + 48 {
+            client_predict_block(8, y, 8, blocks::AIR as u32);
+        }
+        assert!(!state().connectivity.contains_key(&(0, 2, 0)));
+        assert!(state().connectivity.contains_key(&(1, 2, 0)));
+        client_update_visibility(8.0, camera_y, 8.0, 1);
+        assert!(is_visible(state(), (0, 1, 0)));
+        let mut found = false;
+        while client_pop_dirty(8.0, camera_y, 8.0) != 0 {
+            let sy = i32::from_le_bytes(state().out[4..8].try_into().unwrap());
+            found |= sy == 1;
+        }
+        assert!(found);
+        client_update_visibility(8.0, camera_y, 8.0, 0);
+        assert_eq!(client_hidden_dirty_count(), 0);
+        assert_eq!(client_dirty_count() as usize, state().dirty.len());
+        assert_eq!(client_update_visibility(8.0, 400.0, 8.0, 1), -1); // Already unrestricted.
+        assert!(state().visibility_all);
+        client_reset_world();
+        assert!(state().connectivity.is_empty());
     }
 
     #[test]

@@ -353,3 +353,17 @@ test("client initial lighting stops starting chunks when the frame budget is spe
 	while (pending) core.stepLight(12,34);
 	assert.equal(core.stepLight(12,34),0);
 });
+
+test("mesh queue counts only visible work, including pending uploads", t => {
+	const f = fixture(t, 1);
+	f.workers[0].ready();
+	f.pump([[0, 4, 0], [1, 4, 0]]);
+	const visible = new Set(["0,4,0"]);
+	assert.equal(f.pool.visiblePending(visible), 1);
+	assert.equal(f.pool.visiblePending(null), 2);
+	f.workers[0].finish(0);
+	assert.equal(f.pool.visiblePending(visible), 1);
+	f.pool.applyResults();
+	assert.equal(f.pool.visiblePending(visible), 0);
+	assert.equal(f.pool.visiblePending(null), 1);
+});

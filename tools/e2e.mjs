@@ -779,7 +779,56 @@ async function biomeTints() {
 	}
 }
 
+/** Same generated world and fixed camera; freeze presentation time to compare exact pixels. */
+async function sectionCulling() {
+	const images = [];
+	let camera;
+	for (const disabled of [false, true]) {
+		const { page, errors } = await open(`server=local&world=e2e-culling-${run}&seed=2026&view=3&time=6000${disabled ? "&cull=0" : ""}`);
+		try {
+			const initial = await settle(page, "culling initial", chunksInView(3));
+			camera ??= [initial.spawn[0], initial.spawn[1] + 2, initial.spawn[2], 0, 20];
+			await page.evaluate(async camera => {
+				// E2E runs against the dev server. Patch only presentation time, leaving
+				// actual geometry, culling, meshes and all terrain passes in use.
+				const { Renderer } = await import("/src/client/renderer.ts");
+				const render = Renderer.prototype.render;
+				Renderer.prototype.render = function(camera, distance, target, fov) {
+					return render.call(this, camera, distance, target, fov, 6000);
+				};
+				window.__mc.setCamera(...camera);
+				await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+			}, camera);
+			const stats = await settle(page, "culling fixed camera", chunksInView(3));
+			check(disabled ? stats.visibleSections === stats.sections : stats.visibleSections < stats.sections,
+				`culling ${disabled ? "disabled: all sections visible" : "surface: hidden sections exist"}`, `${stats.visibleSections}/${stats.sections}`);
+			await page.addStyleTag({ content: "body > :not(#view) { visibility: hidden !important; }" });
+			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+			images.push(await page.screenshot({ path: join(shots, `culling-${disabled ? "off" : "on"}.png`), encoding: "base64" }));
+			check(errors.length === 0, "culling: no page errors", errors.join(" | "));
+			if (disabled) {
+				const fraction = await page.evaluate(async images => {
+					const pixels = await Promise.all(images.map(async data => {
+						const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+						const g = new OffscreenCanvas(img.width, img.height).getContext("2d");
+						g.drawImage(img, 0, 0);
+						return g.getImageData(0, 0, img.width, img.height).data;
+					}));
+					if (pixels[0].length !== pixels[1].length) return 1;
+					let changed = 0;
+					for (let i = 0; i < pixels[0].length; i += 4) {
+						if ([0,1,2].some(c => pixels[0][i+c] !== pixels[1][i+c])) changed++;
+					}
+					return changed / (pixels[0].length / 4);
+				}, images);
+				check(fraction < 0.005, "culling: fewer than 0.5% different pixels", `${(fraction * 100).toFixed(3)}%`);
+			}
+		} finally { await page.close(); }
+	}
+}
+
 try {
+	await sectionCulling();
 	await biomeTints();
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
