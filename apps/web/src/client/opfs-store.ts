@@ -8,9 +8,10 @@ export interface Meta {
 	dayTime: string;
 }
 
-/** Keep persistence available in browsers without Web Locks. */
+/** Persistence requires cross-tab exclusion, including for imports. */
 function withWorldLock<T>(world: string, fn: () => Promise<T>): Promise<T> {
-	return navigator.locks ? navigator.locks.request(`mcworld-import-${world}`, fn) : fn();
+	if (!navigator.locks) throw new Error("Web Locks are required for OPFS persistence");
+	return navigator.locks.request(`mcworld-import-${world}`, fn);
 }
 
 /** Region files in OPFS. Sync access handles exist only in workers, which is where we are. */
@@ -29,6 +30,7 @@ export class OpfsStore {
 
 	static async open(world: string, codec: RegionCodec): Promise<OpfsStore | null> {
 		try {
+			if (!navigator.locks) return null;
 			const root = await navigator.storage.getDirectory();
 			return await withWorldLock(world, async () =>
 				new OpfsStore(world, await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
@@ -196,8 +198,8 @@ export class OpfsStore {
 
 	/**
 	 * Persist the choice under the same world lock as imports, before generation.
-	 * Without Web Locks, rereading after writing is best effort: a later writer
-	 * can still change the metadata after this function returns.
+	 * Web Locks are required; the final read confirms the saved metadata while
+	 * the world lock is still held.
 	 */
 	async initializeMeta(seed: string, generator: number): Promise<Meta> {
 		return withWorldLock(this.world, async () => {

@@ -445,24 +445,18 @@ test("concurrent imports of the same world serialize and only one succeeds", asy
 });
 
 
-test("OPFS opens, saves, and imports without Web Locks", async () => {
-	const descriptor = Object.getOwnPropertyDescriptor(navigator, "locks")!;
-	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
-	try {
-		const store = await open(new MemoryDirectory());
-		await store.writeChunk(-1, 33, newer);
-		await store.writeMeta(meta);
-		assert.deepEqual(await store.readChunk(-1, 33), newer);
-		assert.deepEqual(await store.readMeta(), meta);
-		const bytes = await store.exportArchive();
-		const dirs = importRoot();
-		await store.importArchive("without-locks", bytes);
-		const imported = await open(dirs.get("world-without-locks")!);
-		assert.deepEqual(await imported.readChunk(-1, 33), newer);
-		assert.deepEqual(await imported.readMeta(), meta);
-	} finally {
-		Object.defineProperty(navigator, "locks", descriptor);
-	}
+test("OPFS opens, saves, and imports with the injected Web Locks", async () => {
+	const store = await open(new MemoryDirectory());
+	await store.writeChunk(-1, 33, newer);
+	await store.writeMeta(meta);
+	assert.deepEqual(await store.readChunk(-1, 33), newer);
+	assert.deepEqual(await store.readMeta(), meta);
+	const bytes = await store.exportArchive();
+	const dirs = importRoot();
+	await store.importArchive("with-locks", bytes);
+	const imported = await open(dirs.get("world-with-locks")!);
+	assert.deepEqual(await imported.readChunk(-1, 33), newer);
+	assert.deepEqual(await imported.readMeta(), meta);
 });
 
 test("archive import reports corrupt regions in Japanese before creating a directory", async (t) => {
@@ -582,22 +576,27 @@ test("concurrent stores initialize one world's metadata under the shared lock", 
 	assert.deepEqual(await b.initializeMeta("42", Generator.DebugHills), first);
 });
 
-test("initialization without Web Locks returns metadata reread after writing", async t => {
-	const originalLocks = navigator.locks;
-	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
-	t.after(() => Object.defineProperty(navigator, "locks", { configurable: true, value: originalLocks }));
+test("OPFS requires Web Locks for opening, initialization and imports", async t => {
 	const dir = new MemoryDirectory();
-	const a = await open(dir);
-	const b = await open(dir);
-	const winner = { seed: "7", generator: Generator.Flat, gameTime: "0", dayTime: "0" };
-	const write = a.writeMeta.bind(a);
-	a.writeMeta = async meta => {
-		await write(meta);
-		// Another tab wins after our write but before our final read.
-		await b.writeMeta(winner);
-	};
-	assert.deepEqual(await a.initializeMeta("2026", Generator.Terrain), winner);
-	assert.deepEqual(await a.initializeMeta("42", Generator.DebugHills), winner);
+	const store = await open(dir);
+	const originalLocks = navigator.locks;
+	const originalStorage = navigator.storage;
+	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+	let storageReads = 0;
+	Object.defineProperty(navigator, "storage", { configurable: true, value: {
+		async getDirectory() { storageReads++; return dir; },
+	} });
+	t.after(() => {
+		Object.defineProperty(navigator, "locks", { configurable: true, value: originalLocks });
+		Object.defineProperty(navigator, "storage", { configurable: true, value: originalStorage });
+	});
+	const codec = new RegionCodec(new WebAssembly.Instance(module, {}));
+	assert.equal(await OpfsStore.open("test", codec), null);
+	assert.equal(storageReads, 0, "do not access OPFS without Web Locks");
+	await assert.rejects(store.initializeMeta("2026", Generator.Terrain), /Web Locks/);
+	const bytes = encodeArchive([{ name: "meta.json", data: new TextEncoder().encode(JSON.stringify(meta)) }]);
+	await assert.rejects(store.importArchive("unlocked", bytes), /Web Locks/);
+	assert.equal(dir.files.size, 0);
 });
 
 test("archives preserve Terrain and migrate generator-less metadata to DebugHills", async () => {
