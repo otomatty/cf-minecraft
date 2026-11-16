@@ -251,3 +251,9 @@ pub unsafe extern "C" fn storage_call(op: u32, ptr: *const u8, len: usize) -> i3
         Err(_) => -1,
     }
 }
+
+/// Pure noise probe, independent of the server and the legacy scenario hash.
+#[no_mangle]
+pub extern "C" fn server_noise_fingerprint(seed: i64) -> i64 {
+    noise::fingerprint(seed) as i64
+}

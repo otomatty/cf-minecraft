@@ -1,0 +1,176 @@
+# Atlas order is stable: append new names; do not reorder existing layers.
+textures = [
+  "stone", "grass_block_top", "grass_block_side", "dirt",
+  "cobblestone", "oak_planks", "bedrock", "sand",
+  "oak_log", "oak_log_top", "bricks", "lamp_block",
+  "glass", "oak_leaves", "water", "red_flower",
+  "yellow_flower", "short_grass",
+]
+legacy_count = 14
+
+[[blocks]]
+name = "air"
+id = 0
+texture = "stone"
+occludes = false
+solid = false
+
+[[blocks]]
+name = "stone"
+id = 1
+texture = "stone"
+
+[[blocks]]
+name = "grass_block"
+id = 2
+top = "grass_block_top"
+bottom = "dirt"
+side = "grass_block_side"
+tint = ["top"]
+
+[[blocks]]
+name = "dirt"
+id = 3
+texture = "dirt"
+
+[[blocks]]
+name = "cobblestone"
+id = 4
+texture = "cobblestone"
+
+[[blocks]]
+name = "oak_planks"
+id = 5
+texture = "oak_planks"
+
+[[blocks]]
+name = "bedrock"
+id = 6
+texture = "bedrock"
+
+[[blocks]]
+name = "sand"
+id = 7
+texture = "sand"
+
+[[blocks]]
+name = "oak_log"
+id = 8
+top = "oak_log_top"
+bottom = "oak_log_top"
+side = "oak_log"
+
+[[blocks]]
+name = "bricks"
+id = 9
+texture = "bricks"
+
+[[blocks]]
+name = "lamp_block"
+id = 10
+texture = "lamp_block"
+emission = 15
+
+[[blocks]]
+name = "glass"
+id = 11
+layer = "cutout"
+texture = "glass"
+cull_same = true
+
+[[blocks]]
+name = "oak_leaves"
+id = 12
+layer = "cutout"
+texture = "oak_leaves"
+opacity = 1
+tint = true
+
+[[blocks]]
+name = "water"
+id = 13
+layer = "translucent"
+texture = "water"
+solid = false
+opacity = 1
+tint = true
+
+[[blocks]]
+name = "oak_slab"
+id = 14
+texture = "oak_planks"
+states = [
+  { properties = [["type", "bottom"]], model = "bottom_slab" },
+  { properties = [["type", "top"]], model = "top_slab" },
+  { properties = [["type", "double"]], model = "cube" },
+]
+
+[[blocks]]
+name = "cobblestone_slab"
+id = 17
+texture = "cobblestone"
+states = [
+  { properties = [["type", "bottom"]], model = "bottom_slab" },
+  { properties = [["type", "top"]], model = "top_slab" },
+  { properties = [["type", "double"]], model = "cube" },
+]
+
+[[blocks]]
+name = "red_flower"
+id = 20
+model = "cross"
+layer = "cutout"
+texture = "red_flower"
+
+[[blocks]]
+name = "yellow_flower"
+id = 21
+model = "cross"
+layer = "cutout"
+texture = "yellow_flower"
+
+[[blocks]]
+name = "short_grass"
+id = 22
+model = "cross"
+layer = "cutout"
+texture = "short_grass"
+tint = true
+
+[[blocks]]
+name = "oak_stairs"
+id = 23
+model = "stairs"
+texture = "oak_planks"
+states = [
+  { properties = [["facing", "north"], ["half", "bottom"]] },
+  { properties = [["facing", "north"], ["half", "top"]] },
+  { properties = [["facing", "south"], ["half", "bottom"]] },
+  { properties = [["facing", "south"], ["half", "top"]] },
+  { properties = [["facing", "west"], ["half", "bottom"]] },
+  { properties = [["facing", "west"], ["half", "top"]] },
+  { properties = [["facing", "east"], ["half", "bottom"]] },
+  { properties = [["facing", "east"], ["half", "top"]] },
+]
+
+[[blocks]]
+name = "cobblestone_stairs"
+id = 31
+model = "stairs"
+texture = "cobblestone"
+states = [
+  { properties = [["facing", "north"], ["half", "bottom"]] },
+  { properties = [["facing", "north"], ["half", "top"]] },
+  { properties = [["facing", "south"], ["half", "bottom"]] },
+  { properties = [["facing", "south"], ["half", "top"]] },
+  { properties = [["facing", "west"], ["half", "bottom"]] },
+  { properties = [["facing", "west"], ["half", "top"]] },
+  { properties = [["facing", "east"], ["half", "bottom"]] },
+  { properties = [["facing", "east"], ["half", "top"]] },
+]
+
+[[blocks]]
+name = "oak_fence"
+id = 39
+model = "fence"
+texture = "oak_planks"

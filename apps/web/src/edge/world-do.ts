@@ -451,8 +451,8 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	/** RPC (debug): the determinism scenario, run inside this runtime. */
-	scenario(seed: string, ticks: number): { host: string; seed: string; ticks: number; hash: string } {
+	scenario(seed: string, ticks: number): { host: string; seed: string; ticks: number; hash: string; noise: string } {
 		const core = ServerCore.fromModule(serverWasm);
-		return { host: "workerd-durable-object", seed, ticks, hash: core.runScenario(BigInt(seed), ticks) };
+		return { host: "workerd-durable-object", seed, ticks, hash: core.runScenario(BigInt(seed), ticks), noise: core.noiseFingerprint(BigInt(seed)) };
 	}
 }

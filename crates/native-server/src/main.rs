@@ -3,6 +3,7 @@
 //!
 //! Usage:
 //!   native-server scenario <seed> <ticks>
+//!   native-server noise [seed]
 //!   native-server bench [players] [view] [ticks]
 
 use std::time::Instant;
@@ -23,6 +24,10 @@ fn main() {
                 o.hash, o.blocks_changed, o.chunks_saved, o.chunks_reloaded
             );
         }
+        Some("noise") => {
+            let seed = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2026);
+            println!("{:016x}", noise::fingerprint(seed));
+        }
         Some("bench") => {
             let players: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
             let view: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -31,7 +36,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: native-server scenario <seed> <ticks> | bench [players] [view] [ticks]"
+                "usage: native-server scenario <seed> <ticks> | noise [seed] | bench [players] [view] [ticks]"
             );
             std::process::exit(2);
         }

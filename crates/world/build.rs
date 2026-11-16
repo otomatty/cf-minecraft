@@ -1,0 +1,410 @@
+use serde::{de::DeserializeOwned, Deserialize};
+use std::{collections::BTreeSet, fmt::Write, fs, path::Path};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Registry {
+    legacy_count: u16,
+    textures: Vec<String>,
+    blocks: Vec<Block>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Block {
+    name: String,
+    id: u16,
+    #[serde(default = "cube")]
+    model: String,
+    #[serde(default = "opaque")]
+    layer: String,
+    occludes: Option<bool>,
+    solid: Option<bool>,
+    cull_same: Option<bool>,
+    opacity: Option<u8>,
+    #[serde(default)]
+    emission: u8,
+    texture: Option<String>,
+    #[serde(alias = "up")]
+    top: Option<String>,
+    #[serde(alias = "down")]
+    bottom: Option<String>,
+    side: Option<String>,
+    north: Option<String>,
+    south: Option<String>,
+    west: Option<String>,
+    east: Option<String>,
+    #[serde(default)]
+    tint: Tint,
+    #[serde(default)]
+    states: Vec<State>,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Tint {
+    All(bool),
+    Faces(Vec<String>),
+}
+impl Default for Tint {
+    fn default() -> Self {
+        Self::All(false)
+    }
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct State {
+    #[serde(default)]
+    properties: Vec<(String, String)>,
+    model: Option<String>,
+    occludes: Option<bool>,
+    opacity: Option<u8>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Biomes {
+    biomes: Vec<Biome>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Biome {
+    name: String,
+    surface: String,
+    subsurface: String,
+    grass_color: [u8; 3],
+    leaves_color: [u8; 3],
+    temperature: [f64; 2],
+    humidity: [f64; 2],
+}
+fn cube() -> String {
+    "cube".into()
+}
+fn opaque() -> String {
+    "opaque".into()
+}
+fn read<T: DeserializeOwned>(path: &Path) -> T {
+    println!("cargo:rerun-if-changed={}", path.display());
+    let data = fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    toml::from_str(&data).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+impl Block {
+    fn textures(&self, atlas: &[String]) -> [u16; 6] {
+        let resolve = |name: &String| {
+            atlas
+                .iter()
+                .position(|t| t == name)
+                .unwrap_or_else(|| panic!("blocks.toml: {}: unknown texture {name}", self.name))
+                as u16
+        };
+        // Validate even an overridden value, so a typo cannot hide behind a more specific face.
+        for name in [
+            &self.texture,
+            &self.top,
+            &self.bottom,
+            &self.side,
+            &self.north,
+            &self.south,
+            &self.west,
+            &self.east,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            resolve(name);
+        }
+        [
+            &self.bottom,
+            &self.top,
+            &self.north,
+            &self.south,
+            &self.west,
+            &self.east,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, face)| {
+            let name = face
+                .as_ref()
+                .or(if i >= 2 { self.side.as_ref() } else { None })
+                .or(self.texture.as_ref())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "blocks.toml: {}: missing texture for {}",
+                        self.name,
+                        ["bottom", "top", "north", "south", "west", "east"][i]
+                    )
+                });
+            resolve(name)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap()
+    }
+    fn tint(&self) -> [bool; 6] {
+        match &self.tint {
+            Tint::All(all) => [*all; 6],
+            Tint::Faces(faces) => {
+                let mut result = [false; 6];
+                for face in faces {
+                    let indices: &[usize] = match face.as_str() {
+                        "bottom" | "down" => &[0],
+                        "top" | "up" => &[1],
+                        "north" => &[2],
+                        "south" => &[3],
+                        "west" => &[4],
+                        "east" => &[5],
+                        "side" => &[2, 3, 4, 5],
+                        _ => panic!("blocks.toml: {}: unknown tint face {face}", self.name),
+                    };
+                    for &i in indices {
+                        result[i] = true;
+                    }
+                }
+                result
+            }
+        }
+    }
+}
+fn identifier(s: &str) {
+    assert!(
+        s.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            && s.bytes()
+                .enumerate()
+                .all(|(i, c)| c.is_ascii_lowercase() || c == b'_' || (i > 0 && c.is_ascii_digit())),
+        "registry: invalid name {s:?}; expected lowercase snake_case"
+    );
+}
+fn model(s: &str) -> &'static str {
+    match s {
+        "cube" => "Model::Cube",
+        "bottom_slab" => "Model::Boxes(&BOTTOM)",
+        "top_slab" => "Model::Boxes(&TOP)",
+        "cross" => "Model::Cross",
+        "stairs" => "Model::Stairs",
+        "fence" => "Model::Fence",
+        _ => panic!("blocks.toml: unknown model {s:?}"),
+    }
+}
+fn main() {
+    // Integration tests run this same executable, keeping serde/toml build-only.
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 4 && args[1] == "--registry-fixture" {
+        generate(Path::new(&args[2]), Path::new(&args[3]));
+        return;
+    }
+    println!(
+        "cargo:rustc-env=REGISTRY_BUILD_SCRIPT={}",
+        std::env::current_exe().unwrap().display()
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/registry");
+    let dest = std::env::var_os("OUT_DIR").unwrap();
+    generate(&root, Path::new(&dest));
+}
+
+fn generate(root: &Path, dest: &Path) {
+    let registry: Registry = read(&root.join("blocks.toml"));
+    let mut names = BTreeSet::new();
+    let textures = &registry.textures;
+    let mut texture_names = BTreeSet::new();
+    for t in textures {
+        identifier(t);
+        assert!(
+            texture_names.insert(t),
+            "blocks.toml: duplicate texture {t}"
+        );
+    }
+    for b in &registry.blocks {
+        identifier(&b.name);
+        model(&b.model);
+        assert!(
+            b.opacity.is_none_or(|v| v <= 15) && b.emission <= 15,
+            "blocks.toml: {}: opacity/emission must be 0..=15",
+            b.name
+        );
+        assert!(
+            names.insert(b.name.as_str()),
+            "blocks.toml: duplicate block {}",
+            b.name
+        );
+        assert!(
+            ![
+                "count",
+                "legacy_count",
+                "textures",
+                "info",
+                "blocks",
+                "properties",
+                "bottom",
+                "top",
+                "plant",
+                "full_box",
+                "cardinal"
+            ]
+            .contains(&b.name.as_str()),
+            "blocks.toml: reserved block name {}",
+            b.name
+        );
+    }
+    assert!(
+        textures.len() <= u16::MAX as usize,
+        "blocks.toml: too many textures"
+    );
+    let mut out = format!(
+        "pub const LEGACY_COUNT: BlockState = {};\npub const TEXTURES: &[&str] = &{:?};\n",
+        registry.legacy_count, textures
+    );
+    let mut infos = String::new();
+    let mut props = String::new();
+    let mut blocks = String::new();
+    let mut count = 0usize;
+    let mut state_names = BTreeSet::new();
+    for b in &registry.blocks {
+        assert_eq!(
+            b.id as usize, count,
+            "blocks.toml: {}: state ID collision or gap (expected {count})",
+            b.name
+        );
+        let default = [State::default()];
+        let states = if b.states.is_empty() {
+            &default[..]
+        } else {
+            &b.states
+        };
+        let tex = b.textures(textures);
+        let tint = b.tint();
+        let layer = match b.layer.as_str() {
+            "opaque" => "Opaque",
+            "cutout" => "Cutout",
+            "translucent" => "Translucent",
+            other => panic!("blocks.toml: {}: unknown layer {other}", b.name),
+        };
+        writeln!(
+            out,
+            "pub const {}: BlockState = {};",
+            b.name.to_ascii_uppercase(),
+            b.id
+        )
+        .unwrap();
+        writeln!(
+            blocks,
+            "Block {{ name: {:?}, first: {}, count: {} }},",
+            b.name,
+            b.id,
+            states.len()
+        )
+        .unwrap();
+        for s in states {
+            let m = s.model.as_deref().unwrap_or(&b.model);
+            let occludes = s
+                .occludes
+                .or(b.occludes)
+                .unwrap_or(m == "cube" && b.layer == "opaque");
+            let solid = b.solid.unwrap_or(m != "cross");
+            let cull_same = b
+                .cull_same
+                .unwrap_or(m == "cube" && b.layer == "translucent");
+            let opacity = s
+                .opacity
+                .or(b.opacity)
+                .unwrap_or(if occludes { 15 } else { 0 });
+            assert!(
+                opacity <= 15 && b.emission <= 15,
+                "blocks.toml: {}: opacity/emission must be 0..=15",
+                b.name
+            );
+            let mut keys = BTreeSet::new();
+            for (key, value) in &s.properties {
+                identifier(key);
+                identifier(value);
+                assert!(
+                    keys.insert(key),
+                    "blocks.toml: {}: duplicate property {key}",
+                    b.name
+                );
+            }
+            assert!(
+                state_names.insert((b.name.clone(), s.properties.clone())),
+                "blocks.toml: {}: duplicate state properties",
+                b.name
+            );
+            // The shape algorithm's facing/half ordering is part of the model contract.
+            if m == "stairs" {
+                assert!(
+                    states
+                        .iter()
+                        .all(|s| s.model.as_deref().unwrap_or(&b.model) == "stairs"),
+                    "blocks.toml: {}: stairs cannot mix models",
+                    b.name
+                );
+                let i = count - b.id as usize;
+                assert!(
+                    states.len() == 8
+                        && s.properties
+                            == [
+                                (
+                                    "facing".into(),
+                                    ["north", "south", "west", "east"][i / 2].into()
+                                ),
+                                ("half".into(), ["bottom", "top"][i % 2].into())
+                            ],
+                    "blocks.toml: {}: stairs require 8 ordered facing/half states",
+                    b.name
+                );
+            }
+            writeln!(infos, "BlockInfo {{ model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            let pairs: Vec<_> = s
+                .properties
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            writeln!(props, "&{pairs:?},").unwrap();
+            count += 1;
+        }
+    }
+    assert!(count <= u16::MAX as usize, "blocks.toml: too many states");
+    assert!(
+        registry.legacy_count as usize <= count,
+        "blocks.toml: legacy_count exceeds COUNT"
+    );
+    assert!(
+        registry
+            .blocks
+            .first()
+            .is_some_and(|b| b.name == "air" && b.id == 0),
+        "blocks.toml: first block must be air at ID 0"
+    );
+    writeln!(out, "pub const COUNT: BlockState = {count};\nstatic INFO: [BlockInfo; {count}] = [{infos}];\nstatic BLOCKS: &[Block] = &[{blocks}];\nstatic PROPERTIES: &[&[(&str, &str)]] = &[{props}];").unwrap();
+    fs::write(dest.join("blocks.rs"), out).unwrap();
+
+    let biomes: Biomes = read(&root.join("biomes.toml"));
+    let mut names = BTreeSet::new();
+    let mut out = String::from("pub const BIOMES: &[Biome] = &[\n");
+    for b in biomes.biomes {
+        identifier(&b.name);
+        assert!(
+            names.insert(b.name.clone()),
+            "biomes.toml: duplicate biome {}",
+            b.name
+        );
+        let resolve = |name: &str| {
+            registry
+                .blocks
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("biomes.toml: {}: unknown block {name}", b.name))
+                .id
+        };
+        for range in [b.temperature, b.humidity] {
+            assert!(
+                range[0].is_finite()
+                    && range[1].is_finite()
+                    && range[0] >= 0.0
+                    && range[1] <= 1.0
+                    && range[0] <= range[1],
+                "biomes.toml: {}: expected ordered range in 0..=1",
+                b.name
+            );
+        }
+        writeln!(out, "Biome {{ name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.temperature, b.humidity).unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("biomes.rs"), out).unwrap();
+}
