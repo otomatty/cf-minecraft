@@ -4,6 +4,7 @@
 //! legacy output. Prepared generators own their noise tables, with no global state.
 
 mod caves;
+mod entrances;
 mod ores;
 mod terrain;
 mod trees;
