@@ -531,6 +531,7 @@ function start(): void {
 			case "error":
 				notice(panel).textContent = startupError;
 				panel.append(button("再読み込み", "gray", () => { void initialize(); }));
+				panel.append(element("hr"), element("p", "ログインなしでも遊べます"), actionLink("シングルプレイ →", "/play.html", "blue"));
 				break;
 			case "login": void login(panel, generation); break;
 			case "menu": menu(); break;
