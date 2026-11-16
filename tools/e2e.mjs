@@ -566,7 +566,7 @@ async function partialModels() {
 				if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
 				try {
 					await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
-					await page.click("#overlay");
+					await page.click("#overlay", { offset: { x: 10, y: 10 } });
 					await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
 					return;
 				} catch (error) {
@@ -580,9 +580,9 @@ async function partialModels() {
 		await page.keyboard.press("KeyE");
 		await waitFor("picker reopened before Escape", () => !document.getElementById("block-picker").hidden);
 		await page.keyboard.press("Escape");
-		await waitFor("picker closed with Escape into pause", () => document.getElementById("block-picker").hidden
+		await waitFor("picker closed with Escape into game menu", () => document.getElementById("block-picker").hidden
 			&& !document.getElementById("overlay").hidden && !document.pointerLockElement
-			&& document.getElementById("status").textContent === "一時停止中：クリックして再開");
+			&& !document.getElementById("game-menu").hidden);
 		await resume("resume after Escape");
 
 		// Break the slab, then place a flower on the supporting full cube.
