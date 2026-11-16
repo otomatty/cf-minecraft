@@ -91,6 +91,13 @@ export class MeshPool {
 	get workerCount(): number { return this.slots.length; }
 	get inFlight(): number { return this.slots.reduce((total, slot) => total + slot.jobs.size, 0); }
 	get pendingResults(): number { return this.results.size; }
+	visiblePending(visible: ReadonlySet<string> | null): number {
+		const matches = (job: MeshRequest) => visible === null || visible.has(key(job.section));
+		let count = 0;
+		for (const slot of this.slots) for (const job of slot.jobs.values()) if (matches(job)) count++;
+		for (const { job } of this.results.values()) if (matches(job)) count++;
+		return count;
+	}
 	get useFallback(): boolean { return this.failed; }
 
 	private fallback(): void {

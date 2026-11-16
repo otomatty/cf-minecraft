@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
 import { paintTexture, downsample, textureIconPixels, LEAVES_TINT, WATER_TINT } from "./textures.ts";
 import { ClientCore } from "./client-core.ts";
-import { outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { filterVisibleSections, outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);
@@ -225,4 +225,12 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 	}
 	// Non-cutout averaging keeps water's continuous opacity.
 	assert.equal(downsample(new Uint8Array([255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170]), 2)[3], 170);
+});
+
+
+test("section visibility filters every layer before frustum tests and translucent sorting", () => {
+    const meshes = new Map([["-1,4,2", { counts: [3,2,1] }], ["0,4,2", { counts: [1,0,2] }]]);
+    assert.deepEqual(filterVisibleSections(meshes, new Set(["-1,4,2"])), [meshes.get("-1,4,2")]);
+    assert.deepEqual(filterVisibleSections(meshes, new Set()), []);
+    assert.deepEqual(filterVisibleSections(meshes, null), [...meshes.values()]);
 });
