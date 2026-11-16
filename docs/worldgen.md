@@ -880,3 +880,72 @@ coal_oreとiron_oreが1個以上あることを確認する。E2Eは本環境で
 `cargo test --workspace`、`pnpm build:wasm`、`pnpm test:host`、
 clientの型チェック (`pnpm --filter web exec tsc -p tsconfig.client.json`) は全て成功。
 `pnpm check:determinism` と `node --check tools/e2e.mjs` も成功した。
+
+## サーバーの外部生成モード（ABI 5）
+
+`sim::Server::set_external_generation(max_in_flight)` で外部生成を有効にする。
+既定値は 0（同期生成）で、`world-do.ts` と `sim.worker.ts` は引き続きこの既定を使う。
+メモリにあるチャンク、保存済みチャンクの読み込みを優先し、それ以外は
+`stream_chunks` の近い順に生成を依頼する。待っている間も他のチャンクを送信できる。
+
+`take_generation_requests()` は座標のキューを取り出す。取り出したあとも依頼中の集合に残り、
+重複を防ぐ。依頼中の数が上限なら新たな依頼を積まず、次の tick で再試行する。
+`deliver_generated(cx, cz, bytes)` は `Chunk::to_bytes` 形式を `Chunk::read` で検証して挿入する。
+既存チャンクは上書きせず false を返す。破損データは同期生成で置き換えて false を返す。
+ホスト側の生成失敗には `generate_now(cx, cz)` で同期生成できる。どちらも依頼中から外す。
+生成直後のチャンクは同期生成と同じく dirty ではなく、編集されるまで保存の対象にならない。
+不要になった座標でも受け取り、遠方なら既存のアンロード処理で破棄する。
+上限を 0 に戻した場合も到着済みでない依頼は受け取れるが、必要なチャンクは同期生成を再開する。
+`stats.chunks_generated` は生成総数、`chunks_generated_externally` は外部のバイト列を受理した数。
+
+server.wasm の追加 ABI（版は 4 から 5）：
+
+| 関数 | 入出力 |
+| --- | --- |
+| `server_set_external_generation(max_in_flight: u32)` | 0 で同期生成 |
+| `server_take_generation_requests() -> usize` | `server_out_ptr()` に `[cx i32 LE][cz i32 LE]` の繰り返し、戻り値はバイト長 |
+| `server_deliver_generated(cx, cz, ptr, len) -> u32` | 生成バイト列を受理すると 1、既存または破損なら 0 |
+| `server_generate_now(cx, cz)` | 同期生成へのフォールバック |
+| `gen_chunk(seed: i64, generator: u32, cx: i32, cz: i32) -> usize` | 生成専用、戻り値はバイト長 |
+| `gen_out_ptr()` | 生成専用出力バッファのポインタ（次の `gen_chunk` まで有効） |
+
+`gen_chunk` は `server_new` 不要で、Flat (0)、DebugHills (1)、Terrain (2) を扱う。
+TerrainGenerator は直近の Terrain 用シード 1 個だけを保持する。生成出力は
+サーバーやストレージの出力バッファとは独立している。
+TypeScript は `ServerCore` の薄いラッパーと、同じ WASM モジュールから別インスタンスを作れる
+`ChunkGenCore.fromModule(module).generate(seed, generator, cx, cz)` を提供する。
+返すバイト列はコピーなので、次の生成や WASM メモリ拡張後も使える。
+
+外部生成が無効なら従来どおりの同期生成で、決定性は変わらない。
+新しい統計はシナリオハッシュに含めない。seed 2026 の既存指紋は
+シナリオ `88d6e0e1abd58ec4`、ノイズ `d5166400c68a1c45`、地形 `6aa960f51ded69b6` を維持する。
+外部生成では到着時刻によってチャンク送信の tick が変わるが、同じ seed・generator・座標の内容は一致する。
+
+### ホストからの外部生成
+
+各 tick の直後に共通の `GenerationDispatcher.pump(core)` を呼ぶ。前の pump 以降に
+完了した結果をコールバックの到着順（FIFO）で反映し、失敗・5 秒の時間切れは
+`generateNow` へ戻す。その後、同時実行上限まで次の依頼を送り、超過分は FIFO で待つ。
+非同期コールバックは世界を変更しない。reset は待ち行列と結果を破棄し、世代番号で
+古い世界の遅い応答も捨てる。統計の `generation` は requested / delivered / fallback、
+queued / inFlight、直近 100 件の latencyMean / latencyMax（ms）を公開する。
+DO の `/debug` metrics と両ホストの `window.__mc.stats().server.generation` で確認できる。
+
+Durable Object は同じ Worker の `ChunkGen` 入口へ `ctx.exports.ChunkGen.generate` で RPC し、
+最大 8 件を並行依頼する（`MAX_GENERATION_IN_FLIGHT`）。同じプロセスで RPC が動く開発環境では、
+16 件に増やすと tick 間の生成処理が増え、タイマー遅延 p99 の振れが大きくなったため 8 件に抑える。
+生成専用 WASM インスタンスは isolate ごとに再利用する。
+`GEN_OFFLOAD=0` で無効。それ以外・未設定は有効で、開発・本番の設定値は `1`。
+入口が存在しない場合や呼び出しが一度でも失敗した場合は警告を一度出し、同期生成へ戻す。
+時間切れだけの場合はその依頼を同期生成し、以後の外部生成は続ける。
+
+ブラウザ内サーバーは生成用 Web Worker を `min(4, max(1, hardwareConcurrency - 2))` 本起動し、
+空いている Worker へ順に割り振る。各 Worker が生成専用 WASM を持ち、結果のバッファを
+transfer で返す。Worker の起動を確認してから外部生成を有効にする。子 Worker の作成・
+起動ができない環境、実行時エラーでは同期生成へ戻す。URL の `genworkers=0` で無効にできる。
+init のやり直しでは旧 Worker を終了し dispatcher を reset する。
+
+同じ seed・generator・座標のチャンク内容は同期生成と同じで、到着する tick だけが変わる。
+シナリオは外部生成を使用しない。プロトコル・保存形式の変更はない。
+本番では生成 1 回ごとに Worker の呼び出しが増える。RPC が同じ isolate で実行される場合は
+CPU の分散にならないことがあるため、呼び出し数・CPU 使用量・遅延を実測する。

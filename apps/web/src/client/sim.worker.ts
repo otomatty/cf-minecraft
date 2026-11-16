@@ -10,6 +10,74 @@ import { type Meta, OpfsStore, PendingChunkReads, PendingChunkSaves } from "./op
 import { RegionCodec } from "../shared/region-codec.ts";
 import { confirmSaved, finishWorldImport } from "./world-import.ts";
 
+import { GenerationDispatcher } from "../shared/gen-dispatch.ts";
+import type { GenReply, GenRequest } from "./gen.worker.ts";
+import { generationInFlightLimit, leastPendingWorker } from "./gen-scheduling.ts";
+
+let generation: GenerationDispatcher | null = null;
+let generationWorkers: Worker[] = [];
+let generationFailed = false;
+let tickTimer: ReturnType<typeof setInterval> | undefined;
+let initEpoch = 0;
+
+async function startGeneration(wasmUrl: string, c: ServerCore): Promise<void> {
+	const workers = generationWorkers;
+	const cancelStartup: Array<() => void> = [];
+	try {
+		const count = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 3) - 2));
+		let id = 0;
+		const queues: Array<Map<number, { resolve(bytes: Uint8Array): void; reject(error: Error): void }>> = [];
+		const requests: Array<(cx: number, cz: number) => Promise<Uint8Array>> = [];
+		const startups: Promise<void>[] = [];
+		for (let i = 0; i < count; i++) {
+			const worker = new Worker(new URL("./gen.worker.ts", import.meta.url), { type: "module" });
+			workers.push(worker);
+			const pending = new Map<number, { resolve(bytes: Uint8Array): void; reject(error: Error): void }>();
+			queues.push(pending);
+			startups.push(new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error("Generation worker startup timed out")), 5000);
+				cancelStartup.push(() => clearTimeout(timer));
+				const fail = (error: Error) => {
+					clearTimeout(timer);
+					reject(error);
+					for (const request of pending.values()) request.reject(error);
+					pending.clear();
+					if (generationWorkers === workers) {
+						if (generation && !generationFailed) console.warn("Generation workers disabled", error);
+						generationFailed = true;
+					}
+				};
+				worker.onerror = () => fail(new Error("Generation worker failed"));
+				worker.onmessage = (event: MessageEvent<GenReply>) => {
+					const msg = event.data;
+					if (msg.type === "ready") { clearTimeout(timer); resolve(); }
+					else if (msg.type === "error") fail(new Error(msg.message));
+					else {
+						pending.get(msg.id)?.resolve(msg.bytes);
+						pending.delete(msg.id);
+					}
+				};
+				worker.postMessage({ type: "init", wasmUrl, seed: seed.toString(), generator } satisfies GenRequest);
+			}));
+			requests.push((cx, cz) => new Promise((resolve, reject) => {
+				const requestId = ++id;
+				pending.set(requestId, { resolve, reject });
+				try { worker.postMessage({ type: "generate", id: requestId, cx, cz } satisfies GenRequest); }
+				catch (error) { pending.delete(requestId); reject(error); }
+			}));
+		}
+		await Promise.all(startups);
+		if (generationWorkers !== workers) return;
+		const limit = generationInFlightLimit(count);
+		generation = new GenerationDispatcher((cx, cz) => requests[leastPendingWorker(queues)](cx, cz), limit, 5000);
+		c.setExternalGeneration(limit);
+	} catch (error) {
+		for (const cancel of cancelStartup) cancel();
+		for (const worker of workers) worker.terminate();
+		console.warn("Generation workers unavailable", error);
+	}
+}
+
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
 const STATS_TICKS = 20;
@@ -46,31 +114,49 @@ async function serveRequests(c: ServerCore): Promise<void> {
 }
 
 async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void> {
+	const epoch = ++initEpoch;
+	clearInterval(tickTimer);
+	generation?.reset();
+	generation = null;
+	for (const worker of generationWorkers) worker.terminate();
+	generationWorkers = [];
+	generationFailed = false;
+	core = null;
 	currentWorld = msg.world;
 	const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
+	if (epoch !== initEpoch) return;
 	const c = new ServerCore(instance);
 
-	store = await OpfsStore.open(msg.world, new RegionCodec(instance));
+	const openedStore = await OpfsStore.open(msg.world, new RegionCodec(instance));
+	if (epoch !== initEpoch) return;
+	store = openedStore;
 	persistence = store ? new PendingChunkSaves(store) : null;
 	const requestedSeed = msg.seed ?? crypto.getRandomValues(new BigInt64Array(1))[0].toString();
 	const meta = store ? await store.initializeMeta(requestedSeed, msg.generator) : null;
+	if (epoch !== initEpoch) return;
 	seed = BigInt.asIntN(64, BigInt(meta?.seed ?? requestedSeed));
 	generator = meta?.generator ?? msg.generator;
 	c.start(seed, generator);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
+	if (epoch !== initEpoch) return;
+	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
+	if (epoch !== initEpoch) return;
 	c.connect(CLIENT, import.meta.env.DEV);
 	core = c;
 	post({ type: "ready", generator, seed: seed.toString(), persistence: store ? "opfs" : "off" });
 
 	const pacer = new TickPacer(performance.now());
 	let spent: number[] = [];
-	setInterval(() => {
+	tickTimer = setInterval(() => {
 		const due = pacer.due(performance.now());
 		for (let i = 0; i < due; i++) {
 			const start = performance.now();
+			generation?.pump(c);
 			c.tick();
+			generation?.pump(c);
+			if (generationFailed) c.setExternalGeneration(0);
 			const packets = c.takeOutbox();
 			spent.push(performance.now() - start);
 
@@ -84,6 +170,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 			if (t % AUTOSAVE_TICKS === 0) void save();
 			if (t % STATS_TICKS === 0) {
 				const stats: ServerStats = {
+					generation: generation?.stats() ?? null,
 					biome: c.clientBiome(CLIENT),
 					gameTime: t,
 					tps: pacer.measuredTps,

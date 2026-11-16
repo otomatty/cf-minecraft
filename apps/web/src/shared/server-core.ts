@@ -19,6 +19,12 @@ interface ServerExports {
 	server_take_outbox(): number;
 	server_set_stored(ptr: number, len: number): void;
 	server_take_requests(): number;
+	server_set_external_generation(maxInFlight: number): void;
+	server_take_generation_requests(): number;
+	server_deliver_generated(cx: number, cz: number, ptr: number, len: number): number;
+	server_generate_now(cx: number, cz: number): void;
+	gen_chunk(seed: bigint, generator: number, cx: number, cz: number): number;
+	gen_out_ptr(): number;
 	server_load_chunk(cx: number, cz: number, ptr: number, len: number): number;
 	server_chunk_missing(cx: number, cz: number): void;
 	server_take_dirty(): number;
@@ -33,7 +39,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 4;
+export const SERVER_ABI_VERSION = 5;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
@@ -148,8 +154,28 @@ export class ServerCore {
 		this.withInput(data, (ptr, len) => this.x.server_set_stored(ptr, len));
 	}
 
+	setExternalGeneration(maxInFlight: number): void {
+		this.x.server_set_external_generation(maxInFlight);
+	}
+
+	takeGenerationRequests(): Array<[number, number]> {
+		return this.coordinates(this.x.server_take_generation_requests());
+	}
+
+	deliverGenerated(cx: number, cz: number, data: Uint8Array): boolean {
+		return this.withInput(data, (ptr, len) => this.x.server_deliver_generated(cx, cz, ptr, len)) === 1;
+	}
+
+	generateNow(cx: number, cz: number): void {
+		this.x.server_generate_now(cx, cz);
+	}
+
 	takeRequests(): Array<[number, number]> {
-		const buf = this.output(this.x.server_take_requests());
+		return this.coordinates(this.x.server_take_requests());
+	}
+
+	private coordinates(len: number): Array<[number, number]> {
+		const buf = this.output(len);
 		const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 		const out: Array<[number, number]> = [];
 		for (let at = 0; at < buf.length; at += 8) {
@@ -214,5 +240,28 @@ export class ServerCore {
 
 	noiseFingerprint(seed: bigint): string {
 		return hashToHex(this.x.server_noise_fingerprint(BigInt.asIntN(64, seed)));
+	}
+}
+
+/** Generation-only instance of server.wasm; no server state is initialized. */
+export class ChunkGenCore {
+	private readonly x: ServerExports;
+
+	constructor(instance: WebAssembly.Instance) {
+		this.x = instance.exports as unknown as ServerExports;
+		const abi = this.x.server_abi_version();
+		if (abi !== SERVER_ABI_VERSION) {
+			throw new Error(`server.wasm ABI ${abi}, host expects ${SERVER_ABI_VERSION}`);
+		}
+	}
+
+	static fromModule(module: WebAssembly.Module): ChunkGenCore {
+		return new ChunkGenCore(new WebAssembly.Instance(module, {}));
+	}
+
+	generate(seed: bigint, generator: number, cx: number, cz: number): Uint8Array {
+		const len = this.x.gen_chunk(BigInt.asIntN(64, seed), generator, cx, cz);
+		const ptr = this.x.gen_out_ptr();
+		return new Uint8Array(this.x.memory.buffer).slice(ptr, ptr + len);
 	}
 }

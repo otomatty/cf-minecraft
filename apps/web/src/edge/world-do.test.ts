@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { testDB } from "./d1-shim.test.ts";
 import { ClientCore } from "../client/client-core.ts";
-import { Generator, ServerCore } from "../shared/server-core.ts";
+import { ChunkGenCore, Generator, ServerCore } from "../shared/server-core.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
 
 // Resolve only the runtime-owned modules; exercise WorldDO's real fetch logic.
@@ -24,7 +24,7 @@ registerHooks({
 			return {
 				format: "module",
 				source:
-					"export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }",
+					"export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint {}",
 				shortCircuit: true,
 			};
 		}
@@ -655,4 +655,58 @@ test("DO sends per-player biome names through stats text metadata", async t => {
 	assert.equal(stats.persistence,"sqlite");
 	assert.equal(stats.msptMean, null);
 	assert.equal(stats.msptMax, null);
+});
+
+for (const mode of ["external", "disabled", "missing", "rejected"]) {
+	test(`DO delivers real WASM chunks with generation ${mode}`, async t => {
+		const warnings = t.mock.method(console, "warn", () => {});
+		const f = fixture(t);
+		delete f.world.ensureCore;
+		const gen = ChunkGenCore.fromModule(storageModule);
+		f.world.env.GEN_OFFLOAD = mode === "disabled" ? "0" : "1";
+		if (mode !== "missing") f.context.exports = { ChunkGen: {
+			async generate(seed, generator, cx, cz) {
+				if (mode === "rejected") throw new Error("RPC failed");
+				return gen.generate(BigInt(seed), generator, cx, cz);
+			},
+		} };
+		await f.join("dev:player");
+		const client = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
+		f.world.core.packet(1, client.encodeHello(2));
+		const socket = f.world.sockets.get(1);
+		let consumed = 0;
+		for (let i = 0; i < 10; i++) {
+			f.world.step();
+			await new Promise(resolve => setImmediate(resolve));
+			for (const data of socket.sent.slice(consumed)) if (typeof data !== "string") client.packet(data);
+			consumed = socket.sent.length;
+			if (mode === "external" && i === 0) {
+				assert.equal(client.chunkCount, 0);
+				assert.equal(f.world.metrics().generation.requested, 8);
+			}
+			if (mode === "external" && i === 1) {
+				assert.ok(client.chunkCount > 0, "pre-tick pump makes completed generation stream in that tick");
+			}
+		}
+		assert.ok(client.chunkCount > 0);
+		if (mode === "external") assert.ok(f.world.metrics().generation.delivered > 0);
+		if (mode === "rejected") {
+			assert.ok(f.world.metrics().generation.fallback > 0);
+			assert.equal(warnings.mock.callCount(), 1);
+		}
+	});
+}
+
+
+test("ChunkGen validates RPC arguments and reuses a generation-only WASM core", async () => {
+	const { ChunkGen } = await import("./index.ts");
+	const entry = new ChunkGen();
+	for (const args of [
+		["9223372036854775808", 0, 0, 0], ["-9223372036854775809", 0, 0, 0],
+		["1.5", 0, 0, 0], ["", 0, 0, 0], ["1", 3, 0, 0],
+		["1", 0, 0.5, 0], ["1", 0, NaN, 0], ["1", 0, 1_875_012, 0],
+	]) await assert.rejects(() => entry.generate(...args));
+	const expected = ChunkGenCore.fromModule(storageModule);
+	for (const seed of ["-9223372036854775808", "9223372036854775807", "2026"])
+		assert.deepEqual(await entry.generate(seed, Generator.Flat, -2, 3), expected.generate(BigInt(seed), Generator.Flat, -2, 3));
 });

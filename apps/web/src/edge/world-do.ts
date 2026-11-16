@@ -6,6 +6,7 @@ import {
 import { RegionCodec } from "../shared/region-codec.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
+import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
 import serverWasm from "../wasm/server.wasm";
 
 // One world = one Durable Object: the dedicated server.
@@ -19,6 +20,8 @@ import serverWasm from "../wasm/server.wasm";
 // at most that window of edits is lost and players reconnect. (The game itself
 // autosaves every five minutes.)
 
+// Limit generation work between ticks when RPCs share the same process to reduce timer jitter.
+const MAX_GENERATION_IN_FLIGHT = 8;
 const MAX_PLAYERS = 16;
 const MAX_PACKET_BYTES = 256;
 /** Packets accepted per client per tick before the connection is dropped. */
@@ -35,6 +38,7 @@ const ACCESS_RECHECK_MS = 60_000;
 
 export interface WorldMetrics {
 	ticking: boolean;
+	generation: GenerationStats | null;
 	seed: string | null;
 	gameTime: number;
 	players: number;
@@ -51,6 +55,8 @@ export interface WorldMetrics {
 
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
+	private generation: GenerationDispatcher | null = null;
+	private generationFailed = false;
 	private codec: RegionCodec | null = null;
 	private seed: bigint | null = null;
 	private generator: number = Generator.DebugHills;
@@ -131,6 +137,29 @@ export class WorldDO extends DurableObject<Env> {
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
 		core.setStored(stored.map((r) => [r.cx, r.cz] as const));
 		this.core = core;
+		this.generationFailed = false;
+		if ((this.env.GEN_OFFLOAD as string | undefined) !== "0") {
+			try {
+				const entry = (this.ctx.exports as unknown as { ChunkGen?: { generate(seed: string, generator: number, cx: number, cz: number): Promise<Uint8Array> } }).ChunkGen;
+				if (!entry) throw new Error("ChunkGen entrypoint unavailable");
+				const seed = this.seed.toString();
+				const generator = this.generator;
+				this.generation = new GenerationDispatcher(async (cx, cz) => {
+					try {
+						if (this.generationFailed) throw new Error("Generation offload disabled");
+						return await entry.generate(seed, generator, cx, cz);
+					}
+					catch (error) {
+						if (this.core === core) {
+							if (!this.generationFailed) console.warn("Generation offload disabled", error);
+							this.generationFailed = true;
+						}
+						throw error;
+					}
+				}, MAX_GENERATION_IN_FLIGHT, 5000);
+				core.setExternalGeneration(MAX_GENERATION_IN_FLIGHT);
+			} catch (error) { console.warn("Generation offload unavailable", error); }
+		}
 		return core;
 	}
 
@@ -284,6 +313,8 @@ export class WorldDO extends DurableObject<Env> {
 		this.save();
 		this.stopTicking();
 		this.positions.clear();
+		this.generation?.reset();
+		this.generation = null;
 		this.core = null;
 		this.codec = null;
 		this.seed = null;
@@ -356,7 +387,10 @@ export class WorldDO extends DurableObject<Env> {
 	private step(): void {
 		const core = this.core;
 		if (!core) return;
+		this.generation?.pump(core);
 		core.tick();
+		this.generation?.pump(core);
+		if (this.generationFailed) core.setExternalGeneration(0);
 		const now = Date.now();
 		if (!this.accessCheckRunning && now - this.lastAccessCheck >= ACCESS_RECHECK_MS) {
 			this.lastAccessCheck = now;
@@ -371,6 +405,7 @@ export class WorldDO extends DurableObject<Env> {
 						tps: this.pacer?.measuredTps ?? 0,
 						// Workers clocks do not advance during synchronous work, so MSPT is unavailable.
 						msptMean: null, msptMax: null,
+						generation: this.generation?.stats() ?? null,
 						loadedChunks: core.loadedChunks, persistence: "sqlite", memoryBytes: core.memoryBytes,
 					} }));
 				} catch { /* Close event cleans up the socket. */ }
@@ -461,6 +496,7 @@ export class WorldDO extends DurableObject<Env> {
 		const stored = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM chunks").one().n;
 		return {
 			ticking: this.timer !== null,
+			generation: this.generation?.stats() ?? null,
 			seed: this.seed?.toString() ?? this.meta("seed"),
 			gameTime: Number(this.core?.gameTime ?? BigInt(this.meta("gameTime") ?? "0")),
 			players: this.sockets.size,
