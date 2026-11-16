@@ -10,8 +10,9 @@ export interface ServerStats {
 	biome: string;
 	gameTime: number;
 	tps: number;
-	msptMean: number;
-	msptMax: number;
+	// null for Durable Objects: Workers clocks do not advance during synchronous work.
+	msptMean: number | null;
+	msptMax: number | null;
 	loadedChunks: number;
 	persistence: string;
 	memoryBytes: number;

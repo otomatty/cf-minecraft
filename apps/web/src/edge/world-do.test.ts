@@ -653,4 +653,6 @@ test("DO sends per-player biome names through stats text metadata", async t => {
 	assert.equal(stats.biome, f.world.core.clientBiome(1));
 	assert.match(stats.biome,/^[a-z]+_[a-z]+$/);
 	assert.equal(stats.persistence,"sqlite");
+	assert.equal(stats.msptMean, null);
+	assert.equal(stats.msptMax, null);
 });

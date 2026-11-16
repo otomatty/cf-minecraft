@@ -629,6 +629,9 @@ async function main(): Promise<void> {
 		return ((g1 - g0) / (t1 - t0)) * 1000;
 	}
 	function updateHud(): void {
+		const mspt = serverStats && serverStats.msptMean !== null
+			? `${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax?.toFixed(2) ?? "n/a"})`
+			: "n/a";
 		const yaw = ((camera.yaw % 360) + 360) % 360;
 		const day = core.dayTime;
 		// Day time 0 is 06:00, 24000 ticks per day.
@@ -642,7 +645,7 @@ async function main(): Promise<void> {
 			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount} pending + ${meshPool.inFlight} in flight + ${meshPool.pendingResults} awaiting upload  chunks ${core.chunkCount}`,
 			`Server: ${transport.kind} "${worldName}"${connection === "reconnecting" ? "  reconnecting" : ""}  TPS ${measuredTps().toFixed(2)}` +
 				(serverStats
-					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
+					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
 			`Biome: ${serverStats?.biome ?? "?"}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
