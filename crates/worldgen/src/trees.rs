@@ -147,13 +147,20 @@ impl TerrainGenerator {
         } else {
             1
         };
-        (top + height + tip < MIN_Y + HEIGHT).then_some(Tree {
+        let tree = (top + height + tip < MIN_Y + HEIGHT).then_some(Tree {
             root,
             top,
             height,
             shape: b.tree_shape,
             tip,
-        })
+        })?;
+        // Preserve the stair passage's jump clearance, including crowns whose
+        // roots are outside the passage or in a neighbouring chunk.
+        let mut obstructs = false;
+        tree.blocks(|x, y, z, _| {
+            obstructs |= entrances.iter().any(|e| e.contains(x, y, z));
+        });
+        (!obstructs).then_some(tree)
     }
 
     pub(crate) fn plant_trees(
@@ -199,7 +206,11 @@ impl TerrainGenerator {
     fn tree_blocks(&self, qx: i32, qz: i32) -> Vec<(i32, i32, i32, BlockState)> {
         let mut result = Vec::new();
         let root = Candidate::new(self.seed, qx, qz);
-        let entrances = self.entrances_for_chunk(root.x.div_euclid(16), root.z.div_euclid(16), 0);
+        let entrances = self.entrances_for_chunk(
+            root.x.div_euclid(16),
+            root.z.div_euclid(16),
+            MAX_CROWN_RADIUS,
+        );
         if let Some(tree) = self.tree(root, &entrances, |x, z| self.surface_y(x, z)) {
             tree.blocks(|x, y, z, state| result.push((x, y, z, state)));
         }

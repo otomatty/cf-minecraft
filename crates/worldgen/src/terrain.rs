@@ -177,6 +177,78 @@ impl TerrainGenerator {
         ))
     }
 
+    // A single sampler shares lattice points and heights across all candidates.
+    // Optional chunk data is read before allocating or evaluating new samples.
+    fn surface_sampler_with<'a>(
+        &'a self,
+        known_height: impl Fn(i32, i32) -> Option<i32> + 'a,
+        known_line: impl Fn(i32, i32) -> Option<[f64; Y_POINTS]> + 'a,
+    ) -> impl FnMut(i32, i32) -> i32 + 'a {
+        let mut lines = std::collections::BTreeMap::new();
+        let mut heights = std::collections::BTreeMap::new();
+        move |x: i32, z: i32| {
+            if let Some(top) = known_height(x, z) {
+                return top;
+            }
+            if let Some(&top) = heights.get(&(x, z)) {
+                return top;
+            }
+            let gx = x.div_euclid(CELL_XZ) * CELL_XZ;
+            let gz = z.div_euclid(CELL_XZ) * CELL_XZ;
+            let points = [
+                (gx, gz),
+                (gx + CELL_XZ, gz),
+                (gx, gz + CELL_XZ),
+                (gx + CELL_XZ, gz + CELL_XZ),
+            ];
+            for point in points {
+                lines.entry(point).or_insert_with(|| {
+                    known_line(point.0, point.1)
+                        .unwrap_or_else(|| self.density_line(point.0, point.1))
+                });
+            }
+            let top = Self::top(&Self::column(
+                points.map(|point| &lines[&point]),
+                (x - gx) as f64 / CELL_XZ as f64,
+                (z - gz) as f64 / CELL_XZ as f64,
+            ));
+            heights.insert((x, z), top);
+            top
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_sampler(&self) -> impl FnMut(i32, i32) -> i32 + '_ {
+        self.surface_sampler_with(|_, _| None, |_, _| None)
+    }
+
+    fn chunk_surface_sampler<'a>(
+        &'a self,
+        cx: i32,
+        cz: i32,
+        grid: &'a [[f64; Y_POINTS]; 49],
+        heights: &'a [[i32; 18]; 18],
+    ) -> impl FnMut(i32, i32) -> i32 + 'a {
+        self.surface_sampler_with(
+            move |x, z| {
+                let (x, z) = (x - cx * 16, z - cz * 16);
+                if (-1..=16).contains(&x) && (-1..=16).contains(&z) {
+                    Some(heights[(z + 1) as usize][(x + 1) as usize])
+                } else {
+                    None
+                }
+            },
+            move |x, z| {
+                let (x, z) = (x - cx * 16, z - cz * 16);
+                if (-4..=20).contains(&x) && (-4..=20).contains(&z) {
+                    Some(grid[((z + 4) / 4 * 7 + (x + 4) / 4) as usize])
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
     /// Piecewise linear, symmetric approximation of this fBm's cumulative distribution.
     /// Expands the common central values without turning the tails into hard plateaus.
     fn climate_map(v: f64) -> f64 {
@@ -399,7 +471,12 @@ impl TerrainGenerator {
             }
         }
         let entrances = if caves || trees {
-            self.entrances_for_chunk(cx, cz, crate::trees::MAX_CROWN_RADIUS)
+            self.entrances_for_chunk_with_surface(
+                cx,
+                cz,
+                crate::trees::MAX_CROWN_RADIUS,
+                self.chunk_surface_sampler(cx, cz, &grid, &heights),
+            )
         } else {
             Vec::new()
         };
@@ -1074,6 +1151,10 @@ mod tests {
                             } else {
                                 old
                             };
+                            let support = y <= top
+                                && expected == blocks::AIR
+                                && entrances.iter().any(|e| e.supports(wx, y, wz));
+                            let expected = if support { blocks::STONE } else { expected };
                             assert_eq!(
                                 after.get(x, y, z),
                                 expected,
@@ -1081,7 +1162,7 @@ mod tests {
                             );
                             if y > top - 6 || y < MIN_Y + 6 {
                                 assert_eq!(cave, None);
-                                if !passage {
+                                if !passage && !support {
                                     assert_eq!(after.get(x, y, z), old);
                                 }
                             }
@@ -1319,7 +1400,23 @@ mod tests {
     }
 
     #[test]
+    fn entrance_surface_sampler_matches_geological_queries() {
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            for [dx, dz] in [[1, 0], [-1, 0], [0, 1], [0, -1]] {
+                let mut sample = t.surface_sampler();
+                for (x, z) in [(-17, 15), (16, -33)] {
+                    for step in -39..=39 {
+                        let (x, z) = (x + dx * step, z + dz * step);
+                        assert_eq!(sample(x, z), t.surface_y(x, z));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0xa7b56879550c2d0a);
+        assert_eq!(terrain_fingerprint(2026), 0x6aa960f51ded69b6);
     }
 }
