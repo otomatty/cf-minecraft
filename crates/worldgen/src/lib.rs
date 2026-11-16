@@ -3,6 +3,7 @@
 //! Terrain is original density-based terrain; Flat and DebugHills retain their
 //! legacy output. Prepared generators own their noise tables, with no global state.
 
+mod caves;
 mod terrain;
 mod trees;
 pub use terrain::{terrain_fingerprint, TerrainGenerator, SEA_LEVEL};

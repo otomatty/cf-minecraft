@@ -45,6 +45,7 @@ const SPAWN_STEP: i32 = 16;
 /// chunks; all methods are pure and can share it across threads.
 pub struct TerrainGenerator {
     pub(crate) seed: i64,
+    caves: crate::caves::Caves,
     continent: Fbm,
     relief: Fbm,
     detail: Fbm,
@@ -86,6 +87,7 @@ impl TerrainGenerator {
         };
         Self {
             seed,
+            caves: crate::caves::Caves::new(seed),
             continent: field(CONTINENT_SALT, CONTINENT_OCTAVES),
             relief: field(RELIEF_SALT, LOCAL_OCTAVES),
             detail: field(DETAIL_SALT, LOCAL_OCTAVES),
@@ -307,15 +309,15 @@ impl TerrainGenerator {
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> Chunk {
-        self.generate_features(cx, cz, true)
+        self.generate_features(cx, cz, true, true)
     }
 
     #[cfg(test)]
     pub(crate) fn generate_geology(&self, cx: i32, cz: i32) -> Chunk {
-        self.generate_features(cx, cz, false)
+        self.generate_features(cx, cz, false, true)
     }
 
-    fn generate_features(&self, cx: i32, cz: i32, trees: bool) -> Chunk {
+    fn generate_features(&self, cx: i32, cz: i32, trees: bool, caves: bool) -> Chunk {
         // A one-cell halo supplies exact neighbouring column heights for slopes.
         let grid: [[f64; Y_POINTS]; 49] = std::array::from_fn(|i| {
             self.density_line(
@@ -388,6 +390,9 @@ impl TerrainGenerator {
                     }
                 }
             }
+        }
+        if caves {
+            self.caves.carve(&mut chunk, cx, cz, &heights);
         }
         if trees {
             self.plant_trees(&mut chunk, cx, cz, |x, z| {
@@ -539,7 +544,11 @@ mod tests {
                             .any(|&(nx, nz)| (terrain.surface_y(nx, nz) - shape_top).abs() >= 3);
                         assert_eq!(chunk.get(x, MIN_Y, z), blocks::BEDROCK);
                         for y in (MIN_Y + 1)..=SEA_LEVEL {
-                            assert_ne!(chunk.get(x, y, z), blocks::AIR);
+                            if let Some(state) = terrain.caves.is_cave(wx, y, wz, shape_top) {
+                                assert_eq!(chunk.get(x, y, z), state);
+                            } else {
+                                assert_ne!(chunk.get(x, y, z), blocks::AIR);
+                            }
                         }
                         for depth in 0..=i32::from(b.depth) + 1 {
                             let y = shape_top - depth;
@@ -996,7 +1005,136 @@ mod tests {
     }
 
     #[test]
+    fn caves_match_coordinate_query_and_preserve_surface() {
+        use crate::caves::CAVE_WATER_LEVEL;
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            let (mut air, mut water) = (0, 0);
+            for cz in -1..=1 {
+                for cx in -1..=1 {
+                    let before = t.generate_features(cx, cz, true, false);
+                    let after = t.generate(cx, cz);
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                            let top = t.surface_y(wx, wz);
+                            for y in MIN_Y..320 {
+                                let old = before.get(x, y, z);
+                                let cave = t.caves.is_cave(wx, y, wz, top);
+                                let expected = if old != blocks::AIR && old != blocks::WATER {
+                                    cave.unwrap_or(old)
+                                } else {
+                                    old
+                                };
+                                assert_eq!(
+                                    after.get(x, y, z),
+                                    expected,
+                                    "seed={seed} at {wx},{y},{wz}"
+                                );
+                                if y > top - 6 || y < MIN_Y + 6 {
+                                    assert_eq!(after.get(x, y, z), old);
+                                }
+                                if let Some(state) = cave {
+                                    assert_eq!(
+                                        state,
+                                        if y <= CAVE_WATER_LEVEL {
+                                            blocks::WATER
+                                        } else {
+                                            blocks::AIR
+                                        }
+                                    );
+                                    if old != blocks::AIR && old != blocks::WATER {
+                                        if state == blocks::WATER {
+                                            water += 1;
+                                        } else {
+                                            air += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(air > 0 && water > 0);
+        }
+    }
+
+    #[test]
+    fn cave_volume_ratio() {
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            let (mut carved, mut volume, mut pools) = (0u64, 0u64, 0usize);
+            // 81 spaced chunks cover 1 km square, with every underground block counted.
+            for cz in -4..=4 {
+                for cx in -4..=4 {
+                    let (cx, cz) = (cx * 8, cz * 8);
+                    let before = t.generate_features(cx, cz, false, false);
+                    let after = t.generate_geology(cx, cz);
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let top = t.surface_y(cx * 16 + x as i32, cz * 16 + z as i32);
+                            let level = crate::caves::CAVE_WATER_LEVEL;
+                            pools += usize::from(
+                                after.get(x, level, z) == blocks::WATER
+                                    && after.get(x, level + 1, z) == blocks::AIR
+                                    && before.get(x, level, z) == blocks::STONE
+                                    && before.get(x, level + 1, z) == blocks::STONE,
+                            );
+                            for y in -56..=top - 6 {
+                                volume += 1;
+                                carved += u64::from(before.get(x, y, z) != after.get(x, y, z));
+                            }
+                            // All six protected surface blocks are identical, including sea floors.
+                            for y in top - 5..=top {
+                                assert_eq!(before.get(x, y, z), after.get(x, y, z));
+                            }
+                        }
+                    }
+                }
+            }
+            let ratio = carved as f64 / volume as f64;
+            eprintln!(
+                "caves seed={seed}: {carved}/{volume} = {:.4}%",
+                ratio * 100.0
+            );
+            assert!((0.04..=0.08).contains(&ratio));
+            assert!(
+                pools > 0,
+                "seed={seed}: no groundwater pool in broad probes"
+            );
+        }
+    }
+
+    #[test]
+    fn surface_metadata_baseline() {
+        let mut h = Fnv64::new();
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            for v in t.spawn_point() {
+                h.u16(v as u16);
+            }
+            for cz in -2..=2 {
+                for cx in -2..=2 {
+                    for b in t.biome_cells(cx, cz) {
+                        h.u16(b);
+                    }
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let (x, z) = (cx * 16 + x, cz * 16 + z);
+                            h.u16(t.surface_y(x, z) as u16);
+                            h.u16(t.biome_at(x, z));
+                        }
+                    }
+                }
+            }
+        }
+        // Captured before caves: surface_y, biome_at, biome_cells and spawn_point.
+        assert_eq!(h.finish(), 13697186662624202043);
+    }
+
+    #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0xa4bbe9718ff68753);
+        assert_eq!(terrain_fingerprint(2026), 0x4cd857db4701f1cb);
     }
 }

@@ -90,13 +90,15 @@ export class TintMap {
 			const x = (cx & 63) * 4, y = (cz & 63) * 4;
 			const combined = new Uint8Array(4 * 4 * 4 * 3);
 			for (let layer = 0; layer < 3; layer++) {
-				const data = combined.subarray(layer * 64, (layer + 1) * 64);
+				const pixels = this.pixels[layer];
 				for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
 					const cell = j * 4 + i, offset = cells[cell] * 9 + layer * 3;
-					data.set(this.colors.subarray(offset, offset + 3), cell * 4);
-					data[cell * 4 + 3] = 255;
+					const r = this.colors[offset], g = this.colors[offset + 1], b = this.colors[offset + 2];
+					const dest = layer * 64 + cell * 4;
+					combined[dest] = r; combined[dest + 1] = g; combined[dest + 2] = b; combined[dest + 3] = 255;
 					const texel = (y + j) * 256 + x + i;
-					this.pixels[layer].set(data.subarray(cell * 4, cell * 4 + 4), texel * 4);
+					const pixel = texel * 4;
+					pixels[pixel] = r; pixels[pixel + 1] = g; pixels[pixel + 2] = b; pixels[pixel + 3] = 255;
 					this.biomes[texel] = cells[cell];
 				}
 			}

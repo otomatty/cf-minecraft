@@ -741,6 +741,28 @@ async function biomeTints() {
 		});
 		check(registry[spawn.tint.biome]?.name === spawn.biome, "tint: spawn cell agrees with server biome", JSON.stringify(spawn));
 		check(JSON.stringify(spawn.tint.grass) === JSON.stringify(registry[spawn.tint.biome].grass), "tint: spawn grass matches registry");
+		const caves = await page.evaluate(() => {
+			const api = window.__mc;
+			const [sx, , sz] = api.stats().spawn;
+			const [cx, cz] = [Math.floor(sx / 16), Math.floor(sz / 16)];
+			const excluded = new Set(["air", "water", "ice", "oak_log", "oak_leaves"].map(name => api.stateId(name)));
+			const air = api.stateId("air");
+			let checked = 0;
+			for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+				for (let z = 0; z < 16; z += 3) for (let x = 0; x < 16; x += 3) {
+					const [wx, wz] = [(cx + dx) * 16 + x, (cz + dz) * 16 + z];
+					if (api.getBlock(wx, -64, wz) < 0) continue;
+					let top = 319;
+					while (top > -50 && excluded.has(api.getBlock(wx, top, wz))) top--;
+					for (let y = -50; y <= top - 8; y += 2) {
+						checked++;
+						if (api.getBlock(wx, y, wz) === air) return { found: true, checked, at: [wx, y, wz] };
+					}
+				}
+			}
+			return { found: false, checked };
+		});
+		check(caves.found, "caves: Terrain seed 2026 has underground air in loaded spawn chunks", JSON.stringify(caves));
 		const trees = await page.evaluate(() => {
 			const [sx, , sz] = window.__mc.stats().spawn.map(Math.floor);
 			const log = window.__mc.stateId("oak_log");
