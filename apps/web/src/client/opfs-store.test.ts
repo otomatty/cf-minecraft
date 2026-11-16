@@ -630,6 +630,39 @@ test("game mode validates metadata, defaults legacy worlds, and ignores new-worl
 	assert.equal((await (await open(legacy)).initializeMeta("2", Generator.Terrain, "survival")).gameMode, "creative");
 });
 
+test("player reads distinguish a missing file from an empty or populated file", async () => {
+	const dir = new MemoryDirectory(), store = await open(dir);
+	assert.equal(await store.readPlayer(), null);
+	for (const bytes of [new Uint8Array(), new Uint8Array([1, 0, 0, 1, 4])]) {
+		dir.seed("player.dat", bytes);
+		assert.deepEqual(await store.readPlayer(), bytes);
+	}
+});
+
+test("player reads propagate lookup and content read failures", async t => {
+	for (const failure of [new DOMException("temporarily unavailable", "NotReadableError"), new Error("I/O failure")]) {
+		const dir = new MemoryDirectory(), store = await open(dir);
+		t.mock.method(dir, "getFileHandle", async () => { throw failure; });
+		await assert.rejects(store.readPlayer(), error => error === failure);
+	}
+	for (const stage of ["getFile", "arrayBuffer"] as const) {
+		const dir = new MemoryDirectory(), store = await open(dir);
+		dir.seed("player.dat", new Uint8Array([1, 0]));
+		const handle = await dir.getFileHandle("player.dat");
+		// NotFoundError after obtaining the handle is also a read failure, not an absent file.
+		const failure = new DOMException("read failed", "NotFoundError");
+		t.mock.method(dir, "getFileHandle", async () => ({
+			...handle,
+			getFile: async () => {
+				if (stage === "getFile") throw failure;
+				return { size: 2, arrayBuffer: async () => { throw failure; } };
+			},
+		}));
+		await assert.rejects(store.readPlayer(), error => error === failure);
+		assert.deepEqual(dir.files.get("player.dat")!.durable, new Uint8Array([1, 0]));
+	}
+});
+
 test("player inventory saves with chunks and metadata and participates in OPFS archives", async () => {
 	const dir = new MemoryDirectory(), store = await open(dir);
 	assert.equal(await store.readPlayer(), null);

@@ -274,7 +274,16 @@ export class OpfsStore {
 		});
 	}
 
-	readPlayer(): Promise<Uint8Array | null> { return this.readFile("player.dat"); }
+	async readPlayer(): Promise<Uint8Array | null> {
+		let handle: FileSystemFileHandle;
+		try {
+			handle = await this.dir.getFileHandle("player.dat");
+		} catch (error) {
+			if (error instanceof DOMException && error.name === "NotFoundError") return null;
+			throw error;
+		}
+		return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+	}
 
 	writePlayer(bytes: Uint8Array): Promise<void> {
 		const run = this.queue.then(() => this.writeFile("player.dat", bytes));

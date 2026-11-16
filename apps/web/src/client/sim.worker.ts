@@ -160,9 +160,10 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));
 	if (store) c.setStored(await store.list());
 	if (epoch !== initEpoch) return;
-	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
-	if (epoch !== initEpoch) return;
+	// Read failures must reach the init error handler before connecting or starting workers.
 	const player = store ? await store.readPlayer() : null;
+	if (epoch !== initEpoch) return;
+	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
 	if (epoch !== initEpoch) return;
 	c.connect(CLIENT, import.meta.env.DEV, undefined, player ?? undefined);
 	core = c;

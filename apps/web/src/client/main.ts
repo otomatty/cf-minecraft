@@ -214,6 +214,7 @@ async function main(): Promise<void> {
 			removeUnloaded();
 			if (id === S2C.Inventory) syncInventory();
 			if (id === S2C.Welcome) {
+				pendingSelectedSlot = null;
 				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
@@ -355,6 +356,7 @@ async function main(): Promise<void> {
 	const slots: HTMLCanvasElement[] = [];
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
+	let pendingSelectedSlot: number | null = null;
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
 		c.width = c.height = TEX_SIZE;
 		c.title = "";
@@ -371,7 +373,10 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	function selectSlot(slot: number, send = true): void {
-		if (send) transport.send(core.encodeSelectSlot(slot));
+		if (send) {
+			pendingSelectedSlot = slot;
+			transport.send(core.encodeSelectSlot(slot));
+		}
 		selectedSlot = slot;
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
@@ -401,7 +406,8 @@ async function main(): Promise<void> {
 				ctx.fillText(String(count), 62, 61);
 			}
 		}
-		selectSlot(core.selectedSlot, false);
+		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
+		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
 	}
 	function replaceSlot(state: number): void {
 		if (core.gameMode !== "creative") return;

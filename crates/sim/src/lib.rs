@@ -394,7 +394,10 @@ impl Server {
                     || if state == blocks::AIR {
                         !matches!(old, Some(blocks::BEDROCK | blocks::WATER))
                     } else {
-                        self.clients[&id]
+                        old.is_some_and(|old| {
+                            matches!(old, blocks::AIR | blocks::WATER | blocks::SHORT_GRASS)
+                                || blocks::info(old).name == blocks::info(state).name
+                        }) && self.clients[&id]
                             .inventory
                             .selected_stack()
                             .is_some_and(|stack| Some(stack.item) == items::for_block(state))
@@ -949,6 +952,69 @@ mod tests {
         assert_eq!(s.stats.edits_corrected, 4);
         assert_eq!(s.clients[&1].inventory.selected_stack().unwrap().count, 1);
     }
+    #[test]
+    fn survival_placement_rejects_overwriting_bedrock_and_other_blocks() {
+        for old in [blocks::BEDROCK, blocks::STONE] {
+            let (mut s, [x, y, z]) = survival();
+            s.world.set_block(x, y, z, old);
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .add(items::for_block(blocks::DIRT).unwrap(), 2);
+            let before = s.inventory_data(1);
+            edit(&mut s, [x, y, z], blocks::DIRT);
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(old));
+            assert_eq!(s.inventory_data(1), before);
+            assert_eq!(s.stats.blocks_changed, 0);
+            assert_eq!(s.stats.packets_rejected, 1);
+            assert_eq!(s.stats.edits_corrected, 1);
+            let updates: Vec<_> = decode_all(s.take_outbox())
+                .into_iter()
+                .filter(|(_, p)| matches!(p, S2C::BlockUpdate { .. } | S2C::Inventory { .. }))
+                .collect();
+            assert_eq!(
+                updates,
+                vec![(
+                    1,
+                    S2C::BlockUpdate {
+                        x,
+                        y,
+                        z,
+                        state: old
+                    }
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn survival_placement_allows_replaceable_blocks_and_slab_state_changes() {
+        for (old, new) in [
+            (blocks::AIR, blocks::DIRT),
+            (blocks::WATER, blocks::DIRT),
+            (blocks::SHORT_GRASS, blocks::DIRT),
+            (blocks::OAK_SLAB, blocks::OAK_SLAB + 2),
+        ] {
+            let (mut s, [x, y, z]) = survival();
+            s.world.set_block(x, y, z, old);
+            let item = items::for_block(new).unwrap();
+            s.clients.get_mut(&1).unwrap().inventory.add(item, 2);
+            edit(&mut s, [x, y, z], new);
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(new));
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack { item, count: 1 })
+            );
+            assert_eq!(s.stats.blocks_changed, 1);
+            assert_eq!(s.stats.packets_rejected, 0);
+            assert_eq!(s.stats.edits_corrected, 0);
+            assert_eq!(inventories(&mut s).len(), 1);
+        }
+    }
+
     #[test]
     fn full_survival_inventory_discards_collected_overflow() {
         let (mut s, pos) = survival();
