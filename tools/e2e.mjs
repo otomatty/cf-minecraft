@@ -297,6 +297,9 @@ async function playthrough(kind) {
 	const query = `server=${kind}&world=${world}&view=${view}&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
 	const { page, errors } = await open(query);
 	const stats = await settle(page, kind, chunksInView(view));
+	await page.waitForFunction(() => window.__mc.stats().server?.generation?.delivered > 0, { timeout: 15000 });
+	const generation = await page.evaluate(() => window.__mc.stats().server.generation);
+	check(generation.delivered > 0, `${kind}: external generation delivered chunks`, JSON.stringify(generation));
 	check(stats.sections > 20, `${kind}: terrain meshed`, `${stats.sections} sections, ${stats.chunks} chunks, adapter ${stats.adapter}`);
 	check(stats.chunks === chunksInView(view), `${kind}: all ${chunksInView(view)} chunks in view arrived`, `${stats.chunks}`);
 
@@ -883,6 +886,13 @@ try {
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();
+	const fallback = await open(`server=local&world=e2e-gen-off-${run}&seed=2026&view=2&genworkers=0`);
+	try {
+		const stats = await settle(fallback.page, "generation disabled", chunksInView(2));
+		check(stats.chunks === chunksInView(2), "local: genworkers=0 loads chunks");
+		const generation = await fallback.page.evaluate(() => window.__mc.stats().server?.generation);
+		check(!generation || generation.requested === 0, "local: genworkers=0 disables offload");
+	} finally { await fallback.page.close(); }
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
 	const inBrowser = await page.evaluate(() => window.__mc.runScenario("2026", 600));

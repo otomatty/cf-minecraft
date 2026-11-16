@@ -279,7 +279,7 @@ async function main(): Promise<void> {
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
-			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime);
+			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime, params.get("genworkers") !== "0");
 
 	const local = () => {
 		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
