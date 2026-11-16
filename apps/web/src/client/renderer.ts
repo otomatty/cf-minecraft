@@ -270,7 +270,11 @@ export interface FrameStats {
 
 /** Shared by all terrain layers and translucent sorting. null disables culling. */
 export function filterVisibleSections<T>(sections: ReadonlyMap<string, T>, visible: ReadonlySet<string> | null): T[] {
-	return [...sections].filter(([k]) => visible === null || visible.has(k)).map(([, mesh]) => mesh);
+	const result: T[] = [];
+	for (const [k, mesh] of sections) {
+		if (visible === null || visible.has(k)) result.push(mesh);
+	}
+	return result;
 }
 
 const key = (cx: number, sy: number, cz: number) => `${cx},${sy},${cz}`;

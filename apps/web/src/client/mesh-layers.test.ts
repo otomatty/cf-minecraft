@@ -231,6 +231,7 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 test("section visibility filters every layer before frustum tests and translucent sorting", () => {
     const meshes = new Map([["-1,4,2", { counts: [3,2,1] }], ["0,4,2", { counts: [1,0,2] }]]);
     assert.deepEqual(filterVisibleSections(meshes, new Set(["-1,4,2"])), [meshes.get("-1,4,2")]);
+    assert.deepEqual(filterVisibleSections(meshes, new Set(["0,4,2", "missing", "-1,4,2"])), [...meshes.values()]);
     assert.deepEqual(filterVisibleSections(meshes, new Set()), []);
     assert.deepEqual(filterVisibleSections(meshes, null), [...meshes.values()]);
 });
