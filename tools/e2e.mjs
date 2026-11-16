@@ -52,7 +52,7 @@ async function open(query) {
 	page.on("console", (m) => {
 		if (m.type() === "error") errors.push(m.text());
 	});
-	await page.goto(`${edge}/?${query}`, { waitUntil: "load" });
+	await page.goto(`${edge}/play.html?${query}`, { waitUntil: "load" });
 	// Pointer lock is only granted to the focused tab.
 	await page.bringToFront();
 	return { page, errors };

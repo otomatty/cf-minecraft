@@ -83,12 +83,12 @@ declare global {
 }
 
 async function canEnterWorld(): Promise<boolean> {
-	const accountURL = `/account.html?next=${encodeURIComponent(location.pathname + location.search)}`;
+	const accountURL = `/?next=${encodeURIComponent(location.pathname + location.search)}`;
 	const stop = (message: string): false => {
 		fail(message);
 		const link = document.createElement("a");
 		link.href = accountURL;
-		link.textContent = "アカウントページへ";
+		link.textContent = "タイトル画面でログイン";
 		link.style.color = "#aaccff";
 		document.getElementById("panel")!.append(link);
 		return false;

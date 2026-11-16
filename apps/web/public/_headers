@@ -3,6 +3,10 @@
   Cross-Origin-Embedder-Policy: require-corp
   X-Content-Type-Options: nosniff
 
+/
+  ! Cross-Origin-Embedder-Policy
+/index.html
+  ! Cross-Origin-Embedder-Policy
 /account.html
   ! Cross-Origin-Embedder-Policy
 /account
