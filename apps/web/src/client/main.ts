@@ -6,6 +6,7 @@
 //   server=local|ws   integrated server in a Web Worker (default) or the Durable Object
 //   world=<name>      world to open (default "main")
 //   view=<chunks>     view distance, 2..12 (default 8)
+//   gen=flat|hills|terrain  generator for a new local world (default terrain)
 //   seed=<int64>      seed for a new local world
 //   time=<tick>       starting day time for the local server
 //   autopilot=1       no input needed: the camera circles above the spawn point
@@ -37,6 +38,7 @@ const serverKind = params.get("server") === "ws" ? "ws" : "local";
 const worldName = /^[a-z0-9][a-z0-9_-]{0,31}$/.test(params.get("world") ?? "") ? params.get("world")! : "main";
 const viewDistance = Math.max(2, Math.min(12, Math.round(Number(params.get("view") ?? 8) || 8)));
 const seedParam = /^-?\d{1,19}$/.test(params.get("seed") ?? "") ? params.get("seed") : null;
+const requestedGenerator = params.get("gen") === "flat" ? Generator.Flat : params.get("gen") === "hills" ? Generator.DebugHills : Generator.Terrain;
 const startTime = parseStartTime(params.get("time"));
 const autopilot = params.get("autopilot") === "1";
 
@@ -157,6 +159,8 @@ async function main(): Promise<void> {
 	let lightMs = 0;
 	let serverStats: ServerStats | null = null;
 	let scenarioLine = "";
+	let generator: number | null = null;
+	const generatorName = () => generator === null ? "unknown" : generator === Generator.Flat ? "Flat" : generator === Generator.Terrain ? "Terrain" : "DebugHills";
 	const timeSamples: Array<[number, number]> = [];
 	let target: RayHit | null = null;
 	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0, skyBrightness: 1 };
@@ -165,6 +169,7 @@ async function main(): Promise<void> {
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
+		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
 			if (opened) {
 				meshPool.reset();
@@ -232,7 +237,7 @@ async function main(): Promise<void> {
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
-			: new LocalTransport(serverWasmUrl, worldName, seedParam, Generator.DebugHills, handlers, startTime);
+			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime);
 
 	const local = () => {
 		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
@@ -638,7 +643,7 @@ async function main(): Promise<void> {
 				(serverStats
 					? `  MSPT ${serverStats.msptMean.toFixed(2)} (max ${serverStats.msptMax.toFixed(2)})  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
-			`Seed: ${core.seed}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
+			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
 		if (scenarioLine) lines.push(scenarioLine);
@@ -738,6 +743,8 @@ async function main(): Promise<void> {
 			adapter: renderer.adapterInfo,
 			camera: { ...camera },
 			spawn: core.spawn,
+			generator,
+			generatorName: generatorName(),
 			seed: core.seed.toString(),
 		}),
 		sendRawPosition: (x, y, z) => transport.send(core.encodePos(x, y, z, camera.yaw, camera.pitch)),

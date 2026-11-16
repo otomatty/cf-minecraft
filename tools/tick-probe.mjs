@@ -32,7 +32,7 @@ const mode = arg("mode", "measure");
 const accessToken = process.env.MC_ACCESS_TOKEN ?? "";
 
 const clientModule = new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/client.wasm")));
-const MARKER = { dx: 2, dy: 3, dz: 1, block: 9 };
+const MARKER = { dx: 0, dy: 3, dz: 0, block: 9 }; // Same dry spawn column on every generator.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function connect(index) {
@@ -64,15 +64,16 @@ function connect(index) {
 	});
 	ws.onclose = (e) => (p.closed = `${e.code} ${e.reason}`);
 	ws.onmessage = (e) => {
+		if (!(e.data instanceof ArrayBuffer)) return; // Host generator metadata is a text frame.
 		const data = new Uint8Array(e.data);
 		p.bytes += data.length;
 		p.packets++;
 		const id = core.packet(data);
 		if (id === S2C.Welcome) {
 			p.joined = true;
-			const [x, y, z] = core.spawn;
+			const [x, , z] = core.spawn;
 			// Spread the players out so each loads its own area.
-			p.pos = [x + index * 300, y + 10, z];
+			p.pos = [x + index * 300, 240, z]; // Above Terrain's maximum; keep spread-out probes clear of mountains.
 			ws.send(core.encodeTeleport(...p.pos));
 		} else if (id === S2C.PlayerCorrect) p.pos = core.playerPosition;
 		else if (id === S2C.ChunkData) p.chunks++;
@@ -179,6 +180,7 @@ async function marker(write) {
 	await p.opened;
 	await waitFor(() => p.joined, "welcome");
 	const [sx, sy, sz] = p.core.spawn.map(Math.floor);
+	p.ws.send(p.core.encodeTeleport(sx + 0.5, sy + 1, sz + 0.5));
 	const [x, y, z] = [sx + MARKER.dx, sy + MARKER.dy, sz + MARKER.dz];
 	await waitFor(() => p.core.getBlock(x, y, z) >= 0, "spawn chunk");
 	const before = p.core.getBlock(x, y, z);

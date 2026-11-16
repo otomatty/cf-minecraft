@@ -264,5 +264,6 @@ name = "worldgen"
 version = "0.0.1"
 dependencies = [
  "jmath",
+ "noise",
  "world",
 ]

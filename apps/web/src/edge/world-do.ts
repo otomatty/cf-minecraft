@@ -53,6 +53,7 @@ export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private codec: RegionCodec | null = null;
 	private seed: bigint | null = null;
+	private generator: number = Generator.DebugHills;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
 	// Memory only: eviction/recreation starts players at spawn, not a saved position.
@@ -110,16 +111,22 @@ export class WorldDO extends DurableObject<Env> {
 	private ensureCore(): ServerCore {
 		if (this.core) return this.core;
 		let seedText = this.meta("seed");
+		const isNew = seedText === null;
 		if (seedText === null) {
 			// The host chooses the seed; from here on the core is deterministic.
 			seedText = crypto.getRandomValues(new BigInt64Array(1))[0].toString();
-			this.setMeta("seed", seedText);
 		}
+		this.generator = isNew ? Generator.Terrain : Number(this.meta("generator") ?? Generator.DebugHills);
+		// Persist legacy migration too; seed absence always starts a new Terrain world.
+		this.ctx.storage.transactionSync(() => {
+			this.setMeta("seed", seedText!);
+			this.setMeta("generator", String(this.generator));
+		});
 		this.seed = BigInt(seedText);
 		const instance = new WebAssembly.Instance(serverWasm, {});
 		const core = new ServerCore(instance);
 		this.codec = new RegionCodec(instance);
-		core.start(this.seed, Generator.DebugHills);
+		core.start(this.seed, this.generator);
 		core.setTime(BigInt(this.meta("gameTime") ?? "0"), BigInt(this.meta("dayTime") ?? "0"));
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
 		core.setStored(stored.map((r) => [r.cx, r.cz] as const));
@@ -174,6 +181,7 @@ export class WorldDO extends DurableObject<Env> {
 		// A plain accept(), not the hibernation API: the tick loop needs the
 		// object in memory for as long as anyone is connected.
 		server.accept();
+		server.send(JSON.stringify({ type: "worldInfo", generator: this.generator }));
 		// Newer compatibility dates deliver binary frames as Blobs unless told otherwise.
 		server.binaryType = "arraybuffer";
 
@@ -451,8 +459,8 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	/** RPC (debug): the determinism scenario, run inside this runtime. */
-	scenario(seed: string, ticks: number): { host: string; seed: string; ticks: number; hash: string; noise: string } {
+	scenario(seed: string, ticks: number): { host: string; seed: string; ticks: number; hash: string; noise: string; terrain: string } {
 		const core = ServerCore.fromModule(serverWasm);
-		return { host: "workerd-durable-object", seed, ticks, hash: core.runScenario(BigInt(seed), ticks), noise: core.noiseFingerprint(BigInt(seed)) };
+		return { host: "workerd-durable-object", seed, ticks, hash: core.runScenario(BigInt(seed), ticks), noise: core.noiseFingerprint(BigInt(seed)), terrain: core.terrainFingerprint(BigInt(seed)) };
 	}
 }

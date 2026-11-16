@@ -28,12 +28,13 @@ interface ServerExports {
 	server_loaded_chunks(): number;
 	server_client_count(): number;
 	server_noise_fingerprint(seed: bigint): bigint;
+	server_terrain_fingerprint(seed: bigint): bigint;
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
 export const SERVER_ABI_VERSION = 3;
 
-export const Generator = { Flat: 0, DebugHills: 1 } as const;
+export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
 export interface OutPacket {
 	client: number;
@@ -200,6 +201,10 @@ export class ServerCore {
 	/** Scripted session in a throwaway server; see crates/sim/src/scenario.rs. */
 	runScenario(seed: bigint, ticks: number): string {
 		return hashToHex(this.x.server_run_scenario(BigInt.asIntN(64, seed), ticks));
+	}
+
+	terrainFingerprint(seed: bigint): string {
+		return hashToHex(this.x.server_terrain_fingerprint(BigInt.asIntN(64, seed)));
 	}
 
 	noiseFingerprint(seed: bigint): string {

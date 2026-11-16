@@ -2,6 +2,7 @@ import { decodeArchive, encodeArchive, isRegionName, type ArchiveEntry, MAX_ARCH
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
 
 export interface Meta {
+	generator: number;
 	seed: string;
 	gameTime: string;
 	dayTime: string;
@@ -191,6 +192,14 @@ export class OpfsStore {
 		return this.region(cx, cz, 2, data).then(() => {});
 	}
 
+	/** Persist the choice before any chunks can be generated or edited. */
+	async initializeMeta(seed: string, generator: number): Promise<Meta> {
+		const existing = await this.readMeta();
+		const meta = existing ?? { seed, generator, gameTime: "0", dayTime: "0" };
+		await this.writeMeta(meta);
+		return meta;
+	}
+
 	async readMeta(): Promise<Meta | null> {
 		const bytes = await this.readFile("meta.json");
 		if (!bytes) return null;
@@ -267,7 +276,9 @@ function parseMeta(bytes: Uint8Array, strictTimes: boolean): Meta {
 		if (strictTimes) throw new Error("meta.json の時刻が不正です");
 		return "0";
 	};
+	if (meta.generator !== undefined && (!Number.isInteger(meta.generator) || meta.generator < 0 || meta.generator > 0xffffffff)) throw new Error("meta.json のジェネレーターが不正です");
 	return {
+		generator: meta.generator ?? 1,
 		seed: BigInt.asIntN(64, BigInt(meta.seed)).toString(),
 		gameTime: time(meta.gameTime),
 		dayTime: time(meta.dayTime),

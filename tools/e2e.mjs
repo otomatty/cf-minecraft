@@ -303,6 +303,7 @@ async function playthrough(kind) {
 	// Let the orbiting camera draw a few frames, then look at what is on screen.
 	await new Promise((r) => setTimeout(r, 1500));
 	const drawn = await page.evaluate(() => window.__mc.stats());
+	check(Math.hypot(drawn.camera.x - stats.camera.x, drawn.camera.z - stats.camera.z) > 0.1, `${kind}: Terrain autopilot moves the camera`);
 	check(drawn.drawn > 0 && drawn.quads > 1000, `${kind}: sections drawn`, `${drawn.drawn} sections, ${drawn.quads} quads`);
 	// Server clock is advancing at 20 ticks per second. Measured before the
 	// screenshot below, which blocks the page for more than a second.
@@ -313,7 +314,16 @@ async function playthrough(kind) {
 
 	// Place a block through the same path a mouse click takes.
 	const [sx, sy, sz] = drawn.spawn.map(Math.floor);
-	const pos = [sx + 2, sy + 3, sz + 1];
+	check(drawn.generator === 2, `${kind}: new world uses Terrain`, `${drawn.generatorName}`);
+	const ground = await page.evaluate(([x, y, z]) => ({
+		foot: window.__mc.getBlock(x, y - 1, z),
+		body: window.__mc.getBlock(x, y, z),
+		head: window.__mc.getBlock(x, y + 1, z),
+	}), [sx, sy, sz]);
+	// Terrain produces only stone/grass/dirt/sand solids above the ocean floor.
+	check(sy > 57 && [1, 2, 3, 7].includes(ground.foot) && ground.body === 0 && ground.head === 0,
+		`${kind}: spawn is dry land above sea level with headroom`, JSON.stringify({spawn: drawn.spawn, ...ground}));
+	const pos = [sx, sy + 4, sz]; // Above both terrain and the player's head. Highest solid in this column is below spawn.
 	const before = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	await page.evaluate(([x, y, z], spawn) => {
 		window.__mc.setCamera(spawn[0], spawn[1] + 3, spawn[2], 0, 0);
@@ -352,6 +362,7 @@ async function playthrough(kind) {
 	await page.reload({ waitUntil: "load" });
 	const after = await settle(page, `${kind} after reload`, chunksInView(view));
 	const kept = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
+	check(after.generator === drawn.generator, `${kind}: generator kept across reload`);
 	check(after.seed === seedBefore, `${kind}: seed kept across reload`, after.seed);
 	check(kept === 9, `${kind}: placed block survived reload`, `block ${kept}`);
 	check(after.joinedGameTime >= timeBefore && timeBefore > 0, `${kind}: clock continued instead of restarting`, `tick ${timeBefore} -> ${after.joinedGameTime}`);
@@ -371,9 +382,11 @@ async function playthrough(kind) {
 		const url = new URL(page.url());
 		url.searchParams.set("world", importedWorld);
 		url.searchParams.delete("seed");
+        url.searchParams.set("gen", "flat"); // Existing/imported metadata must override URL choices.
 		await page.goto(url.href, { waitUntil: "load" });
 		const imported = await settle(page, "local imported world", chunksInView(view));
 		const importedBlock = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
+		check(imported.generator === drawn.generator, "local: archive preserves generator and ignores URL override");
 		check(importedBlock === 9 && imported.seed === seedBefore, "local: imported world kept the block and seed", `block ${importedBlock}, seed ${imported.seed}`);
 	}
 
@@ -385,7 +398,7 @@ async function playthrough(kind) {
 		});
 		await page.waitForFunction(before => window.__mc.stats().positionsCorrected > before, { timeout: 10000 }, corrections);
 		const corrected = await page.evaluate(() => window.__mc.stats());
-		check(Math.abs(corrected.camera.x) < 1000 && Math.abs(corrected.camera.z) < 1000, "ws: raw distant position is corrected without teleport");
+		check(Math.abs(corrected.camera.x - drawn.spawn[0]) < 1000 && Math.abs(corrected.camera.z - drawn.spawn[2]) < 1000, "ws: raw distant position is corrected without teleport");
 		const response = await fetch(`${edge}/api/debug/disconnect?world=${encodeURIComponent(world)}`, { method: "POST" });
 		check(response.ok, "ws: debug disconnect accepted");
 		const deadline = Date.now() + 15000;
@@ -440,13 +453,17 @@ async function inputs() {
 		return page.evaluate(() => document.getElementById("hud").textContent.split("\n").find((l) => l.startsWith("Target")));
 	};
 	const top = sy - 1;
-	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  grass_block`, "input: crosshair targets the block below", await targetLine());
+	const sandy = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z) === window.__mc.stateId("sand"), [sx, top, sz]);
+	const topName = sandy ? "sand" : "grass_block";
+	const underName = sandy ? "sand" : "dirt";
+	check(stats.generator === 2, "input: movement and mouse placement run on Terrain");
+	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below", await targetLine());
 
 	await page.mouse.down({ button: "left" });
 	await page.mouse.up({ button: "left" });
 	await new Promise((r) => setTimeout(r, 300));
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
-	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  dirt`, "input: the block underneath is targeted next", await targetLine());
+	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next", await targetLine());
 
 	await page.keyboard.press("Digit3");
 	await page.mouse.down({ button: "right" });

@@ -29,7 +29,7 @@ registerHooks({
 			};
 		}
 		if (url === "test:wasm") {
-			return { format: "module", source: "export default {}", shortCircuit: true };
+			return { format: "module", source: `import { readFileSync } from "node:fs"; export default new WebAssembly.Module(readFileSync(new URL(${JSON.stringify(new URL("../wasm/server.wasm", import.meta.url).href)})));`, shortCircuit: true };
 		}
 		return next(url, context);
 	},
@@ -45,6 +45,8 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	const initialPositions: Array<[number, number, number] | undefined> = [];
 	const acceptedPositions = new Map<number, [number, number, number]>();
 	class Socket extends EventTarget {
+		sent: string[] = [];
+		send(data: string) { this.sent.push(data); }
 		accept() {}
 		close(code, reason) {
 			closed.push([code, reason]);
@@ -568,4 +570,50 @@ test("real WASM ABI restores a normal user's position and exposes only accepted 
 	core.connect(2, false, [NaN, 100, 0.5]);
 	core.connect(3);
 	assert.deepEqual(core.clientPosition(2), core.clientPosition(3));
+});
+
+
+test("DO saves Terrain for new worlds and DebugHills for existing seed-only worlds", t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	const get = key => f.sqlite.prepare("SELECT value FROM meta WHERE key = ?").get(key)?.value;
+	for (const [seed, generator, expected] of [
+		[null, null, Generator.Terrain],
+		["2026", null, Generator.DebugHills],
+		["2026", "0", Generator.Flat],
+		["2026", "2", Generator.Terrain],
+		["2026", "99", 99],
+		[null, "1", Generator.Terrain],
+	]) {
+		f.sqlite.exec("DELETE FROM meta");
+		if (seed !== null) f.world.setMeta("seed", seed);
+		if (generator !== null) f.world.setMeta("generator", generator);
+		f.world.core = null;
+		const core = f.world.ensureCore();
+		assert.equal(get("generator"), String(expected));
+		const savedSeed = get("seed");
+		const reference = ServerCore.fromModule(storageModule);
+		reference.start(BigInt(savedSeed), expected);
+		const initialHash = reference.stateHash();
+		assert.equal(core.stateHash(), initialHash);
+		const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		for (const server of [core, reference]) {
+			server.connect(1, false);
+			server.packet(1, client.encodeHello(2));
+			server.tick();
+		}
+		assert.equal(core.stateHash(), reference.stateHash(), "restored generator determines new chunks");
+		assert.ok(core.loadedChunks > 0);
+		f.world.core = null;
+		assert.equal(f.world.ensureCore().stateHash(), initialHash);
+		assert.equal(get("seed"), savedSeed);
+	}
+});
+
+test("DO announces the saved generator to clients", async t => {
+	const f = fixture(t);
+	f.world.generator = Generator.Terrain;
+	await f.join("user");
+	assert.deepEqual(JSON.parse(f.world.sockets.get(1).sent[0]), { type: "worldInfo", generator: Generator.Terrain });
 });

@@ -1,13 +1,10 @@
 //! Chunk generation.
 //!
-//! M0 ships two generators:
-//! * `Flat` reproduces the game's default "Classic Flat" superflat preset.
-//! * `DebugHills` is a PLACEHOLDER with no relation to vanilla terrain. It
-//!   exists to give the renderer and the chunk pipeline something to chew on.
-//!   The real noise router, biomes and surface rules are M2.
-//!
-//! A generator is a pure function of (seed, chunk coordinate): no state, no
-//! clock, no hash-map iteration, and no libm calls.
+//! Terrain is original density-based terrain; Flat and DebugHills retain their
+//! legacy output. Prepared generators own their noise tables, with no global state.
+
+mod terrain;
+pub use terrain::{terrain_fingerprint, TerrainGenerator, SEA_LEVEL};
 
 use jmath::mix_stafford13;
 use world::{blocks, Chunk, Section, MIN_Y};
@@ -16,12 +13,15 @@ use world::{blocks, Chunk, Section, MIN_Y};
 pub enum Generator {
     Flat,
     DebugHills,
+    Terrain,
 }
 
 impl Generator {
     pub fn from_id(id: u32) -> Self {
         match id {
             0 => Generator::Flat,
+            1 => Generator::DebugHills,
+            2 => Generator::Terrain,
             _ => Generator::DebugHills,
         }
     }
@@ -33,6 +33,7 @@ pub fn surface_y(gen: Generator, seed: i64, x: i32, z: i32) -> i32 {
         // Classic Flat: bedrock, two dirt, one grass block, starting at the world bottom.
         Generator::Flat => MIN_Y + 3,
         Generator::DebugHills => hills_height(seed, x, z),
+        Generator::Terrain => TerrainGenerator::new(seed).surface_y(x, z),
     }
 }
 
@@ -40,6 +41,17 @@ pub fn generate(gen: Generator, seed: i64, cx: i32, cz: i32) -> Chunk {
     match gen {
         Generator::Flat => generate_flat(cx, cz),
         Generator::DebugHills => generate_hills(seed, cx, cz),
+        Generator::Terrain => TerrainGenerator::new(seed).generate(cx, cz),
+    }
+}
+
+/// Feet position on dry ground, searching square rings in a fixed order.
+/// Legacy generators retain the original origin spawn.
+pub fn spawn_point(gen: Generator, seed: i64) -> [i32; 3] {
+    if gen == Generator::Terrain {
+        TerrainGenerator::new(seed).spawn_point()
+    } else {
+        [0, surface_y(gen, seed, 0, 0) + 1, 0]
     }
 }
 
