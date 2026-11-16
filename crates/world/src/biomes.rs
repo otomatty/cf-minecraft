@@ -12,8 +12,18 @@ pub enum TerrainKind {
     Mountain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeShape {
+    None,
+    Round,
+    Cone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Biome {
+    pub tree_density: f64,
+    pub tree_shape: TreeShape,
+    pub tree_height: [u8; 2],
     pub terrain: TerrainKind,
     pub depth: u8,
     pub underwater: BlockState,

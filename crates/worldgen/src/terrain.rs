@@ -44,6 +44,7 @@ const SPAWN_STEP: i32 = 16;
 /// Prepared seed-specific noise tables. Retain this value when generating many
 /// chunks; all methods are pure and can share it across threads.
 pub struct TerrainGenerator {
+    pub(crate) seed: i64,
     continent: Fbm,
     relief: Fbm,
     detail: Fbm,
@@ -84,6 +85,7 @@ impl TerrainGenerator {
             )
         };
         Self {
+            seed,
             continent: field(CONTINENT_SALT, CONTINENT_OCTAVES),
             relief: field(RELIEF_SALT, LOCAL_OCTAVES),
             detail: field(DETAIL_SALT, LOCAL_OCTAVES),
@@ -233,7 +235,7 @@ impl TerrainGenerator {
         (temperature, humidity)
     }
 
-    fn biome_for_height(&self, x: i32, z: i32, top: i32) -> BiomeId {
+    pub(crate) fn biome_for_height(&self, x: i32, z: i32, top: i32) -> BiomeId {
         let (temperature, humidity) = self.climate_at(x, z, top);
         let kind = if top < SEA_LEVEL {
             // Cold water can freeze all the way to shore.
@@ -281,7 +283,7 @@ impl TerrainGenerator {
         })
     }
 
-    fn coating(b: &Biome, top: i32, y: i32, steep: bool) -> world::BlockState {
+    pub(crate) fn coating(b: &Biome, top: i32, y: i32, steep: bool) -> world::BlockState {
         if top - y > i32::from(b.depth) {
             blocks::STONE
         } else if top < SEA_LEVEL {
@@ -305,6 +307,15 @@ impl TerrainGenerator {
     }
 
     pub fn generate(&self, cx: i32, cz: i32) -> Chunk {
+        self.generate_features(cx, cz, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generate_geology(&self, cx: i32, cz: i32) -> Chunk {
+        self.generate_features(cx, cz, false)
+    }
+
+    fn generate_features(&self, cx: i32, cz: i32, trees: bool) -> Chunk {
         // A one-cell halo supplies exact neighbouring column heights for slopes.
         let grid: [[f64; Y_POINTS]; 49] = std::array::from_fn(|i| {
             self.density_line(
@@ -378,12 +389,27 @@ impl TerrainGenerator {
                 }
             }
         }
+        if trees {
+            self.plant_trees(&mut chunk, cx, cz, |x, z| {
+                if (-1..=16).contains(&x) && (-1..=16).contains(&z) {
+                    heights[(z + 1) as usize][(x + 1) as usize]
+                } else {
+                    Self::top(&column(x, z))
+                }
+            });
+        }
         chunk
     }
 
     pub fn spawn_point(&self) -> [i32; 3] {
-        self.find_spawn(SPAWN_RADIUS)
-            .unwrap_or([0, self.surface_y(0, 0).max(SEA_LEVEL) + 1, 0])
+        self.find_spawn(SPAWN_RADIUS).unwrap_or_else(|| {
+            let chunk = self.generate(0, 0);
+            let mut y = self.surface_y(0, 0).max(SEA_LEVEL) + 1;
+            while chunk.get(0, y, 0) != blocks::AIR || chunk.get(0, y + 1, 0) != blocks::AIR {
+                y += 1;
+            }
+            [0, y, 0]
+        })
     }
 
     fn find_spawn(&self, radius: i32) -> Option<[i32; 3]> {
@@ -394,9 +420,12 @@ impl TerrainGenerator {
                         continue;
                     }
                     let y = self.surface_y(x, z);
-                    // Highest solid implies both blocks above are air on dry land.
                     if y > SEA_LEVEL {
-                        return Some([x, y + 1, z]);
+                        let chunk = self.generate(x.div_euclid(16), z.div_euclid(16));
+                        let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+                        if (1..=2).all(|dy| chunk.get(lx, y + dy, lz) == blocks::AIR) {
+                            return Some([x, y + 1, z]);
+                        }
                     }
                 }
             }
@@ -491,7 +520,12 @@ mod tests {
                     for x in 0..16 {
                         let top = (MIN_Y..320)
                             .rev()
-                            .find(|&y| blocks::info(chunk.get(x, y, z)).solid)
+                            .find(|&y| {
+                                let b = chunk.get(x, y, z);
+                                blocks::info(b).solid
+                                    && b != blocks::OAK_LOG
+                                    && b != blocks::OAK_LEAVES
+                            })
                             .unwrap();
                         let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
                         let shape_top = terrain.surface_y(wx, wz);
@@ -554,7 +588,12 @@ mod tests {
                     let top = |c: &Chunk, x, z| {
                         (MIN_Y..320)
                             .rev()
-                            .find(|&y| blocks::info(c.get(x, y, z)).solid)
+                            .find(|&y| {
+                                let b = c.get(x, y, z);
+                                blocks::info(b).solid
+                                    && b != blocks::OAK_LOG
+                                    && b != blocks::OAK_LEAVES
+                            })
                             .unwrap()
                     };
                     for i in 0..16 {
@@ -625,6 +664,32 @@ mod tests {
             .find(|g| g.surface_y(0, 0) <= SEA_LEVEL)
             .unwrap();
         assert_eq!(ocean.find_spawn(0), None);
+    }
+
+    #[test]
+    fn spawn_skips_a_dry_candidate_obstructed_by_a_tree() {
+        for seed in 0..128 {
+            let t = TerrainGenerator::new(seed);
+            let top = t.surface_y(0, 0);
+            if top <= SEA_LEVEL {
+                continue;
+            }
+            let c = t.generate(0, 0);
+            if (1..=2).any(|dy| c.get(0, top + dy, 0) != blocks::AIR) {
+                assert_eq!(t.find_spawn(0), None);
+                let [x, y, z] = t.spawn_point();
+                assert_ne!((x, z), (0, 0));
+                let c = t.generate(x.div_euclid(16), z.div_euclid(16));
+                for dy in 0..2 {
+                    assert_eq!(
+                        c.get(x.rem_euclid(16) as usize, y + dy, z.rem_euclid(16) as usize),
+                        blocks::AIR
+                    );
+                }
+                return;
+            }
+        }
+        panic!("samples must include an obstructed dry spawn candidate");
     }
 
     #[test]
@@ -932,6 +997,6 @@ mod tests {
 
     #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0xd3a977090d68e9eb);
+        assert_eq!(terrain_fingerprint(2026), 0xa4bbe9718ff68753);
     }
 }

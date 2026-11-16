@@ -1294,25 +1294,37 @@ mod tests {
             assert_eq!(hit_x, if material == blocks::WATER { 3 } else { 2 });
         }
         state().world.insert_chunk(Chunk::empty(0, 0));
-        for (x, material) in [(2, blocks::STONE), (5, blocks::GLASS), (8, blocks::WATER)] {
+        for (x, material) in [
+            (2, blocks::STONE),
+            (5, blocks::GLASS),
+            (8, blocks::WATER),
+            (11, blocks::OAK_LEAVES),
+            (12, blocks::OAK_LEAVES),
+        ] {
             state().world.set_block(x, 80, 3, material);
         }
-        assert_eq!(client_mesh(0, 9, 0), 18);
+        assert_eq!(client_mesh(0, 9, 0), 28);
         assert_eq!(
             [
                 client_mesh_count(0),
                 client_mesh_count(1),
                 client_mesh_count(2)
             ],
-            [6, 6, 6]
+            [6, 16, 6]
         );
         let mut p = vec![blocks::AIR; PADDED_LEN];
-        for (x, material) in [(2, blocks::STONE), (5, blocks::GLASS), (8, blocks::WATER)] {
+        for (x, material) in [
+            (2, blocks::STONE),
+            (5, blocks::GLASS),
+            (8, blocks::WATER),
+            (11, blocks::OAK_LEAVES),
+            (12, blocks::OAK_LEAVES),
+        ] {
             p[padded_index(x, 3, 3)] = material;
         }
         assert_eq!(
             unsafe { mesh_padded(p.as_ptr(), p.len(), std::ptr::null(), std::ptr::null()) },
-            18
+            28
         );
         assert_eq!(
             [
@@ -1320,7 +1332,7 @@ mod tests {
                 client_mesh_count(1),
                 client_mesh_count(2)
             ],
-            [6, 6, 6]
+            [6, 16, 6]
         );
         assert_eq!(
             unsafe { mesh_padded(p.as_ptr(), 0, std::ptr::null(), std::ptr::null()) },

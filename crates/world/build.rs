@@ -66,6 +66,9 @@ struct Biomes {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Biome {
+    tree_density: f64,
+    tree_shape: String,
+    tree_height: [u8; 2],
     terrain: String,
     depth: u8,
     underwater: String,
@@ -410,6 +413,29 @@ fn generate(root: &Path, dest: &Path) {
             "biomes.toml: unknown terrain kind"
         );
         assert!(b.depth <= 8, "biomes.toml: depth must be <= 8");
+        assert!(
+            (0.0..=1.0).contains(&b.tree_density),
+            "biomes.toml: tree_density must be in 0..=1"
+        );
+        let tree_shape = match b.tree_shape.as_str() {
+            "none" => "None",
+            "round" => "Round",
+            "cone" => "Cone",
+            _ => panic!("biomes.toml: unknown tree_shape"),
+        };
+        if tree_shape == "None" {
+            assert!(
+                b.tree_density == 0.0 && b.tree_height == [0, 0],
+                "biomes.toml: none requires zero tree_density and tree_height"
+            );
+        } else {
+            assert!(
+                3 <= b.tree_height[0]
+                    && b.tree_height[0] <= b.tree_height[1]
+                    && b.tree_height[1] <= 12,
+                "biomes.toml: tree_height must satisfy 3 <= min <= max <= 12"
+            );
+        }
         identifier(&b.name);
         assert!(
             names.insert(b.name.clone()),
@@ -435,7 +461,7 @@ fn generate(root: &Path, dest: &Path) {
                 b.name
             );
         }
-        writeln!(out, "Biome {{ terrain: TerrainKind::{}, depth: {}, underwater: {}, slope: {}, freeze: {}, name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, water_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.terrain, b.depth, resolve(&b.underwater), resolve(&b.slope), b.freeze, b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.water_color, b.temperature, b.humidity).unwrap();
+        writeln!(out, "Biome {{ tree_density: {:?}, tree_shape: TreeShape::{}, tree_height: {:?}, terrain: TerrainKind::{}, depth: {}, underwater: {}, slope: {}, freeze: {}, name: {:?}, surface: {}, subsurface: {}, grass_color: {:?}, leaves_color: {:?}, water_color: {:?}, temperature: {:?}, humidity: {:?} }},", b.tree_density, tree_shape, b.tree_height, b.terrain, b.depth, resolve(&b.underwater), resolve(&b.slope), b.freeze, b.name, resolve(&b.surface), resolve(&b.subsurface), b.grass_color, b.leaves_color, b.water_color, b.temperature, b.humidity).unwrap();
     }
     out.push_str("];\n");
     fs::write(dest.join("biomes.rs"), out).unwrap();

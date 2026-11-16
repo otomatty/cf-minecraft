@@ -3,7 +3,13 @@ use world::blocks::*;
 // Captured from the handwritten registry before introducing code generation.
 #[test]
 fn registry_matches_pre_generation_snapshot() {
-    assert_eq!(snapshot(), include_str!("registry-v1.txt"));
+    // Preserve the historical snapshot; only leaf internal-face culling changed.
+    let expected = include_str!("registry-v1.txt").replacen(
+        "12: oak_leaves Cube Cutout false true false 1 0",
+        "12: oak_leaves Cube Cutout false true true 1 0",
+        1,
+    );
+    assert_eq!(snapshot(), expected);
     assert_eq!(
         [
             AIR,
@@ -128,5 +134,34 @@ fn biome_ids_and_original_tint_palette_match() {
         assert_eq!(biome.grass_color, grass);
         assert_eq!(biome.leaves_color, leaves);
         assert_eq!(biome.water_color, water);
+    }
+}
+
+#[test]
+fn biome_tree_recipes_match_original_specification() {
+    use world::biomes::{TreeShape::*, BIOMES};
+    let expected = [
+        (0.03, Round, [4, 6]),
+        (0.0, None, [0, 0]),
+        (0.32, Round, [6, 9]),
+        (0.008, Round, [4, 5]),
+        (0.08, Cone, [6, 9]),
+        (0.12, Round, [4, 6]),
+        (0.0, None, [0, 0]),
+        (0.0, None, [0, 0]),
+        (0.0, None, [0, 0]),
+        (0.0, None, [0, 0]),
+        (0.0, None, [0, 0]),
+        (0.01, Cone, [5, 7]),
+        (0.0, None, [0, 0]),
+    ];
+    assert_eq!(BIOMES.len(), expected.len());
+    for (b, recipe) in BIOMES.iter().zip(expected) {
+        assert_eq!(
+            (b.tree_density, b.tree_shape, b.tree_height),
+            recipe,
+            "{}",
+            b.name
+        );
     }
 }

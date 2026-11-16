@@ -324,7 +324,11 @@ async function playthrough(kind) {
 	// Terrain uses only air/water as non-solid blocks; every surface recipe is solid.
 	check(sy > 57 && ground.foot !== "air" && ground.foot !== "water" && ground.foot !== "?" && ground.body === 0 && ground.head === 0,
 		`${kind}: spawn is dry land above sea level with headroom`, JSON.stringify({spawn: drawn.spawn, ...ground}));
-	const pos = [sx, sy + 4, sz]; // Above both terrain and the player's head. Highest solid in this column is below spawn.
+	const pos = await page.evaluate(([x, y, z]) => {
+		// Trees can overhang a spawn column even when its first two blocks are air.
+		while (window.__mc.getBlock(x, y, z) !== 0 && y < 319) y++;
+		return [x, y, z];
+	}, [sx, sy + 4, sz]);
 	const before = await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), pos);
 	await page.evaluate(([x, y, z], spawn) => {
 		window.__mc.setCamera(spawn[0], spawn[1] + 3, spawn[2], 0, 0);
@@ -737,6 +741,23 @@ async function biomeTints() {
 		});
 		check(registry[spawn.tint.biome]?.name === spawn.biome, "tint: spawn cell agrees with server biome", JSON.stringify(spawn));
 		check(JSON.stringify(spawn.tint.grass) === JSON.stringify(registry[spawn.tint.biome].grass), "tint: spawn grass matches registry");
+		const trees = await page.evaluate(() => {
+			const [sx, , sz] = window.__mc.stats().spawn.map(Math.floor);
+			const log = window.__mc.stateId("oak_log");
+			const leaves = window.__mc.stateId("oak_leaves");
+			let logs = 0, crowns = 0;
+			for (let z = sz - 24; z <= sz + 24; z++) {
+				for (let x = sx - 24; x <= sx + 24; x++) {
+					for (let y = 57; y < 320; y++) {
+						const block = window.__mc.getBlock(x, y, z);
+						if (block === log) logs++;
+						if (block === leaves) crowns++;
+					}
+				}
+			}
+			return { logs, crowns };
+		});
+		check(trees.logs > 0 && trees.crowns > 0, "trees: Terrain seed 2026 has logs and leaves within 24 blocks of spawn", JSON.stringify(trees));
 		for (const [z, name, grass] of [[0, "rain_grove", [72, 170, 74]], [144, "mild_meadow", [124, 184, 84]]]) {
 			await page.evaluate(z => window.__mc.setCamera(0, 140, z, 0, 0), z);
 			await page.waitForFunction(z => window.__mc.tint(0, z) !== null, {}, z);

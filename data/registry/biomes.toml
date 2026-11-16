@@ -1,5 +1,8 @@
 [[biomes]]
 name = "mild_meadow"
+tree_density = 0.03
+tree_shape = "round"
+tree_height = [4, 6]
 terrain = "Land"
 surface = "grass_block"
 subsurface = "dirt"
@@ -15,6 +18,9 @@ humidity = [0.3, 0.66]
 
 [[biomes]]
 name = "dry_sands"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Land"
 surface = "sand"
 subsurface = "sandstone"
@@ -30,6 +36,9 @@ humidity = [0.07, 0.17]
 
 [[biomes]]
 name = "rain_grove"
+tree_density = 0.32
+tree_shape = "round"
+tree_height = [6, 9]
 terrain = "Land"
 surface = "grass_block"
 subsurface = "dirt"
@@ -45,6 +54,9 @@ humidity = [0.8, 0.9]
 
 [[biomes]]
 name = "sun_steppe"
+tree_density = 0.008
+tree_shape = "round"
+tree_height = [4, 5]
 terrain = "Land"
 surface = "coarse_dirt"
 subsurface = "dirt"
@@ -60,6 +72,9 @@ humidity = [0.3, 0.4]
 
 [[biomes]]
 name = "quiet_snow"
+tree_density = 0.08
+tree_shape = "cone"
+tree_height = [6, 9]
 terrain = "Land"
 surface = "snow_block"
 subsurface = "dirt"
@@ -75,6 +90,9 @@ humidity = [0.35, 0.45]
 
 [[biomes]]
 name = "reed_mire"
+tree_density = 0.12
+tree_shape = "round"
+tree_height = [4, 6]
 terrain = "Land"
 surface = "grass_block"
 subsurface = "dirt"
@@ -90,6 +108,9 @@ humidity = [0.85, 0.95]
 
 [[biomes]]
 name = "open_tide"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Sea"
 surface = "sand"
 subsurface = "sand"
@@ -105,6 +126,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "silent_floe"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Sea"
 surface = "gravel"
 subsurface = "gravel"
@@ -120,6 +144,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "clear_shoal"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Shallows"
 surface = "sand"
 subsurface = "sand"
@@ -135,6 +162,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "pale_strand"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Beach"
 surface = "sand"
 subsurface = "sand"
@@ -150,6 +180,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "shingle_edge"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Beach"
 surface = "gravel"
 subsurface = "gravel"
@@ -165,6 +198,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "bare_ridge"
+tree_density = 0.01
+tree_shape = "cone"
+tree_height = [5, 7]
 terrain = "Mountain"
 surface = "stone"
 subsurface = "gravel"
@@ -180,6 +216,9 @@ humidity = [0.45, 0.55]
 
 [[biomes]]
 name = "white_crest"
+tree_density = 0.0
+tree_shape = "none"
+tree_height = [0, 0]
 terrain = "Mountain"
 surface = "snow_block"
 subsurface = "stone"

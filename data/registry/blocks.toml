@@ -84,6 +84,7 @@ name = "oak_leaves"
 id = 12
 layer = "cutout"
 texture = "oak_leaves"
+cull_same = true
 opacity = 1
 tint = true
 
