@@ -568,6 +568,38 @@ test("OPFS selects Terrain only for new worlds and persists the saved choice", a
 	assert.equal((await freshFlat.initializeMeta("1", Generator.Flat)).generator, Generator.Flat);
 });
 
+test("concurrent stores initialize one world's metadata under the shared lock", async () => {
+	const dir = new MemoryDirectory();
+	const a = await open(dir);
+	const b = await open(dir);
+	const [first, second] = await Promise.all([
+		a.initializeMeta("2026", Generator.Terrain),
+		b.initializeMeta("7", Generator.Flat),
+	]);
+	assert.deepEqual(first, { seed: "2026", generator: Generator.Terrain, gameTime: "0", dayTime: "0" });
+	assert.deepEqual(second, first);
+	assert.deepEqual(await b.readMeta(), first);
+	assert.deepEqual(await b.initializeMeta("42", Generator.DebugHills), first);
+});
+
+test("initialization without Web Locks returns metadata reread after writing", async t => {
+	const originalLocks = navigator.locks;
+	Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+	t.after(() => Object.defineProperty(navigator, "locks", { configurable: true, value: originalLocks }));
+	const dir = new MemoryDirectory();
+	const a = await open(dir);
+	const b = await open(dir);
+	const winner = { seed: "7", generator: Generator.Flat, gameTime: "0", dayTime: "0" };
+	const write = a.writeMeta.bind(a);
+	a.writeMeta = async meta => {
+		await write(meta);
+		// Another tab wins after our write but before our final read.
+		await b.writeMeta(winner);
+	};
+	assert.deepEqual(await a.initializeMeta("2026", Generator.Terrain), winner);
+	assert.deepEqual(await a.initializeMeta("42", Generator.DebugHills), winner);
+});
+
 test("archives preserve Terrain and migrate generator-less metadata to DebugHills", async () => {
 	for (const generator of [undefined, Generator.Flat, Generator.Terrain, 99]) {
 		const store = await open(new MemoryDirectory());

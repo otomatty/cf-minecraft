@@ -16,11 +16,13 @@ function withWorldLock<T>(world: string, fn: () => Promise<T>): Promise<T> {
 /** Region files in OPFS. Sync access handles exist only in workers, which is where we are. */
 export class OpfsStore {
 	private readonly dir: FileSystemDirectoryHandle;
+	private readonly world: string;
 
 	private readonly codec: RegionCodec;
 	private queue: Promise<unknown> = Promise.resolve();
 
-	private constructor(dir: FileSystemDirectoryHandle, codec: RegionCodec) {
+	private constructor(world: string, dir: FileSystemDirectoryHandle, codec: RegionCodec) {
+		this.world = world;
 		this.dir = dir;
 		this.codec = codec;
 	}
@@ -29,7 +31,7 @@ export class OpfsStore {
 		try {
 			const root = await navigator.storage.getDirectory();
 			return await withWorldLock(world, async () =>
-				new OpfsStore(await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
+				new OpfsStore(world, await root.getDirectoryHandle(`world-${world}`, { create: true }), codec));
 		} catch {
 			// Private browsing or an old browser: play without saving.
 			return null;
@@ -192,12 +194,22 @@ export class OpfsStore {
 		return this.region(cx, cz, 2, data).then(() => {});
 	}
 
-	/** Persist the choice before any chunks can be generated or edited. */
+	/**
+	 * Persist the choice under the same world lock as imports, before generation.
+	 * Without Web Locks, rereading after writing is best effort: a later writer
+	 * can still change the metadata after this function returns.
+	 */
 	async initializeMeta(seed: string, generator: number): Promise<Meta> {
-		const existing = await this.readMeta();
-		const meta = existing ?? { seed, generator, gameTime: "0", dayTime: "0" };
-		await this.writeMeta(meta);
-		return meta;
+		return withWorldLock(this.world, async () => {
+			// Do not enqueue this callback: writeMeta itself awaits the write queue.
+			await this.queue;
+			const existing = await this.readMeta();
+			if (existing) return existing;
+			await this.writeMeta({ seed, generator, gameTime: "0", dayTime: "0" });
+			const saved = await this.readMeta();
+			if (!saved) throw new Error("Cannot read initialized world metadata");
+			return saved;
+		});
 	}
 
 	async readMeta(): Promise<Meta | null> {
@@ -248,7 +260,7 @@ export class OpfsStore {
 				if (existing === name) throw new Error("同じ名前のワールドが既に存在します");
 			}
 			const dir = await root.getDirectoryHandle(name, { create: true });
-			const target = new OpfsStore(dir, this.codec);
+			const target = new OpfsStore(world, dir, this.codec);
 			try {
 				for (const entry of entries) if (entry.name !== "meta.json") await target.writeFile(entry.name, entry.data);
 				await target.writeMeta(meta);
