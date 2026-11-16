@@ -51,9 +51,11 @@ const statusLine = $<HTMLParagraphElement>("status");
 const hotbar = $<HTMLDivElement>("hotbar");
 
 type MenuView = "start" | "menu" | "controls" | "settings";
+let failed = false;
 let menuView: MenuView = "start";
 let prepareMenuView: (view: MenuView) => void = () => {};
 function showMenuView(view: MenuView): void {
+	if (failed) view = "start";
 	menuView = view;
 	prepareMenuView(view);
 	for (const [name, id] of Object.entries({ start: "start-panel", menu: "game-menu", controls: "controls-panel", settings: "settings-panel" })) {
@@ -65,8 +67,12 @@ function showMenuView(view: MenuView): void {
 }
 
 function fail(message: string): void {
+	failed = true;
 	statusLine.textContent = message;
 	statusLine.className = "error";
+	$("start-to-title").hidden = false;
+	$("block-picker").hidden = true;
+	if (document.pointerLockElement !== null) document.exitPointerLock();
 	showMenuView("start");
 	hud.textContent = message;
 }
@@ -224,8 +230,11 @@ async function main(): Promise<void> {
 				}
 				connection = "open";
 				timeSamples.length = 0;
-				statusLine.className = "";
-				statusLine.textContent = "クリックして開始";
+				if (!failed) {
+					$("start-to-title").hidden = true;
+					statusLine.className = "";
+					statusLine.textContent = "クリックして開始";
+				}
 				if (!locked()) showMenuView(wasJoined ? "menu" : "start");
 				if (autopilot) overlay.hidden = true;
 			} else if (id === S2C.PlayerCorrect) {
@@ -248,10 +257,13 @@ async function main(): Promise<void> {
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
 			picker.hidden = true;
+			$("start-to-title").hidden = false;
 			showMenuView("start");
 			timeSamples.length = 0;
-			statusLine.className = "";
-			statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+			if (!failed) {
+				statusLine.className = "";
+				statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+			}
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
@@ -563,27 +575,36 @@ async function main(): Promise<void> {
 			if (document.fullscreenElement) await document.exitFullscreen();
 			else await document.documentElement.requestFullscreen();
 		} catch {
+			if (failed) return;
 			if (menuView === "start") statusLine.textContent = "全画面に切り替えられませんでした。";
 			else $("menu-message").textContent = "全画面に切り替えられませんでした。";
 		}
 	}
 	async function requestPointerLock(): Promise<void> {
+		if (failed) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
+			if (failed) return;
 			try { await canvas.requestPointerLock(); }
 			catch { pointerLockFailed(); }
 		}
 	}
 	function pointerLockFailed(): void {
+		if (failed) return;
 		if (menuView === "start") statusLine.textContent = "マウスをロックできませんでした。クリックして再試行してください。";
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && connection === "open" && picker.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
+		if (failed) {
+			if (locked()) document.exitPointerLock();
+			showMenuView("start");
+			return;
+		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
 		if (!picker.hidden) { overlay.hidden = true; return; }
@@ -626,7 +647,7 @@ async function main(): Promise<void> {
 			if (menuView === "controls") showMenuView("menu");
 			return;
 		}
-		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed) {
+		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {
 			e.preventDefault();
 			if (!e.repeat) openPicker();
 			return;
