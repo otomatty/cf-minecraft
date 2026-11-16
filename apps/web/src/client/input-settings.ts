@@ -1,5 +1,5 @@
 /** Input preferences and key policy, independent of browser/DOM globals. */
-export const ACTIONS = ["forward", "backward", "left", "right", "up", "down", "sprint", "fullscreen", "inventory"] as const;
+export const ACTIONS = ["forward", "backward", "left", "right", "up", "down", "sprint", "fullscreen", "inventory", "drop"] as const;
 export type Action = typeof ACTIONS[number];
 export interface InputSettings {
 	keys: Record<Action, string>;
@@ -10,7 +10,7 @@ export const SETTINGS_KEY = "cf-minecraft.input-settings.v1";
 const LEGACY_SETTINGS_KEY = "maincraft.input-settings.v1";
 export function defaultSettings(): InputSettings {
 	return {
-		keys: { forward: "KeyW", backward: "KeyS", left: "KeyA", right: "KeyD", up: "Space", down: "ShiftLeft", sprint: "KeyR", fullscreen: "KeyF", inventory: "KeyE" },
+		keys: { forward: "KeyW", backward: "KeyS", left: "KeyA", right: "KeyD", up: "Space", down: "ShiftLeft", sprint: "KeyR", fullscreen: "KeyF", inventory: "KeyE", drop: "KeyQ" },
 		sensitivity: 100,
 		fov: 70,
 	};
@@ -52,18 +52,20 @@ export function loadSettings(storage: StorageReader & StorageWriter & StorageRem
 	try {
 		const current = storage.getItem(SETTINGS_KEY);
 		const value = JSON.parse((current === null ? storage.getItem(LEGACY_SETTINGS_KEY) : current) ?? "null");
-		if (!value || !value.keys || !ACTIONS.filter(action => action !== "inventory").every(action => validKey(value.keys[action]))
+		if (!value || !value.keys || !ACTIONS.filter(action => action !== "inventory" && action !== "drop").every(action => validKey(value.keys[action]))
 			|| !Number.isFinite(value.sensitivity) || value.sensitivity < 0 || value.sensitivity > 200
 			|| !Number.isFinite(value.fov) || value.fov < 30 || value.fov > 110) return defaultSettings();
+		const missingDrop = !Object.hasOwn(value.keys, "drop");
+		if (missingDrop) value.keys.drop = ["KeyQ", ...LOCKABLE_CODES].find(code => validKey(code) && !Object.values(value.keys).some(key => typeof key === "string" && matchesKey(code, key)));
 		const missingInventory = !Object.hasOwn(value.keys, "inventory");
 		if (missingInventory) {
 			// Check both sprint maps as well as assigned keys before choosing a default.
 			value.keys.inventory = ["KeyE", "KeyI", "KeyB", "KeyC", ...LOCKABLE_CODES].find(code => validKey(code)
 				&& effectiveKeyConflicts({ ...value, keys: { ...value.keys, inventory: code } }).length === 0);
 		}
-		if (!validKey(value.keys.inventory) || duplicateKeys(value.keys).length > 0 || effectiveKeyConflicts(value).length > 0) return defaultSettings();
+		if (!validKey(value.keys.drop) || !validKey(value.keys.inventory) || duplicateKeys(value.keys).length > 0 || effectiveKeyConflicts(value).length > 0) return defaultSettings();
 		const settings = { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov };
-		if (current === null || missingInventory) {
+		if (current === null || missingInventory || missingDrop) {
 			try {
 				storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 				if (current === null) storage.removeItem(LEGACY_SETTINGS_KEY);

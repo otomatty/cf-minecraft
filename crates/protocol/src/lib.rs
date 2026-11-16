@@ -8,11 +8,14 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
+    DropItem {
+        dir: [f32; 3],
+    },
     SelectSlot {
         slot: u8,
     },
@@ -48,6 +51,28 @@ pub enum C2S {
 /// Server to client.
 #[derive(Clone, Debug, PartialEq)]
 pub enum S2C {
+    EntitySpawn {
+        id: u32,
+        kind: u8,
+        item: u16,
+        count: u8,
+        x: f64,
+        y: f64,
+        z: f64,
+    },
+    EntityMove {
+        id: u32,
+        x: f64,
+        y: f64,
+        z: f64,
+    },
+    EntityCount {
+        id: u32,
+        count: u8,
+    },
+    EntityRemove {
+        id: u32,
+    },
     Inventory {
         selected: u8,
         slots: Vec<Option<(u16, u8)>>,
@@ -86,6 +111,11 @@ pub enum S2C {
 }
 
 pub mod id {
+    pub const C2S_DROP_ITEM: u8 = 0x06;
+    pub const S2C_ENTITY_SPAWN: u8 = 0x07;
+    pub const S2C_ENTITY_MOVE: u8 = 0x08;
+    pub const S2C_ENTITY_COUNT: u8 = 0x09;
+    pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
     pub const S2C_INVENTORY: u8 = 0x06;
@@ -106,6 +136,12 @@ impl C2S {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match *self {
+            C2S::DropItem { dir } => {
+                w.u8(id::C2S_DROP_ITEM);
+                for v in dir {
+                    w.f32(v);
+                }
+            }
             C2S::SelectSlot { slot } => {
                 w.u8(id::C2S_SELECT_SLOT);
                 w.u8(slot);
@@ -159,6 +195,13 @@ impl C2S {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::C2S_DROP_ITEM => {
+                let dir = [r.f32()?, r.f32()?, r.f32()?];
+                if !dir.iter().all(|v| v.is_finite()) {
+                    return Err(DecodeError);
+                }
+                C2S::DropItem { dir }
+            }
             id::C2S_SELECT_SLOT => {
                 let slot = r.u8()?;
                 if slot >= 9 {
@@ -221,6 +264,46 @@ impl S2C {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
+            S2C::EntitySpawn {
+                id: entity,
+                kind,
+                item,
+                count,
+                x,
+                y,
+                z,
+            } => {
+                w.u8(id::S2C_ENTITY_SPAWN);
+                w.i32(*entity as i32);
+                w.u8(*kind);
+                w.u16(*item);
+                w.u8(*count);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+            }
+            S2C::EntityMove {
+                id: entity,
+                x,
+                y,
+                z,
+            } => {
+                w.u8(id::S2C_ENTITY_MOVE);
+                w.i32(*entity as i32);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+            }
+            S2C::EntityCount { id: entity, count } => {
+                w.u8(id::S2C_ENTITY_COUNT);
+                w.i32(*entity as i32);
+                w.u8(*count);
+            }
+            S2C::EntityRemove { id: entity } => {
+                w.u8(id::S2C_ENTITY_REMOVE);
+                w.i32(*entity as i32);
+            }
+
             S2C::Inventory { selected, slots } => {
                 w.u8(id::S2C_INVENTORY);
                 w.u8(*selected);
@@ -286,6 +369,43 @@ impl S2C {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::S2C_ENTITY_SPAWN => {
+                let id = entity_id(&mut r)?;
+                let kind = r.u8()?;
+                let item = r.u16()?;
+                let count = r.u8()?;
+                if kind != 0
+                    || !world::items::info(item).is_some_and(|i| (1..=i.max_stack).contains(&count))
+                {
+                    return Err(DecodeError);
+                }
+                let [x, y, z] = entity_pos(&mut r)?;
+                S2C::EntitySpawn {
+                    id,
+                    kind,
+                    item,
+                    count,
+                    x,
+                    y,
+                    z,
+                }
+            }
+            id::S2C_ENTITY_MOVE => {
+                let id = entity_id(&mut r)?;
+                let [x, y, z] = entity_pos(&mut r)?;
+                S2C::EntityMove { id, x, y, z }
+            }
+            id::S2C_ENTITY_COUNT => {
+                let id = entity_id(&mut r)?;
+                let count = r.u8()?;
+                if !(1..=64).contains(&count) {
+                    return Err(DecodeError);
+                }
+                S2C::EntityCount { id, count }
+            }
+            id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
+                id: entity_id(&mut r)?,
+            },
             id::S2C_INVENTORY => {
                 let selected = r.u8()?;
                 let n = r.u8()?;
@@ -368,6 +488,23 @@ impl S2C {
     }
 }
 
+fn entity_id(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
+    let id = r.i32()? as u32;
+    if id == 0 {
+        Err(DecodeError)
+    } else {
+        Ok(id)
+    }
+}
+fn entity_pos(r: &mut Reader<'_>) -> Result<[f64; 3], DecodeError> {
+    let p = [r.f64()?, r.f64()?, r.f64()?];
+    if p.iter().all(|v| v.is_finite()) {
+        Ok(p)
+    } else {
+        Err(DecodeError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +512,9 @@ mod tests {
     #[test]
     fn every_packet_round_trips() {
         let c2s = [
+            C2S::DropItem {
+                dir: [0.0, 1.0, 0.0],
+            },
             C2S::SelectSlot { slot: 8 },
             C2S::CreativeSetSlot {
                 slot: 35,
@@ -413,6 +553,23 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let s2c = [
+            S2C::EntitySpawn {
+                id: 1,
+                kind: 0,
+                item: 1,
+                count: 2,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            S2C::EntityMove {
+                id: 1,
+                x: 2.0,
+                y: 3.0,
+                z: 4.0,
+            },
+            S2C::EntityCount { id: 1, count: 3 },
+            S2C::EntityRemove { id: 1 },
             S2C::Inventory {
                 selected: 8,
                 slots: vec![Some((1, 64)); 36],
@@ -483,6 +640,50 @@ mod tests {
         for (slot, item, count) in [(36, 1, 1), (0, 65535, 1), (0, 1, 0), (0, 1, 65)] {
             assert!(C2S::decode(&C2S::CreativeSetSlot { slot, item, count }.encode()).is_err());
         }
+    }
+    #[test]
+    fn entity_packets_reject_invalid_values_and_lengths() {
+        let valid = S2C::EntitySpawn {
+            id: 1,
+            kind: 0,
+            item: 1,
+            count: 1,
+            x: 0.0,
+            y: 1.0,
+            z: 2.0,
+        }
+        .encode();
+        for (index, value) in [(5, 1), (6, 255), (8, 0), (8, 65)] {
+            let mut bad = valid.clone();
+            bad[index] = value;
+            assert!(S2C::decode(&bad).is_err());
+        }
+        for end in 0..valid.len() {
+            assert!(S2C::decode(&valid[..end]).is_err());
+        }
+        let mut extra = valid.clone();
+        extra.push(0);
+        assert!(S2C::decode(&extra).is_err());
+        for p in [
+            S2C::EntityCount { id: 1, count: 0 },
+            S2C::EntityCount { id: 1, count: 65 },
+            S2C::EntityRemove { id: 0 },
+            S2C::EntityMove {
+                id: 1,
+                x: f64::NAN,
+                y: 0.0,
+                z: 0.0,
+            },
+        ] {
+            assert!(S2C::decode(&p.encode()).is_err());
+        }
+        assert!(C2S::decode(
+            &C2S::DropItem {
+                dir: [0.0, f32::INFINITY, 0.0]
+            }
+            .encode()
+        )
+        .is_err());
     }
     #[test]
     fn garbage_is_rejected_not_panicked_on() {

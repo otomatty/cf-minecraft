@@ -896,9 +896,17 @@ async function survivalInventory() {
 		for (let i = 0; i < targets.length; i++) {
 			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[i]);
 			await page.mouse.click(640, 360);
+			await page.waitForFunction(() => window.__mc.stats().entities.length > 0);
+			check(await page.evaluate(() => window.__mc.stats().entities.length > 0), "survival: breaking spawns a visible item entity");
+			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 1.62, z + 0.5, 0, 90), targets[i]);
 			await page.waitForFunction(count => window.__mc.stats().inventory[0]?.count === count, {}, i + 1);
 		}
 		check(await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "2" && c.width === 64), "survival: breaking two blocks shows the hotbar count");
+		await page.keyboard.press("KeyQ");
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 1 && window.__mc.stats().entities.length > 0);
+		check(await page.evaluate(() => window.__mc.stats().entities.length > 0), "survival: Q removes one item and displays a dropped entity");
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 2 && window.__mc.stats().entities.length === 0);
+
 		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[1]);
 		await page.mouse.click(640, 360, { button: "right" });
 		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 1);

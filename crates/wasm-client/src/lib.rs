@@ -19,7 +19,14 @@ use worldgen::{Generator, TerrainGenerator};
 /// so no faces are built against the unknown, then re-meshed on arrival.
 const UNKNOWN: u16 = blocks::STONE;
 
+struct ItemEntity {
+    item: u16,
+    count: u8,
+    pos: [f64; 3],
+    previous: [f64; 3],
+}
 struct State {
+    entities: BTreeMap<u32, ItemEntity>,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -165,6 +172,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn client_new() {
     let st = State {
+        entities: BTreeMap::new(),
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -210,6 +218,7 @@ pub extern "C" fn client_reset_world() {
     if st.light_exports.is_none() {
         st.unloaded.extend(st.world.chunks.keys().copied());
     }
+    st.entities.clear();
     st.connectivity.clear();
     st.visibility_stale = true;
     st.world.chunks.clear();
@@ -258,6 +267,42 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         return u32::MAX;
     };
     match packet {
+        S2C::EntitySpawn {
+            id,
+            item,
+            count,
+            x,
+            y,
+            z,
+            ..
+        } => {
+            st.entities.insert(
+                id,
+                ItemEntity {
+                    item,
+                    count,
+                    pos: [x, y, z],
+                    previous: [x, y, z],
+                },
+            );
+        }
+        S2C::EntityMove { id, x, y, z } => {
+            if let Some(e) = st.entities.get_mut(&id) {
+                e.previous = e.pos;
+                e.pos = [x, y, z];
+            }
+        }
+        S2C::EntityCount { id, count } => {
+            if let Some(e) = st.entities.get_mut(&id) {
+                if world::items::info(e.item).is_some_and(|i| count <= i.max_stack) {
+                    e.count = count;
+                }
+            }
+        }
+        S2C::EntityRemove { id } => {
+            st.entities.remove(&id);
+        }
+
         S2C::Inventory { selected, slots } => {
             st.selected = selected;
             st.slots = slots;
@@ -1208,11 +1253,99 @@ pub extern "C" fn client_item_registry() -> usize {
     state().out.len()
 }
 
+/// Sorted packed records: ID u32, item u16, count u8, current/previous f64 triples.
+#[no_mangle]
+pub extern "C" fn client_entities() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, e) in &st.entities {
+        w.i32(id as i32);
+        w.u16(e.item);
+        w.u8(e.count);
+        for v in e.pos.into_iter().chain(e.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_entity_light(x: i32, y: i32, z: i32) -> u32 {
+    let st = state();
+    st.world.sky_light(x, y, z) as u32 * 16 + st.world.block_light(x, y, z) as u32
+}
+#[no_mangle]
+pub extern "C" fn client_enc_drop_item(x: f32, y: f32, z: f32) -> usize {
+    let st = state();
+    st.out = C2S::DropItem { dir: [x, y, z] }.encode();
+    st.out.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn item_mirror_updates_previous_count_removal_and_reset() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let receive = |p: S2C| {
+            let bytes = p.encode();
+            assert_ne!(
+                unsafe { client_packet(bytes.as_ptr(), bytes.len()) },
+                u32::MAX
+            );
+        };
+        receive(S2C::EntitySpawn {
+            id: 7,
+            kind: 0,
+            item: 1,
+            count: 3,
+            x: 2.0,
+            y: 3.0,
+            z: 4.0,
+        });
+        assert_eq!(state().entities[&7].previous, [2.0, 3.0, 4.0]);
+        receive(S2C::EntityMove {
+            id: 7,
+            x: 3.0,
+            y: 4.0,
+            z: 5.0,
+        });
+        receive(S2C::EntityCount { id: 7, count: 2 });
+        let e = &state().entities[&7];
+        assert_eq!(e.pos, [3.0, 4.0, 5.0]);
+        assert_eq!(e.previous, [2.0, 3.0, 4.0]);
+        assert_eq!(e.count, 2);
+        assert_eq!(client_entities(), 55);
+        assert_eq!(
+            client_entity_light(2, 3, 4),
+            state().world.sky_light(2, 3, 4) as u32 * 16
+                + state().world.block_light(2, 3, 4) as u32
+        );
+        receive(S2C::EntityRemove { id: 7 });
+        assert!(state().entities.is_empty());
+        receive(S2C::EntitySpawn {
+            id: 8,
+            kind: 0,
+            item: 1,
+            count: 1,
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        });
+        client_reset_world();
+        assert!(state().entities.is_empty());
+        client_enc_drop_item(1.0, 0.0, 0.0);
+        assert_eq!(
+            C2S::decode(&state().out),
+            Ok(C2S::DropItem {
+                dir: [1.0, 0.0, 0.0]
+            })
+        );
+    }
 
     fn receive(chunk: &Chunk) {
         let packet = S2C::ChunkData {
