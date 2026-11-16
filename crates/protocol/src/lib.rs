@@ -8,11 +8,19 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
+    SelectSlot {
+        slot: u8,
+    },
+    CreativeSetSlot {
+        slot: u8,
+        item: u16,
+        count: u8,
+    },
     Hello {
         protocol: u32,
         view_distance: u8,
@@ -40,11 +48,16 @@ pub enum C2S {
 /// Server to client.
 #[derive(Clone, Debug, PartialEq)]
 pub enum S2C {
+    Inventory {
+        selected: u8,
+        slots: Vec<Option<(u16, u8)>>,
+    },
     Welcome {
         seed: i64,
         game_time: i64,
         spawn: [f64; 3],
         view_distance: u8,
+        game_mode: u8,
     },
     ChunkData {
         cx: i32,
@@ -73,6 +86,9 @@ pub enum S2C {
 }
 
 pub mod id {
+    pub const C2S_SELECT_SLOT: u8 = 0x04;
+    pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
+    pub const S2C_INVENTORY: u8 = 0x06;
     pub const C2S_HELLO: u8 = 0x00;
     pub const C2S_PLAYER_POS: u8 = 0x01;
     pub const C2S_TELEPORT: u8 = 0x03;
@@ -90,6 +106,17 @@ impl C2S {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match *self {
+            C2S::SelectSlot { slot } => {
+                w.u8(id::C2S_SELECT_SLOT);
+                w.u8(slot);
+            }
+            C2S::CreativeSetSlot { slot, item, count } => {
+                w.u8(id::C2S_CREATIVE_SET_SLOT);
+                w.u8(slot);
+                w.u16(item);
+                w.u8(count);
+            }
+
             C2S::Hello {
                 protocol,
                 view_distance,
@@ -132,6 +159,26 @@ impl C2S {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::C2S_SELECT_SLOT => {
+                let slot = r.u8()?;
+                if slot >= 9 {
+                    return Err(DecodeError);
+                }
+                C2S::SelectSlot { slot }
+            }
+            id::C2S_CREATIVE_SET_SLOT => {
+                let slot = r.u8()?;
+                let item = r.u16()?;
+                let count = r.u8()?;
+                if slot >= 36
+                    || (item != 0
+                        && !world::items::info(item)
+                            .is_some_and(|i| (1..=i.max_stack).contains(&count)))
+                {
+                    return Err(DecodeError);
+                }
+                C2S::CreativeSetSlot { slot, item, count }
+            }
             id::C2S_HELLO => C2S::Hello {
                 protocol: r.varint()?,
                 view_distance: r.u8()?,
@@ -174,11 +221,22 @@ impl S2C {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
+            S2C::Inventory { selected, slots } => {
+                w.u8(id::S2C_INVENTORY);
+                w.u8(*selected);
+                w.u8(slots.len() as u8);
+                for slot in slots {
+                    w.u16(slot.map_or(0, |s| s.0));
+                    w.u8(slot.map_or(0, |s| s.1));
+                }
+            }
+
             S2C::Welcome {
                 seed,
                 game_time,
                 spawn,
                 view_distance,
+                game_mode,
             } => {
                 w.u8(id::S2C_WELCOME);
                 w.i64(*seed);
@@ -187,6 +245,7 @@ impl S2C {
                     w.f64(*v);
                 }
                 w.u8(*view_distance);
+                w.u8(*game_mode);
             }
             S2C::ChunkData { cx, cz, data } => {
                 w.u8(id::S2C_CHUNK_DATA);
@@ -227,11 +286,44 @@ impl S2C {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::S2C_INVENTORY => {
+                let selected = r.u8()?;
+                let n = r.u8()?;
+                if selected >= 9 || n != 36 {
+                    return Err(DecodeError);
+                }
+                let mut slots = Vec::with_capacity(36);
+                for _ in 0..36 {
+                    let item = r.u16()?;
+                    let count = r.u8()?;
+                    if item == 0 {
+                        if count != 0 {
+                            return Err(DecodeError);
+                        }
+                        slots.push(None);
+                    } else {
+                        if !world::items::info(item)
+                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
+                        {
+                            return Err(DecodeError);
+                        }
+                        slots.push(Some((item, count)));
+                    }
+                }
+                S2C::Inventory { selected, slots }
+            }
             id::S2C_WELCOME => S2C::Welcome {
                 seed: r.i64()?,
                 game_time: r.i64()?,
                 spawn: [r.f64()?, r.f64()?, r.f64()?],
                 view_distance: r.u8()?,
+                game_mode: {
+                    let mode = r.u8()?;
+                    if mode > 1 {
+                        return Err(DecodeError);
+                    }
+                    mode
+                },
             },
             id::S2C_CHUNK_DATA => {
                 let (cx, cz) = (r.i32()?, r.i32()?);
@@ -283,6 +375,17 @@ mod tests {
     #[test]
     fn every_packet_round_trips() {
         let c2s = [
+            C2S::SelectSlot { slot: 8 },
+            C2S::CreativeSetSlot {
+                slot: 35,
+                item: 1,
+                count: 64,
+            },
+            C2S::CreativeSetSlot {
+                slot: 0,
+                item: 0,
+                count: 0,
+            },
             C2S::Teleport {
                 x: 123.0,
                 y: 80.0,
@@ -310,6 +413,10 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let s2c = [
+            S2C::Inventory {
+                selected: 8,
+                slots: vec![Some((1, 64)); 36],
+            },
             S2C::PlayerCorrect {
                 x: 0.5,
                 y: 65.0,
@@ -320,6 +427,7 @@ mod tests {
                 game_time: 42,
                 spawn: [0.5, 65.0, 0.5],
                 view_distance: 6,
+                game_mode: 0,
             },
             S2C::ChunkData {
                 cx: -2,
@@ -343,6 +451,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inventory_packet_rejects_malformed_lengths_and_values() {
+        let p = S2C::Inventory {
+            selected: 0,
+            slots: vec![Some((1, 64)); 36],
+        };
+        let bytes = p.encode();
+        for (index, value) in [(1, 9), (2, 35), (2, 37), (3, 255), (5, 0), (5, 65)] {
+            let mut bad = bytes.clone();
+            bad[index] = value;
+            assert!(S2C::decode(&bad).is_err());
+        }
+        let mut bad = bytes.clone();
+        bad.push(0);
+        assert!(S2C::decode(&bad).is_err());
+        assert!(S2C::decode(&bytes[..bytes.len() - 1]).is_err());
+        let p = S2C::Inventory {
+            selected: 8,
+            slots: vec![None; 36],
+        };
+        assert_eq!(S2C::decode(&p.encode()), Ok(p));
+        let mut bad = S2C::Inventory {
+            selected: 0,
+            slots: vec![None; 36],
+        }
+        .encode();
+        bad[5] = 1;
+        assert!(S2C::decode(&bad).is_err());
+        assert!(C2S::decode(&C2S::SelectSlot { slot: 9 }.encode()).is_err());
+        for (slot, item, count) in [(36, 1, 1), (0, 65535, 1), (0, 1, 0), (0, 1, 65)] {
+            assert!(C2S::decode(&C2S::CreativeSetSlot { slot, item, count }.encode()).is_err());
+        }
+    }
     #[test]
     fn garbage_is_rejected_not_panicked_on() {
         assert!(C2S::decode(&[]).is_err());

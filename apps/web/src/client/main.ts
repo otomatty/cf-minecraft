@@ -19,7 +19,7 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
-import { defaultHotbar, loadHotbar, saveHotbar } from "./hotbar.ts";
+import { hotbarStates } from "./hotbar.ts";
 import { placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
@@ -143,6 +143,7 @@ async function main(): Promise<void> {
 	const renderer = await Renderer.create(canvas, core.textureNames());
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
+	const items = core.itemRegistry();
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -211,7 +212,9 @@ async function main(): Promise<void> {
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
 			removeUnloaded();
+			if (id === S2C.Inventory) syncInventory();
 			if (id === S2C.Welcome) {
+				pendingSelectedSlot = null;
 				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
@@ -279,7 +282,7 @@ async function main(): Promise<void> {
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
-			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime, params.get("genworkers") !== "0");
+			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime, params.get("genworkers") !== "0", params.get("mode") === "survival" ? "survival" : "creative");
 
 	const local = () => {
 		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
@@ -351,11 +354,13 @@ async function main(): Promise<void> {
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
-	let hotbarBlocks = defaultHotbar(registry);
-	try { hotbarBlocks = loadHotbar(localStorage, registry); } catch { /* Keep defaults if storage access throws. */ }
+	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
+	let pendingSelectedSlot: number | null = null;
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
 		c.width = c.height = TEX_SIZE;
+		c.title = "";
+		if (!state) return;
 		const info = registry[state];
 		const pixels = renderer.texturePixels.get(info.texture);
 		if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(info.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
@@ -367,18 +372,50 @@ async function main(): Promise<void> {
 		hotbar.append(c);
 		slots.push(c);
 	}
-	function selectSlot(slot: number): void {
+	function selectSlot(slot: number, send = true): void {
+		if (send) {
+			pendingSelectedSlot = slot;
+			transport.send(core.encodeSelectSlot(slot));
+		}
 		selectedSlot = slot;
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
 	}
-	function replaceSlot(state: number): void {
-		hotbarBlocks[selectedSlot] = registry[state].first;
-		paintIcon(slots[selectedSlot], hotbarBlocks[selectedSlot]);
-		selectSlot(selectedSlot);
-		try { saveHotbar(localStorage, hotbarBlocks, registry); } catch { /* Usable until reload if storage is disabled. */ }
+	function syncInventory(): void {
+		const inventory = core.inventory;
+		hotbarBlocks = hotbarStates(inventory, items);
+		for (let i = 0; i < 9; i++) {
+			const c = slots[i];
+			paintIcon(c, hotbarBlocks[i]);
+			const count = inventory[i]?.count ?? 0;
+			c.dataset.count = String(count);
+			if (count >= 2) {
+				const icon = document.createElement("canvas");
+				icon.width = icon.height = TEX_SIZE;
+				icon.getContext("2d")!.drawImage(c, 0, 0);
+				c.width = c.height = 64;
+				const ctx = c.getContext("2d")!;
+				ctx.imageSmoothingEnabled = false;
+				ctx.drawImage(icon, 0, 0, 64, 64);
+				ctx.font = "bold 23px monospace";
+				ctx.textAlign = "right";
+				ctx.lineWidth = 4;
+				ctx.strokeStyle = "black";
+				ctx.strokeText(String(count), 62, 61);
+				ctx.fillStyle = "white";
+				ctx.fillText(String(count), 62, 61);
+			}
+		}
+		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
+		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
 	}
-	selectSlot(0);
+	function replaceSlot(state: number): void {
+		if (core.gameMode !== "creative") return;
+		const item = items.find(item => item.block === registry[state].first);
+		if (!item) return;
+		transport.send(core.encodeCreativeSetSlot(selectedSlot, item.id, 1));
+	}
+	selectSlot(0, false);
 
 	// ---- input -------------------------------------------------------------
 	let settings = defaultSettings();
@@ -536,6 +573,7 @@ async function main(): Promise<void> {
 		pickerButtons.push(button);
 	});
 	function openPicker(): void {
+		if (core.gameMode !== "creative") return;
 		picker.querySelector("p")!.textContent = `クリックで現在のホットバー枠に設定。${settings.keys.inventory} / Esc で閉じます。`;
 		clearInput();
 		picker.hidden = false;
@@ -702,6 +740,12 @@ async function main(): Promise<void> {
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
 		if (connection !== "open") return false;
+		if (core.gameMode === "survival") {
+			if (block === 0) {
+				const name = registry[core.getBlock(x, y, z)]?.name;
+				if (name === "bedrock" || name === "water") return false;
+			} else if (!hotbarBlocks[selectedSlot]) return false;
+		}
 		if (!core.predictBlock(x, y, z, block)) return false;
 		// The server checks reach against the last position it knows.
 		sendPosition();
@@ -715,6 +759,7 @@ async function main(): Promise<void> {
 		if (button === 0) {
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
+			if (!selected) return;
 			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
@@ -722,7 +767,7 @@ async function main(): Promise<void> {
 			if (block && block.first > 0) {
 				const slot = hotbarBlocks.indexOf(block.first);
 				if (slot >= 0) selectSlot(slot);
-				else replaceSlot(block.first);
+				else if (core.gameMode === "creative") replaceSlot(block.first);
 			}
 		}
 	}
@@ -804,7 +849,7 @@ async function main(): Promise<void> {
 				(serverStats
 					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
-			`Biome: ${serverStats?.biome ?? "?"}`,
+			`Biome: ${serverStats?.biome ?? "?"}  Game mode: ${core.gameMode}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
@@ -887,6 +932,9 @@ async function main(): Promise<void> {
 		frames: 0,
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
+			gameMode: core.gameMode,
+			inventory: core.inventory,
+			selectedSlot: core.selectedSlot,
 			joined,
 			joinedGameTime,
 			autopilotStarted: autopilotStartedAt !== null,

@@ -3,6 +3,24 @@ use std::{collections::BTreeSet, fmt::Write, fs, path::Path};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Items {
+    items: Vec<Item>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Item {
+    name: String,
+    id: u16,
+    #[serde(default = "max_stack")]
+    max_stack: u8,
+    block: Option<String>,
+}
+fn max_stack() -> u8 {
+    64
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Registry {
     legacy_count: u16,
     textures: Vec<String>,
@@ -397,6 +415,44 @@ fn generate(root: &Path, dest: &Path) {
     );
     writeln!(out, "pub const COUNT: BlockState = {count};\nstatic INFO: [BlockInfo; {count}] = [{infos}];\nstatic BLOCKS: &[Block] = &[{blocks}];\nstatic PROPERTIES: &[&[(&str, &str)]] = &[{props}];").unwrap();
     fs::write(dest.join("blocks.rs"), out).unwrap();
+
+    let items: Items = read(&root.join("items.toml"));
+    let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut out = format!(
+        "pub const COUNT: usize = {};\npub static ITEMS: &[ItemInfo] = &[\n",
+        items.items.len()
+    );
+    for item in items.items {
+        identifier(&item.name);
+        assert!(
+            names.insert(item.name.clone()),
+            "items.toml: duplicate item {}",
+            item.name
+        );
+        assert!(item.id != 0, "items.toml: item id must not be 0");
+        assert!(ids.insert(item.id), "items.toml: duplicate id {}", item.id);
+        assert!(
+            (1..=64).contains(&item.max_stack),
+            "items.toml: max_stack must be 1..=64"
+        );
+        let block = item.block.map(|name| {
+            registry
+                .blocks
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("items.toml: unknown block {name}"))
+                .id
+        });
+        writeln!(
+            out,
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?} }},",
+            item.id, item.name, item.max_stack, block
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("items.rs"), out).unwrap();
 
     let biomes: Biomes = read(&root.join("biomes.toml"));
     let mut names = BTreeSet::new();

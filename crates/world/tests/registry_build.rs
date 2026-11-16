@@ -10,6 +10,14 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // Exercise the exact build pipeline without changing checked-in data.
 fn generate_fixture(blocks: &str, biomes: &str) -> Result<String, String> {
+    generate_items_fixture(
+        blocks,
+        biomes,
+        include_str!("../../../data/registry/items.toml"),
+    )
+}
+
+fn generate_items_fixture(blocks: &str, biomes: &str, items: &str) -> Result<String, String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/registry-test-{}-{}",
         std::process::id(),
@@ -18,6 +26,7 @@ fn generate_fixture(blocks: &str, biomes: &str) -> Result<String, String> {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("blocks.toml"), blocks).unwrap();
     fs::write(dir.join("biomes.toml"), biomes).unwrap();
+    fs::write(dir.join("items.toml"), items).unwrap();
     let output = std::process::Command::new(env!("REGISTRY_BUILD_SCRIPT"))
         .arg("--registry-fixture")
         .arg(&dir)
@@ -287,4 +296,43 @@ fn tree_data_is_required_and_validated() {
         let error = generate_fixture(BLOCKS, &BIOMES.replacen(from, to, 1)).unwrap_err();
         assert!(error.contains(message), "{error}");
     }
+}
+
+#[test]
+fn item_validation_and_optional_block() {
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        (
+            "name = \"dirt\"",
+            "name = \"stone\"",
+            "duplicate item stone",
+        ),
+        ("id = 1\n", "id = 0\n", "must not be 0"),
+        ("id = 2\n", "id = 1\n", "duplicate id 1"),
+        (
+            "block = \"stone\"",
+            "block = \"missing\"",
+            "unknown block missing",
+        ),
+        (
+            "id = 1\n",
+            "id = 1\nmax_stack = 0\n",
+            "max_stack must be 1..=64",
+        ),
+        (
+            "id = 1\n",
+            "id = 1\nmax_stack = 65\n",
+            "max_stack must be 1..=64",
+        ),
+    ] {
+        let error =
+            generate_items_fixture(BLOCKS, BIOMES, &items.replacen(from, to, 1)).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    assert!(generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("block = \"stone\"", "max_stack = 7", 1)
+    )
+    .is_ok());
 }

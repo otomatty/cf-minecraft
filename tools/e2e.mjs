@@ -561,6 +561,7 @@ async function partialModels() {
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
 		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
 		await page.click('#block-grid [data-block="red_flower"]');
+		await waitFor("authoritative red flower slot", () => document.querySelector("#hotbar canvas.selected")?.title === "red_flower");
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
 		await page.keyboard.press("KeyE");
 		await waitFor("picker closed with inventory key", () => document.getElementById("block-picker").hidden);
@@ -625,6 +626,7 @@ async function partialModels() {
 			await page.keyboard.press("KeyE");
 			await waitFor(`picker for ${name}`, () => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 			await page.click(`#block-grid [data-block="${name}"]`);
+			await waitFor(`authoritative slot for ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
 			check(await page.$eval("#hotbar canvas.selected", (c, name) => c.title === name, name), `models: picker selects ${name}`);
 			// Recenter while unlocked so the next canvas click cannot rotate yaw.
 			await page.mouse.move(640, 360);
@@ -718,6 +720,7 @@ async function partialModels() {
 			"models: jumping cannot cross the fence", JSON.stringify(fenceMotion));
 		// Preserve the existing fourth-slot persistence check after these fixtures.
 		await pickBlock("red_flower");
+		await page.evaluate(async () => { await window.__mc.exportWorld(); });
 		await page.reload({ waitUntil: "load" });
 		await settle(page, "models reload", chunksInView(view));
 		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");
@@ -877,12 +880,55 @@ async function sectionCulling() {
 	}
 }
 
+/** Survival uses authoritative item stacks while the existing playthroughs stay creative. */
+async function survivalInventory() {
+	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const stats = await settle(page, "survival", chunksInView(2));
+		check(stats.gameMode === "survival", "survival: new-world URL sets game mode");
+		check(await page.$$eval("#hotbar canvas", slots => slots.every(c => c.title === "")), "survival: starts with an empty hotbar");
+		const [sx, sy, sz] = stats.spawn;
+		const targets = [1, 2].map(dx => [Math.floor(sx) + dx, Math.floor(sy) - 1, Math.floor(sz)]);
+		await page.mouse.click(640, 360);
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		await page.keyboard.press("KeyE");
+		check(await page.$eval("#block-picker", picker => picker.hidden), "survival: block picker stays closed");
+		for (let i = 0; i < targets.length; i++) {
+			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[i]);
+			await page.mouse.click(640, 360);
+			await page.waitForFunction(count => window.__mc.stats().inventory[0]?.count === count, {}, i + 1);
+		}
+		check(await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "2" && c.width === 64), "survival: breaking two blocks shows the hotbar count");
+		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[1]);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 1);
+		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[1]), "survival: placement consumes one item (1 remaining)");
+		const savedItem = await page.evaluate(() => window.__mc.stats().inventory[0].item);
+		// Export waits for a full save, including the remaining item in player.dat.
+		await page.evaluate(async () => { await window.__mc.exportWorld(); });
+		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
+		const restored = await settle(page, "survival reload", chunksInView(2));
+		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
+		check(restored.inventory[0]?.item === savedItem && restored.inventory[0]?.count === 1
+			&& await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1"), "survival: reload restores one grass block in the first slot");
+		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[0]);
+		await page.mouse.click(640, 360);
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(() => window.__mc.stats().inventory[0] === null);
+		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[0]), "survival: placement consumes one item (0 remaining)");
+		check(await page.$eval("#hotbar canvas", c => c.title === "" && c.dataset.count === "0"), "survival: last item leaves an empty slot");
+		check(errors.length === 0, "survival: no page errors", errors.join(" | "));
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await partialModels();
+	await survivalInventory();
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();

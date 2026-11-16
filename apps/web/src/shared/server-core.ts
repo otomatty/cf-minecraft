@@ -9,7 +9,9 @@ interface ServerExports {
 	server_abi_version(): number;
 	server_new(seed: bigint, generator: number): void;
 	server_set_time(gameTime: bigint, dayTime: bigint): void;
-	server_connect(client: number, allowTeleport: number, hasPosition: number, x: number, y: number, z: number): void;
+	server_connect(client: number, allowTeleport: number, hasPosition: number, x: number, y: number, z: number, ptr: number, len: number): void;
+	server_set_game_mode(mode: number): void;
+	server_inventory_data(client: number): number;
 	server_client_biome(client: number): number;
 	server_client_position(client: number): number;
 	server_disconnect(client: number): void;
@@ -39,7 +41,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 5;
+export const SERVER_ABI_VERSION = 6;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
@@ -106,8 +108,17 @@ export class ServerCore {
 		this.x.server_set_time(gameTime, dayTime);
 	}
 
-	connect(client: number, allowTeleport = false, position?: readonly [number, number, number]): void {
-		this.x.server_connect(client, Number(allowTeleport), Number(position !== undefined), ...(position ?? [0, 0, 0] as const));
+	connect(client: number, allowTeleport = false, position?: readonly [number, number, number], inventory?: Uint8Array): void {
+		this.withInput(inventory ?? new Uint8Array(), (ptr, len) => this.x.server_connect(client, Number(allowTeleport), Number(position !== undefined), ...(position ?? [0, 0, 0] as const), ptr, len));
+	}
+
+	setGameMode(mode: "creative" | "survival"): void {
+		this.x.server_set_game_mode(mode === "survival" ? 1 : 0);
+	}
+
+	inventoryData(client: number): Uint8Array | undefined {
+		const len = this.x.server_inventory_data(client);
+		return len ? this.output(len) : undefined;
 	}
 
 	clientPosition(client: number): [number, number, number] | undefined {

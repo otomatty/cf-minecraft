@@ -111,8 +111,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_scenario_fingerprint_is_unchanged() {
-        assert_eq!(run(2026, 600), 0x88d6e0e1abd58ec4);
+    fn creative_inventory_scenario_fingerprint() {
+        assert_eq!(run(2026, 600), 0x39573e99c270f551);
     }
 
     #[test]

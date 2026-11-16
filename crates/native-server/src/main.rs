@@ -68,6 +68,7 @@ fn bench(players: u32, view: u8, ticks: u32, generator: Generator) {
             id,
             true,
             Some([id as f64 * 400.0, flight_y, id as f64 * -250.0]),
+            None,
         );
         server.handle_packet(
             id,

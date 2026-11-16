@@ -39,6 +39,9 @@ struct State {
     external_light: bool,
     light_generations: BTreeMap<(i32, i32), (u32, u32)>,
     light_exports: Option<BTreeSet<(i32, usize, i32)>>,
+    game_mode: u8,
+    selected: u8,
+    slots: Vec<Option<(u16, u8)>>,
     seed: i64,
     spawn: [f64; 3],
     view_distance: u32,
@@ -180,6 +183,9 @@ pub extern "C" fn client_new() {
         external_light: false,
         light_generations: BTreeMap::new(),
         light_exports: None,
+        game_mode: 0,
+        selected: 0,
+        slots: vec![None; 36],
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -252,12 +258,18 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         return u32::MAX;
     };
     match packet {
+        S2C::Inventory { selected, slots } => {
+            st.selected = selected;
+            st.slots = slots;
+        }
         S2C::Welcome {
             seed,
             game_time,
             spawn,
             view_distance,
+            game_mode,
         } => {
+            st.game_mode = game_mode;
             st.seed = seed;
             st.game_time = game_time;
             st.spawn = spawn;
@@ -1135,6 +1147,65 @@ pub extern "C" fn client_player_tick(forward: f32, strafe: f32, yaw: f32, flags:
     }
     st.out.push(u8::from(st.player.on_ground));
     st.out.push(u8::from(st.flying));
+}
+
+#[no_mangle]
+pub extern "C" fn client_game_mode() -> u32 {
+    state().game_mode as u32
+}
+#[no_mangle]
+pub extern "C" fn client_selected_slot() -> u32 {
+    state().selected as u32
+}
+#[no_mangle]
+pub extern "C" fn client_slot_item(slot: usize) -> u32 {
+    state()
+        .slots
+        .get(slot)
+        .copied()
+        .flatten()
+        .map_or(0, |s| s.0 as u32)
+}
+#[no_mangle]
+pub extern "C" fn client_slot_count(slot: usize) -> u32 {
+    state()
+        .slots
+        .get(slot)
+        .copied()
+        .flatten()
+        .map_or(0, |s| s.1 as u32)
+}
+#[no_mangle]
+pub extern "C" fn client_enc_select_slot(slot: u8) -> usize {
+    state().out = C2S::SelectSlot { slot }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_enc_creative_set_slot(slot: u8, item: u16, count: u8) -> usize {
+    state().out = C2S::CreativeSetSlot { slot, item, count }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_item_registry() -> usize {
+    use std::fmt::Write;
+    let mut out = String::from("[");
+    for (i, item) in world::items::ITEMS.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        write!(
+            out,
+            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{}}}",
+            item.id,
+            item.name,
+            item.max_stack,
+            item.block.map_or("null".into(), |b| b.to_string())
+        )
+        .unwrap();
+    }
+    out.push(']');
+    state().out = out.into_bytes();
+    state().out.len()
 }
 
 #[cfg(test)]

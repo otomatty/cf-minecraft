@@ -68,7 +68,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn server_abi_version() -> u32 {
-    5
+    6
 }
 
 #[no_mangle]
@@ -77,23 +77,48 @@ pub extern "C" fn server_new(seed: i64, generator: u32) {
 }
 
 #[no_mangle]
+pub extern "C" fn server_set_game_mode(mode: u32) {
+    server().set_game_mode(if mode == 1 {
+        sim::GameMode::Survival
+    } else {
+        sim::GameMode::Creative
+    });
+}
+#[no_mangle]
+pub extern "C" fn server_inventory_data(client: u32) -> usize {
+    let st = state();
+    st.out = st
+        .server
+        .as_ref()
+        .expect("server")
+        .inventory_data(client)
+        .unwrap_or_default();
+    st.out.len()
+}
+
+#[no_mangle]
 pub extern "C" fn server_set_time(game_time: i64, day_time: i64) {
     server().set_time(game_time, day_time);
 }
 
 #[no_mangle]
-pub extern "C" fn server_connect(
+/// # Safety
+/// `ptr..ptr+len` must be readable.
+pub unsafe extern "C" fn server_connect(
     client: u32,
     allow_teleport: u32,
     has_position: u32,
     x: f64,
     y: f64,
     z: f64,
+    ptr: *const u8,
+    len: usize,
 ) {
     server().connect_at(
         client,
         allow_teleport != 0,
         (has_position != 0).then_some([x, y, z]),
+        (len != 0).then(|| input(ptr, len)),
     );
 }
 

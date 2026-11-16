@@ -5,7 +5,17 @@ import type { LightMutation } from "./light-pool.ts";
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
+export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null }
+export interface InventorySlot { item: number; count: number }
+
 export interface ClientExports {
+	client_game_mode(): number;
+	client_selected_slot(): number;
+	client_slot_item(slot: number): number;
+	client_slot_count(slot: number): number;
+	client_item_registry(): number;
+	client_enc_select_slot(slot: number): number;
+	client_enc_creative_set_slot(slot: number, item: number, count: number): number;
 	memory: WebAssembly.Memory;
 	mc_alloc(len: number): number;
 	mc_free(ptr: number, len: number): void;
@@ -63,7 +73,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -338,6 +348,18 @@ export class ClientCore {
 	textureNames(): string[] {
 		return this.decoder.decode(this.out(this.x.client_texture_names())).split("\n");
 	}
+
+	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
+	get selectedSlot(): number { return this.x.client_selected_slot(); }
+	get inventory(): Array<InventorySlot | null> {
+		return Array.from({ length: 36 }, (_, i) => {
+			const item = this.x.client_slot_item(i);
+			return item ? { item, count: this.x.client_slot_count(i) } : null;
+		});
+	}
+	itemRegistry(): ItemInfo[] { return JSON.parse(this.decoder.decode(this.out(this.x.client_item_registry()))); }
+	encodeSelectSlot(slot: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_select_slot(slot)); }
+	encodeCreativeSetSlot(slot: number, item: number, count: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_creative_set_slot(slot, item, count)); }
 
 	blockRegistry(): BlockStateInfo[] {
 		return JSON.parse(this.decoder.decode(this.out(this.x.client_block_registry())));

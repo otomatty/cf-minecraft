@@ -16,13 +16,22 @@
 //! Given the same seed and the same sequence of calls, every host ends up in
 //! the same state. `state_hash` makes that checkable.
 
+pub mod inventory;
 pub mod scenario;
+use inventory::{Inventory, Stack};
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GameMode {
+    #[default]
+    Creative = 0,
+    Survival = 1,
+}
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use protocol::{C2S, S2C};
 use world::io::Reader;
-use world::{blocks, Chunk, Fnv64, World, HEIGHT, MIN_Y};
+use world::{blocks, items, Chunk, Fnv64, World, HEIGHT, MIN_Y};
 use worldgen::Generator;
 
 pub const TICKS_PER_SECOND: u32 = 20;
@@ -51,6 +60,8 @@ const COLLISION_TOLERANCE: f64 = 0.1;
 type ChunkPos = (i32, i32);
 
 struct Client {
+    inventory: Inventory,
+    inventory_dirty: bool,
     joined: bool,
     view: i32,
     pos: [f64; 3],
@@ -89,6 +100,7 @@ pub struct Stats {
 }
 
 pub struct Server {
+    game_mode: GameMode,
     seed: i64,
     generator: Generator,
     terrain: Option<worldgen::TerrainGenerator>,
@@ -116,6 +128,7 @@ impl Server {
             (generator == Generator::Terrain).then(|| worldgen::TerrainGenerator::new(seed));
         let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
+            game_mode: GameMode::Creative,
             seed,
             generator,
             terrain,
@@ -135,6 +148,30 @@ impl Server {
             generation_requests: Vec::new(),
             stats: Stats::default(),
         }
+    }
+
+    pub fn set_game_mode(&mut self, mode: GameMode) {
+        self.game_mode = mode;
+    }
+    pub fn inventory_data(&self, id: u32) -> Option<Vec<u8>> {
+        self.clients.get(&id).map(|c| c.inventory.to_bytes())
+    }
+    fn send_inventory(&mut self, id: u32) {
+        let client = self.clients.get_mut(&id).expect("client");
+        client.inventory_dirty = false;
+        self.outbox.push((
+            id,
+            S2C::Inventory {
+                selected: client.inventory.selected(),
+                slots: client
+                    .inventory
+                    .slots()
+                    .iter()
+                    .map(|s| s.map(|s| (s.item, s.count)))
+                    .collect(),
+            }
+            .encode(),
+        ));
     }
 
     pub fn seed(&self) -> i64 {
@@ -188,18 +225,31 @@ impl Server {
 
     /// Permission is supplied by the trusted host, never by a wire packet.
     pub fn connect_with_teleport(&mut self, id: u32, allow_teleport: bool) {
-        self.connect_at(id, allow_teleport, None);
+        self.connect_at(id, allow_teleport, None, None);
     }
 
     /// Restore a trusted host's last accepted feet position on reconnect.
     /// Invalid coordinates fall back to spawn; no chunk load is required here.
-    pub fn connect_at(&mut self, id: u32, allow_teleport: bool, position: Option<[f64; 3]>) {
+    pub fn connect_at(
+        &mut self,
+        id: u32,
+        allow_teleport: bool,
+        position: Option<[f64; 3]>,
+        inventory: Option<&[u8]>,
+    ) {
         let pos = position
             .filter(|p| valid_position(*p))
             .unwrap_or_else(|| self.spawn());
         self.clients.insert(
             id,
             Client {
+                inventory: inventory
+                    .and_then(|bytes| Inventory::from_bytes(bytes).ok())
+                    .unwrap_or_else(|| match self.game_mode {
+                        GameMode::Creative => Inventory::creative(),
+                        GameMode::Survival => Inventory::default(),
+                    }),
+                inventory_dirty: false,
                 joined: false,
                 view: DEFAULT_VIEW_DISTANCE,
                 pos,
@@ -233,7 +283,12 @@ impl Server {
         }
         match C2S::decode(bytes) {
             Ok(p) => self.pending.push((id, p)),
-            Err(_) => self.stats.packets_rejected += 1,
+            Err(_) => {
+                self.stats.packets_rejected += 1;
+                if bytes.first() == Some(&protocol::id::C2S_CREATIVE_SET_SLOT) {
+                    self.clients.get_mut(&id).unwrap().inventory_dirty = true;
+                }
+            }
         }
     }
 
@@ -265,6 +320,15 @@ impl Server {
         if self.game_time % UNLOAD_INTERVAL == 0 {
             self.unload_far_chunks();
         }
+        let changed: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.joined && c.inventory_dirty)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in changed {
+            self.send_inventory(id);
+        }
     }
 
     fn apply(&mut self, id: u32, packet: C2S) {
@@ -291,8 +355,32 @@ impl Server {
                     game_time: self.game_time,
                     spawn,
                     view_distance: client.view as u8,
+                    game_mode: self.game_mode as u8,
                 };
                 self.outbox.push((id, welcome.encode()));
+                self.send_inventory(id);
+            }
+            C2S::SelectSlot { slot } => {
+                let client = self.clients.get_mut(&id).unwrap();
+                let before = client.inventory.selected();
+                if !client.joined || client.inventory.select(slot).is_err() {
+                    self.stats.packets_rejected += 1;
+                } else {
+                    client.inventory_dirty |= before != client.inventory.selected();
+                }
+            }
+            C2S::CreativeSetSlot { slot, item, count } => {
+                let client = self.clients.get_mut(&id).unwrap();
+                let before = client.inventory.clone();
+                let stack = (item != 0).then_some(Stack { item, count });
+                if !client.joined
+                    || self.game_mode != GameMode::Creative
+                    || client.inventory.set(slot, stack).is_err()
+                {
+                    self.stats.packets_rejected += 1;
+                    client.inventory_dirty = true;
+                }
+                client.inventory_dirty |= before != client.inventory;
             }
             C2S::PlayerPos { x, y, z, .. } => {
                 self.move_player(id, [x, y, z], false);
@@ -301,13 +389,39 @@ impl Server {
                 self.move_player(id, [x, y, z], true);
             }
             C2S::SetBlock { x, y, z, state } => {
-                if !self.can_edit(id, x, y, z, state) {
+                let old = self.world.get_block(x, y, z);
+                let survival_ok = self.game_mode == GameMode::Creative
+                    || if state == blocks::AIR {
+                        !matches!(old, Some(blocks::BEDROCK | blocks::WATER))
+                    } else {
+                        old.is_some_and(|old| {
+                            matches!(old, blocks::AIR | blocks::WATER | blocks::SHORT_GRASS)
+                                || blocks::info(old).name == blocks::info(state).name
+                        }) && self.clients[&id]
+                            .inventory
+                            .selected_stack()
+                            .is_some_and(|stack| Some(stack.item) == items::for_block(state))
+                    };
+                if !self.can_edit(id, x, y, z, state) || !survival_ok {
                     self.stats.packets_rejected += 1;
                     self.correct_block(id, x, y, z);
                     return;
                 }
                 if let Some(old) = self.world.set_block(x, y, z, state) {
                     if old != state {
+                        if self.game_mode == GameMode::Survival {
+                            let client = self.clients.get_mut(&id).unwrap();
+                            let before = client.inventory.clone();
+                            if state == blocks::AIR {
+                                if let Some(item) = items::for_block(old) {
+                                    // Overflow is discarded until dropped items arrive in the next PR.
+                                    client.inventory.add(item, 1);
+                                }
+                            } else {
+                                client.inventory.take_selected();
+                            }
+                            client.inventory_dirty |= before != client.inventory;
+                        }
                         self.stats.blocks_changed += 1;
                         self.broadcast_block(x, y, z, state);
                     }
@@ -650,12 +764,18 @@ impl Server {
         self.world.get_block(x, y, z)
     }
 
-    /// Fingerprint of the clock and every loaded block.
+    /// Fingerprint of the clock, mode, connected inventories, and every loaded block.
     pub fn state_hash(&self) -> u64 {
         let mut h = Fnv64::new();
         h.i64(self.seed);
         h.i64(self.game_time);
         h.i64(self.day_time);
+        h.u8(self.game_mode as u8);
+        h.i64(self.clients.len() as i64);
+        for (&id, client) in &self.clients {
+            h.bytes(&id.to_be_bytes());
+            h.bytes(&client.inventory.to_bytes());
+        }
         self.world.hash_into(&mut h);
         h.finish()
     }
@@ -754,6 +874,292 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    fn survival() -> (Server, [i32; 3]) {
+        let mut s = Server::new(1, Generator::Flat);
+        s.set_game_mode(GameMode::Survival);
+        s.connect(1);
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        s.tick();
+        let [x, y, z] = s.spawn();
+        s.take_outbox();
+        (s, [x.floor() as i32, y as i32, z.floor() as i32])
+    }
+    fn edit(s: &mut Server, [x, y, z]: [i32; 3], state: u16) {
+        s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
+    }
+    fn inventories(s: &mut Server) -> Vec<S2C> {
+        decode_all(s.take_outbox())
+            .into_iter()
+            .filter_map(|(_, p)| matches!(p, S2C::Inventory { .. }).then_some(p))
+            .collect()
+    }
+    #[test]
+    fn survival_breaks_collect_and_placements_consume_all_block_states() {
+        let (mut s, pos) = survival();
+        assert_eq!(s.clients[&1].inventory, Inventory::default());
+        for state in [blocks::STONE, blocks::OAK_SLAB + 1, blocks::OAK_STAIRS + 7] {
+            s.world.set_block(pos[0], pos[1], pos[2], state);
+            edit(&mut s, pos, blocks::AIR);
+            s.tick();
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack {
+                    item: items::for_block(state).unwrap(),
+                    count: 1
+                })
+            );
+            assert_eq!(inventories(&mut s).len(), 1);
+            edit(&mut s, pos, state);
+            s.tick();
+            assert!(s.clients[&1].inventory.selected_stack().is_none());
+            assert_eq!(inventories(&mut s).len(), 1);
+            assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(state));
+        }
+    }
+    #[test]
+    fn survival_rejects_empty_wrong_items_and_unbreakable_blocks_with_correction() {
+        let (mut s, pos) = survival();
+        s.world.set_block(pos[0], pos[1], pos[2], blocks::AIR);
+        edit(&mut s, pos, blocks::STONE);
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 1);
+        assert_eq!(s.stats.edits_corrected, 1);
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .add(items::for_block(blocks::DIRT).unwrap(), 1);
+        edit(&mut s, pos, blocks::STONE);
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 2);
+        assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
+        for state in [blocks::BEDROCK, blocks::WATER] {
+            s.world.set_block(pos[0], pos[1], pos[2], state);
+            edit(&mut s, pos, blocks::AIR);
+            s.tick();
+            assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(state));
+        }
+        assert_eq!(s.stats.packets_rejected, 4);
+        assert_eq!(s.stats.edits_corrected, 4);
+        assert_eq!(s.clients[&1].inventory.selected_stack().unwrap().count, 1);
+    }
+    #[test]
+    fn survival_placement_rejects_overwriting_bedrock_and_other_blocks() {
+        for old in [blocks::BEDROCK, blocks::STONE] {
+            let (mut s, [x, y, z]) = survival();
+            s.world.set_block(x, y, z, old);
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .add(items::for_block(blocks::DIRT).unwrap(), 2);
+            let before = s.inventory_data(1);
+            edit(&mut s, [x, y, z], blocks::DIRT);
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(old));
+            assert_eq!(s.inventory_data(1), before);
+            assert_eq!(s.stats.blocks_changed, 0);
+            assert_eq!(s.stats.packets_rejected, 1);
+            assert_eq!(s.stats.edits_corrected, 1);
+            let updates: Vec<_> = decode_all(s.take_outbox())
+                .into_iter()
+                .filter(|(_, p)| matches!(p, S2C::BlockUpdate { .. } | S2C::Inventory { .. }))
+                .collect();
+            assert_eq!(
+                updates,
+                vec![(
+                    1,
+                    S2C::BlockUpdate {
+                        x,
+                        y,
+                        z,
+                        state: old
+                    }
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn survival_placement_allows_replaceable_blocks_and_slab_state_changes() {
+        for (old, new) in [
+            (blocks::AIR, blocks::DIRT),
+            (blocks::WATER, blocks::DIRT),
+            (blocks::SHORT_GRASS, blocks::DIRT),
+            (blocks::OAK_SLAB, blocks::OAK_SLAB + 2),
+        ] {
+            let (mut s, [x, y, z]) = survival();
+            s.world.set_block(x, y, z, old);
+            let item = items::for_block(new).unwrap();
+            s.clients.get_mut(&1).unwrap().inventory.add(item, 2);
+            edit(&mut s, [x, y, z], new);
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(new));
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack { item, count: 1 })
+            );
+            assert_eq!(s.stats.blocks_changed, 1);
+            assert_eq!(s.stats.packets_rejected, 0);
+            assert_eq!(s.stats.edits_corrected, 0);
+            assert_eq!(inventories(&mut s).len(), 1);
+        }
+    }
+
+    #[test]
+    fn full_survival_inventory_discards_collected_overflow() {
+        let (mut s, pos) = survival();
+        let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
+        assert_eq!(inv.add(1, 36 * 64), 0);
+        let before = inv.clone();
+        s.world.set_block(pos[0], pos[1], pos[2], blocks::DIRT);
+        edit(&mut s, pos, blocks::AIR);
+        s.tick();
+        assert_eq!(s.clients[&1].inventory, before);
+        assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
+        assert!(inventories(&mut s).is_empty());
+    }
+    #[test]
+    fn slots_validate_permissions_ranges_and_resend_authoritative_inventory() {
+        let (mut s, _) = survival();
+        s.handle_packet(
+            1,
+            &C2S::CreativeSetSlot {
+                slot: 0,
+                item: 1,
+                count: 1,
+            }
+            .encode(),
+        );
+        s.handle_packet(1, &C2S::SelectSlot { slot: 9 }.encode());
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 2);
+        assert_eq!(s.clients[&1].inventory, Inventory::default());
+        assert_eq!(inventories(&mut s).len(), 1);
+        s.handle_packet(1, &C2S::SelectSlot { slot: 8 }.encode());
+        s.tick();
+        assert_eq!(s.clients[&1].inventory.selected(), 8);
+        assert_eq!(inventories(&mut s).len(), 1);
+        s.set_game_mode(GameMode::Creative);
+        for packet in [
+            C2S::CreativeSetSlot {
+                slot: 36,
+                item: 1,
+                count: 1,
+            },
+            C2S::CreativeSetSlot {
+                slot: 0,
+                item: u16::MAX,
+                count: 1,
+            },
+            C2S::CreativeSetSlot {
+                slot: 0,
+                item: 1,
+                count: 65,
+            },
+            C2S::CreativeSetSlot {
+                slot: 0,
+                item: 1,
+                count: 0,
+            },
+        ] {
+            s.handle_packet(1, &packet.encode());
+        }
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 6);
+        assert_eq!(inventories(&mut s).len(), 1);
+    }
+    #[test]
+    fn creative_defaults_unrestricted_edits_and_inventory_batching() {
+        let mut s = joined(2);
+        s.tick();
+        let packets = decode_all(s.take_outbox());
+        assert!(matches!(packets[0].1, S2C::Welcome { game_mode: 0, .. }));
+        assert!(matches!(packets[1].1, S2C::Inventory { selected: 0, .. }));
+        assert_eq!(s.clients[&1].inventory, Inventory::creative());
+        let [x, y, z] = s.spawn();
+        let pos = [x.floor() as i32, y as i32, z.floor() as i32];
+        let before = s.inventory_data(1);
+        for state in [
+            blocks::WATER,
+            blocks::AIR,
+            blocks::BEDROCK,
+            blocks::AIR,
+            blocks::OAK_STAIRS + 6,
+        ] {
+            edit(&mut s, pos, state);
+        }
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 0);
+        assert_eq!(s.inventory_data(1), before);
+        assert!(inventories(&mut s).is_empty());
+        for slot in [1, 2, 8] {
+            s.handle_packet(1, &C2S::SelectSlot { slot }.encode());
+        }
+        s.handle_packet(
+            1,
+            &C2S::CreativeSetSlot {
+                slot: 35,
+                item: 1,
+                count: 64,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(inventories(&mut s).len(), 1);
+        assert_eq!(s.clients[&1].inventory.selected(), 8);
+        s.tick();
+        assert!(inventories(&mut s).is_empty());
+        s.handle_packet(
+            1,
+            &C2S::CreativeSetSlot {
+                slot: 35,
+                item: 0,
+                count: 0,
+            }
+            .encode(),
+        );
+        s.tick();
+        assert_eq!(s.clients[&1].inventory.slots()[35], None);
+    }
+    #[test]
+    fn inventory_reconnect_and_hash_include_mode_and_client_order() {
+        let (mut s, _) = survival();
+        s.clients.get_mut(&1).unwrap().inventory.add(1, 70);
+        s.clients.get_mut(&1).unwrap().inventory.select(5).unwrap();
+        let bytes = s.inventory_data(1).unwrap();
+        s.disconnect(1);
+        assert_eq!(s.inventory_data(1), None);
+        s.connect_at(1, false, None, Some(&bytes));
+        assert_eq!(s.inventory_data(1), Some(bytes));
+        let hash = s.state_hash();
+        s.set_game_mode(GameMode::Creative);
+        assert_ne!(s.state_hash(), hash);
+        s.set_game_mode(GameMode::Survival);
+        s.connect_at(1, false, None, Some(&[1, 2, 3]));
+        assert_eq!(s.clients[&1].inventory, Inventory::default());
+        assert_ne!(s.state_hash(), hash);
+        s.set_game_mode(GameMode::Creative);
+        s.connect_at(1, false, None, Some(&[0]));
+        assert_eq!(s.clients[&1].inventory, Inventory::creative());
+        let mut a = Server::new(1, Generator::Flat);
+        let mut b = Server::new(1, Generator::Flat);
+        for id in [1, 2] {
+            a.connect(id);
+        }
+        for id in [2, 1] {
+            b.connect(id);
+        }
+        assert_eq!(a.state_hash(), b.state_hash());
     }
 
     fn position_packet(pos: [f64; 3]) -> Vec<u8> {
@@ -962,7 +1368,7 @@ mod tests {
 
     fn joined_at(position: [f64; 3]) -> Server {
         let mut s = Server::new(1, Generator::Flat);
-        s.connect_at(1, false, Some(position));
+        s.connect_at(1, false, Some(position), None);
         s.handle_packet(
             1,
             &C2S::Hello {
@@ -1364,7 +1770,7 @@ mod tests {
     fn reconnect_at_accepted_position_allows_nearby_movement_without_teleport() {
         let mut s = Server::new(1, Generator::Flat);
         let start = [3000.5, 100.0, -3000.5];
-        s.connect_at(7, false, Some(start));
+        s.connect_at(7, false, Some(start), None);
         assert_eq!(s.client_position(7), Some(start));
         s.handle_packet(
             7,
@@ -1399,7 +1805,7 @@ mod tests {
     #[test]
     fn invalid_initial_positions_fall_back_to_spawn() {
         let mut s = Server::new(1, Generator::Flat);
-        s.connect_at(1, false, None);
+        s.connect_at(1, false, None, None);
         assert_eq!(s.client_position(1), Some(s.spawn()));
         for axis in 0..3 {
             for value in [
@@ -1411,7 +1817,7 @@ mod tests {
             ] {
                 let mut position = [0.5, 100.0, 0.5];
                 position[axis] = value;
-                s.connect_at(1, false, Some(position));
+                s.connect_at(1, false, Some(position), None);
                 assert_eq!(s.client_position(1), Some(s.spawn()));
             }
         }
