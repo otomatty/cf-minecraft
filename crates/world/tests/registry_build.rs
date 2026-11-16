@@ -119,18 +119,14 @@ fn biome_recipes_validate_all_block_references_and_terrain_kinds() {
 #[test]
 fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
-    let data = BLOCKS.replacen(
-        "\"coarse_dirt\",\n]",
-        "\"coarse_dirt\", \"test_clay\",\n]",
-        1,
-    );
+    let data = BLOCKS.replacen("\"gold_ore\",\n]", "\"gold_ore\", \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 45\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 45;"));
-    assert!(output.contains("pub const COUNT: BlockState = 46;"));
-    assert!(output.contains("tex: [23, 23, 23, 23, 23, 23]"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 49;"));
+    assert!(output.contains("pub const COUNT: BlockState = 50;"));
+    assert!(output.contains("tex: [27, 27, 27, 27, 27, 27]"));
 }
 
 #[test]
@@ -161,7 +157,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 45
+        id = 49
         texture = "stone"
         top = "grass_block_top"
         side = "grass_block_side"
@@ -174,7 +170,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 45\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 49\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"

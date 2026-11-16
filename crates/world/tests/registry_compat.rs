@@ -37,7 +37,7 @@ fn registry_matches_pre_generation_snapshot() {
             COUNT,
             LEGACY_COUNT
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 45, 14]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 49, 14]
     );
     for state in 0..COUNT {
         assert_eq!(parse_state(&state_name(state)), Some(state));
@@ -163,5 +163,28 @@ fn biome_tree_recipes_match_original_specification() {
             "{}",
             b.name
         );
+    }
+}
+
+#[test]
+fn original_ore_ids_textures_and_stone_properties() {
+    let stone = info(STONE);
+    for (id, name, texture) in [
+        (COAL_ORE, "coal_ore", 23),
+        (COPPER_ORE, "copper_ore", 24),
+        (IRON_ORE, "iron_ore", 25),
+        (GOLD_ORE, "gold_ore", 26),
+    ] {
+        assert_eq!(id, 45 + texture - 23);
+        assert_eq!(parse_state(name), Some(id));
+        assert_eq!(TEXTURES[texture as usize], name);
+        let ore = info(id);
+        assert_eq!(ore.model, stone.model);
+        assert_eq!(ore.layer, stone.layer);
+        assert_eq!(ore.occludes, stone.occludes);
+        assert_eq!(ore.solid, stone.solid);
+        assert_eq!(ore.opacity, 15);
+        assert_eq!(ore.emission, 0);
+        assert_eq!(ore.tex, [texture; 6]);
     }
 }

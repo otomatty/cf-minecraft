@@ -235,3 +235,22 @@ test("section visibility filters every layer before frustum tests and translucen
     assert.deepEqual(filterVisibleSections(meshes, new Set()), []);
     assert.deepEqual(filterVisibleSections(meshes, null), [...meshes.values()]);
 });
+
+test("four original ore textures are opaque stone with distinct mineral grains", () => {
+	const names = ["coal_ore", "copper_ore", "iron_ore", "gold_ore"];
+	const textures = names.map(paintTexture);
+	const unknown = paintTexture("unknown_ore");
+	for (const [i, pixels] of textures.entries()) {
+		assert.equal(pixels.length, 16 * 16 * 4);
+		assert.deepEqual(pixels, paintTexture(names[i]));
+		assert.notDeepEqual(pixels, unknown);
+		let stone = 0, mineral = 0;
+		for (let p = 0; p < pixels.length; p += 4) {
+			assert.equal(pixels[p + 3], 255);
+			if (pixels[p] === pixels[p + 1] && pixels[p + 1] === pixels[p + 2]) stone++;
+			else mineral++;
+		}
+		assert.ok(stone > 128 && mineral > 0, names[i]);
+		for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, textures[j]);
+	}
+});

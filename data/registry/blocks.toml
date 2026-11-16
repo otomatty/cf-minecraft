@@ -6,6 +6,7 @@ textures = [
   "glass", "oak_leaves", "water", "red_flower",
   "yellow_flower", "short_grass",
   "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
+  "coal_ore", "copper_ore", "iron_ore", "gold_ore",
 ]
 legacy_count = 14
 
@@ -205,3 +206,23 @@ solid = true
 name = "coarse_dirt"
 id = 44
 texture = "coarse_dirt"
+
+[[blocks]]
+name = "coal_ore"
+id = 45
+texture = "coal_ore"
+
+[[blocks]]
+name = "copper_ore"
+id = 46
+texture = "copper_ore"
+
+[[blocks]]
+name = "iron_ore"
+id = 47
+texture = "iron_ore"
+
+[[blocks]]
+name = "gold_ore"
+id = 48
+texture = "gold_ore"
