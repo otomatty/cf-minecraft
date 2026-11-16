@@ -26,6 +26,9 @@ export interface ClientExports {
 	client_day_time(): bigint;
 	client_chunk_count(): number;
 	client_dirty_count(): number;
+	client_hidden_dirty_count(): number;
+	client_visible_count(): number;
+	client_update_visibility(x: number, y: number, z: number, enabled: number): number;
 	client_pop_dirty(x: number, y: number, z: number): number;
 	client_padded(cx: number, sy: number, cz: number): number;
 	client_padded_ptr(): number;
@@ -223,6 +226,20 @@ export class ClientCore {
 
 	get dirtyCount(): number {
 		return this.x.client_dirty_count();
+	}
+
+	get hiddenDirty(): number { return this.x.client_hidden_dirty_count(); }
+	get visibleSections(): number { return this.x.client_visible_count(); }
+
+	/** undefined: unchanged; null: unrestricted; otherwise renderer section keys. */
+	updateVisibility(x: number, y: number, z: number, enabled: boolean): Set<string> | null | undefined {
+		const count = this.x.client_update_visibility(x, y, z, Number(enabled));
+		if (count === -1) return undefined;
+		if (count === -2) return null;
+		const values = this.outInts(count * 3);
+		const keys = new Set<string>();
+		for (let i = 0; i < values.length; i += 3) keys.add(`${values[i]},${values[i + 1]},${values[i + 2]}`);
+		return keys;
 	}
 
 	/** Stale section nearest to the camera, as [chunk x, section index, chunk z]. */

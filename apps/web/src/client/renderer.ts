@@ -268,6 +268,11 @@ export interface FrameStats {
 	skyBrightness: number;
 }
 
+/** Shared by all terrain layers and translucent sorting. null disables culling. */
+export function filterVisibleSections<T>(sections: ReadonlyMap<string, T>, visible: ReadonlySet<string> | null): T[] {
+	return [...sections].filter(([k]) => visible === null || visible.has(k)).map(([, mesh]) => mesh);
+}
+
 const key = (cx: number, sy: number, cz: number) => `${cx},${sy},${cz}`;
 
 export class Renderer {
@@ -293,6 +298,7 @@ export class Renderer {
 	private readonly tintTexture: GPUTexture;
 	private readonly outlineBind: GPUBindGroup;
 	private depth: GPUTexture | null = null;
+	visibleSections: ReadonlySet<string> | null = null;
 	private readonly sections = new Map<string, SectionMesh>();
 	private readonly freeSlots: number[] = [];
 	private nextSlot = 0;
@@ -619,7 +625,7 @@ export class Renderer {
 		pass.draw(3);
 
 		const planes = frustumPlanes(viewProj);
-		const visible = [...this.sections.values()].filter(mesh => boxInFrustum(planes,
+		const visible = filterVisibleSections(this.sections, this.visibleSections).filter(mesh => boxInFrustum(planes,
 			mesh.origin[0] - block[0] - frac[0], mesh.origin[1] - block[1] - frac[1], mesh.origin[2] - block[2] - frac[2], 16));
 		const cameraPoint: Point = [camera.x, camera.y, camera.z];
 		const transparent = sortSections(visible.filter(mesh => mesh.counts[2] > 0), cameraPoint);

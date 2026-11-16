@@ -9,6 +9,7 @@
 //   gen=flat|hills|terrain  generator for a new local world (default terrain)
 //   seed=<int64>      seed for a new local world
 //   time=<tick>       starting day time for the local server
+//   cull=0            disable section visibility culling
 //   autopilot=1       no input needed: the camera circles above the spawn point
 
 import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
@@ -672,7 +673,7 @@ async function main(): Promise<void> {
 			`${fps.toFixed(0)} fps`,
 			`XYZ: ${camera.x.toFixed(2)} / ${(camera.y - EYE_HEIGHT).toFixed(2)} / ${camera.z.toFixed(2)}   Chunk: ${Math.floor(camera.x) >> 4} ${Math.floor(camera.z) >> 4}`,
 			`Facing: ${FACING[Math.round(yaw / 90) % 4]}  (${yaw.toFixed(1)} / ${camera.pitch.toFixed(1)})`,
-			`Sections: ${frame.drawn}/${frame.sections} drawn  ${frame.quads} quads  mesh queue ${core.dirtyCount} pending + ${meshPool.inFlight} in flight + ${meshPool.pendingResults} awaiting upload  chunks ${core.chunkCount}`,
+			`Sections: ${frame.drawn}/${core.chunkCount * 24} drawn  visible ${core.visibleSections}  ${frame.quads} quads  mesh queue ${core.dirtyCount} pending + ${meshPool.inFlight} in flight + ${meshPool.pendingResults} awaiting upload  chunks ${core.chunkCount}`,
 			`Server: ${transport.kind} "${worldName}"${connection === "reconnecting" ? "  reconnecting" : ""}  TPS ${measuredTps().toFixed(2)}` +
 				(serverStats
 					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
@@ -705,6 +706,8 @@ async function main(): Promise<void> {
 			move(dt, now);
 
 			removeUnloaded();
+			const visible = core.updateVisibility(camera.x, camera.y, camera.z, params.get("cull") !== "0");
+			if (visible !== undefined) renderer.visibleSections = visible;
 			lightMs = lightPool.step(camera.x, camera.z);
 			const pop = () => core.popDirty(camera.x, camera.y, camera.z);
 			if (meshPool.useFallback) {
@@ -767,7 +770,10 @@ async function main(): Promise<void> {
 			positionsCorrected,
 			fps,
 			...frame,
-			meshQueue: core.dirtyCount + meshPool.inFlight + meshPool.pendingResults,
+			sections: core.chunkCount * 24,
+			visibleSections: core.visibleSections,
+			hiddenDirty: core.hiddenDirty,
+			meshQueue: core.dirtyCount + meshPool.visiblePending(renderer.visibleSections),
 			lightQueue: lightPool.queue,
 			lightFallback: lightPool.useFallback,
 			lightMs,
