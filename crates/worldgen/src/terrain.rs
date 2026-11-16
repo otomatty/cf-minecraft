@@ -45,7 +45,7 @@ const SPAWN_STEP: i32 = 16;
 /// chunks; all methods are pure and can share it across threads.
 pub struct TerrainGenerator {
     pub(crate) seed: i64,
-    caves: crate::caves::Caves,
+    pub(crate) caves: crate::caves::Caves,
     continent: Fbm,
     relief: Fbm,
     detail: Fbm,
@@ -398,14 +398,20 @@ impl TerrainGenerator {
                 }
             }
         }
+        let entrances = if caves || trees {
+            self.entrances_for_chunk(cx, cz, crate::trees::MAX_CROWN_RADIUS)
+        } else {
+            Vec::new()
+        };
         if caves {
             self.caves.carve(&mut chunk, cx, cz, &heights);
+            crate::entrances::carve(&entrances, &mut chunk, cx, cz, &heights);
         }
         if ores {
             crate::ores::place(self.seed, &mut chunk, cx, cz);
         }
         if trees {
-            self.plant_trees(&mut chunk, cx, cz, |x, z| {
+            self.plant_trees(&mut chunk, cx, cz, &entrances, |x, z| {
                 if (-1..=16).contains(&x) && (-1..=16).contains(&z) {
                     heights[(z + 1) as usize][(x + 1) as usize]
                 } else {
@@ -417,14 +423,13 @@ impl TerrainGenerator {
     }
 
     pub fn spawn_point(&self) -> [i32; 3] {
-        self.find_spawn(SPAWN_RADIUS).unwrap_or_else(|| {
-            let chunk = self.generate(0, 0);
-            let mut y = self.surface_y(0, 0).max(SEA_LEVEL) + 1;
-            while chunk.get(0, y, 0) != blocks::AIR || chunk.get(0, y + 1, 0) != blocks::AIR {
-                y += 1;
+        let mut radius = SPAWN_RADIUS;
+        loop {
+            if let Some(point) = self.find_spawn(radius) {
+                return point;
             }
-            [0, y, 0]
-        })
+            radius *= 2;
+        }
     }
 
     fn find_spawn(&self, radius: i32) -> Option<[i32; 3]> {
@@ -438,7 +443,9 @@ impl TerrainGenerator {
                     if y > SEA_LEVEL {
                         let chunk = self.generate(x.div_euclid(16), z.div_euclid(16));
                         let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
-                        if (1..=2).all(|dy| chunk.get(lx, y + dy, lz) == blocks::AIR) {
+                        if blocks::info(chunk.get(lx, y, lz)).solid
+                            && (1..=2).all(|dy| chunk.get(lx, y + dy, lz) == blocks::AIR)
+                        {
                             return Some([x, y + 1, z]);
                         }
                     }
@@ -543,6 +550,8 @@ mod tests {
                             })
                             .unwrap();
                         let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                        let neighbors = [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
+                            .map(|(x, z)| terrain.surface_y(x, z));
                         let shape_top = terrain.surface_y(wx, wz);
                         let b = &BIOMES[terrain.biome_at(wx, wz) as usize];
                         assert_eq!(top, if b.freeze { SEA_LEVEL } else { shape_top });
@@ -554,7 +563,9 @@ mod tests {
                             .any(|&(nx, nz)| (terrain.surface_y(nx, nz) - shape_top).abs() >= 3);
                         assert_eq!(chunk.get(x, MIN_Y, z), blocks::BEDROCK);
                         for y in (MIN_Y + 1)..=SEA_LEVEL {
-                            if let Some(state) = terrain.caves.is_cave(wx, y, wz, shape_top) {
+                            if let Some(state) =
+                                terrain.caves.is_cave(wx, y, wz, shape_top, neighbors)
+                            {
                                 assert_eq!(chunk.get(x, y, z), state);
                             } else {
                                 assert_ne!(chunk.get(x, y, z), blocks::AIR);
@@ -1029,45 +1040,65 @@ mod tests {
         for seed in [2026, 0, -71] {
             let t = TerrainGenerator::new(seed);
             let (mut air, mut water) = (0, 0);
-            for cz in -1..=1 {
-                for cx in -1..=1 {
-                    let before = t.generate_features(cx, cz, true, false, false);
-                    let after = t.generate_features(cx, cz, true, true, false);
-                    for z in 0..16 {
-                        for x in 0..16 {
-                            let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
-                            let top = t.surface_y(wx, wz);
-                            for y in MIN_Y..320 {
-                                let old = before.get(x, y, z);
-                                let cave = t.caves.is_cave(wx, y, wz, top);
-                                let expected = if old != blocks::AIR && old != blocks::WATER {
-                                    cave.unwrap_or(old)
-                                } else {
-                                    old
-                                };
-                                assert_eq!(
-                                    after.get(x, y, z),
-                                    expected,
-                                    "seed={seed} at {wx},{y},{wz}"
+            let chunks = (-1..=1).flat_map(|z| (-1..=1).map(move |x| (x, z))).chain([
+                (-13, 9),
+                (-12, 9),
+                (-13, 10),
+                (-12, 10),
+                (-20, -20),
+                (20, 20),
+            ]);
+            for (cx, cz) in chunks {
+                let before = t.generate_features(cx, cz, false, false, false);
+                let after = t.generate_features(cx, cz, false, true, false);
+                let entrances = t.entrances_for_chunk(cx, cz, 0);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                        let top = t.surface_y(wx, wz);
+                        let neighbors = [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
+                            .map(|(x, z)| t.surface_y(x, z));
+                        for y in MIN_Y..320 {
+                            let old = before.get(x, y, z);
+                            let cave = t.caves.is_cave(wx, y, wz, top, neighbors);
+                            let passage = entrances.iter().any(|e| e.contains(wx, y, wz))
+                                && crate::entrances::removable(
+                                    old,
+                                    y,
+                                    *neighbors.iter().min().unwrap(),
                                 );
-                                if y > top - 6 || y < MIN_Y + 6 {
+                            let expected = if passage {
+                                blocks::AIR
+                            } else if old != blocks::AIR && old != blocks::WATER {
+                                cave.unwrap_or(old)
+                            } else {
+                                old
+                            };
+                            assert_eq!(
+                                after.get(x, y, z),
+                                expected,
+                                "seed={seed} at {wx},{y},{wz}"
+                            );
+                            if y > top - 6 || y < MIN_Y + 6 {
+                                assert_eq!(cave, None);
+                                if !passage {
                                     assert_eq!(after.get(x, y, z), old);
                                 }
-                                if let Some(state) = cave {
-                                    assert_eq!(
-                                        state,
-                                        if y <= CAVE_WATER_LEVEL {
-                                            blocks::WATER
-                                        } else {
-                                            blocks::AIR
-                                        }
-                                    );
-                                    if old != blocks::AIR && old != blocks::WATER {
-                                        if state == blocks::WATER {
-                                            water += 1;
-                                        } else {
-                                            air += 1;
-                                        }
+                            }
+                            if let Some(state) = cave {
+                                assert_eq!(
+                                    state,
+                                    if y <= CAVE_WATER_LEVEL {
+                                        blocks::WATER
+                                    } else {
+                                        blocks::AIR
+                                    }
+                                );
+                                if old != blocks::AIR && old != blocks::WATER {
+                                    if state == blocks::WATER {
+                                        water += 1;
+                                    } else {
+                                        air += 1;
                                     }
                                 }
                             }
@@ -1076,6 +1107,137 @@ mod tests {
                 }
             }
             assert!(air > 0 && water > 0);
+        }
+    }
+
+    #[test]
+    fn entrances_open_the_surface_and_preserve_coasts_and_outer_regions() {
+        let t = TerrainGenerator::new(2026);
+        let mut openings = 0;
+        for cz in -20..=20 {
+            for cx in -20..=20 {
+                // Broad, deterministic probes plus all columns around the closest entrance.
+                if (!(-13..=-12).contains(&cx) || !(9..=10).contains(&cz))
+                    && (cx % 4 != 0 || cz % 4 != 0)
+                {
+                    continue;
+                }
+                let before = t.generate_features(cx, cz, false, false, false);
+                let after = t.generate_features(cx, cz, false, true, false);
+                let entrances = t.entrances_for_chunk(cx, cz, 0);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                        let top = t.surface_y(wx, wz);
+                        for y in top - 5..=top {
+                            if !entrances.iter().any(|e| e.contains(wx, y, wz)) {
+                                assert_eq!(before.get(x, y, z), after.get(x, y, z));
+                            }
+                        }
+                        if after.get(x, top, z) == blocks::AIR {
+                            openings += 1;
+                            assert!(entrances.iter().any(|e| e.contains(wx, top, wz)));
+                            assert_ne!(before.get(x, top, z), blocks::AIR);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(openings > 0);
+    }
+
+    #[test]
+    fn spawn_skips_surface_holes() {
+        for seed in 0..10000 {
+            let t = TerrainGenerator::new(seed);
+            let top = t.surface_y(0, 0);
+            if !t
+                .entrances_for_chunk(0, 0, 0)
+                .iter()
+                .any(|e| e.contains(0, top, 0))
+            {
+                continue;
+            }
+            let c = t.generate(0, 0);
+            if c.get(0, top, 0) != blocks::AIR {
+                continue;
+            }
+            assert_eq!(t.find_spawn(0), None);
+            let [x, y, z] = t.spawn_point();
+            assert_ne!((x, z), (0, 0));
+            let c = t.generate(x.div_euclid(16), z.div_euclid(16));
+            let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+            assert_eq!(y, t.surface_y(x, z) + 1);
+            assert!(blocks::info(c.get(lx, y - 1, lz)).solid);
+            assert_eq!(c.get(lx, y, lz), blocks::AIR);
+            assert_eq!(c.get(lx, y + 1, lz), blocks::AIR);
+            return;
+        }
+        panic!("probes must include a seed with a surface hole at the first spawn candidate");
+    }
+
+    #[test]
+    fn entrance_regions_cover_a_small_fraction_of_land() {
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            let (mut land, mut region) = (0, 0);
+            for z in (-4096..4096).step_by(32) {
+                for x in (-4096..4096).step_by(32) {
+                    let top = t.surface_y(x, z);
+                    if top > SEA_LEVEL {
+                        land += 1;
+                        // Sample the region independently of the coastal exclusion.
+                        region += usize::from(
+                            t.caves.entrance_value(x, z) > crate::caves::ENTRANCE_THRESHOLD,
+                        );
+                    }
+                }
+            }
+            let ratio = region as f64 / land as f64;
+            eprintln!(
+                "entrance region seed={seed}: {region}/{land} = {:.4}%",
+                ratio * 100.0
+            );
+            assert!((0.10..=0.16).contains(&ratio));
+        }
+    }
+
+    #[test]
+    fn cave_air_never_touches_terrain_water() {
+        for seed in [2026, 0, -71] {
+            let t = TerrainGenerator::new(seed);
+            let mut contacts = 0;
+            for cz in -10..=10 {
+                for cx in -10..=10 {
+                    let chunk = t.generate_features(cx, cz, false, true, false);
+                    let heights: [[i32; 18]; 18] = std::array::from_fn(|z| {
+                        std::array::from_fn(|x| {
+                            t.surface_y(cx * 16 + x as i32 - 1, cz * 16 + z as i32 - 1)
+                        })
+                    });
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let top = heights[z + 1][x + 1];
+                            let lowest = [
+                                heights[z + 1][x],
+                                heights[z + 1][x + 2],
+                                heights[z][x + 1],
+                                heights[z + 2][x + 1],
+                            ]
+                            .into_iter()
+                            .min()
+                            .unwrap();
+                            for y in (crate::caves::CAVE_WATER_LEVEL + 1).max(lowest + 1)
+                                ..=SEA_LEVEL.min(top)
+                            {
+                                contacts += usize::from(chunk.get(x, y, z) == blocks::AIR);
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("terrain-water adjacent cave-air blocks seed={seed}: {contacts}");
+            assert_eq!(contacts, 0);
         }
     }
 
@@ -1090,6 +1252,7 @@ mod tests {
                     let (cx, cz) = (cx * 8, cz * 8);
                     let before = t.generate_features(cx, cz, false, false, false);
                     let after = t.generate_features(cx, cz, false, true, false);
+                    let entrances = t.entrances_for_chunk(cx, cz, 0);
                     for z in 0..16 {
                         for x in 0..16 {
                             let top = t.surface_y(cx * 16 + x as i32, cz * 16 + z as i32);
@@ -1104,9 +1267,12 @@ mod tests {
                                 volume += 1;
                                 carved += u64::from(before.get(x, y, z) != after.get(x, y, z));
                             }
-                            // All six protected surface blocks are identical, including sea floors.
+                            // Protected roof blocks are identical, including sea floors.
                             for y in top - 5..=top {
-                                assert_eq!(before.get(x, y, z), after.get(x, y, z));
+                                let (wx, wz) = (cx * 16 + x as i32, cz * 16 + z as i32);
+                                if !entrances.iter().any(|e| e.contains(wx, y, wz)) {
+                                    assert_eq!(before.get(x, y, z), after.get(x, y, z));
+                                }
                             }
                         }
                     }
@@ -1154,6 +1320,6 @@ mod tests {
 
     #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0xc4a48cdc0d6a60a1);
+        assert_eq!(terrain_fingerprint(2026), 0xa7b56879550c2d0a);
     }
 }
