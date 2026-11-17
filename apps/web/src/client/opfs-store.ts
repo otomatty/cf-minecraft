@@ -282,7 +282,14 @@ export class OpfsStore {
 			if (error instanceof DOMException && error.name === "NotFoundError") return null;
 			throw error;
 		}
-		return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+		const access = await this.acquireAccess(handle);
+		try {
+			const bytes = new Uint8Array(access.getSize());
+			this.readAt(access, bytes, 0);
+			return bytes;
+		} finally {
+			access.close();
+		}
 	}
 
 	writePlayer(bytes: Uint8Array): Promise<void> {

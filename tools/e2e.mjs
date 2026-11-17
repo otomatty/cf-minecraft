@@ -955,8 +955,21 @@ async function survivalInventory() {
 		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
 		const restored = await settle(page, "survival reload", chunksInView(2));
 		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
-		check(restored.inventory[0]?.item === savedItem && restored.inventory[0]?.count === 1
-			&& await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1"), "survival: reload restores one grass block in the first slot");
+		let inventoryRestored = true;
+		let inventoryDetail = "";
+		try {
+			await page.waitForFunction(item => {
+				const slot = window.__mc.stats().inventory[0];
+				return slot?.item === item && slot?.count === 1;
+			}, { timeout: 5000 }, savedItem);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			inventoryRestored = false;
+			const slot = await page.evaluate(() => window.__mc.stats().inventory[0]);
+			inventoryDetail = `expected item ${savedItem}, count 1; inventory[0]=${JSON.stringify(slot)}`;
+		}
+		const hotbarRestored = await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1");
+		check(inventoryRestored && hotbarRestored, "survival: reload restores one grass block in the first slot", inventoryDetail);
 		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[0]);
 		await page.mouse.click(640, 360);
 		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
