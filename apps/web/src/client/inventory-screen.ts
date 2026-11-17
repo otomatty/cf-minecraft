@@ -11,3 +11,16 @@ export function inventoryDisplay(slots: readonly (InventorySlot | null)[]) {
         cursor: slots[41] ?? null,
     };
 }
+
+/** Native button activation covers both pointer and keyboard input. */
+export function bindInventorySlot(
+    button: Pick<HTMLButtonElement, "addEventListener">,
+    slot: number,
+    send: (slot: number, button: 0 | 1, shift: boolean) => void,
+): void {
+    button.addEventListener("click", event => send(slot, 0, event.shiftKey));
+    button.addEventListener("contextmenu", event => {
+        event.preventDefault();
+        send(slot, 1, event.shiftKey);
+    });
+}

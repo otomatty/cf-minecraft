@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { INVENTORY_ROWS, inventoryDisplay } from "./inventory-screen.ts";
+import { bindInventorySlot, INVENTORY_ROWS, inventoryDisplay } from "./inventory-screen.ts";
 import { paintTexture } from "./textures.ts";
 
 test("inventory display maps all wire slots without mutating server state", () => {
@@ -65,4 +65,32 @@ test("WASM Inventory carries crafting preview and cursor through server-confirme
     assert.equal(client.inventorySlots[41],null);
     assert.deepEqual(client.inventorySlots[2],{item:planks,count:5});
     assert.equal(client.inventory.length,36);
+});
+
+
+test("slot activation sends exactly once for pointer and keyboard event sequences", () => {
+    for (const { name, events, activation, button, shift } of [
+        { name: "left mouse", events: ["mousedown", "mouseup", "click"], activation: "click", button: 0, shift: false },
+        { name: "shift left mouse", events: ["mousedown", "mouseup", "click"], activation: "click", button: 0, shift: true },
+        { name: "Enter", events: ["keydown", "click", "keyup"], activation: "click", button: 0, shift: false },
+        { name: "Space", events: ["keydown", "keyup", "click"], activation: "click", button: 0, shift: false },
+        { name: "shift Enter", events: ["keydown", "click", "keyup"], activation: "click", button: 0, shift: true },
+        { name: "right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: false },
+        { name: "shift right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: true },
+        { name: "menu key", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: false },
+        { name: "Shift+F10", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: true },
+    ]) {
+        const target = new EventTarget();
+        const sent: Array<{ slot: number; button: number; shift: boolean }> = [];
+        bindInventorySlot(target as HTMLButtonElement, 36, (slot, button, shift) => sent.push({slot, button, shift}));
+        let activated = false;
+        for (const type of events) {
+            const event = Object.assign(new Event(type, { cancelable: true }), { shiftKey: shift });
+            target.dispatchEvent(event);
+            activated ||= type === activation;
+            assert.equal(sent.length, activated ? 1 : 0, `${name}: ${type}`);
+            assert.equal(event.defaultPrevented, type === "contextmenu", `${name}: ${type}`);
+        }
+        assert.deepEqual(sent, [{ slot: 36, button, shift }], name);
+    }
 });

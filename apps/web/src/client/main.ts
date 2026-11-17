@@ -1,4 +1,4 @@
-import { inventoryDisplay, INVENTORY_ROWS } from "./inventory-screen.ts";
+import { bindInventorySlot, inventoryDisplay, INVENTORY_ROWS } from "./inventory-screen.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -650,10 +650,8 @@ async function main(): Promise<void> {
 			const count = document.createElement("span");
 			count.style.cssText = "position:absolute;right:2px;bottom:0;text-shadow:1px 1px black";
 			button.append(canvas,count);
-			button.addEventListener("contextmenu", event => event.preventDefault());
-			button.addEventListener("mousedown", event => {
-				event.preventDefault();
-				if (event.button === 0 || event.button === 2) transport.send(core.encodeClickSlot(slot, event.button === 2 ? 1 : 0, event.shiftKey));
+			bindInventorySlot(button, slot, (slot, button, shift) => {
+				transport.send(core.encodeClickSlot(slot, button, shift));
 			});
 			inventoryButtons.set(slot,{canvas,count});
 			group.append(button);
