@@ -8,13 +8,16 @@ export const INVENTORY_ROWS = [
 export const TABLE_ROWS = [INVENTORY_ROWS[0], INVENTORY_ROWS[1],
     Array.from({ length: 9 }, (_, i) => i + 41), [50]];
 
+export const FURNACE_ROWS = [INVENTORY_ROWS[0], INVENTORY_ROWS[1], [51, 52], [53]];
+export type InventoryScreenKind = 0 | 1 | 2;
+
 /** Translate a wire slot into the client display array, keeping cursor 41 separate. */
-export function inventoryDisplayIndex(slot: number, table = false): number {
-    return table && slot >= 41 && slot <= 49 ? slot + 1 : table && slot === 50 ? 40 : slot;
+export function inventoryDisplayIndex(slot: number, kind: InventoryScreenKind = 0): number {
+    return kind === 1 && slot >= 41 && slot <= 49 ? slot + 1 : kind === 1 && slot === 50 ? 40 : slot;
 }
-export function inventoryDisplay(slots: readonly (InventorySlot | null)[], table = false) {
+export function inventoryDisplay(slots: readonly (InventorySlot | null)[], kind: InventoryScreenKind = 0) {
     return {
-        groups: (table ? TABLE_ROWS : INVENTORY_ROWS).map(row => row.map(slot => ({ slot, stack: slots[inventoryDisplayIndex(slot, table)] ?? null }))),
+        groups: (kind === 2 ? FURNACE_ROWS : kind === 1 ? TABLE_ROWS : INVENTORY_ROWS).map(row => row.map(slot => ({ slot, stack: slots[inventoryDisplayIndex(slot, kind)] ?? null }))),
         cursor: slots[41] ?? null,
     };
 }
@@ -42,6 +45,6 @@ export function updateClosePending(
     return event.screen === 0 ? false : closePending;
 }
 
-export function tableScreenVisible({ screen, closePending }: { screen: number; closePending: boolean }): boolean {
-    return screen === 1 && !closePending;
+export function containerScreenVisible({ screen, closePending }: { screen: number; closePending: boolean }, kind: 1 | 2): boolean {
+    return screen === kind && !closePending;
 }

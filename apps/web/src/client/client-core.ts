@@ -23,6 +23,7 @@ export interface ClientExports {
 	client_enc_close_inventory(): number;
 	client_enc_use_block(x: number, y: number, z: number): number;
 	client_screen(): number;
+	client_furnace_time(index: number): number;
 	client_selected_slot(): number;
 	client_slot_item(slot: number): number;
 	client_slot_count(slot: number): number;
@@ -405,8 +406,11 @@ export class ClientCore {
 	encodeUseBlock(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_block(x, y, z)); }
 	get selectedSlot(): number { return this.x.client_selected_slot(); }
 	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }
+	// Display indices 0..50 retain protocol 7 layout; 51..53 are furnace input/fuel/output.
+	get furnace(): Array<InventorySlot | null> { return this.inventorySlots.slice(51, 54); }
+	get furnaceTimes(): number[] { return [0, 1, 2].map(i => this.x.client_furnace_time(i)); }
 	get inventorySlots(): Array<InventorySlot | null> {
-		return Array.from({ length: 51 }, (_, i) => {
+		return Array.from({ length: 54 }, (_, i) => {
 			const item = this.x.client_slot_item(i);
 			return item ? { item, count: this.x.client_slot_count(i) } : null;
 		});

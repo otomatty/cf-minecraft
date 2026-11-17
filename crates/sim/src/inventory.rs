@@ -14,6 +14,9 @@ pub struct Stack {
 pub enum Screen {
     #[default]
     None,
+    Furnace {
+        pos: [i32; 3],
+    },
     CraftingTable {
         pos: [i32; 3],
     },
@@ -100,6 +103,9 @@ impl Inventory {
     }
 
     pub fn result(&self) -> Option<Stack> {
+        if matches!(self.screen, Screen::Furnace { .. }) {
+            return None;
+        }
         matching_recipe(
             self.grid(),
             self.width(),
@@ -138,6 +144,9 @@ impl Inventory {
         }
     }
     pub fn click(&mut self, slot: u8, button: u8, shift: bool) -> Result<(), DecodeError> {
+        if matches!(self.screen, Screen::Furnace { .. }) {
+            return Err(DecodeError);
+        }
         let base = if self.screen == Screen::None { 36 } else { 41 };
         let result_slot = if self.screen == Screen::None { 40 } else { 50 };
         if slot > result_slot || (slot >= 36 && slot < base) || button > 1 {
@@ -239,6 +248,84 @@ impl Inventory {
         }
         Ok(())
     }
+    pub fn click_furnace(
+        &mut self,
+        f: &mut crate::furnace::Furnace,
+        slot: u8,
+        button: u8,
+        shift: bool,
+    ) -> Result<(), DecodeError> {
+        if button > 1 || (36..51).contains(&slot) || slot > 53 {
+            return Err(DecodeError);
+        }
+        if shift {
+            if slot < 36 {
+                if let Some(s) = self.slots[slot as usize] {
+                    let target = if world::smelting::output(s.item).is_some() {
+                        Some(0)
+                    } else if items::info(s.item).unwrap().fuel.is_some() {
+                        Some(1)
+                    } else {
+                        None
+                    };
+                    if let Some(i) = target {
+                        let left = add_slots(&mut f.slots[i..=i], s.item, u32::from(s.count));
+                        subtract(&mut self.slots[slot as usize], s.count - left as u8);
+                        return Ok(());
+                    }
+                }
+            } else {
+                let source = &mut f.slots[(slot - 51) as usize];
+                if let Some(s) = *source {
+                    let left = self.add(s.item, u32::from(s.count));
+                    subtract(source, s.count - left as u8);
+                }
+                return Ok(());
+            }
+        }
+        if slot == 53 {
+            if let Some(s) = f.slots[2] {
+                if self.cursor.is_none_or(|c| c.item == s.item) {
+                    let room =
+                        items::info(s.item).unwrap().max_stack - self.cursor.map_or(0, |c| c.count);
+                    let count = room.min(if button == 0 {
+                        s.count
+                    } else {
+                        s.count.div_ceil(2)
+                    });
+                    if count > 0 {
+                        self.cursor = Some(Stack {
+                            item: s.item,
+                            count: self.cursor.map_or(0, |c| c.count) + count,
+                        });
+                        subtract(&mut f.slots[2], count);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if slot == 52
+            && self
+                .cursor
+                .is_some_and(|s| items::info(s.item).unwrap().fuel.is_none())
+        {
+            return Ok(());
+        }
+        // Reuse the same pickup/place/swap rules through a temporary 2x2 target.
+        let screen = self.screen;
+        self.screen = Screen::None;
+        let saved = self.crafting;
+        if slot >= 51 {
+            self.crafting[0] = f.slots[(slot - 51) as usize];
+        }
+        let result = self.click(if slot >= 51 { 36 } else { slot }, button, shift);
+        if slot >= 51 {
+            f.slots[(slot - 51) as usize] = self.crafting[0];
+        }
+        self.crafting = saved;
+        self.screen = screen;
+        result
+    }
     /// Returns overflow for the server to spawn, in stable grid then cursor order.
     pub fn return_crafting(&mut self) -> Vec<Stack> {
         let mut overflow = Vec::new();
@@ -311,7 +398,7 @@ impl Inventory {
         Ok(result)
     }
 }
-fn valid(s: Stack) -> bool {
+pub(crate) fn valid(s: Stack) -> bool {
     items::info(s.item).is_some_and(|i| (1..=i.max_stack).contains(&s.count))
 }
 #[cfg(test)]
@@ -394,7 +481,7 @@ mod tests {
     }
 }
 
-fn subtract(slot: &mut Option<Stack>, count: u8) {
+pub(crate) fn subtract(slot: &mut Option<Stack>, count: u8) {
     if let Some(s) = slot {
         s.count -= count;
         if s.count == 0 {
@@ -532,7 +619,7 @@ mod crafting_tests {
     }
     #[test]
     fn all_tool_recipes_match_every_offset_without_mirroring() {
-        for material in ["wooden", "stone"] {
+        for material in ["wooden", "stone", "copper", "iron"] {
             for tool in ["pickaxe", "axe", "shovel"] {
                 let item = items::by_name(&format!("{material}_{tool}")).unwrap();
                 let recipe = world::recipes::RECIPES
@@ -729,5 +816,60 @@ mod crafting_tests {
         assert_eq!(inv.slots[1], stack(5, 2));
         assert_eq!(inv.cursor, None);
         assert_eq!(inv.crafting, [None; 4]);
+    }
+}
+
+#[cfg(test)]
+mod furnace_click_tests {
+    use super::*;
+    fn stack(name: &str, count: u8) -> Option<Stack> {
+        Some(Stack {
+            item: items::by_name(name).unwrap(),
+            count,
+        })
+    }
+    #[test]
+    fn furnace_pick_place_split_shift_and_output_are_conservative() {
+        let mut inv = Inventory {
+            screen: Screen::Furnace { pos: [0, 0, 0] },
+            ..Inventory::default()
+        };
+        let mut f = crate::furnace::Furnace::default();
+        inv.cursor = stack("dirt", 5);
+        inv.click_furnace(&mut f, 51, 1, false).unwrap();
+        assert_eq!(f.slots[0], stack("dirt", 1));
+        inv.click_furnace(&mut f, 51, 0, false).unwrap();
+        assert_eq!(f.slots[0], stack("dirt", 5));
+        inv.click_furnace(&mut f, 51, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack("dirt", 3));
+        inv.click_furnace(&mut f, 52, 0, false).unwrap();
+        assert_eq!(f.slots[1], None);
+        inv.cursor = stack("coal", 3);
+        inv.click_furnace(&mut f, 52, 0, false).unwrap();
+        assert_eq!(f.slots[1], stack("coal", 3));
+        assert_eq!(inv.cursor, None);
+        inv.click_furnace(&mut f, 52, 0, true).unwrap();
+        assert_eq!(inv.slots[0], stack("coal", 3));
+        f.slots[2] = stack("iron_ingot", 8);
+        inv.cursor = stack("dirt", 1);
+        inv.click_furnace(&mut f, 53, 0, false).unwrap();
+        assert_eq!(f.slots[2], stack("iron_ingot", 8));
+        inv.cursor = stack("iron_ingot", 63);
+        inv.click_furnace(&mut f, 53, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack("iron_ingot", 64));
+        assert_eq!(f.slots[2], stack("iron_ingot", 7));
+        inv.cursor = None;
+        inv.click_furnace(&mut f, 53, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack("iron_ingot", 4));
+        inv.slots.fill(stack("dirt", 64));
+        inv.slots[10] = stack("iron_ingot", 63);
+        inv.click_furnace(&mut f, 53, 0, true).unwrap();
+        assert_eq!(f.slots[2], stack("iron_ingot", 2));
+        assert_eq!(inv.slots[10], stack("iron_ingot", 64));
+        inv.cursor = stack("coal", 1);
+        f.slots[2] = None;
+        inv.click_furnace(&mut f, 53, 0, false).unwrap();
+        assert_eq!(f.slots[2], None);
+        assert_eq!(inv.cursor, stack("coal", 1));
     }
 }

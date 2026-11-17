@@ -1,0 +1,16 @@
+[[smelting]]
+input = "copper_ore"
+output = "copper_ingot"
+
+[[smelting]]
+input = "iron_ore"
+output = "iron_ingot"
+
+[[smelting]]
+input = "sand"
+output = "glass"
+
+[[smelting]]
+input = "cobblestone"
+output = "stone"
+

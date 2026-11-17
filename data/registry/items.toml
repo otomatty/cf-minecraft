@@ -22,6 +22,7 @@ block = "cobblestone"
 
 [[items]]
 name = "oak_planks"
+fuel = 320
 id = 5
 block = "oak_planks"
 
@@ -37,6 +38,7 @@ block = "sand"
 
 [[items]]
 name = "oak_log"
+fuel = 320
 id = 8
 block = "oak_log"
 
@@ -236,10 +238,33 @@ tool = { kind = "shovel", tier = 4 }
 
 [[items]]
 name = "stick"
+fuel = 80
 id = 43
 texture = "stick"
 
 [[items]]
 name = "crafting_table"
+fuel = 320
 id = 44
 block = "crafting_table"
+
+[[items]]
+name = "coal"
+id = 45
+fuel = 1600
+texture = "coal"
+
+[[items]]
+name = "copper_ingot"
+id = 46
+texture = "copper_ingot"
+
+[[items]]
+name = "iron_ingot"
+id = 47
+texture = "iron_ingot"
+
+[[items]]
+name = "furnace"
+id = 48
+block = "furnace"

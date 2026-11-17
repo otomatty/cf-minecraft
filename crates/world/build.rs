@@ -16,6 +16,7 @@ struct Item {
     block: Option<String>,
     texture: Option<String>,
     tool: Option<Tool>,
+    fuel: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -465,6 +466,10 @@ fn generate(root: &Path, dest: &Path) {
     for item in &items.items {
         identifier(&item.name);
         assert!(
+            item.fuel.is_none_or(|v| v > 0),
+            "items.toml: fuel must be positive"
+        );
+        assert!(
             names.insert(item.name.clone()),
             "items.toml: duplicate item {}",
             item.name
@@ -508,8 +513,8 @@ fn generate(root: &Path, dest: &Path) {
         });
         writeln!(
             out,
-            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool} }},",
-            item.id, item.name, item.max_stack, block
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?} }},",
+            item.id, item.name, item.max_stack, block, item.fuel
         )
         .unwrap();
     }
@@ -529,6 +534,7 @@ fn generate(root: &Path, dest: &Path) {
     fs::write(dest.join("items.rs"), out).unwrap();
 
     generate_recipes(root, dest, &items.items);
+    generate_smelting(root, dest, &items.items);
 
     let biomes: Biomes = read(&root.join("biomes.toml"));
     let mut names = BTreeSet::new();
@@ -719,4 +725,36 @@ fn generate_recipes(root: &Path, dest: &Path, items: &[Item]) {
     }
     out.push_str("];\n");
     fs::write(dest.join("recipes.rs"), out).unwrap();
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Smelting {
+    smelting: Vec<Smelt>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Smelt {
+    input: String,
+    output: String,
+}
+fn generate_smelting(root: &Path, dest: &Path, items: &[Item]) {
+    let data: Smelting = read(&root.join("smelting.toml"));
+    let mut seen = BTreeSet::new();
+    let mut out = String::from("pub const RECIPES: &[(u16,u16)] = &[\n");
+    for r in data.smelting {
+        let resolve = |name: &str| {
+            items
+                .iter()
+                .find(|i| i.name == name)
+                .unwrap_or_else(|| panic!("smelting.toml: unknown item {name}"))
+                .id
+        };
+        let input = resolve(&r.input);
+        let output = resolve(&r.output);
+        assert!(seen.insert(input), "smelting.toml: duplicate input");
+        writeln!(out, "({input}, {output}),").unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("smelting.rs"), out).unwrap();
 }
