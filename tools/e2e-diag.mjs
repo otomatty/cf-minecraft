@@ -100,22 +100,7 @@ export async function diagnose(browser, page, label, { edge, shots }) {
 		result.processes = connected;
 	}
 
-	let fresh;
-	let freshExpired = false;
-	try {
-		result.freshTab = await bounded(async () => {
-			fresh = await browser.newPage();
-			if (freshExpired) {
-				await bounded(() => fresh.close(), 1000);
-				return "tab arrived after deadline";
-			}
-			await fresh.goto(`${edge}/`, { waitUntil: "domcontentloaded", timeout: 15000 });
-			return fresh.evaluate(() => document.readyState);
-		}, 15000);
-	} finally {
-		freshExpired = true;
-		if (fresh) result.freshTabClose = await bounded(async () => { await fresh.close(); return "closed"; }, 1000);
-	}
+	// Capture before opening a fresh tab, which changes focus and releases pointer lock.
 	// Raw CDP avoids Puppeteer's screenshot lock, which can delay page.close()
 	// after a bounded page.screenshot() has already returned a timeout.
 	let screenshotSession;
@@ -142,6 +127,23 @@ export async function diagnose(browser, page, label, { edge, shots }) {
 	} finally {
 		screenshotExpired = true;
 		if (screenshotSession) result.screenshotSessionDetach = await bounded(async () => { await screenshotSession.detach(); return "detached"; }, 1000);
+	}
+
+	let fresh;
+	let freshExpired = false;
+	try {
+		result.freshTab = await bounded(async () => {
+			fresh = await browser.newPage();
+			if (freshExpired) {
+				await bounded(() => fresh.close(), 1000);
+				return "tab arrived after deadline";
+			}
+			await fresh.goto(`${edge}/`, { waitUntil: "domcontentloaded", timeout: 15000 });
+			return fresh.evaluate(() => document.readyState);
+		}, 15000);
+	} finally {
+		freshExpired = true;
+		if (fresh) result.freshTabClose = await bounded(async () => { await fresh.close(); return "closed"; }, 1000);
 	}
 	if (connected === true) result.sessionDetach = await bounded(async () => { await session.detach(); return "detached"; }, 1000);
 	const saved = await bounded(async () => {

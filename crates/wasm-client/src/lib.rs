@@ -49,6 +49,7 @@ struct State {
     game_mode: u8,
     selected: u8,
     slots: Vec<Option<(u16, u8)>>,
+    screen: u8,
     seed: i64,
     spawn: [f64; 3],
     view_distance: u32,
@@ -193,7 +194,8 @@ pub extern "C" fn client_new() {
         light_exports: None,
         game_mode: 0,
         selected: 0,
-        slots: vec![None; 42],
+        slots: vec![None; 51],
+        screen: 0,
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -305,6 +307,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         }
 
         S2C::Inventory {
+            screen,
+            table,
             selected,
             mut slots,
             crafting,
@@ -313,6 +317,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         } => {
             slots.extend(crafting);
             slots.extend([result, cursor]);
+            slots.extend(table);
+            st.screen = screen;
             st.selected = selected;
             st.slots = slots;
         }
@@ -1349,6 +1355,15 @@ pub extern "C" fn client_enc_click_slot(slot: u32, button: u32, shift: u32) -> u
     }
     .encode();
     st.out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_screen() -> u32 {
+    state().screen as u32
+}
+#[no_mangle]
+pub extern "C" fn client_enc_use_block(x: i32, y: i32, z: i32) -> usize {
+    state().out = C2S::UseBlock { x, y, z }.encode();
+    state().out.len()
 }
 #[no_mangle]
 pub extern "C" fn client_enc_close_inventory() -> usize {

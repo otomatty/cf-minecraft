@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
-import { placementState } from "./placement.ts";
+import { blockInteraction, placementState } from "./placement.ts";
 import { hotbarStates } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -197,4 +197,14 @@ test("WASM mining rules use the selected tool, tier gates and integer rounding",
 		assert.equal(core.miningDrops(id(block), held), drops);
 	}
 	assert.equal(core.miningTicks(65535, 0), null);
+});
+
+
+test("right-click opens a crafting table unless Shift requests placement", () => {
+    assert.equal(blockInteraction("crafting_table", false), "open");
+    assert.equal(blockInteraction("crafting_table", true), "place");
+    for (const name of ["stone", "oak_log", "air", undefined]) {
+        assert.equal(blockInteraction(name, false), "place");
+        assert.equal(blockInteraction(name, true), "place");
+    }
 });

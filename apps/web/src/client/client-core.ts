@@ -21,6 +21,8 @@ export interface ClientExports {
 	client_game_mode(): number;
 	client_enc_click_slot(slot: number, button: number, shift: number): number;
 	client_enc_close_inventory(): number;
+	client_enc_use_block(x: number, y: number, z: number): number;
+	client_screen(): number;
 	client_selected_slot(): number;
 	client_slot_item(slot: number): number;
 	client_slot_count(slot: number): number;
@@ -397,10 +399,14 @@ export class ClientCore {
 	}
 
 	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
+	get screen(): number { return this.x.client_screen(); }
+	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
+	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }
+	encodeUseBlock(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_block(x, y, z)); }
 	get selectedSlot(): number { return this.x.client_selected_slot(); }
 	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }
 	get inventorySlots(): Array<InventorySlot | null> {
-		return Array.from({ length: 42 }, (_, i) => {
+		return Array.from({ length: 51 }, (_, i) => {
 			const item = this.x.client_slot_item(i);
 			return item ? { item, count: this.x.client_slot_count(i) } : null;
 		});

@@ -182,6 +182,8 @@ impl Server {
         self.outbox.push((
             id,
             S2C::Inventory {
+                screen: u8::from(client.inventory.screen != inventory::Screen::None),
+                table: client.inventory.table.map(|s| s.map(|s| (s.item, s.count))),
                 crafting: client
                     .inventory
                     .crafting
@@ -521,7 +523,9 @@ impl Server {
             return;
         };
         let had_transient = client.inventory.cursor.is_some()
-            || client.inventory.crafting.iter().any(Option::is_some);
+            || client.inventory.crafting.iter().any(Option::is_some)
+            || client.inventory.table.iter().any(Option::is_some)
+            || client.inventory.screen != inventory::Screen::None;
         let overflow = client.inventory.return_crafting();
         client.inventory_dirty |= had_transient;
         let pos = client.pos;
@@ -549,7 +553,11 @@ impl Server {
                 self.stats.packets_rejected += 1;
                 if matches!(
                     bytes.first(),
-                    Some(&protocol::id::C2S_CREATIVE_SET_SLOT | &protocol::id::C2S_CLICK_SLOT)
+                    Some(
+                        &protocol::id::C2S_CREATIVE_SET_SLOT
+                            | &protocol::id::C2S_CLICK_SLOT
+                            | &protocol::id::C2S_USE_BLOCK
+                    )
                 ) {
                     self.clients.get_mut(&id).unwrap().inventory_dirty = true;
                 }
@@ -563,6 +571,7 @@ impl Server {
             self.apply(id, packet);
         }
         self.tick_digs();
+        self.tick_screens();
         self.stream_chunks();
         self.tick_entities();
         self.flush_digs();
@@ -677,9 +686,25 @@ impl Server {
                     self.stats.packets_rejected += 1;
                     return;
                 }
-                let _ = client.inventory.click(slot, button, shift);
+                if client.inventory.click(slot, button, shift).is_err() {
+                    self.stats.packets_rejected += 1;
+                }
                 client.inventory_dirty = true;
                 self.abort_dig(id);
+            }
+            C2S::UseBlock { x, y, z } => {
+                let client = &self.clients[&id];
+                let allowed = client.joined
+                    && client.inventory.screen == inventory::Screen::None
+                    && self.within_reach(client.pos, [x, y, z])
+                    && self.world.get_block(x, y, z) == Some(blocks::CRAFTING_TABLE);
+                let client = self.clients.get_mut(&id).unwrap();
+                if allowed {
+                    client.inventory.screen = inventory::Screen::CraftingTable { pos: [x, y, z] };
+                } else {
+                    self.stats.packets_rejected += 1;
+                }
+                client.inventory_dirty = true;
             }
             C2S::CloseInventory => {
                 self.return_crafting(id);
@@ -939,6 +964,33 @@ impl Server {
         }
     }
 
+    fn within_reach(&self, player: [f64; 3], [x, y, z]: [i32; 3]) -> bool {
+        let dx = x as f64 + 0.5 - player[0];
+        let dy = y as f64 + 0.5 - player[1];
+        let dz = z as f64 + 0.5 - player[2];
+        dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+    }
+
+    fn tick_screens(&mut self) {
+        let close: Vec<_> = self
+            .clients
+            .iter()
+            .filter_map(|(&id, c)| {
+                if let inventory::Screen::CraftingTable { pos: [x, y, z] } = c.inventory.screen {
+                    if self.world.get_block(x, y, z) != Some(blocks::CRAFTING_TABLE)
+                        || !self.within_reach(c.pos, [x, y, z])
+                    {
+                        return Some(id);
+                    }
+                }
+                None
+            })
+            .collect();
+        for id in close {
+            self.return_crafting(id);
+        }
+    }
+
     fn can_edit(&self, id: u32, x: i32, y: i32, z: i32, state: u16) -> bool {
         let Some(client) = self.clients.get(&id) else {
             return false;
@@ -949,10 +1001,7 @@ impl Server {
         if !client.sent.contains(&(x >> 4, z >> 4)) {
             return false;
         }
-        let dx = x as f64 + 0.5 - client.pos[0];
-        let dy = y as f64 + 0.5 - client.pos[1];
-        let dz = z as f64 + 0.5 - client.pos[2];
-        dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+        self.within_reach(client.pos, [x, y, z])
             && self.world.get_block(x, y, z).is_some_and(|old| {
                 blocks::can_place(
                     old,
@@ -1246,9 +1295,16 @@ impl Server {
                 .copied()
                 .chain(client.inventory.crafting)
                 .chain([client.inventory.cursor])
+                .chain(client.inventory.table)
             {
                 h.bytes(&slot.map_or(0, |s| s.item).to_be_bytes());
                 h.u8(slot.map_or(0, |s| s.count));
+            }
+            h.u8(u8::from(client.inventory.screen != inventory::Screen::None));
+            if let inventory::Screen::CraftingTable { pos } = client.inventory.screen {
+                for v in pos {
+                    h.bytes(&v.to_be_bytes());
+                }
             }
             h.u8(client.dig.is_some() as u8);
             if let Some(dig) = client.dig {
@@ -3345,6 +3401,186 @@ mod crafting_server_tests {
         s.take_outbox();
         s
     }
+    fn table(s: &mut Server) -> [i32; 3] {
+        let p = s.clients[&1].pos;
+        let pos = [
+            p[0].floor() as i32 + 1,
+            p[1].floor() as i32,
+            p[2].floor() as i32,
+        ];
+        assert!(s
+            .world
+            .set_block(pos[0], pos[1], pos[2], blocks::CRAFTING_TABLE)
+            .is_some());
+        pos
+    }
+    fn use_table(s: &mut Server, [x, y, z]: [i32; 3]) {
+        s.handle_packet(1, &C2S::UseBlock { x, y, z }.encode());
+        s.tick();
+    }
+    #[test]
+    fn opens_only_reachable_tables_and_rejects_inactive_grid_slots() {
+        let mut s = server();
+        let pos = table(&mut s);
+        for slot in 41..=50 {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button: 0,
+                    shift: false,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 10);
+        assert!(s
+            .take_outbox()
+            .iter()
+            .any(|(_, p)| matches!(S2C::decode(p), Ok(S2C::Inventory { screen: 0, .. }))));
+        use_table(&mut s, [pos[0], pos[1] + 1, pos[2]]);
+        s.world
+            .set_block(pos[0] + 10, pos[1], pos[2], blocks::CRAFTING_TABLE);
+        use_table(&mut s, [pos[0] + 10, pos[1], pos[2]]);
+        assert_eq!(s.stats.packets_rejected, 12);
+        use_table(&mut s, pos);
+        assert_eq!(
+            s.clients[&1].inventory.screen,
+            inventory::Screen::CraftingTable { pos }
+        );
+        assert!(s
+            .take_outbox()
+            .iter()
+            .any(|(_, p)| matches!(S2C::decode(p), Ok(S2C::Inventory { screen: 1, .. }))));
+        use_table(&mut s, pos);
+        for slot in 36..=40 {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button: 0,
+                    shift: false,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 18);
+    }
+    #[test]
+    fn log_to_wooden_pickaxe_through_packet_clicks() {
+        let mut s = server();
+        let pos = table(&mut s);
+        s.clients.get_mut(&1).unwrap().inventory = Inventory::default();
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, Some(Stack { item: 8, count: 3 }))
+            .unwrap();
+        for (slot, button, shift) in [
+            (0, 0, false),
+            (36, 0, false),
+            (40, 0, true),
+            (0, 0, false),
+            (36, 1, false),
+            (38, 1, false),
+            (1, 0, false),
+            (40, 0, false),
+            (2, 0, false),
+        ] {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button,
+                    shift,
+                }
+                .encode(),
+            );
+        }
+        s.handle_packet(1, &C2S::CloseInventory.encode());
+        use_table(&mut s, pos);
+        for (slot, button) in [
+            (1, 0),
+            (41, 1),
+            (42, 1),
+            (43, 1),
+            (1, 0),
+            (2, 0),
+            (45, 1),
+            (48, 1),
+            (2, 0),
+            (50, 0),
+            (3, 0),
+        ] {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button,
+                    shift: false,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        let inv = &s.clients[&1].inventory;
+        assert_eq!(
+            inv.slots()[3],
+            Some(Stack {
+                item: items::by_name("wooden_pickaxe").unwrap(),
+                count: 1
+            })
+        );
+        assert_eq!(inv.table, [None; 9]);
+        assert_eq!(s.stats.packets_rejected, 0);
+    }
+    #[test]
+    fn destroying_table_or_leaving_reach_returns_or_drops_contents() {
+        for broken in [false, true] {
+            for full in [false, true] {
+                let mut s = server();
+                fill(&mut s, full);
+                let pos = table(&mut s);
+                use_table(&mut s, pos);
+                if broken {
+                    s.world.set_block(pos[0], pos[1], pos[2], blocks::AIR);
+                } else {
+                    s.handle_packet(
+                        1,
+                        &C2S::Teleport {
+                            x: 100.0,
+                            y: 80.0,
+                            z: 100.0,
+                        }
+                        .encode(),
+                    );
+                }
+                s.tick();
+                let inv = &s.clients[&1].inventory;
+                assert_eq!(inv.screen, inventory::Screen::None);
+                assert_eq!(inv.table, [None; 9]);
+                assert_eq!(inv.crafting, [None; 4]);
+                assert_eq!(inv.cursor, None);
+                let returned = inv
+                    .slots()
+                    .iter()
+                    .flatten()
+                    .filter(|s| s.item != 1)
+                    .map(|s| u32::from(s.count))
+                    .sum::<u32>()
+                    + s.entities.values().map(|e| u32::from(e.count)).sum::<u32>();
+                assert_eq!(returned, 12);
+                assert_eq!(s.entities.len(), if full { 3 } else { 0 });
+                assert!(s
+                    .take_outbox()
+                    .iter()
+                    .any(|(_, p)| matches!(S2C::decode(p), Ok(S2C::Inventory { screen: 0, .. }))));
+            }
+        }
+    }
     fn fill(s: &mut Server, full: bool) {
         let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
         *inv = Inventory::default();
@@ -3355,6 +3591,7 @@ mod crafting_server_tests {
         }
         inv.crafting[0] = Some(Stack { item: 8, count: 2 });
         inv.cursor = Some(Stack { item: 43, count: 3 });
+        inv.table[8] = Some(Stack { item: 5, count: 7 });
     }
     #[test]
     fn close_save_disconnect_return_and_drop_overflow() {
@@ -3368,6 +3605,10 @@ mod crafting_server_tests {
         );
         assert_eq!(
             s.clients[&1].inventory.slots()[1],
+            Some(Stack { item: 5, count: 7 })
+        );
+        assert_eq!(
+            s.clients[&1].inventory.slots()[2],
             Some(Stack { item: 43, count: 3 })
         );
         fill(&mut s, true);
@@ -3379,15 +3620,15 @@ mod crafting_server_tests {
         assert!(s.entities.is_empty());
         s.handle_packet(1, &C2S::CloseInventory.encode());
         s.tick();
-        assert_eq!(s.entities.len(), 2);
+        assert_eq!(s.entities.len(), 3);
         assert_eq!(
             s.entities.values().map(|e| u32::from(e.count)).sum::<u32>(),
-            5
+            12
         );
         fill(&mut s, true);
         s.disconnect(1);
         assert!(!s.clients.contains_key(&1));
-        assert_eq!(s.entities.len(), 4);
+        assert_eq!(s.entities.len(), 6);
         // The same return operation used by disconnect also inserts into non-full inventories.
         let mut inv = Inventory::default();
         inv.crafting[0] = Some(Stack { item: 8, count: 2 });
@@ -3429,6 +3670,7 @@ mod crafting_server_tests {
             .iter()
             .copied()
             .chain(before.crafting)
+            .chain(before.table)
             .chain([before.cursor])
             .flatten()
         {
@@ -3454,7 +3696,7 @@ mod crafting_server_tests {
             assert_eq!(entity.pickup_delay, 40);
         }
         assert_eq!(actual, expected);
-        assert_eq!(restored.entities.len(), 2);
+        assert_eq!(restored.entities.len(), 3);
         // A subsequent snapshot and reconnect must not restore transient items twice.
         let saved = restored.inventory_data(1).unwrap();
         let mut again = Server::new(2026, Generator::Flat);
@@ -3472,6 +3714,7 @@ mod crafting_server_tests {
                 .iter()
                 .copied()
                 .chain(inv.crafting)
+                .chain(inv.table)
                 .chain([inv.cursor])
                 .flatten()
                 .map(|s| (s.item, s.count))
@@ -3497,12 +3740,12 @@ mod crafting_server_tests {
         let inv = Inventory::from_bytes(&saved).unwrap();
         assert_eq!(inv.crafting, [None; 4]);
         assert_eq!(inv.cursor, None);
-        assert_eq!(s.entities.len(), 2);
+        assert_eq!(s.entities.len(), 3);
         assert_eq!(totals(&s), before);
         s.disconnect(1);
         s.connect_at(1, true, position, Some(&saved));
         assert_eq!(totals(&s), before);
-        assert_eq!(s.entities.len(), 2);
+        assert_eq!(s.entities.len(), 3);
         assert_eq!(s.clients[&1].inventory, inv);
     }
     #[test]
@@ -3511,6 +3754,17 @@ mod crafting_server_tests {
         fill(&mut a, false);
         fill(&mut b, false);
         assert_eq!(a.state_hash(), b.state_hash());
+        b.clients.get_mut(&1).unwrap().inventory.table[0] = Some(Stack { item: 5, count: 1 });
+        assert_ne!(a.state_hash(), b.state_hash());
+        fill(&mut b, false);
+        b.clients.get_mut(&1).unwrap().inventory.screen =
+            inventory::Screen::CraftingTable { pos: [0, 80, 0] };
+        assert_ne!(a.state_hash(), b.state_hash());
+        let open_hash = b.state_hash();
+        b.clients.get_mut(&1).unwrap().inventory.screen =
+            inventory::Screen::CraftingTable { pos: [1, 80, 0] };
+        assert_ne!(b.state_hash(), open_hash);
+        fill(&mut b, false);
         b.clients.get_mut(&1).unwrap().inventory.cursor = None;
         assert_ne!(a.state_hash(), b.state_hash());
         fill(&mut b, false);

@@ -5,9 +5,16 @@ export const INVENTORY_ROWS = [
     [36, 37, 38, 39],
     [40],
 ];
-export function inventoryDisplay(slots: readonly (InventorySlot | null)[]) {
+export const TABLE_ROWS = [INVENTORY_ROWS[0], INVENTORY_ROWS[1],
+    Array.from({ length: 9 }, (_, i) => i + 41), [50]];
+
+/** Translate a wire slot into the client display array, keeping cursor 41 separate. */
+export function inventoryDisplayIndex(slot: number, table = false): number {
+    return table && slot >= 41 && slot <= 49 ? slot + 1 : table && slot === 50 ? 40 : slot;
+}
+export function inventoryDisplay(slots: readonly (InventorySlot | null)[], table = false) {
     return {
-        groups: INVENTORY_ROWS.map(row => row.map(slot => ({ slot, stack: slots[slot] ?? null }))),
+        groups: (table ? TABLE_ROWS : INVENTORY_ROWS).map(row => row.map(slot => ({ slot, stack: slots[inventoryDisplayIndex(slot, table)] ?? null }))),
         cursor: slots[41] ?? null,
     };
 }

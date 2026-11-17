@@ -52,3 +52,8 @@ export function placementState(
 	if (block.model === "cross" && !registry[getBlock(x, y - 1, z)]?.occludes) return null;
 	return { x, y, z, state };
 }
+
+/** Right-click uses a table before attempting placement, including with an empty hand. */
+export function blockInteraction(blockName: string | undefined, shift: boolean): "open" | "place" {
+    return blockName === "crafting_table" && !shift ? "open" : "place";
+}
