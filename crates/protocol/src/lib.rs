@@ -8,11 +8,17 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
+    ClickSlot {
+        slot: u8,
+        button: u8,
+        shift: bool,
+    },
+    CloseInventory,
     DigStart {
         x: i32,
         y: i32,
@@ -89,6 +95,9 @@ pub enum S2C {
     Inventory {
         selected: u8,
         slots: Vec<Option<(u16, u8)>>,
+        crafting: [Option<(u16, u8)>; 4],
+        result: Option<(u16, u8)>,
+        cursor: Option<(u16, u8)>,
     },
     Welcome {
         seed: i64,
@@ -124,6 +133,8 @@ pub enum S2C {
 }
 
 pub mod id {
+    pub const C2S_CLICK_SLOT: u8 = 0x09;
+    pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
     pub const C2S_DIG_ABORT: u8 = 0x08;
     pub const S2C_DIG_PROGRESS: u8 = 0x0b;
@@ -152,6 +163,17 @@ impl C2S {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match *self {
+            C2S::ClickSlot {
+                slot,
+                button,
+                shift,
+            } => {
+                w.u8(id::C2S_CLICK_SLOT);
+                w.u8(slot);
+                w.u8(button);
+                w.u8(u8::from(shift));
+            }
+            C2S::CloseInventory => w.u8(id::C2S_CLOSE_INVENTORY),
             C2S::DigStart { x, y, z } => {
                 w.u8(id::C2S_DIG_START);
                 w.i32(x);
@@ -218,6 +240,18 @@ impl C2S {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::C2S_CLICK_SLOT => {
+                let (slot, button, shift) = (r.u8()?, r.u8()?, r.u8()?);
+                if slot > 40 || button > 1 || shift > 1 {
+                    return Err(DecodeError);
+                }
+                C2S::ClickSlot {
+                    slot,
+                    button,
+                    shift: shift != 0,
+                }
+            }
+            id::C2S_CLOSE_INVENTORY => C2S::CloseInventory,
             id::C2S_DIG_START => C2S::DigStart {
                 x: r.i32()?,
                 y: r.i32()?,
@@ -347,11 +381,17 @@ impl S2C {
                 w.i32(*entity as i32);
             }
 
-            S2C::Inventory { selected, slots } => {
+            S2C::Inventory {
+                selected,
+                slots,
+                crafting,
+                result,
+                cursor,
+            } => {
                 w.u8(id::S2C_INVENTORY);
                 w.u8(*selected);
                 w.u8(slots.len() as u8);
-                for slot in slots {
+                for slot in slots.iter().chain(crafting).chain([result, cursor]) {
                     w.u16(slot.map_or(0, |s| s.0));
                     w.u8(slot.map_or(0, |s| s.1));
                 }
@@ -488,7 +528,30 @@ impl S2C {
                         slots.push(Some((item, count)));
                     }
                 }
-                S2C::Inventory { selected, slots }
+                let mut extra = [None; 6];
+                for slot in &mut extra {
+                    let item = r.u16()?;
+                    let count = r.u8()?;
+                    if item == 0 {
+                        if count != 0 {
+                            return Err(DecodeError);
+                        }
+                    } else {
+                        if !world::items::info(item)
+                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
+                        {
+                            return Err(DecodeError);
+                        }
+                        *slot = Some((item, count));
+                    }
+                }
+                S2C::Inventory {
+                    selected,
+                    slots,
+                    crafting: extra[..4].try_into().unwrap(),
+                    result: extra[4],
+                    cursor: extra[5],
+                }
             }
             id::S2C_WELCOME => S2C::Welcome {
                 seed: r.i64()?,
@@ -658,6 +721,9 @@ mod tests {
             S2C::Inventory {
                 selected: 8,
                 slots: vec![Some((1, 64)); 36],
+                crafting: [None; 4],
+                result: None,
+                cursor: None,
             },
             S2C::PlayerCorrect {
                 x: 0.5,
@@ -694,10 +760,54 @@ mod tests {
     }
 
     #[test]
+    fn crafting_packets_round_trip_and_reject_out_of_range_values() {
+        for packet in [
+            C2S::CloseInventory,
+            C2S::ClickSlot {
+                slot: 40,
+                button: 1,
+                shift: true,
+            },
+            C2S::ClickSlot {
+                slot: 0,
+                button: 0,
+                shift: false,
+            },
+        ] {
+            assert_eq!(C2S::decode(&packet.encode()), Ok(packet));
+        }
+        for bytes in [
+            vec![id::C2S_CLICK_SLOT, 41, 0, 0],
+            vec![id::C2S_CLICK_SLOT, 0, 2, 0],
+            vec![id::C2S_CLICK_SLOT, 0, 0, 2],
+            vec![id::C2S_CLOSE_INVENTORY, 0],
+        ] {
+            assert!(C2S::decode(&bytes).is_err());
+        }
+        let packet = S2C::Inventory {
+            selected: 3,
+            slots: vec![None; 36],
+            crafting: [Some((8, 2)), None, Some((5, 3)), None],
+            result: Some((43, 4)),
+            cursor: Some((44, 1)),
+        };
+        let bytes = packet.encode();
+        assert_eq!(S2C::decode(&bytes), Ok(packet));
+        for offset in [111, 114, 117, 120, 123, 126] {
+            let mut bad = bytes.clone();
+            bad[offset + 2] = 65;
+            assert!(S2C::decode(&bad).is_err());
+        }
+    }
+
+    #[test]
     fn inventory_packet_rejects_malformed_lengths_and_values() {
         let p = S2C::Inventory {
             selected: 0,
             slots: vec![Some((1, 64)); 36],
+            crafting: [None; 4],
+            result: None,
+            cursor: None,
         };
         let bytes = p.encode();
         for (index, value) in [(1, 9), (2, 35), (2, 37), (3, 255), (5, 0), (5, 65)] {
@@ -712,11 +822,17 @@ mod tests {
         let p = S2C::Inventory {
             selected: 8,
             slots: vec![None; 36],
+            crafting: [None; 4],
+            result: None,
+            cursor: None,
         };
         assert_eq!(S2C::decode(&p.encode()), Ok(p));
         let mut bad = S2C::Inventory {
             selected: 0,
             slots: vec![None; 36],
+            crafting: [None; 4],
+            result: None,
+            cursor: None,
         }
         .encode();
         bad[5] = 1;

@@ -340,7 +340,7 @@ mod tests {
         }
         assert_eq!(
             (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
-            (23, 31, 39, 49)
+            (23, 31, 39, 50)
         );
         for base in [OAK_STAIRS, COBBLESTONE_STAIRS] {
             assert_eq!(block(base).unwrap().count, 8);

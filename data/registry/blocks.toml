@@ -7,6 +7,7 @@ textures = [
   "yellow_flower", "short_grass",
   "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
   "coal_ore", "copper_ore", "iron_ore", "gold_ore",
+  "crafting_table_top", "crafting_table_side", "crafting_table_bottom",
 ]
 legacy_count = 14
 
@@ -301,3 +302,13 @@ min_tier = 3
 dig_ticks = 90
 id = 48
 texture = "gold_ore"
+
+[[blocks]]
+name = "crafting_table"
+id = 49
+dig_ticks = 40
+tool = "axe"
+min_tier = 0
+top = "crafting_table_top"
+side = "crafting_table_side"
+bottom = "crafting_table_bottom"

@@ -19,6 +19,8 @@ export interface ClientExports {
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
 	client_game_mode(): number;
+	client_enc_click_slot(slot: number, button: number, shift: number): number;
+	client_enc_close_inventory(): number;
 	client_selected_slot(): number;
 	client_slot_item(slot: number): number;
 	client_slot_count(slot: number): number;
@@ -396,12 +398,15 @@ export class ClientCore {
 
 	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
 	get selectedSlot(): number { return this.x.client_selected_slot(); }
-	get inventory(): Array<InventorySlot | null> {
-		return Array.from({ length: 36 }, (_, i) => {
+	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }
+	get inventorySlots(): Array<InventorySlot | null> {
+		return Array.from({ length: 42 }, (_, i) => {
 			const item = this.x.client_slot_item(i);
 			return item ? { item, count: this.x.client_slot_count(i) } : null;
 		});
 	}
+	encodeClickSlot(slot: number, button: number, shift: boolean): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_click_slot(slot, button, Number(shift))); }
+	encodeCloseInventory(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_close_inventory()); }
 	itemRegistry(): ItemInfo[] { return JSON.parse(this.decoder.decode(this.out(this.x.client_item_registry()))); }
 	encodeSelectSlot(slot: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_select_slot(slot)); }
 	encodeCreativeSetSlot(slot: number, item: number, count: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_creative_set_slot(slot, item, count)); }

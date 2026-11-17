@@ -1,3 +1,4 @@
+import { inventoryDisplay, INVENTORY_ROWS } from "./inventory-screen.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -292,6 +293,8 @@ async function main(): Promise<void> {
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
 			picker.hidden = true;
+			inventoryScreen.hidden = true;
+			cursorIcon.hidden = true;
 			$("start-to-title").hidden = false;
 			showMenuView("start");
 			timeSamples.length = 0;
@@ -306,6 +309,8 @@ async function main(): Promise<void> {
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
 			picker.hidden = true;
+			inventoryScreen.hidden = true;
+			cursorIcon.hidden = true;
 			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
@@ -419,6 +424,7 @@ async function main(): Promise<void> {
 	}
 	function syncInventory(): void {
 		const inventory = core.inventory;
+		paintInventoryScreen();
 		hotbarBlocks = hotbarStates(inventory, items);
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
@@ -610,6 +616,103 @@ async function main(): Promise<void> {
 	}
 	refreshSettings();
 
+	const inventoryScreen = document.createElement("section");
+	inventoryScreen.id = "inventory-screen";
+	inventoryScreen.setAttribute("role", "dialog");
+	inventoryScreen.setAttribute("aria-modal", "true");
+	inventoryScreen.setAttribute("aria-label", "インベントリとクラフト");
+	inventoryScreen.hidden = true;
+	inventoryScreen.style.cssText = "position:fixed;inset:10% auto auto 50%;transform:translateX(-50%);z-index:20;background:#292c30;color:white;padding:20px;border:2px solid #91999e;max-height:80vh;overflow:auto";
+	const heading = document.createElement("h2");
+	heading.textContent = "インベントリ / クラフト";
+	inventoryScreen.append(heading);
+	const inventoryButtons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
+	const craftingRow = document.createElement("div");
+	craftingRow.className = "inventory-crafting";
+	for (const [index, row] of INVENTORY_ROWS.entries()) {
+		const group = document.createElement("div");
+		const label = ["所持品", "ホットバー", "クラフト", "結果"][index];
+		group.setAttribute("aria-label", label);
+		group.className = `inventory-slots${index === 2 ? " inventory-crafting-grid" : index === 3 ? " inventory-result" : ""}`;
+		if (index !== 3) {
+			const title = document.createElement("h3");
+			title.textContent = label;
+			inventoryScreen.append(title);
+		}
+		for (const slot of row) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.dataset.slot = String(slot);
+			button.setAttribute("aria-label", `枠 ${slot}`);
+			button.style.cssText = "position:relative;width:48px;height:48px;background:#525960;border:1px solid #aab2ba;color:white";
+			const canvas = document.createElement("canvas");
+			canvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
+			const count = document.createElement("span");
+			count.style.cssText = "position:absolute;right:2px;bottom:0;text-shadow:1px 1px black";
+			button.append(canvas,count);
+			button.addEventListener("contextmenu", event => event.preventDefault());
+			button.addEventListener("mousedown", event => {
+				event.preventDefault();
+				if (event.button === 0 || event.button === 2) transport.send(core.encodeClickSlot(slot, event.button === 2 ? 1 : 0, event.shiftKey));
+			});
+			inventoryButtons.set(slot,{canvas,count});
+			group.append(button);
+		}
+		if (index === 2) {
+			craftingRow.append(group);
+			inventoryScreen.append(craftingRow);
+		} else if (index === 3) {
+			const arrow = document.createElement("span");
+			arrow.textContent = "→";
+			arrow.setAttribute("aria-hidden", "true");
+			craftingRow.append(arrow, group);
+		} else {
+			inventoryScreen.append(group);
+		}
+	}
+	const inventoryClose = document.createElement("button");
+	inventoryClose.textContent = "閉じる (E / Esc)";
+	inventoryClose.addEventListener("click", closeInventoryScreen);
+	inventoryScreen.append(inventoryClose);
+	const cursorIcon = document.createElement("div");
+	cursorIcon.style.cssText = "position:fixed;pointer-events:none;z-index:30;color:white;text-shadow:1px 1px black";
+	const cursorCanvas = document.createElement("canvas");
+	cursorCanvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
+	const cursorCount = document.createElement("span");
+	cursorIcon.append(cursorCanvas,cursorCount);
+	cursorIcon.hidden = true;
+	document.body.append(inventoryScreen,cursorIcon);
+	document.addEventListener("mousemove", event => {
+		cursorIcon.style.left = `${event.clientX+12}px`;
+		cursorIcon.style.top = `${event.clientY+12}px`;
+	});
+	function paintInventoryScreen(): void {
+		const display = inventoryDisplay(core.inventorySlots);
+		for (const group of display.groups) for (const {slot,stack} of group) {
+			const view = inventoryButtons.get(slot)!;
+			paintItemIcon(view.canvas, stack?.item);
+			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
+			view.canvas.dataset.count = String(stack?.count ?? 0);
+		}
+		paintItemIcon(cursorCanvas, display.cursor?.item);
+		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
+		cursorIcon.hidden = inventoryScreen.hidden || !display.cursor;
+	}
+	function openInventoryScreen(): void {
+		clearInput();
+		inventoryScreen.hidden = false;
+		overlay.hidden = true;
+		paintInventoryScreen();
+		if (locked()) document.exitPointerLock();
+	}
+	function closeInventoryScreen(): void {
+		inventoryScreen.hidden = true;
+		cursorIcon.hidden = true;
+		transport.send(core.encodeCloseInventory());
+		clearInput();
+		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
+		void requestPointerLock();
+	}
 	const picker = $("block-picker");
 	const pickerButtons: HTMLButtonElement[] = [];
 	items.forEach(info => {
@@ -689,7 +792,7 @@ async function main(): Promise<void> {
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && !failed && connection === "open" && picker.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
@@ -700,7 +803,7 @@ async function main(): Promise<void> {
 		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
-		if (!picker.hidden) { overlay.hidden = true; return; }
+		if (!picker.hidden || !inventoryScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -728,6 +831,13 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
+		if (!inventoryScreen.hidden) {
+			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
+				e.preventDefault();
+				if (!e.repeat) closeInventoryScreen();
+			}
+			return;
+		}
 		if (!picker.hidden) {
 			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
 				e.preventDefault();
@@ -742,7 +852,7 @@ async function main(): Promise<void> {
 		}
 		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {
 			e.preventDefault();
-			if (!e.repeat) openPicker();
+			if (!e.repeat) { if (core.gameMode === "survival") openInventoryScreen(); else openPicker(); }
 			return;
 		}
 		if (matchesKey(e.code, settings.keys.fullscreen) && !e.repeat) {

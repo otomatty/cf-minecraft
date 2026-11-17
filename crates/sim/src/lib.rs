@@ -173,7 +173,12 @@ impl Server {
         self.game_mode = mode;
     }
     pub fn inventory_data(&self, id: u32) -> Option<Vec<u8>> {
-        self.clients.get(&id).map(|c| c.inventory.to_bytes())
+        self.clients.get(&id).map(|c| {
+            let mut snapshot = c.inventory.clone();
+            // Transient overflow is omitted from the snapshot; live state is untouched.
+            snapshot.return_crafting();
+            snapshot.to_bytes()
+        })
     }
     fn send_inventory(&mut self, id: u32) {
         let client = self.clients.get_mut(&id).expect("client");
@@ -181,6 +186,12 @@ impl Server {
         self.outbox.push((
             id,
             S2C::Inventory {
+                crafting: client
+                    .inventory
+                    .crafting
+                    .map(|s| s.map(|s| (s.item, s.count))),
+                result: client.inventory.result().map(|s| (s.item, s.count)),
+                cursor: client.inventory.cursor.map(|s| (s.item, s.count)),
                 selected: client.inventory.selected(),
                 slots: client
                     .inventory
@@ -508,7 +519,21 @@ impl Server {
         self.clients.get(&id).map(|client| client.pos)
     }
 
+    fn return_crafting(&mut self, id: u32) {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return;
+        };
+        let had_transient = client.inventory.cursor.is_some()
+            || client.inventory.crafting.iter().any(Option::is_some);
+        let overflow = client.inventory.return_crafting();
+        client.inventory_dirty |= had_transient;
+        let pos = client.pos;
+        for stack in overflow {
+            self.spawn_item(stack.item, stack.count, pos, [0.0, 0.1, 0.0], 40);
+        }
+    }
     pub fn disconnect(&mut self, id: u32) {
+        self.return_crafting(id);
         self.abort_dig(id);
         self.clients.remove(&id);
         self.pending.retain(|(c, _)| *c != id);
@@ -525,7 +550,10 @@ impl Server {
             Ok(p) => self.pending.push((id, p)),
             Err(_) => {
                 self.stats.packets_rejected += 1;
-                if bytes.first() == Some(&protocol::id::C2S_CREATIVE_SET_SLOT) {
+                if matches!(
+                    bytes.first(),
+                    Some(&protocol::id::C2S_CREATIVE_SET_SLOT | &protocol::id::C2S_CLICK_SLOT)
+                ) {
                     self.clients.get_mut(&id).unwrap().inventory_dirty = true;
                 }
             }
@@ -642,6 +670,23 @@ impl Server {
                 });
             }
 
+            C2S::ClickSlot {
+                slot,
+                button,
+                shift,
+            } => {
+                let client = self.clients.get_mut(&id).unwrap();
+                if !client.joined {
+                    self.stats.packets_rejected += 1;
+                    return;
+                }
+                let _ = client.inventory.click(slot, button, shift);
+                client.inventory_dirty = true;
+                self.abort_dig(id);
+            }
+            C2S::CloseInventory => {
+                self.return_crafting(id);
+            }
             C2S::DropItem { dir } => {
                 let client = self.clients.get_mut(&id).unwrap();
                 if !client.joined || !dir.iter().all(|v| v.is_finite()) {
@@ -1194,6 +1239,15 @@ impl Server {
         for (&id, client) in &self.clients {
             h.bytes(&id.to_be_bytes());
             h.bytes(&client.inventory.to_bytes());
+            for slot in client
+                .inventory
+                .crafting
+                .into_iter()
+                .chain([client.inventory.cursor])
+            {
+                h.bytes(&slot.map_or(0, |s| s.item).to_be_bytes());
+                h.u8(slot.map_or(0, |s| s.count));
+            }
             h.u8(client.dig.is_some() as u8);
             if let Some(dig) = client.dig {
                 for v in dig.pos {
@@ -3270,3 +3324,130 @@ mod tests {
 
 #[cfg(test)]
 mod mining;
+
+#[cfg(test)]
+mod crafting_server_tests {
+    use super::*;
+    fn server() -> Server {
+        let mut s = Server::new(2026, Generator::Flat);
+        s.connect_with_teleport(1, true);
+        s.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: protocol::PROTOCOL_VERSION,
+                view_distance: 0,
+            }
+            .encode(),
+        );
+        s.tick();
+        s.take_outbox();
+        s
+    }
+    fn fill(s: &mut Server, full: bool) {
+        let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
+        *inv = Inventory::default();
+        if full {
+            for i in 0..36 {
+                inv.set(i, Some(Stack { item: 1, count: 64 })).unwrap();
+            }
+        }
+        inv.crafting[0] = Some(Stack { item: 8, count: 2 });
+        inv.cursor = Some(Stack { item: 43, count: 3 });
+    }
+    #[test]
+    fn close_save_disconnect_return_and_drop_overflow() {
+        let mut s = server();
+        fill(&mut s, false);
+        s.handle_packet(1, &C2S::CloseInventory.encode());
+        s.tick();
+        assert_eq!(
+            s.clients[&1].inventory.slots()[0],
+            Some(Stack { item: 8, count: 2 })
+        );
+        assert_eq!(
+            s.clients[&1].inventory.slots()[1],
+            Some(Stack { item: 43, count: 3 })
+        );
+        fill(&mut s, true);
+        let bytes = s.inventory_data(1).unwrap();
+        assert_eq!(Inventory::from_bytes(&bytes).unwrap().crafting, [None; 4]);
+        assert!(s.entities.is_empty());
+        s.handle_packet(1, &C2S::CloseInventory.encode());
+        s.tick();
+        assert_eq!(s.entities.len(), 2);
+        assert_eq!(
+            s.entities.values().map(|e| u32::from(e.count)).sum::<u32>(),
+            5
+        );
+        fill(&mut s, true);
+        s.disconnect(1);
+        assert!(!s.clients.contains_key(&1));
+        assert_eq!(s.entities.len(), 4);
+        // The same return operation used by disconnect also inserts into non-full inventories.
+        let mut inv = Inventory::default();
+        inv.crafting[0] = Some(Stack { item: 8, count: 2 });
+        assert!(inv.return_crafting().is_empty());
+        assert_eq!(inv.slots()[0], Some(Stack { item: 8, count: 2 }));
+    }
+    #[test]
+    fn inventory_snapshot_returns_transient_items_without_changing_live_state() {
+        for full in [false, true] {
+            let mut s = server();
+            fill(&mut s, full);
+            let before = s.clients[&1].inventory.clone();
+            let hash = s.state_hash();
+            let dirty = s.clients[&1].inventory_dirty;
+            let snapshot = Inventory::from_bytes(&s.inventory_data(1).unwrap()).unwrap();
+            assert_eq!(s.clients[&1].inventory, before);
+            assert_eq!(s.state_hash(), hash);
+            assert_eq!(s.clients[&1].inventory_dirty, dirty);
+            assert!(s.entities.is_empty());
+            assert_eq!(snapshot.crafting, [None; 4]);
+            assert_eq!(snapshot.cursor, None);
+            assert_eq!(snapshot.selected(), before.selected());
+            if full {
+                assert_eq!(snapshot.slots(), before.slots());
+            } else {
+                let mut expected = Inventory::default();
+                expected.add(8, 2);
+                expected.add(43, 3);
+                assert_eq!(snapshot, expected);
+            }
+            assert_eq!(s.inventory_data(1), Some(snapshot.to_bytes()));
+        }
+    }
+    #[test]
+    fn rejects_and_resends_and_hashes_transient_state_deterministically() {
+        let (mut a, mut b) = (server(), server());
+        fill(&mut a, false);
+        fill(&mut b, false);
+        assert_eq!(a.state_hash(), b.state_hash());
+        b.clients.get_mut(&1).unwrap().inventory.cursor = None;
+        assert_ne!(a.state_hash(), b.state_hash());
+        fill(&mut b, false);
+        for (slot, button, shift) in [
+            (36, 1, false),
+            (0, 0, false),
+            (40, 0, true),
+            (99, 0, false),
+            (0, 2, false),
+        ] {
+            let packet = C2S::ClickSlot {
+                slot,
+                button,
+                shift,
+            }
+            .encode();
+            a.handle_packet(1, &packet);
+            b.handle_packet(1, &packet);
+            a.tick();
+            b.tick();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert_eq!(a.stats.packets_rejected, 2);
+        assert!(a
+            .take_outbox()
+            .iter()
+            .any(|(_, p)| matches!(S2C::decode(p), Ok(S2C::Inventory { .. }))));
+    }
+}

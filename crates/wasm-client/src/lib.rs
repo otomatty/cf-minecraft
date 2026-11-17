@@ -193,7 +193,7 @@ pub extern "C" fn client_new() {
         light_exports: None,
         game_mode: 0,
         selected: 0,
-        slots: vec![None; 36],
+        slots: vec![None; 42],
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -304,7 +304,15 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.entities.remove(&id);
         }
 
-        S2C::Inventory { selected, slots } => {
+        S2C::Inventory {
+            selected,
+            mut slots,
+            crafting,
+            result,
+            cursor,
+        } => {
+            slots.extend(crafting);
+            slots.extend([result, cursor]);
             st.selected = selected;
             st.slots = slots;
         }
@@ -1328,6 +1336,24 @@ pub extern "C" fn client_entity_light(x: i32, y: i32, z: i32) -> u32 {
 pub extern "C" fn client_enc_drop_item(x: f32, y: f32, z: f32) -> usize {
     let st = state();
     st.out = C2S::DropItem { dir: [x, y, z] }.encode();
+    st.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_click_slot(slot: u32, button: u32, shift: u32) -> usize {
+    let st = state();
+    st.out = C2S::ClickSlot {
+        slot: slot as u8,
+        button: button as u8,
+        shift: shift != 0,
+    }
+    .encode();
+    st.out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_enc_close_inventory() -> usize {
+    let st = state();
+    st.out = C2S::CloseInventory.encode();
     st.out.len()
 }
 

@@ -112,7 +112,8 @@ mod tests {
 
     #[test]
     fn creative_inventory_scenario_fingerprint() {
-        assert_eq!(run(2026, 600), 0x92a0baa309d6ad75);
+        // Previously 92a0baa309d6ad75; crafting grid and cursor now participate in state_hash.
+        assert_eq!(run(2026, 600), 0x20ff82c4ae0b595b);
     }
 
     #[test]

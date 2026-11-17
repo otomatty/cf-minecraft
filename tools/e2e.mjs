@@ -904,6 +904,64 @@ async function sectionCulling() {
 }
 
 /** Survival uses authoritative item stacks while the existing playthroughs stay creative. */
+// Mine an original generated tree and craft through the actual DOM, with no item injection.
+async function survivalCrafting() {
+    const { page, errors } = await open(`server=local&world=e2e-crafting-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
+    try {
+        const stats = await settle(page, "survival crafting", chunksInView(3));
+        check(stats.gameMode === "survival", "crafting: Terrain survival world");
+        const target = await page.evaluate(() => {
+            const api = window.__mc;
+            const [sx,,sz] = api.stats().spawn.map(Math.floor);
+            const log = api.stateId("oak_log");
+            // Search the same spawn radius and seed as the existing tree check.
+            // A supported, clear cell east of the trunk gives a stable mining view.
+            for (let z=sz-24;z<=sz+24;z++) for (let x=sx-24;x<=sx+24;x++) {
+                for (let y=57;y<319;y++) {
+                    if (api.getBlock(x,y,z) !== log || api.getBlock(x,y-1,z) === log) continue;
+                    const floor = api.getBlock(x+1,y-1,z);
+                    if (floor <= 0 || floor === api.stateId("water")) continue;
+                    if ([0,1].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
+                    return [x,y,z];
+                }
+            }
+            return null;
+        });
+        check(target !== null, "crafting: finds an accessible spawn tree");
+        if (!target) return;
+        await page.mouse.click(640,360);
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,0.51)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera;
+            const pitch=c.pitch*Math.PI/180;
+            const t=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(pitch),-Math.sin(pitch),0],6);
+            return t?.x===x && t?.y===y && t?.z===z;
+        },{},target);
+        await page.mouse.down();
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z)===0,{},target);
+        await page.mouse.up();
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+0.5,y+1.62,z+0.5,0,0),target);
+        await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count===1);
+        check(await page.$eval("#hotbar canvas", c=>c.title==="oak_log"), "crafting: mines and picks up log");
+        await page.keyboard.press("KeyE");
+        await page.waitForSelector('#inventory-screen:not([hidden])');
+        await page.click('#inventory-screen [data-slot="0"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="0"] canvas').dataset.count === "0");
+        await page.click('#inventory-screen [data-slot="36"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="40"] canvas').title === "oak_planks");
+        check(await page.$eval('#inventory-screen [data-slot="40"] canvas',c=>c.dataset.count==="4"),"crafting: log previews four planks");
+        await page.click('#inventory-screen [data-slot="40"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="36"] canvas').dataset.count === "0");
+        await page.click('#inventory-screen [data-slot="9"]');
+        await page.waitForFunction(() => window.__mc.stats().inventory[9]?.count===4);
+        check(await page.$eval('#inventory-screen [data-slot="9"] canvas',c=>c.title==="oak_planks" && c.dataset.count==="4"),"crafting: takes result and returns planks to inventory");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.getElementById("inventory-screen").hidden);
+        check(errors.length===0,"crafting: no page errors",errors.join(" | "));
+    } finally { await page.close(); }
+}
+
 async function survivalInventory() {
 	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -916,6 +974,9 @@ async function survivalInventory() {
 		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
 		await page.keyboard.press("KeyE");
 		check(await page.$eval("#block-picker", picker => picker.hidden), "survival: block picker stays closed");
+        check(await page.$eval("#inventory-screen", screen => !screen.hidden), "survival: E opens inventory");
+        await page.keyboard.press("KeyE");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
 		for (let i = 0; i < targets.length; i++) {
 			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[i]);
 			await page.mouse.down();
@@ -988,6 +1049,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await partialModels();
 	await survivalInventory();
+	await survivalCrafting();
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();

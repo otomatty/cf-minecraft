@@ -1,0 +1,14 @@
+# Original small-grid recipes. File order is matching priority.
+[[recipes]]
+ingredients = ["oak_log"]
+result = { item = "oak_planks", count = 4 }
+
+[[recipes]]
+pattern = ["#", "#"]
+key = { "#" = "oak_planks" }
+result = { item = "stick", count = 4 }
+
+[[recipes]]
+pattern = ["##", "##"]
+key = { "#" = "oak_planks" }
+result = { item = "crafting_table", count = 1 }

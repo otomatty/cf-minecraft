@@ -67,3 +67,13 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 42 | iron_shovel | shovel | 4 |
 
 12種類すべて `block = None`、`max_stack = 1`。`items::info` から `tool.kind`、`tool.tier`、`tool.speed()` と `texture` を取得できる。Creative の選択画面で選んでホットバーへ入れ、Qで捨てられる。採掘速度とドロップ条件は [mining.md](mining.md#道具とドロップ条件) を参照。耐久値は未実装。Survival の入手用クラフトは次の PR で追加する。
+
+
+## 2×2 クラフトで追加したアイテム
+
+| アイテムID | 名前 | ブロック状態ID | texture | max_stack |
+| --- | --- | --- | --- | --- |
+| 43 | stick | なし | stick | 64 |
+| 44 | crafting_table | 49 | 上・横・下の専用テクスチャ | 64 |
+
+棒と作業台の絵は `textures.ts` の独自のコード生成。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0` で、今回は配置のみ。サバイバルの E はインベントリ画面を開く。現在の通信はバージョン6で、クラフト枠・結果・カーソルを含む。操作、追加レシピ、保存前の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
