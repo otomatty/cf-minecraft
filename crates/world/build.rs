@@ -461,7 +461,7 @@ fn generate(root: &Path, dest: &Path) {
         "pub const COUNT: usize = {};\npub static ITEMS: &[ItemInfo] = &[\n",
         items.items.len()
     );
-    for item in items.items {
+    for item in &items.items {
         identifier(&item.name);
         assert!(
             names.insert(item.name.clone()),
@@ -481,7 +481,7 @@ fn generate(root: &Path, dest: &Path) {
         if let Some(texture) = &item.texture {
             identifier(texture);
         }
-        let tool = item.tool.map_or("None".into(), |tool| {
+        let tool = item.tool.as_ref().map_or("None".into(), |tool| {
             assert!(item.max_stack == 1, "items.toml: tool max_stack must be 1");
             assert!(
                 (1..=4).contains(&tool.tier),
@@ -495,12 +495,13 @@ fn generate(root: &Path, dest: &Path) {
         });
         let texture = item
             .texture
+            .as_ref()
             .map_or("None".into(), |t| format!("Some({t:?})"));
-        let block = item.block.map(|name| {
+        let block = item.block.as_ref().map(|name| {
             registry
                 .blocks
                 .iter()
-                .find(|b| b.name == name)
+                .find(|b| &b.name == name)
                 .unwrap_or_else(|| panic!("items.toml: unknown block {name}"))
                 .id
         });
@@ -513,6 +514,8 @@ fn generate(root: &Path, dest: &Path) {
     }
     out.push_str("];\n");
     fs::write(dest.join("items.rs"), out).unwrap();
+
+    generate_recipes(root, dest, &items.items);
 
     let biomes: Biomes = read(&root.join("biomes.toml"));
     let mut names = BTreeSet::new();
@@ -581,4 +584,126 @@ fn generate(root: &Path, dest: &Path) {
     }
     out.push_str("];\n");
     fs::write(dest.join("biomes.rs"), out).unwrap();
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recipes {
+    recipes: Vec<Recipe>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recipe {
+    pattern: Option<Vec<String>>,
+    key: Option<std::collections::BTreeMap<String, String>>,
+    ingredients: Option<Vec<String>>,
+    result: RecipeResult,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeResult {
+    item: String,
+    count: u8,
+}
+fn generate_recipes(root: &Path, dest: &Path, items: &[Item]) {
+    let recipes: Recipes = read(&root.join("recipes.toml"));
+    let resolve = |name: &str| {
+        items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("recipes.toml: unknown item {name}"))
+    };
+    let mut seen = BTreeSet::new();
+    let mut out = String::from("pub static RECIPES: &[Recipe] = &[\n");
+    for recipe in recipes.recipes {
+        let result = resolve(&recipe.result.item);
+        assert!(
+            (1..=result.max_stack).contains(&recipe.result.count),
+            "recipes.toml: invalid result count"
+        );
+        let (width, height, mut cells) = if let Some(pattern) = recipe.pattern {
+            assert!(
+                recipe.ingredients.is_none(),
+                "recipes.toml: mixed recipe kinds"
+            );
+            assert!(
+                (1..=3).contains(&pattern.len()),
+                "recipes.toml: pattern height"
+            );
+            let width = pattern[0].chars().count();
+            assert!((1..=3).contains(&width), "recipes.toml: pattern width");
+            let key = recipe.key.expect("recipes.toml: missing key");
+            for (ch, name) in &key {
+                assert!(
+                    ch.chars().count() == 1 && ch != " ",
+                    "recipes.toml: invalid key"
+                );
+                resolve(name);
+            }
+            let mut used = BTreeSet::new();
+            let mut cells = Vec::new();
+            for row in &pattern {
+                assert_eq!(
+                    row.chars().count(),
+                    width,
+                    "recipes.toml: unequal row lengths"
+                );
+                for ch in row.chars() {
+                    cells.push(if ch == ' ' {
+                        0
+                    } else {
+                        let ch = ch.to_string();
+                        used.insert(ch.clone());
+                        resolve(
+                            key.get(&ch)
+                                .expect("recipes.toml: character missing from key"),
+                        )
+                        .id
+                    });
+                }
+            }
+            assert_eq!(used.len(), key.len(), "recipes.toml: unused key");
+            assert!(cells.iter().any(|&i| i != 0), "recipes.toml: empty pattern");
+            // Canonical bounding rectangle also detects duplicates with outer padding.
+            let xs: Vec<_> = (0..width)
+                .filter(|&x| (0..pattern.len()).any(|y| cells[y * width + x] != 0))
+                .collect();
+            let ys: Vec<_> = (0..pattern.len())
+                .filter(|&y| (0..width).any(|x| cells[y * width + x] != 0))
+                .collect();
+            let (left, right, top, bottom) = (xs[0], xs[xs.len() - 1], ys[0], ys[ys.len() - 1]);
+            let cropped = (top..=bottom)
+                .flat_map(|y| (left..=right).map(move |x| (y, x)))
+                .map(|(y, x)| cells[y * width + x])
+                .collect();
+            (right - left + 1, bottom - top + 1, cropped)
+        } else {
+            assert!(recipe.key.is_none(), "recipes.toml: shapeless key");
+            let ingredients = recipe
+                .ingredients
+                .expect("recipes.toml: missing ingredients");
+            assert!(
+                (1..=9).contains(&ingredients.len()),
+                "recipes.toml: ingredients length"
+            );
+            (
+                0,
+                0,
+                ingredients
+                    .iter()
+                    .map(|i| resolve(i).id)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if width == 0 {
+            cells.sort_unstable();
+        }
+        assert!(
+            seen.insert((width, height, cells.clone())),
+            "recipes.toml: duplicate recipe"
+        );
+        writeln!(out,"Recipe {{ width: {width}, height: {height}, ingredients: &{cells:?}, item: {}, count: {} }},", result.id, recipe.result.count).unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("recipes.rs"), out).unwrap();
 }

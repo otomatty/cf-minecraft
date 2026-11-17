@@ -11,6 +11,7 @@ pub mod io;
 pub mod items;
 pub mod light;
 pub mod palette;
+pub mod recipes;
 pub mod visibility;
 
 pub use chunk::{Chunk, Fnv64, Section, World};

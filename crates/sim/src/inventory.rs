@@ -14,12 +14,16 @@ pub struct Stack {
 pub struct Inventory {
     slots: [Option<Stack>; SLOT_COUNT],
     selected: u8,
+    pub crafting: [Option<Stack>; 4],
+    pub cursor: Option<Stack>,
 }
 impl Default for Inventory {
     fn default() -> Self {
         Self {
             slots: [None; SLOT_COUNT],
             selected: 0,
+            crafting: [None; 4],
+            cursor: None,
         }
     }
 }
@@ -79,30 +83,145 @@ impl Inventory {
         }
         Some(item)
     }
-    pub fn add(&mut self, item: u16, mut count: u32) -> u32 {
-        let Some(info) = items::info(item) else {
-            return count;
-        };
-        for slot in self.slots.iter_mut().flatten().filter(|s| s.item == item) {
-            let n = count.min((info.max_stack - slot.count) as u32) as u8;
-            slot.count += n;
-            count -= n as u32;
+    pub fn add(&mut self, item: u16, count: u32) -> u32 {
+        add_slots(&mut self.slots, item, count)
+    }
+
+    pub fn result(&self) -> Option<Stack> {
+        matching_recipe(&self.crafting, 2, 2, world::recipes::RECIPES).map(|r| Stack {
+            item: r.item,
+            count: r.count,
+        })
+    }
+    fn consume(&mut self) {
+        for slot in &mut self.crafting {
+            subtract(slot, 1);
         }
-        for slot in self.slots.iter_mut().filter(|s| s.is_none()) {
-            if count == 0 {
-                break;
+    }
+    pub fn click(&mut self, slot: u8, button: u8, shift: bool) -> Result<(), DecodeError> {
+        if slot > 40 || button > 1 {
+            return Err(DecodeError);
+        }
+        if slot == 40 {
+            while let Some(result) = self.result() {
+                if shift {
+                    let mut next = self.clone();
+                    if next.add(result.item, u32::from(result.count)) != 0 {
+                        break;
+                    }
+                    self.slots = next.slots;
+                } else {
+                    if self.cursor.is_some_and(|s| {
+                        s.item != result.item
+                            || u16::from(s.count) + u16::from(result.count)
+                                > u16::from(items::info(s.item).unwrap().max_stack)
+                    }) {
+                        break;
+                    }
+                    self.cursor = Some(Stack {
+                        item: result.item,
+                        count: self.cursor.map_or(0, |s| s.count) + result.count,
+                    });
+                }
+                self.consume();
+                if !shift {
+                    break;
+                }
             }
-            let n = count.min(info.max_stack as u32) as u8;
-            *slot = Some(Stack { item, count: n });
-            count -= n as u32;
+            return Ok(());
         }
-        count
+        let index = usize::from(slot);
+        if shift {
+            let source = if index < 36 {
+                self.slots[index]
+            } else {
+                self.crafting[index - 36]
+            };
+            if let Some(stack) = source {
+                let range = if index < 9 {
+                    9..36
+                } else if index < 36 {
+                    0..9
+                } else {
+                    0..36
+                };
+                let remaining =
+                    add_slots(&mut self.slots[range], stack.item, u32::from(stack.count));
+                let source = if index < 36 {
+                    &mut self.slots[index]
+                } else {
+                    &mut self.crafting[index - 36]
+                };
+                *source = (remaining != 0).then_some(Stack {
+                    item: stack.item,
+                    count: remaining as u8,
+                });
+            }
+        } else {
+            let target = if index < 36 {
+                &mut self.slots[index]
+            } else {
+                &mut self.crafting[index - 36]
+            };
+            match (self.cursor, *target) {
+                (None, Some(s)) => {
+                    let count = if button == 0 {
+                        s.count
+                    } else {
+                        s.count.div_ceil(2)
+                    };
+                    self.cursor = Some(Stack {
+                        item: s.item,
+                        count,
+                    });
+                    subtract(target, count);
+                }
+                (Some(c), t) if t.is_none_or(|s| s.item == c.item) => {
+                    let present = t.map_or(0, |s| s.count);
+                    let count = (items::info(c.item).unwrap().max_stack - present)
+                        .min(if button == 0 { c.count } else { 1 });
+                    if count > 0 {
+                        *target = Some(Stack {
+                            item: c.item,
+                            count: present + count,
+                        });
+                        subtract(&mut self.cursor, count);
+                    }
+                }
+                (Some(_), Some(_)) => std::mem::swap(target, &mut self.cursor),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    /// Returns overflow for the server to spawn, in stable grid then cursor order.
+    pub fn return_crafting(&mut self) -> Vec<Stack> {
+        let mut overflow = Vec::new();
+        let mut stacks = self.crafting.to_vec();
+        stacks.push(self.cursor);
+        self.crafting = [None; 4];
+        self.cursor = None;
+        for stack in stacks.into_iter().flatten() {
+            let count = self.add(stack.item, u32::from(stack.count));
+            if count > 0 {
+                overflow.push(Stack {
+                    item: stack.item,
+                    count: count as u8,
+                });
+            }
+        }
+        overflow
     }
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(1);
+        w.u8(2);
         w.u8(self.selected);
-        for slot in self.slots {
+        for slot in self
+            .slots
+            .into_iter()
+            .chain(self.crafting)
+            .chain([self.cursor])
+        {
             w.u16(slot.map_or(0, |s| s.item));
             w.u8(slot.map_or(0, |s| s.count));
         }
@@ -110,18 +229,30 @@ impl Inventory {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
-        if r.u8()? != 1 {
+        let version = r.u8()?;
+        if !matches!(version, 1 | 2) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
         result.select(r.u8()?)?;
-        for i in 0..SLOT_COUNT {
+        let count = SLOT_COUNT + if version == 2 { 5 } else { 0 };
+        for slot in result
+            .slots
+            .iter_mut()
+            .chain(result.crafting.iter_mut())
+            .chain(std::iter::once(&mut result.cursor))
+            .take(count)
+        {
             let item = r.u16()?;
             let count = r.u8()?;
             if item == 0 && count != 0 {
                 return Err(DecodeError);
             }
-            result.set(i as u8, (item != 0).then_some(Stack { item, count }))?;
+            let stack = (item != 0).then_some(Stack { item, count });
+            if stack.is_some_and(|s| !valid(s)) {
+                return Err(DecodeError);
+            }
+            *slot = stack;
         }
         if r.remaining() != 0 {
             return Err(DecodeError);
@@ -147,12 +278,53 @@ mod tests {
         assert_eq!(inv.add(u16::MAX, 3), 3);
     }
     #[test]
+    fn persistence_v2_preserves_transient_slots_and_reads_v1() {
+        let mut inv = Inventory::creative();
+        inv.select(7).unwrap();
+        inv.crafting = [
+            Some(Stack { item: 8, count: 64 }),
+            None,
+            Some(Stack { item: 5, count: 3 }),
+            Some(Stack { item: 31, count: 1 }),
+        ];
+        inv.cursor = Some(Stack { item: 43, count: 5 });
+        let bytes = inv.to_bytes();
+        assert_eq!(bytes.len(), 125);
+        assert_eq!(bytes[0], 2);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok(inv.clone()));
+        let mut legacy = bytes[..110].to_vec();
+        legacy[0] = 1;
+        let mut expected = inv.clone();
+        expected.crafting = [None; 4];
+        expected.cursor = None;
+        assert_eq!(Inventory::from_bytes(&legacy), Ok(expected));
+        for data in [&bytes, &legacy] {
+            for length in 0..data.len() {
+                assert!(Inventory::from_bytes(&data[..length]).is_err());
+            }
+            let mut extra = data.clone();
+            extra.push(0);
+            assert!(Inventory::from_bytes(&extra).is_err());
+        }
+        for offset in [110, 113, 116, 119, 122] {
+            for (item, count) in [(0u16, 1), (u16::MAX, 1), (8, 0), (8, 65), (31, 2)] {
+                let mut bad = bytes.clone();
+                bad[offset..offset + 2].copy_from_slice(&item.to_be_bytes());
+                bad[offset + 2] = count;
+                assert!(
+                    Inventory::from_bytes(&bad).is_err(),
+                    "{offset}: {item}/{count}"
+                );
+            }
+        }
+    }
+    #[test]
     fn persistence_is_strict_and_round_trips() {
         let mut inv = Inventory::creative();
         inv.select(8).unwrap();
         let bytes = inv.to_bytes();
         assert_eq!(Inventory::from_bytes(&bytes), Ok(inv));
-        for (at, value) in [(0, 2), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        for (at, value) in [(0, 3), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
@@ -161,5 +333,255 @@ mod tests {
         let mut bad = bytes;
         bad.push(0);
         assert!(Inventory::from_bytes(&bad).is_err());
+    }
+}
+
+fn subtract(slot: &mut Option<Stack>, count: u8) {
+    if let Some(s) = slot {
+        s.count -= count;
+        if s.count == 0 {
+            *slot = None;
+        }
+    }
+}
+fn add_slots(slots: &mut [Option<Stack>], item: u16, mut count: u32) -> u32 {
+    let Some(info) = items::info(item) else {
+        return count;
+    };
+    for slot in slots.iter_mut().flatten().filter(|s| s.item == item) {
+        let n = count.min(u32::from(info.max_stack - slot.count)) as u8;
+        slot.count += n;
+        count -= u32::from(n);
+    }
+    for slot in slots.iter_mut().filter(|s| s.is_none()) {
+        if count == 0 {
+            break;
+        }
+        let n = count.min(u32::from(info.max_stack)) as u8;
+        *slot = Some(Stack { item, count: n });
+        count -= u32::from(n);
+    }
+    count
+}
+/// Shared matcher for any rectangular crafting grid. Counts do not affect matching.
+pub fn matching_recipe<'a>(
+    grid: &[Option<Stack>],
+    width: usize,
+    height: usize,
+    recipes: &'a [world::recipes::Recipe],
+) -> Option<&'a world::recipes::Recipe> {
+    if width == 0 || height == 0 || grid.len() != width * height {
+        return None;
+    }
+    let occupied: Vec<_> = grid
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|_| i))
+        .collect();
+    let left = occupied.iter().map(|i| i % width).min()?;
+    let right = occupied.iter().map(|i| i % width).max()?;
+    let top = occupied.iter().map(|i| i / width).min()?;
+    let bottom = occupied.iter().map(|i| i / width).max()?;
+    let mut multiset: Vec<_> = grid.iter().flatten().map(|s| s.item).collect();
+    multiset.sort_unstable();
+    recipes.iter().find(|r| {
+        if r.width == 0 {
+            return r.ingredients == multiset;
+        }
+        r.width == right - left + 1
+            && r.height == bottom - top + 1
+            && (0..r.height).all(|y| {
+                (0..r.width).all(|x| {
+                    grid[(top + y) * width + left + x].map_or(0, |s| s.item)
+                        == r.ingredients[y * r.width + x]
+                })
+            })
+    })
+}
+
+#[cfg(test)]
+mod crafting_tests {
+    use super::*;
+    fn stack(item: u16, count: u8) -> Option<Stack> {
+        Some(Stack { item, count })
+    }
+    #[test]
+    fn matching_trims_offsets_shapeless_and_rejects_wrong_shapes() {
+        for i in 0..4 {
+            let mut grid = [None; 4];
+            grid[i] = stack(8, 12);
+            assert_eq!(
+                matching_recipe(&grid, 2, 2, world::recipes::RECIPES)
+                    .unwrap()
+                    .item,
+                5
+            );
+        }
+        for x in 0..2 {
+            let mut grid = [None; 4];
+            grid[x] = stack(5, 1);
+            grid[x + 2] = stack(5, 64);
+            assert_eq!(
+                matching_recipe(&grid, 2, 2, world::recipes::RECIPES)
+                    .unwrap()
+                    .item,
+                43
+            );
+        }
+        assert!(matching_recipe(
+            &[stack(5, 1), stack(5, 1), None, None],
+            2,
+            2,
+            world::recipes::RECIPES
+        )
+        .is_none());
+        let wide = [world::recipes::Recipe {
+            width: 3,
+            height: 1,
+            ingredients: &[5, 5, 5],
+            item: 43,
+            count: 4,
+        }];
+        assert!(matching_recipe(&[stack(5, 1); 4], 2, 2, &wide).is_none());
+        assert!(matching_recipe(&[stack(5, 1); 3], 3, 1, &wide).is_some());
+        let mixed = [world::recipes::Recipe {
+            width: 0,
+            height: 0,
+            ingredients: &[5, 5, 8],
+            item: 43,
+            count: 4,
+        }];
+        assert!(matching_recipe(
+            &[stack(8, 64), stack(5, 1), None, stack(5, 2)],
+            2,
+            2,
+            &mixed
+        )
+        .is_some());
+        assert!(
+            matching_recipe(&[stack(8, 1), stack(8, 1), None, stack(5, 2)], 2, 2, &mixed).is_none()
+        );
+        let asymmetric = [world::recipes::Recipe {
+            width: 2,
+            height: 1,
+            ingredients: &[5, 8],
+            item: 43,
+            count: 4,
+        }];
+        assert!(
+            matching_recipe(&[stack(8, 1), stack(5, 1), None, None], 2, 2, &asymmetric).is_none()
+        );
+    }
+    #[test]
+    fn normal_clicks_pick_place_merge_swap_split_and_single_place() {
+        let mut inv = Inventory::default();
+        inv.slots[0] = stack(5, 5);
+        inv.click(0, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 3));
+        assert_eq!(inv.slots[0], stack(5, 2));
+        inv.click(1, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 2));
+        assert_eq!(inv.slots[1], stack(5, 1));
+        inv.slots[2] = stack(8, 7);
+        inv.click(2, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(8, 7));
+        assert_eq!(inv.slots[2], stack(5, 2));
+        inv.click(3, 0, false).unwrap();
+        assert_eq!(inv.cursor, None);
+        inv.click(3, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(8, 7));
+        assert_eq!(inv.slots[3], None);
+        inv.slots[4] = stack(8, 62);
+        inv.click(4, 0, false).unwrap();
+        assert_eq!(inv.slots[4], stack(8, 64));
+        assert_eq!(inv.cursor, stack(8, 5));
+        inv.click(4, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(8, 5));
+        inv.click(2, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 2));
+        assert_eq!(inv.slots[2], stack(8, 5));
+        assert!(inv.click(41, 0, false).is_err());
+        assert!(inv.click(0, 2, false).is_err());
+    }
+    #[test]
+    fn result_is_atomic_and_shift_stops_before_overflow() {
+        let mut inv = Inventory::default();
+        inv.crafting[3] = stack(8, 3);
+        inv.cursor = stack(1, 1);
+        inv.click(40, 0, false).unwrap();
+        assert_eq!(inv.crafting[3], stack(8, 3));
+        inv.cursor = stack(5, 61);
+        inv.click(40, 1, false).unwrap();
+        assert_eq!(inv.crafting[3], stack(8, 3));
+        inv.cursor = stack(5, 60);
+        inv.click(40, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 64));
+        assert_eq!(inv.crafting[3], stack(8, 2));
+        inv.slots = [stack(1, 64); 36];
+        inv.slots[10] = stack(5, 59);
+        inv.click(40, 0, true).unwrap();
+        assert_eq!(inv.slots[10], stack(5, 63));
+        assert_eq!(inv.crafting[3], stack(8, 1));
+        inv.cursor = None;
+        inv.click(40, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 4));
+        assert_eq!(inv.result(), None);
+        inv.click(40, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 4));
+    }
+    #[test]
+    fn shift_moves_between_regions_merging_before_empty_slots() {
+        let mut inv = Inventory::default();
+        inv.slots[0] = stack(5, 8);
+        inv.slots[20] = stack(5, 62);
+        inv.click(0, 0, true).unwrap();
+        assert_eq!(inv.slots[20], stack(5, 64));
+        assert_eq!(inv.slots[9], stack(5, 6));
+        assert_eq!(inv.slots[0], None);
+        inv.click(9, 1, true).unwrap();
+        assert_eq!(inv.slots[0], stack(5, 6));
+        inv.crafting[0] = stack(5, 8);
+        inv.click(36, 0, true).unwrap();
+        assert_eq!(inv.slots[0], stack(5, 14));
+        assert_eq!(inv.crafting[0], None);
+        inv.slots[9..].fill(stack(1, 64));
+        inv.slots[12] = stack(5, 63);
+        inv.click(0, 0, true).unwrap();
+        assert_eq!(inv.slots[0], stack(5, 13));
+        assert_eq!(inv.slots[12], stack(5, 64));
+        inv.crafting[1] = stack(8, 3);
+        inv.click(37, 0, true).unwrap();
+        assert_eq!(inv.slots[1], stack(8, 3));
+    }
+    #[test]
+    fn log_to_planks_stick_and_table_using_only_clicks() {
+        let mut inv = Inventory::default();
+        inv.slots[0] = stack(8, 2);
+        for (slot, button, shift) in [
+            (0, 0, false),
+            (36, 0, false),
+            (40, 0, true),
+            (0, 0, false),
+            (36, 1, false),
+            (38, 1, false),
+            (1, 0, false),
+            (40, 0, false),
+            (2, 0, false),
+            (1, 0, false),
+            (36, 1, false),
+            (37, 1, false),
+            (38, 1, false),
+            (39, 1, false),
+            (1, 0, false),
+            (40, 0, false),
+            (3, 0, false),
+        ] {
+            inv.click(slot, button, shift).unwrap();
+        }
+        assert_eq!(inv.slots[2], stack(43, 4));
+        assert_eq!(inv.slots[3], stack(44, 1));
+        assert_eq!(inv.slots[1], stack(5, 2));
+        assert_eq!(inv.cursor, None);
+        assert_eq!(inv.crafting, [None; 4]);
     }
 }

@@ -123,6 +123,11 @@
 			#controls-panel dd { margin: 0; }
 			kbd { display: inline-block; padding: 0 5px; border: 1px solid #6c7686; border-radius: 3px; background: #3a4352; box-shadow: inset 0 -2px 0 rgba(0,0,0,.35); }
 			@media (max-width: 639px) { .two-columns, #key-bindings { grid-template-columns: 1fr; } .menu-panel { padding: 26px 20px; } }
+			#inventory-screen h3 { font-size: 14px; margin: 12px 0 4px; }
+			.inventory-slots { display: grid; grid-template-columns: repeat(9, 48px); gap: 4px; margin: 8px 0 14px; }
+			.inventory-crafting { display: flex; align-items: center; gap: 20px; }
+			.inventory-crafting-grid { grid-template-columns: repeat(2, 48px); }
+			.inventory-result { grid-template-columns: 48px; }
 			#block-picker {
 				position: fixed;
 				inset: 8vh 10vw;

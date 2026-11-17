@@ -40,6 +40,12 @@ const { WorldDO } = await import("./world-do.ts");
 function fixture(t, synchronousClose = false, legacy = false) {
 	const closed: [number, string][] = [];
 	const disconnected: number[] = [];
+	const releaseCalls: Array<[string, number]> = [];
+	t.after(() => {
+		assert.deepEqual(releaseCalls, disconnected.flatMap(id => [
+			["returnCrafting", id], ["clientPosition", id], ["inventoryData", id], ["disconnect", id],
+		]));
+	});
 	const connected: number[] = [];
 	const teleportPermissions: boolean[] = [];
 	const initialPositions: Array<[number, number, number] | undefined> = [];
@@ -106,16 +112,19 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	t.after(authDB.close);
 	const world = new WorldDO(context, { DB: authDB.db });
 	world.ensureCore = () => ({
-		inventoryData() { return undefined; },
+		returnCrafting(id) { releaseCalls.push(["returnCrafting", id]); },
+		inventoryData(id) { releaseCalls.push(["inventoryData", id]); return undefined; },
 		connect(id, allowTeleport, position) {
 			connected.push(id);
 			teleportPermissions.push(allowTeleport);
 			initialPositions.push(position);
 		},
 		clientPosition(id) {
+			releaseCalls.push(["clientPosition", id]);
 			return acceptedPositions.get(id);
 		},
 		disconnect(id) {
+			releaseCalls.push(["disconnect", id]);
 			disconnected.push(id);
 		},
 	});

@@ -18,6 +18,19 @@ fn generate_fixture(blocks: &str, biomes: &str) -> Result<String, String> {
 }
 
 fn generate_items_fixture(blocks: &str, biomes: &str, items: &str) -> Result<String, String> {
+    generate_recipes_fixture(
+        blocks,
+        biomes,
+        items,
+        include_str!("../../../data/registry/recipes.toml"),
+    )
+}
+fn generate_recipes_fixture(
+    blocks: &str,
+    biomes: &str,
+    items: &str,
+    recipes: &str,
+) -> Result<String, String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/registry-test-{}-{}",
         std::process::id(),
@@ -27,6 +40,7 @@ fn generate_items_fixture(blocks: &str, biomes: &str, items: &str) -> Result<Str
     fs::write(dir.join("blocks.toml"), blocks).unwrap();
     fs::write(dir.join("biomes.toml"), biomes).unwrap();
     fs::write(dir.join("items.toml"), items).unwrap();
+    fs::write(dir.join("recipes.toml"), recipes).unwrap();
     let output = std::process::Command::new(env!("REGISTRY_BUILD_SCRIPT"))
         .arg("--registry-fixture")
         .arg(&dir)
@@ -128,14 +142,18 @@ fn biome_recipes_validate_all_block_references_and_terrain_kinds() {
 #[test]
 fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
-    let data = BLOCKS.replacen("\"gold_ore\",\n]", "\"gold_ore\", \"test_clay\",\n]", 1);
+    let data = BLOCKS.replacen(
+        "\"crafting_table_bottom\",\n]",
+        "\"crafting_table_bottom\", \"test_clay\",\n]",
+        1,
+    );
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ndig_ticks = 12\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 50\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 49;"));
-    assert!(output.contains("pub const COUNT: BlockState = 50;"));
-    assert!(output.contains("tex: [27, 27, 27, 27, 27, 27]"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 50;"));
+    assert!(output.contains("pub const COUNT: BlockState = 51;"));
+    assert!(output.contains("tex: [30, 30, 30, 30, 30, 30]"));
 }
 
 #[test]
@@ -166,7 +184,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 49
+        id = 50
         dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
@@ -180,7 +198,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 49\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 50\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"
@@ -379,5 +397,38 @@ fn tools_and_harvest_requirements_are_validated() {
         ("tool = \"pickaxe\"", "tool = \"hammer\""),
     ] {
         assert!(generate_fixture(&BLOCKS.replacen(from, to, 1), BIOMES).is_err());
+    }
+}
+
+#[test]
+fn crafting_recipe_validation() {
+    let recipes = include_str!("../../../data/registry/recipes.toml");
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        ("oak_log", "missing", "unknown item"),
+        ("item = \"stick\"", "item = \"missing\"", "unknown item"),
+        ("count = 4", "count = 0", "invalid result count"),
+        ("count = 4", "count = 65", "invalid result count"),
+        ("[\"#\", \"#\"]", "[\"#\", \"##\"]", "unequal row lengths"),
+        ("[\"#\", \"#\"]", "[\"?\", \"#\"]", "character missing"),
+        ("key = {", "key = { \"x\" = \"oak_log\",", "unused key"),
+        ("[\"oak_log\"]", "[]", "ingredients length"),
+        ("[\"#\", \"#\"]", "[\"####\"]", "pattern width"),
+        (
+            "[\"#\", \"#\"]",
+            "[\"#\",\"#\",\"#\",\"#\"]",
+            "pattern height",
+        ),
+    ] {
+        assert!(recipes.contains(from));
+        let error = generate_recipes_fixture(BLOCKS, BIOMES, items, &recipes.replacen(from, to, 1))
+            .unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    for duplicate in [
+        "[[recipes]]\ningredients = [\"oak_log\"]\nresult = { item = \"stick\", count = 1 }",
+        "[[recipes]]\npattern = [\" x\", \" x\"]\nkey = { x = \"oak_planks\" }\nresult = { item = \"stick\", count = 1 }",
+    ] {
+        assert!(generate_recipes_fixture(BLOCKS,BIOMES,items,&format!("{recipes}\n{duplicate}")).unwrap_err().contains("duplicate recipe"));
     }
 }

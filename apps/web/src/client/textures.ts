@@ -163,6 +163,10 @@ function ore(colors: readonly Rgb[], count: number): (rand: () => number) => Pai
 }
 
 const PAINTERS: Record<string, (rand: () => number) => Painter> = {
+    stick: () => (x) => x % 2 ? [185, 139, 77] : [116, 79, 42],
+    crafting_table_top: () => (x,y,r) => shade([174, 128, 70], x < 2 || y < 2 || x > 13 || y > 13 ? .62 : x % 5 === 2 || y % 5 === 2 ? .75 : .94+r()*.12),
+    crafting_table_side: () => (x,y,r) => shade([146, 103, 57], x < 3 || x > 12 ? .66 : y < 3 ? 1.2 : y === 7 || y === 12 ? .72 : .94+r()*.12),
+    crafting_table_bottom: () => (x,y) => shade([124, 87, 49], x === y || x+y === 15 ? .65 : y%4 === 0 ? .82 : 1),
 	coal_ore: ore([[32, 34, 39], [46, 45, 48]], 9),
 	copper_ore: ore([[194, 100, 55], [219, 126, 65], [62, 153, 125]], 9),
 	iron_ore: ore([[172, 117, 60], [148, 77, 51]], 8),
@@ -219,7 +223,7 @@ export function paintTexture(name: string): Uint8Array {
 			px[i] = clamp(r);
 			px[i + 1] = clamp(g);
 			px[i + 2] = clamp(b);
-			px[i + 3] = plant ? (visible ? 255 : 0) : name === "glass"
+			px[i + 3] = name === "stick" ? (y >= 2 && y <= 13 && (x === 7 || x === 8) ? 255 : 0) : plant ? (visible ? 255 : 0) : name === "glass"
 				? (x === 0 || y === 0 || x === 15 || y === 15 || (x === y + 3 && y > 3 && y < 9) ? 255 : 0)
 				: name === "oak_leaves" ? ((x * 7 + y * 11 + (x >> 1) * (y >> 1)) % 17 < 5 ? 0 : 255)
 				: name === "ice" ? 150 + (x + y) % 24

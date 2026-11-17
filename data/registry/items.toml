@@ -233,3 +233,13 @@ id = 42
 max_stack = 1
 texture = "iron_shovel"
 tool = { kind = "shovel", tier = 4 }
+
+[[items]]
+name = "stick"
+id = 43
+texture = "stick"
+
+[[items]]
+name = "crafting_table"
+id = 44
+block = "crafting_table"
