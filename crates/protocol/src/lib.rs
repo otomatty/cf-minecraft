@@ -8,11 +8,17 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
+    DigStart {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    DigAbort,
     DropItem {
         dir: [f32; 3],
     },
@@ -51,6 +57,13 @@ pub enum C2S {
 /// Server to client.
 #[derive(Clone, Debug, PartialEq)]
 pub enum S2C {
+    DigProgress {
+        player: u32,
+        x: i32,
+        y: i32,
+        z: i32,
+        stage: u8,
+    },
     EntitySpawn {
         id: u32,
         kind: u8,
@@ -111,6 +124,9 @@ pub enum S2C {
 }
 
 pub mod id {
+    pub const C2S_DIG_START: u8 = 0x07;
+    pub const C2S_DIG_ABORT: u8 = 0x08;
+    pub const S2C_DIG_PROGRESS: u8 = 0x0b;
     pub const C2S_DROP_ITEM: u8 = 0x06;
     pub const S2C_ENTITY_SPAWN: u8 = 0x07;
     pub const S2C_ENTITY_MOVE: u8 = 0x08;
@@ -136,6 +152,13 @@ impl C2S {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match *self {
+            C2S::DigStart { x, y, z } => {
+                w.u8(id::C2S_DIG_START);
+                w.i32(x);
+                w.i32(y);
+                w.i32(z);
+            }
+            C2S::DigAbort => w.u8(id::C2S_DIG_ABORT),
             C2S::DropItem { dir } => {
                 w.u8(id::C2S_DROP_ITEM);
                 for v in dir {
@@ -195,6 +218,12 @@ impl C2S {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::C2S_DIG_START => C2S::DigStart {
+                x: r.i32()?,
+                y: r.i32()?,
+                z: r.i32()?,
+            },
+            id::C2S_DIG_ABORT => C2S::DigAbort,
             id::C2S_DROP_ITEM => {
                 let dir = [r.f32()?, r.f32()?, r.f32()?];
                 if !dir.iter().all(|v| v.is_finite()) {
@@ -264,6 +293,20 @@ impl S2C {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
+            S2C::DigProgress {
+                player,
+                x,
+                y,
+                z,
+                stage,
+            } => {
+                w.u8(id::S2C_DIG_PROGRESS);
+                w.i32(*player as i32);
+                w.i32(*x);
+                w.i32(*y);
+                w.i32(*z);
+                w.u8(*stage);
+            }
             S2C::EntitySpawn {
                 id: entity,
                 kind,
@@ -403,6 +446,21 @@ impl S2C {
                 }
                 S2C::EntityCount { id, count }
             }
+            id::S2C_DIG_PROGRESS => {
+                let player = entity_id(&mut r)?;
+                let (x, y, z) = (r.i32()?, r.i32()?, r.i32()?);
+                let stage = r.u8()?;
+                if stage > 9 && stage != 255 {
+                    return Err(DecodeError);
+                }
+                S2C::DigProgress {
+                    player,
+                    x,
+                    y,
+                    z,
+                    stage,
+                }
+            }
             id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
                 id: entity_id(&mut r)?,
             },
@@ -512,6 +570,12 @@ mod tests {
     #[test]
     fn every_packet_round_trips() {
         let c2s = [
+            C2S::DigStart {
+                x: i32::MIN,
+                y: 50,
+                z: i32::MAX,
+            },
+            C2S::DigAbort,
             C2S::DropItem {
                 dir: [0.0, 1.0, 0.0],
             },
@@ -553,6 +617,27 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let s2c = [
+            S2C::DigProgress {
+                player: u32::MAX,
+                x: -1,
+                y: 80,
+                z: 2,
+                stage: 0,
+            },
+            S2C::DigProgress {
+                player: 1,
+                x: 0,
+                y: 0,
+                z: 0,
+                stage: 9,
+            },
+            S2C::DigProgress {
+                player: 1,
+                x: 0,
+                y: 0,
+                z: 0,
+                stage: 255,
+            },
             S2C::EntitySpawn {
                 id: 1,
                 kind: 0,
@@ -699,5 +784,58 @@ mod tests {
         bytes.push(0);
         assert!(C2S::decode(&bytes).is_err());
         assert!(S2C::decode(&[id::S2C_TIME_UPDATE, 1, 2, 3]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mining_tests {
+    use super::*;
+    #[test]
+    fn invalid_progress_stages_ids_lengths_and_trailing_bytes_are_rejected() {
+        for stage in 10..255 {
+            assert!(S2C::decode(
+                &S2C::DigProgress {
+                    player: 1,
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    stage
+                }
+                .encode()
+            )
+            .is_err());
+        }
+        assert!(S2C::decode(
+            &S2C::DigProgress {
+                player: 0,
+                x: 0,
+                y: 0,
+                z: 0,
+                stage: 0
+            }
+            .encode()
+        )
+        .is_err());
+        let packet = C2S::DigStart { x: 0, y: 0, z: 0 }.encode();
+        for len in 0..packet.len() {
+            assert!(C2S::decode(&packet[..len]).is_err());
+        }
+        let mut packet = C2S::DigAbort.encode();
+        packet.push(0);
+        assert!(C2S::decode(&packet).is_err());
+        let packet = S2C::DigProgress {
+            player: 1,
+            x: 0,
+            y: 0,
+            z: 0,
+            stage: 0,
+        }
+        .encode();
+        for len in 0..packet.len() {
+            assert!(S2C::decode(&packet[..len]).is_err());
+        }
+        let mut packet = packet;
+        packet.push(0);
+        assert!(S2C::decode(&packet).is_err());
     }
 }

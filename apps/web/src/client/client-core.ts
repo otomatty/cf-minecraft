@@ -1,6 +1,7 @@
 import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
+import type { DigBounds } from "./dig.ts";
 
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
@@ -10,6 +11,8 @@ export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ClientExports {
+	client_enc_dig_start(x: number, y: number, z: number): number;
+	client_enc_dig_abort(): number;
 	client_entities(): number;
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
@@ -62,6 +65,7 @@ export interface ClientExports {
 	client_mesh(cx: number, sy: number, cz: number): number;
 	client_take_unloaded(): number;
 	client_get_block(x: number, y: number, z: number): number;
+	client_selection_bounds(x: number, y: number, z: number): number;
 	client_raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
 	client_enc_hello(view: number): number;
 	client_player_position(axis: number): number;
@@ -77,7 +81,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -327,6 +331,13 @@ export class ClientCore {
 		return b === 0xffffffff ? -1 : b;
 	}
 
+	selectionBounds(x: number, y: number, z: number): DigBounds | null {
+		const len = this.x.client_selection_bounds(x, y, z);
+		if (!len) return null;
+		const v = this.out(len);
+		return { min: [v[0] / 16, v[1] / 16, v[2] / 16], max: [v[3] / 16, v[4] / 16, v[5] / 16] };
+	}
+
 	raycast(origin: readonly number[], dir: readonly number[], max: number): RayHit | null {
 		if (this.x.client_raycast(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], max) === 0) return null;
 		const v = this.outInts(10);
@@ -360,6 +371,8 @@ export class ClientCore {
 		return this.out(this.x.client_enc_teleport(x, y, z));
 	}
 
+	encodeDigStart(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_start(x,y,z)); }
+	encodeDigAbort(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_abort()); }
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_set_block(x, y, z, block));
 	}

@@ -299,6 +299,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 }
             }
         }
+        S2C::DigProgress { .. } => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
         }
@@ -973,6 +974,30 @@ pub extern "C" fn client_get_block(x: i32, y: i32, z: i32) -> u32 {
         .map_or(u32::MAX, |b| b as u32)
 }
 
+/// Output: local min XYZ then max XYZ, six u8 in sixteenths; zero bytes if absent.
+#[no_mangle]
+pub extern "C" fn client_selection_bounds(x: i32, y: i32, z: i32) -> usize {
+    let st = state();
+    let Some(block) = st.world.get_block(x, y, z) else {
+        return 0;
+    };
+    let boxes = blocks::selection_boxes(block, |dx, dy, dz| {
+        st.world
+            .get_block(x + dx, y + dy, z + dz)
+            .unwrap_or(blocks::AIR)
+    });
+    let Some(mut bounds) = boxes.first().copied() else {
+        return 0;
+    };
+    for b in &boxes[1..] {
+        for a in 0..3 {
+            bounds.min[a] = bounds.min[a].min(b.min[a]);
+            bounds.max[a] = bounds.max[a].max(b.max[a]);
+        }
+    }
+    emit(st, bounds.min.into_iter().chain(bounds.max).collect())
+}
+
 /// Walks the grid and intersects selection boxes, including non-solid plants.
 /// Output: x/y/z/face, local min/max XYZ in sixteenths (ten i32 LE),
 /// then the intersection local Y as f64 LE (0..=1, including the top edge).
@@ -1109,6 +1134,15 @@ pub extern "C" fn client_enc_set_block(x: i32, y: i32, z: i32, block: u32) -> us
     )
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_dig_start(x: i32, y: i32, z: i32) -> usize {
+    emit(state(), C2S::DigStart { x, y, z }.encode())
+}
+#[no_mangle]
+pub extern "C" fn client_enc_dig_abort() -> usize {
+    emit(state(), C2S::DigAbort.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
@@ -1136,9 +1170,9 @@ pub extern "C" fn client_block_registry() -> usize {
             blocks::Model::Stairs => "stairs",
             blocks::Model::Fence => "fence",
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"texture":"{}"}}"#,
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}"}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, blocks::TEXTURES[info.tex[1] as usize])
+            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), blocks::TEXTURES[info.tex[1] as usize])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }
@@ -1551,6 +1585,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn selection_bounds_enclose_every_box_and_follow_fence_neighbors() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        for (block, expected) in [
+            (blocks::STONE, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_SLAB, [0, 0, 0, 16, 8, 16]),
+            (blocks::OAK_SLAB + 1, [0, 8, 0, 16, 16, 16]),
+            (blocks::OAK_SLAB + 2, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_STAIRS, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_FENCE, [6, 0, 6, 10, 16, 10]),
+            (blocks::RED_FLOWER, [5, 0, 5, 11, 10, 11]),
+        ] {
+            state().world.set_block(2, 80, 2, block);
+            assert_eq!(client_selection_bounds(2, 80, 2), 6);
+            assert_eq!(state().out, expected);
+        }
+        state().world.set_block(2, 80, 2, blocks::OAK_FENCE);
+        state().world.set_block(3, 80, 2, blocks::STONE);
+        assert_eq!(client_selection_bounds(2, 80, 2), 6);
+        assert_eq!(state().out, [6, 0, 6, 16, 16, 10]);
+        state().world.set_block(3, 80, 2, blocks::AIR);
+        assert_eq!(client_selection_bounds(2, 80, 2), 6);
+        assert_eq!(state().out, [6, 0, 6, 10, 16, 10]);
+        for block in [blocks::AIR, blocks::WATER] {
+            state().world.set_block(2, 80, 2, block);
+            assert_eq!(client_selection_bounds(2, 80, 2), 0);
+        }
+        assert_eq!(client_selection_bounds(32, 80, 32), 0);
     }
 
     #[test]

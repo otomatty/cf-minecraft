@@ -60,7 +60,17 @@ const COLLISION_TOLERANCE: f64 = 0.1;
 
 type ChunkPos = (i32, i32);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Dig {
+    pos: [i32; 3],
+    state: u16,
+    start: i64,
+    ticks: u16,
+    stage: Option<u8>,
+}
+
 struct Client {
+    dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     inventory: Inventory,
     inventory_dirty: bool,
@@ -115,6 +125,7 @@ pub struct Server {
     clients: BTreeMap<u32, Client>,
     pending: Vec<(u32, C2S)>,
     outbox: Vec<(u32, Vec<u8>)>,
+    dig_updates: BTreeMap<(u32, [i32; 3]), u8>,
     /// Chunks the host has in storage.
     stored: BTreeSet<ChunkPos>,
     /// Asked from the host, not yet delivered.
@@ -146,6 +157,7 @@ impl Server {
             clients: BTreeMap::new(),
             pending: Vec::new(),
             outbox: Vec::new(),
+            dig_updates: BTreeMap::new(),
             stored: BTreeSet::new(),
             requested: BTreeSet::new(),
             requests: Vec::new(),
@@ -440,6 +452,7 @@ impl Server {
         self.clients.insert(
             id,
             Client {
+                dig: None,
                 visible_entities: BTreeMap::new(),
                 inventory: inventory
                     .and_then(|bytes| Inventory::from_bytes(bytes).ok())
@@ -468,6 +481,7 @@ impl Server {
     }
 
     pub fn disconnect(&mut self, id: u32) {
+        self.abort_dig(id);
         self.clients.remove(&id);
         self.pending.retain(|(c, _)| *c != id);
         self.outbox.retain(|(c, _)| *c != id);
@@ -495,7 +509,9 @@ impl Server {
         for (id, packet) in pending {
             self.apply(id, packet);
         }
+        self.tick_digs();
         self.stream_chunks();
+        self.flush_digs();
         self.tick_entities();
 
         self.game_time += 1;
@@ -533,6 +549,40 @@ impl Server {
 
     fn apply(&mut self, id: u32, packet: C2S) {
         match packet {
+            C2S::DigAbort => {
+                if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
+                    self.stats.packets_rejected += 1;
+                } else {
+                    self.abort_dig(id);
+                }
+            }
+            C2S::DigStart { x, y, z } => {
+                if self.game_mode != GameMode::Survival {
+                    self.stats.packets_rejected += 1;
+                    return;
+                }
+                self.abort_dig(id);
+                let state = self.world.get_block(x, y, z);
+                let ticks = state.and_then(|s| blocks::info(s).dig_ticks);
+                if !self.can_edit(id, x, y, z, blocks::AIR) || ticks.is_none() {
+                    self.stats.packets_rejected += 1;
+                    self.correct_block(id, x, y, z);
+                    return;
+                }
+                if ticks == Some(0) {
+                    self.change_block(id, x, y, z, blocks::AIR);
+                    self.dig_updates.insert((id, [x, y, z]), 255);
+                    return;
+                }
+                self.clients.get_mut(&id).unwrap().dig = Some(Dig {
+                    pos: [x, y, z],
+                    state: state.unwrap(),
+                    start: self.game_time,
+                    ticks: ticks.unwrap(),
+                    stage: None,
+                });
+            }
+
             C2S::DropItem { dir } => {
                 let client = self.clients.get_mut(&id).unwrap();
                 if !client.joined || !dir.iter().all(|v| v.is_finite()) {
@@ -618,7 +668,7 @@ impl Server {
                 let old = self.world.get_block(x, y, z);
                 let survival_ok = self.game_mode == GameMode::Creative
                     || if state == blocks::AIR {
-                        !matches!(old, Some(blocks::BEDROCK | blocks::WATER))
+                        false
                     } else {
                         old.is_some_and(|old| {
                             matches!(old, blocks::AIR | blocks::WATER | blocks::SHORT_GRASS)
@@ -633,36 +683,107 @@ impl Server {
                     self.correct_block(id, x, y, z);
                     return;
                 }
-                if let Some(old) = self.world.set_block(x, y, z, state) {
-                    if old != state {
-                        if self.game_mode == GameMode::Survival {
-                            if state == blocks::AIR {
-                                if let Some(item) = items::for_block(old) {
-                                    let mut random = jmath::JavaRandom::new(
-                                        self.seed.wrapping_add(self.next_entity_id as i64),
-                                    );
-                                    let velocity = [
-                                        random.next_double() * 0.1 - 0.05,
-                                        0.1,
-                                        random.next_double() * 0.1 - 0.05,
-                                    ];
-                                    self.spawn_item(
-                                        item,
-                                        1,
-                                        [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
-                                        velocity,
-                                        10,
-                                    );
-                                }
-                            } else {
-                                let client = self.clients.get_mut(&id).unwrap();
-                                client.inventory.take_selected();
-                                client.inventory_dirty = true;
-                            }
+                self.change_block(id, x, y, z, state);
+            }
+        }
+    }
+
+    fn change_block(&mut self, id: u32, x: i32, y: i32, z: i32, state: u16) {
+        if let Some(old) = self.world.set_block(x, y, z, state) {
+            if old != state {
+                let miners: Vec<_> = self
+                    .clients
+                    .iter()
+                    .filter(|(_, c)| c.dig.is_some_and(|dig| dig.pos == [x, y, z]))
+                    .map(|(&id, _)| id)
+                    .collect();
+                for miner in miners {
+                    self.abort_dig(miner);
+                }
+                if self.game_mode == GameMode::Survival {
+                    if state == blocks::AIR {
+                        if let Some(item) = items::for_block(old) {
+                            let mut random = jmath::JavaRandom::new(
+                                self.seed.wrapping_add(self.next_entity_id as i64),
+                            );
+                            let velocity = [
+                                random.next_double() * 0.1 - 0.05,
+                                0.1,
+                                random.next_double() * 0.1 - 0.05,
+                            ];
+                            self.spawn_item(
+                                item,
+                                1,
+                                [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
+                                velocity,
+                                10,
+                            );
                         }
-                        self.stats.blocks_changed += 1;
-                        self.broadcast_block(x, y, z, state);
+                    } else {
+                        let client = self.clients.get_mut(&id).unwrap();
+                        client.inventory.take_selected();
+                        client.inventory_dirty = true;
                     }
+                }
+                self.stats.blocks_changed += 1;
+                self.broadcast_block(x, y, z, state);
+            }
+        }
+    }
+
+    fn abort_dig(&mut self, id: u32) {
+        if let Some(dig) = self.clients.get_mut(&id).and_then(|c| c.dig.take()) {
+            self.dig_updates.insert((id, dig.pos), 255);
+        }
+    }
+
+    fn tick_digs(&mut self) {
+        let digs: Vec<_> = self
+            .clients
+            .iter()
+            .filter_map(|(&id, c)| c.dig.map(|d| (id, d)))
+            .collect();
+        for (id, dig) in digs {
+            let [x, y, z] = dig.pos;
+            if self.world.get_block(x, y, z) != Some(dig.state)
+                || !self.can_edit(id, x, y, z, blocks::AIR)
+            {
+                self.abort_dig(id);
+                continue;
+            }
+            let elapsed = self.game_time - dig.start;
+            if elapsed >= i64::from(dig.ticks) {
+                self.change_block(id, x, y, z, blocks::AIR);
+                self.abort_dig(id);
+            } else {
+                let stage = ((elapsed * 10 / i64::from(dig.ticks)).min(9)) as u8;
+                if dig.stage != Some(stage) {
+                    self.clients
+                        .get_mut(&id)
+                        .unwrap()
+                        .dig
+                        .as_mut()
+                        .unwrap()
+                        .stage = Some(stage);
+                    self.dig_updates.insert((id, dig.pos), stage);
+                }
+            }
+        }
+    }
+
+    fn flush_digs(&mut self) {
+        for ((player, [x, y, z]), stage) in std::mem::take(&mut self.dig_updates) {
+            let bytes = S2C::DigProgress {
+                player,
+                x,
+                y,
+                z,
+                stage,
+            }
+            .encode();
+            for (&id, c) in &self.clients {
+                if id != player && c.joined && c.sent.contains(&(x >> 4, z >> 4)) {
+                    self.outbox.push((id, bytes.clone()));
                 }
             }
         }
@@ -1014,6 +1135,16 @@ impl Server {
         for (&id, client) in &self.clients {
             h.bytes(&id.to_be_bytes());
             h.bytes(&client.inventory.to_bytes());
+            h.u8(client.dig.is_some() as u8);
+            if let Some(dig) = client.dig {
+                for v in dig.pos {
+                    h.bytes(&v.to_be_bytes());
+                }
+                h.bytes(&dig.state.to_be_bytes());
+                h.i64(dig.start);
+                h.bytes(&dig.ticks.to_be_bytes());
+                h.u8(dig.stage.unwrap_or(255));
+            }
         }
         h.bytes(&self.next_entity_id.to_be_bytes());
         h.i64(self.entities.len() as i64);
@@ -1183,6 +1314,9 @@ mod tests {
         s.take_outbox();
         (s, [x.floor() as i32, y as i32, z.floor() as i32])
     }
+    fn dig_start(s: &mut Server, id: u32, [x, y, z]: [i32; 3]) {
+        s.handle_packet(id, &C2S::DigStart { x, y, z }.encode());
+    }
     fn edit(s: &mut Server, [x, y, z]: [i32; 3], state: u16) {
         s.handle_packet(1, &C2S::SetBlock { x, y, z, state }.encode());
     }
@@ -1198,8 +1332,10 @@ mod tests {
         assert_eq!(s.clients[&1].inventory, Inventory::default());
         for state in [blocks::STONE, blocks::OAK_SLAB + 1, blocks::OAK_STAIRS + 7] {
             s.world.set_block(pos[0], pos[1], pos[2], state);
-            edit(&mut s, pos, blocks::AIR);
-            s.tick();
+            dig_start(&mut s, 1, pos);
+            for _ in 0..=blocks::info(state).dig_ticks.unwrap() {
+                s.tick();
+            }
             assert_eq!(s.entities.len(), 1);
             assert!(s.clients[&1].inventory.selected_stack().is_none());
             for _ in 0..9 {
@@ -1318,8 +1454,10 @@ mod tests {
         assert_eq!(inv.add(1, 36 * 64), 0);
         let before = inv.clone();
         s.world.set_block(pos[0], pos[1], pos[2], blocks::DIRT);
-        edit(&mut s, pos, blocks::AIR);
-        s.tick();
+        dig_start(&mut s, 1, pos);
+        for _ in 0..=12 {
+            s.tick();
+        }
         for _ in 0..10 {
             s.tick();
         }
@@ -3047,3 +3185,6 @@ mod tests {
         assert!(s.take_outbox().is_empty());
     }
 }
+
+#[cfg(test)]
+mod mining;

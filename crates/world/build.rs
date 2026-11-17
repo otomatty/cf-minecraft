@@ -29,6 +29,9 @@ struct Registry {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Block {
+    dig_ticks: Option<u16>,
+    #[serde(default)]
+    unbreakable: bool,
     name: String,
     id: u16,
     #[serde(default = "cube")]
@@ -254,6 +257,11 @@ fn generate(root: &Path, dest: &Path) {
         );
     }
     for b in &registry.blocks {
+        assert!(
+            b.unbreakable != b.dig_ticks.is_some(),
+            "blocks.toml: {}: specify dig_ticks or unbreakable",
+            b.name
+        );
         identifier(&b.name);
         model(&b.model);
         assert!(
@@ -391,7 +399,7 @@ fn generate(root: &Path, dest: &Path) {
                     b.name
                 );
             }
-            writeln!(infos, "BlockInfo {{ model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            writeln!(infos, "BlockInfo {{ dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
             let pairs: Vec<_> = s
                 .properties
                 .iter()

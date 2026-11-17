@@ -42,6 +42,7 @@ pub enum Model {
 
 #[derive(Clone, Copy)]
 pub struct BlockInfo {
+    pub dig_ticks: Option<u16>,
     pub model: Model,
     pub layer: RenderLayer,
     /// Full opaque cube: hides adjacent faces and blocks AO/light samples.

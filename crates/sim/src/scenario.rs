@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn creative_inventory_scenario_fingerprint() {
-        assert_eq!(run(2026, 600), 0x2f8d55d7b5e67801);
+        assert_eq!(run(2026, 600), 0x92a0baa309d6ad75);
     }
 
     #[test]
