@@ -21,6 +21,6 @@ export function bindInventorySlot(
     button.addEventListener("click", event => send(slot, 0, event.shiftKey));
     button.addEventListener("contextmenu", event => {
         event.preventDefault();
-        send(slot, 1, event.shiftKey);
+        send(slot, 1, event.button === 2 && event.shiftKey);
     });
 }

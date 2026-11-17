@@ -516,7 +516,7 @@ impl Server {
         self.clients.get(&id).map(|client| client.pos)
     }
 
-    fn return_crafting(&mut self, id: u32) {
+    pub fn return_crafting(&mut self, id: u32) {
         let Some(client) = self.clients.get_mut(&id) else {
             return;
         };
@@ -3461,6 +3461,49 @@ mod crafting_server_tests {
         again.connect_at(1, false, Some(pos), Some(&saved));
         assert!(again.entities.is_empty());
         assert_eq!(again.clients[&1].inventory, restored.clients[&1].inventory);
+    }
+    #[test]
+    fn multiplayer_release_then_reconnect_preserves_inventory_and_world_totals() {
+        fn totals(s: &Server) -> BTreeMap<u16, u32> {
+            let inv = &s.clients[&1].inventory;
+            let mut totals = BTreeMap::new();
+            for (item, count) in inv
+                .slots()
+                .iter()
+                .copied()
+                .chain(inv.crafting)
+                .chain([inv.cursor])
+                .flatten()
+                .map(|s| (s.item, s.count))
+                .chain(s.entities.values().map(|e| (e.item, e.count)))
+            {
+                *totals.entry(item).or_default() += u32::from(count);
+            }
+            totals
+        }
+        let mut s = server();
+        fill(&mut s, true);
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(35, Some(Stack { item: 8, count: 63 }))
+            .unwrap();
+        let before = totals(&s);
+        // Same order as WorldDO: return, remember position/inventory, disconnect.
+        s.return_crafting(1);
+        let position = s.client_position(1);
+        let saved = s.inventory_data(1).unwrap();
+        let inv = Inventory::from_bytes(&saved).unwrap();
+        assert_eq!(inv.crafting, [None; 4]);
+        assert_eq!(inv.cursor, None);
+        assert_eq!(s.entities.len(), 2);
+        assert_eq!(totals(&s), before);
+        s.disconnect(1);
+        s.connect_at(1, true, position, Some(&saved));
+        assert_eq!(totals(&s), before);
+        assert_eq!(s.entities.len(), 2);
+        assert_eq!(s.clients[&1].inventory, inv);
     }
     #[test]
     fn rejects_and_resends_and_hashes_transient_state_deterministically() {

@@ -14,6 +14,7 @@ interface ServerExports {
 	server_inventory_data(client: number): number;
 	server_client_biome(client: number): number;
 	server_client_position(client: number): number;
+	server_return_crafting(client: number): void;
 	server_disconnect(client: number): void;
 	server_packet(client: number, ptr: number, len: number): void;
 	server_tick(): void;
@@ -41,7 +42,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 6;
+export const SERVER_ABI_VERSION = 7;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
@@ -127,6 +128,10 @@ export class ServerCore {
 		const bytes = this.output(len);
 		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		return [view.getFloat64(0, true), view.getFloat64(8, true), view.getFloat64(16, true)];
+	}
+
+	returnCrafting(client: number): void {
+		this.x.server_return_crafting(client);
 	}
 
 	disconnect(client: number): void {

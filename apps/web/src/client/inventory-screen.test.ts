@@ -69,28 +69,30 @@ test("WASM Inventory carries crafting preview and cursor through server-confirme
 
 
 test("slot activation sends exactly once for pointer and keyboard event sequences", () => {
-    for (const { name, events, activation, button, shift } of [
+    for (const { name, events, activation, button, shift, eventButton = 0, expectedShift = shift } of [
         { name: "left mouse", events: ["mousedown", "mouseup", "click"], activation: "click", button: 0, shift: false },
         { name: "shift left mouse", events: ["mousedown", "mouseup", "click"], activation: "click", button: 0, shift: true },
         { name: "Enter", events: ["keydown", "click", "keyup"], activation: "click", button: 0, shift: false },
         { name: "Space", events: ["keydown", "keyup", "click"], activation: "click", button: 0, shift: false },
         { name: "shift Enter", events: ["keydown", "click", "keyup"], activation: "click", button: 0, shift: true },
-        { name: "right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: false },
-        { name: "shift right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: true },
-        { name: "menu key", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: false },
-        { name: "Shift+F10", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: true },
+        { name: "right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: false, eventButton: 2 },
+        { name: "shift right mouse", events: ["mousedown", "contextmenu", "mouseup"], activation: "contextmenu", button: 1, shift: true, eventButton: 2 },
+        { name: "menu key (button -1)", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: false, eventButton: -1 },
+        { name: "menu key (button 0)", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: false, eventButton: 0 },
+        { name: "Shift+F10 (button -1)", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: true, eventButton: -1, expectedShift: false },
+        { name: "Shift+F10 (button 0)", events: ["keydown", "contextmenu", "keyup"], activation: "contextmenu", button: 1, shift: true, eventButton: 0, expectedShift: false },
     ]) {
         const target = new EventTarget();
         const sent: Array<{ slot: number; button: number; shift: boolean }> = [];
         bindInventorySlot(target as HTMLButtonElement, 36, (slot, button, shift) => sent.push({slot, button, shift}));
         let activated = false;
         for (const type of events) {
-            const event = Object.assign(new Event(type, { cancelable: true }), { shiftKey: shift });
+            const event = Object.assign(new Event(type, { cancelable: true }), { shiftKey: shift, button: eventButton });
             target.dispatchEvent(event);
             activated ||= type === activation;
             assert.equal(sent.length, activated ? 1 : 0, `${name}: ${type}`);
             assert.equal(event.defaultPrevented, type === "contextmenu", `${name}: ${type}`);
         }
-        assert.deepEqual(sent, [{ slot: 36, button, shift }], name);
+        assert.deepEqual(sent, [{ slot: 36, button, shift: expectedShift }], name);
     }
 });

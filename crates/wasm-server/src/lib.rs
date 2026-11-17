@@ -68,7 +68,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn server_abi_version() -> u32 {
-    6
+    7
 }
 
 #[no_mangle]
@@ -133,6 +133,11 @@ pub extern "C" fn server_client_position(client: u32) -> usize {
         }
     }
     st.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn server_return_crafting(client: u32) {
+    server().return_crafting(client);
 }
 
 #[no_mangle]

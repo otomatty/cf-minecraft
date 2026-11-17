@@ -200,13 +200,7 @@ export class WorldDO extends DurableObject<Env> {
 		const core = this.ensureCore();
 		if (previous !== undefined) {
 			this.sockets.get(previous)?.close(LOGGED_IN_ELSEWHERE, "logged in elsewhere");
-			if (this.sockets.delete(previous)) {
-				this.rememberPosition(previous);
-				this.users.delete(previous);
-				this.sessions.delete(previous);
-				this.packetCounts.delete(previous);
-				core.disconnect(previous);
-			}
+			this.releaseClient(previous);
 		}
 		const pair = new WebSocketPair();
 		const client = pair[0];
@@ -228,13 +222,7 @@ export class WorldDO extends DurableObject<Env> {
 		this.worldName = new URL(request.url).pathname.split("/").filter(Boolean)[1];
 
 		const drop = () => {
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				core.disconnect(id);
-			}
+			this.releaseClient(id);
 		};
 		server.addEventListener("message", (event) => {
 			if (!this.sockets.has(id)) return;
@@ -260,6 +248,17 @@ export class WorldDO extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	private releaseClient(id: number): void {
+		if (!this.sockets.delete(id)) return;
+		const core = this.ensureCore();
+		core.returnCrafting(id);
+		this.rememberPosition(id);
+		this.users.delete(id);
+		this.sessions.delete(id);
+		this.packetCounts.delete(id);
+		core.disconnect(id);
+	}
+
 	private rememberPosition(id: number): void {
 		const user = this.users.get(id);
 		const position = this.ensureCore().clientPosition(id);
@@ -283,15 +282,8 @@ export class WorldDO extends DurableObject<Env> {
 		let revoked = 0;
 		for (const [id, user] of this.users) {
 			if (user !== userId) continue;
-			const core = this.ensureCore();
 			this.sockets.get(id)?.close(ACCESS_REVOKED, "access revoked");
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				core.disconnect(id);
-			}
+			this.releaseClient(id);
 			revoked++;
 		}
 		return revoked;
@@ -302,13 +294,7 @@ export class WorldDO extends DurableObject<Env> {
 		const count = this.sockets.size;
 		for (const [id, socket] of this.sockets) {
 			socket.close(code, reason);
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				this.ensureCore().disconnect(id);
-			}
+			this.releaseClient(id);
 		}
 		return count;
 	}
@@ -355,13 +341,7 @@ export class WorldDO extends DurableObject<Env> {
 					new Date(row.expiresAt).getTime() > now
 				)) continue;
 				this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
-				if (this.sockets.delete(connection.id)) {
-					this.rememberPosition(connection.id);
-					this.users.delete(connection.id);
-					this.sessions.delete(connection.id);
-					this.packetCounts.delete(connection.id);
-					this.ensureCore().disconnect(connection.id);
-				}
+				this.releaseClient(connection.id);
 			}
 		} catch (error) {
 			console.error("access recheck failed", this.worldName, error);

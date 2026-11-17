@@ -91,3 +91,23 @@ test("inventory and game mode cross the server/client ABI and survive reconnect"
 	assert.deepEqual(client.inventory[35], { item: slab.id, count: 17 });
 	assert.deepEqual(server.inventoryData(1), saved);
 });
+
+test("returnCrafting clears transient stacks before taking a multiplayer snapshot", () => {
+	const server = ServerCore.fromModule(module);
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	server.start(2026n, Generator.Flat);
+	server.connect(1);
+	server.packet(1, client.encodeHello(2)); server.tick(); server.takeOutbox();
+	for (const slot of [4, 36, 2]) server.packet(1, client.encodeClickSlot(slot, 0, false));
+	server.tick(); server.takeOutbox();
+	const before = server.inventoryData(1)!;
+	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(110), 8);
+	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(122), 5);
+	server.returnCrafting(1);
+	const saved = server.inventoryData(1)!;
+	assert.equal(saved[0], 2);
+	assert.ok(saved.slice(110).every(byte => byte === 0));
+	server.disconnect(1);
+	server.connect(1, false, undefined, saved);
+	assert.deepEqual(server.inventoryData(1), saved);
+});
