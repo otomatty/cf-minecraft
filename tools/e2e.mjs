@@ -953,9 +953,11 @@ async function survivalCrafting() {
             for (let z=sz-24;z<=sz+24;z++) for (let x=sx-24;x<=sx+24;x++) {
                 for (let y=57;y<319;y++) {
                     if (api.getBlock(x,y,z) !== log || api.getBlock(x,y-1,z) === log) continue;
+                    // Require the next two logs in this same trunk as well.
+                    if ([1,2].some(dy => api.getBlock(x,y+dy,z) !== log)) continue;
                     const floor = api.getBlock(x+1,y-1,z);
                     if (floor <= 0 || floor === api.stateId("water")) continue;
-                    if ([0,1].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
+                    if ([0,1,2].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
                     return [x,y,z];
                 }
             }
@@ -992,6 +994,92 @@ async function survivalCrafting() {
         check(await page.$eval('#inventory-screen [data-slot="9"] canvas',c=>c.title==="oak_planks" && c.dataset.count==="4"),"crafting: takes result and returns planks to inventory");
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.getElementById("inventory-screen").hidden);
+        // Preserve the first-log checks above, then mine the next two trunk blocks.
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        for (const dy of [1,2]) {
+            await page.evaluate(([x,y,z,dy]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12-dy,1)*180/Math.PI),[...target,dy]);
+            await page.waitForFunction(([x,y,z,dy]) => {
+                const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+                const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+                return hit?.x===x && hit?.y===y+dy && hit?.z===z;
+            },{},[...target,dy]);
+            await page.mouse.down();
+            await page.waitForFunction(([x,y,z,dy]) => window.__mc.getBlock(x,y+dy,z)===0,{},[...target,dy]);
+            await page.mouse.up();
+            await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+0.5,y+1.62,z+0.5,0,0),target);
+            await page.waitForFunction(count => window.__mc.stats().inventory[0]?.count===count,{},dy);
+        }
+        check(await page.evaluate(() => window.__mc.stats().inventory[0]?.count===2),"crafting: collects three logs from the same trunk");
+        await page.keyboard.press("KeyE");
+        await page.waitForFunction(() => !document.getElementById("inventory-screen").hidden);
+        // Each click waits for a changed slot rendered from the server Inventory.
+        const clickSlot = async (screen, slot, count, button = "left", observedSlot = slot) => {
+            const selector = `#${screen} [data-slot="${slot}"]`;
+            await page.click(selector,{button});
+            await page.waitForFunction((selector,count) => document.querySelector(`${selector} canvas`).dataset.count===String(count),{},`#${screen} [data-slot="${observedSlot}"]`,count);
+        };
+        const inv = (slot,count,button) => clickSlot("inventory-screen",slot,count,button);
+        await inv(0,0);
+        await inv(36,2);
+        // The preview stays four planks; observe the consumed log to acknowledge the click.
+        await clickSlot("inventory-screen",40,1,"left",36);
+        await inv(40,0);
+        await inv(9,12);
+        check(await page.$eval('#inventory-screen [data-slot="9"] canvas',c=>c.dataset.count==="12"),"crafting: three logs yield twelve planks");
+        await inv(9,0);
+        await inv(36,1,"right");
+        await inv(38,1,"right");
+        await inv(9,10);
+        await inv(40,0);
+        await inv(10,4);
+        check(await page.$eval('#inventory-screen [data-slot="10"] canvas',c=>c.title==="stick"),"crafting: crafts sticks through inventory buttons");
+        await inv(9,0);
+        for (const slot of [36,37,38,39]) await inv(slot,1,"right");
+        await inv(9,6);
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="40"] canvas').title==="crafting_table");
+        await inv(40,0);
+        await inv(0,1);
+        check(await page.$eval('#inventory-screen [data-slot="0"] canvas',c=>c.title==="crafting_table"),"crafting: crafts table into hotbar");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        // Move before aiming: under pointer lock this movement rotates the camera.
+        await page.mouse.move(640, 360);
+        await page.keyboard.press("Digit1");
+        await page.waitForFunction(() => window.__mc.stats().selectedSlot===0);
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(2.12,1)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+            const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x===x && hit?.y===y-1 && hit?.z===z && hit?.face===1;
+        },{},target);
+        await page.mouse.click(640,360,{button:"right"});
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z)===window.__mc.stateId("crafting_table") && !window.__mc.stats().inventory[0],{},target);
+        check(await page.evaluate(([x,y,z])=>window.__mc.getBlock(x,y,z)===window.__mc.stateId("crafting_table"),target),"crafting: places table on the ground");
+        // No mouse movement since placement; the next right-click stays at the center.
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+            const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x===x && hit?.y===y && hit?.z===z;
+        },{},target);
+        await page.mouse.click(640,360,{button:"right"});
+        await page.waitForFunction(() => !document.getElementById("crafting-table-screen").hidden);
+        check(await page.$eval("#crafting-table-screen",el=>!el.hidden),"crafting: right-click opens table screen");
+        const table = (slot,count,button) => clickSlot("crafting-table-screen",slot,count,button);
+        await table(9,0);
+        for (const slot of [41,42,43]) await table(slot,1,"right");
+        await table(9,3);
+        await table(10,0);
+        for (const slot of [45,48]) await table(slot,1,"right");
+        await table(10,2);
+        await page.waitForFunction(() => document.querySelector('#crafting-table-screen [data-slot="50"] canvas').title==="wooden_pickaxe");
+        check(await page.$eval('#crafting-table-screen [data-slot="50"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: three planks and two sticks preview wooden pickaxe");
+        await table(50,0);
+        await table(11,1);
+        check(await page.$eval('#crafting-table-screen [data-slot="11"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: takes wooden pickaxe into inventory");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.getElementById("crafting-table-screen").hidden && window.__mc.stats().screen===0);
+        check(await page.evaluate(() => window.__mc.stats().inventory[11]?.count===1 && document.querySelector('#crafting-table-screen [data-slot="11"] canvas').title==="wooden_pickaxe"),"crafting: wooden pickaxe remains in inventory after closing");
         check(errors.length===0,"crafting: no page errors",errors.join(" | "));
     } catch (err) {
         await diagnoseFailure(page, "crafting", err);

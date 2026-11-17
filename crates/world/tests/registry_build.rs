@@ -208,8 +208,8 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
-        "name = \"stone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
@@ -431,4 +431,25 @@ fn crafting_recipe_validation() {
     ] {
         assert!(generate_recipes_fixture(BLOCKS,BIOMES,items,&format!("{recipes}\n{duplicate}")).unwrap_err().contains("duplicate recipe"));
     }
+}
+
+#[test]
+fn mining_drop_references_must_name_an_existing_item() {
+    for (replacement, message) in [
+        ("drop = \"missing\"", "unknown drop item missing"),
+        ("drop = \"\"", "unknown drop item"),
+        ("drop = 4", "invalid type"),
+    ] {
+        let data = BLOCKS.replacen("drop = \"cobblestone\"", replacement, 1);
+        assert_ne!(data, BLOCKS);
+        let error = generate_fixture(&data, BIOMES).unwrap_err();
+        assert!(error.contains("blocks.toml"), "{error}");
+        assert!(error.contains(message), "{error}");
+    }
+    // The override may reference a non-block item as well.
+    assert!(generate_fixture(
+        &BLOCKS.replacen("drop = \"cobblestone\"", "drop = \"stick\"", 1),
+        BIOMES
+    )
+    .is_ok());
 }

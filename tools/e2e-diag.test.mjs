@@ -97,6 +97,58 @@ test("diagnostic screenshots use CDP command deadlines and detach on success or 
 	}
 });
 
+test("diagnostic capture and screenshot session detach finish before opening a fresh tab", async (t) => {
+	const shots = await mkdtemp(join(tmpdir(), "e2e-diag-order-"));
+	t.mock.method(console, "log", () => {});
+	const calls = [];
+	const page = {
+		async evaluate() { calls.push("page evaluate"); return { readyState: "complete" }; },
+		target() {
+			return {
+				async createCDPSession() {
+					calls.push("screenshot session");
+					return {
+						async send(method) {
+							assert.equal(method, "Page.captureScreenshot");
+							calls.push("capture");
+							return { data: Buffer.from("captured before focus change").toString("base64") };
+						},
+						async detach() { calls.push("screenshot detach"); },
+					};
+				},
+			};
+		},
+	};
+	const browser = {
+		target() {
+			return { async createCDPSession() {
+				calls.push("browser session");
+				throw new Error("browser CDP unavailable");
+			} };
+		},
+		async newPage() {
+			calls.push("new tab");
+			return {
+				async goto() { calls.push("fresh goto"); },
+				async evaluate() { calls.push("fresh evaluate"); return "complete"; },
+				async close() { calls.push("fresh close"); },
+			};
+		},
+	};
+	try {
+		const result = await diagnose(browser, page, "capture-order", { edge: "http://localhost", shots });
+		assert.deepEqual(calls, [
+			"page evaluate", "browser session", "screenshot session", "capture", "screenshot detach",
+			"new tab", "fresh goto", "fresh evaluate", "fresh close",
+		]);
+		assert.equal(await readFile(result.screenshot, "utf8"), "captured before focus change");
+		assert.equal(result.screenshotSessionDetach, "detached");
+		assert.equal(result.freshTabClose, "closed");
+	} finally {
+		await rm(shots, { recursive: true, force: true });
+	}
+});
+
 test("targets are grouped by type and final URL component without query", () => {
 	assert.deepEqual(summarizeTargets([
 		{ type: "worker", url: "http://localhost/assets/worker.js?v=1" },

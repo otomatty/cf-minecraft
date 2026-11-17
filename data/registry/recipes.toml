@@ -12,3 +12,33 @@ result = { item = "stick", count = 4 }
 pattern = ["##", "##"]
 key = { "#" = "oak_planks" }
 result = { item = "crafting_table", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_shovel", count = 1 }

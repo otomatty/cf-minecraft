@@ -10,12 +10,22 @@ pub struct Stack {
     pub item: u16,
     pub count: u8,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Screen {
+    #[default]
+    None,
+    CraftingTable {
+        pos: [i32; 3],
+    },
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inventory {
     slots: [Option<Stack>; SLOT_COUNT],
     selected: u8,
     pub crafting: [Option<Stack>; 4],
     pub cursor: Option<Stack>,
+    pub table: [Option<Stack>; 9],
+    pub screen: Screen,
 }
 impl Default for Inventory {
     fn default() -> Self {
@@ -24,6 +34,8 @@ impl Default for Inventory {
             selected: 0,
             crafting: [None; 4],
             cursor: None,
+            table: [None; 9],
+            screen: Screen::None,
         }
     }
 }
@@ -88,21 +100,50 @@ impl Inventory {
     }
 
     pub fn result(&self) -> Option<Stack> {
-        matching_recipe(&self.crafting, 2, 2, world::recipes::RECIPES).map(|r| Stack {
+        matching_recipe(
+            self.grid(),
+            self.width(),
+            self.width(),
+            world::recipes::RECIPES,
+        )
+        .map(|r| Stack {
             item: r.item,
             count: r.count,
         })
     }
+    fn width(&self) -> usize {
+        if self.screen == Screen::None {
+            2
+        } else {
+            3
+        }
+    }
+    fn grid(&self) -> &[Option<Stack>] {
+        if self.screen == Screen::None {
+            &self.crafting
+        } else {
+            &self.table
+        }
+    }
+    fn grid_mut(&mut self) -> &mut [Option<Stack>] {
+        if self.screen == Screen::None {
+            &mut self.crafting
+        } else {
+            &mut self.table
+        }
+    }
     fn consume(&mut self) {
-        for slot in &mut self.crafting {
+        for slot in self.grid_mut() {
             subtract(slot, 1);
         }
     }
     pub fn click(&mut self, slot: u8, button: u8, shift: bool) -> Result<(), DecodeError> {
-        if slot > 40 || button > 1 {
+        let base = if self.screen == Screen::None { 36 } else { 41 };
+        let result_slot = if self.screen == Screen::None { 40 } else { 50 };
+        if slot > result_slot || (slot >= 36 && slot < base) || button > 1 {
             return Err(DecodeError);
         }
-        if slot == 40 {
+        if slot == result_slot {
             while let Some(result) = self.result() {
                 if shift {
                     let mut next = self.clone();
@@ -135,7 +176,7 @@ impl Inventory {
             let source = if index < 36 {
                 self.slots[index]
             } else {
-                self.crafting[index - 36]
+                self.grid()[index - base as usize]
             };
             if let Some(stack) = source {
                 let range = if index < 9 {
@@ -149,8 +190,10 @@ impl Inventory {
                     add_slots(&mut self.slots[range], stack.item, u32::from(stack.count));
                 let source = if index < 36 {
                     &mut self.slots[index]
-                } else {
+                } else if base == 36 {
                     &mut self.crafting[index - 36]
+                } else {
+                    &mut self.table[index - 41]
                 };
                 *source = (remaining != 0).then_some(Stack {
                     item: stack.item,
@@ -160,8 +203,10 @@ impl Inventory {
         } else {
             let target = if index < 36 {
                 &mut self.slots[index]
-            } else {
+            } else if base == 36 {
                 &mut self.crafting[index - 36]
+            } else {
+                &mut self.table[index - 41]
             };
             match (self.cursor, *target) {
                 (None, Some(s)) => {
@@ -198,7 +243,10 @@ impl Inventory {
     pub fn return_crafting(&mut self) -> Vec<Stack> {
         let mut overflow = Vec::new();
         let mut stacks = self.crafting.to_vec();
+        stacks.extend(self.table);
         stacks.push(self.cursor);
+        self.table = [None; 9];
+        self.screen = Screen::None;
         self.crafting = [None; 4];
         self.cursor = None;
         for stack in stacks.into_iter().flatten() {
@@ -214,13 +262,14 @@ impl Inventory {
     }
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(2);
+        w.u8(3);
         w.u8(self.selected);
         for slot in self
             .slots
             .into_iter()
             .chain(self.crafting)
             .chain([self.cursor])
+            .chain(self.table)
         {
             w.u16(slot.map_or(0, |s| s.item));
             w.u8(slot.map_or(0, |s| s.count));
@@ -230,17 +279,19 @@ impl Inventory {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 1 | 2) {
+        if !matches!(version, 1..=3) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
         result.select(r.u8()?)?;
-        let count = SLOT_COUNT + if version == 2 { 5 } else { 0 };
+        let count =
+            SLOT_COUNT + if version >= 2 { 5 } else { 0 } + if version == 3 { 9 } else { 0 };
         for slot in result
             .slots
             .iter_mut()
             .chain(result.crafting.iter_mut())
             .chain(std::iter::once(&mut result.cursor))
+            .chain(result.table.iter_mut())
             .take(count)
         {
             let item = r.u16()?;
@@ -288,17 +339,24 @@ mod tests {
             Some(Stack { item: 31, count: 1 }),
         ];
         inv.cursor = Some(Stack { item: 43, count: 5 });
+        inv.table[8] = Some(Stack { item: 5, count: 7 });
         let bytes = inv.to_bytes();
-        assert_eq!(bytes.len(), 125);
-        assert_eq!(bytes[0], 2);
+        assert_eq!(bytes.len(), 152);
+        assert_eq!(bytes[0], 3);
         assert_eq!(Inventory::from_bytes(&bytes), Ok(inv.clone()));
+        let mut v2 = bytes[..125].to_vec();
+        v2[0] = 2;
+        let mut expected_v2 = inv.clone();
+        expected_v2.table = [None; 9];
+        assert_eq!(Inventory::from_bytes(&v2), Ok(expected_v2));
         let mut legacy = bytes[..110].to_vec();
         legacy[0] = 1;
         let mut expected = inv.clone();
         expected.crafting = [None; 4];
         expected.cursor = None;
+        expected.table = [None; 9];
         assert_eq!(Inventory::from_bytes(&legacy), Ok(expected));
-        for data in [&bytes, &legacy] {
+        for data in [&bytes, &v2, &legacy] {
             for length in 0..data.len() {
                 assert!(Inventory::from_bytes(&data[..length]).is_err());
             }
@@ -306,7 +364,7 @@ mod tests {
             extra.push(0);
             assert!(Inventory::from_bytes(&extra).is_err());
         }
-        for offset in [110, 113, 116, 119, 122] {
+        for offset in [110, 113, 116, 119, 122, 125, 149] {
             for (item, count) in [(0u16, 1), (u16::MAX, 1), (8, 0), (8, 65), (31, 2)] {
                 let mut bad = bytes.clone();
                 bad[offset..offset + 2].copy_from_slice(&item.to_be_bytes());
@@ -324,7 +382,7 @@ mod tests {
         inv.select(8).unwrap();
         let bytes = inv.to_bytes();
         assert_eq!(Inventory::from_bytes(&bytes), Ok(inv));
-        for (at, value) in [(0, 3), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        for (at, value) in [(0, 4), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
@@ -471,6 +529,94 @@ mod crafting_tests {
         assert!(
             matching_recipe(&[stack(8, 1), stack(5, 1), None, None], 2, 2, &asymmetric).is_none()
         );
+    }
+    #[test]
+    fn all_tool_recipes_match_every_offset_without_mirroring() {
+        for material in ["wooden", "stone"] {
+            for tool in ["pickaxe", "axe", "shovel"] {
+                let item = items::by_name(&format!("{material}_{tool}")).unwrap();
+                let recipe = world::recipes::RECIPES
+                    .iter()
+                    .find(|r| r.item == item)
+                    .unwrap();
+                assert_eq!(recipe.height, 3);
+                assert_eq!(recipe.count, 1);
+                for x in 0..=3 - recipe.width {
+                    let mut grid = [None; 9];
+                    for y in 0..3 {
+                        for dx in 0..recipe.width {
+                            let ingredient = recipe.ingredients[y * recipe.width + dx];
+                            grid[y * 3 + x + dx] = (ingredient != 0).then_some(Stack {
+                                item: ingredient,
+                                count: 2,
+                            });
+                        }
+                    }
+                    assert_eq!(
+                        matching_recipe(&grid, 3, 3, world::recipes::RECIPES)
+                            .unwrap()
+                            .item,
+                        item
+                    );
+                    assert!(
+                        matching_recipe(&grid[..4], 2, 2, std::slice::from_ref(recipe)).is_none()
+                    );
+                    if tool == "axe" {
+                        for row in grid.chunks_mut(3) {
+                            row.reverse();
+                        }
+                        assert!(matching_recipe(&grid, 3, 3, world::recipes::RECIPES).is_none());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn table_clicks_share_atomic_result_shift_and_return_order() {
+        let mut inv = Inventory::default();
+        for slot in 41..=51 {
+            assert!(inv.click(slot, 0, false).is_err());
+        }
+        inv.screen = Screen::CraftingTable { pos: [1, 2, 3] };
+        for slot in 36..=40 {
+            assert!(inv.click(slot, 0, false).is_err());
+        }
+        assert!(inv.click(51, 0, false).is_err());
+        inv.table[8] = stack(8, 3);
+        let restored = Inventory::from_bytes(&inv.to_bytes()).unwrap();
+        assert_eq!(restored.screen, Screen::None);
+        assert_eq!(restored.table, inv.table);
+        inv.slots = [stack(1, 64); 36];
+        inv.slots[10] = stack(5, 59);
+        inv.click(50, 0, true).unwrap();
+        assert_eq!(inv.slots[10], stack(5, 63));
+        assert_eq!(inv.table[8], stack(8, 2));
+        inv.cursor = stack(5, 61);
+        inv.click(50, 1, false).unwrap();
+        assert_eq!(inv.table[8], stack(8, 2));
+        inv.cursor = None;
+        inv.click(50, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack(5, 4));
+        assert_eq!(inv.table[8], stack(8, 1));
+        inv.table[0] = stack(1, 3);
+        inv.slots[0] = stack(1, 60);
+        inv.click(41, 0, true).unwrap();
+        assert_eq!(inv.slots[0], stack(1, 63));
+        assert_eq!(inv.table[0], None);
+        inv.slots.fill(stack(1, 64));
+        inv.crafting[0] = stack(43, 1);
+        assert_eq!(
+            inv.return_crafting(),
+            vec![
+                Stack { item: 43, count: 1 },
+                Stack { item: 8, count: 1 },
+                Stack { item: 5, count: 4 }
+            ]
+        );
+        assert_eq!(inv.screen, Screen::None);
+        assert_eq!(inv.table, [None; 9]);
+        assert_eq!(inv.crafting, [None; 4]);
+        assert_eq!(inv.cursor, None);
     }
     #[test]
     fn normal_clicks_pick_place_merge_swap_split_and_single_place() {

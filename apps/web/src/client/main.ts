@@ -1,4 +1,4 @@
-import { bindInventorySlot, inventoryDisplay, INVENTORY_ROWS } from "./inventory-screen.ts";
+import { bindInventorySlot, tableScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS } from "./inventory-screen.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -22,7 +22,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { hotbarStates } from "./hotbar.ts";
-import { placementState } from "./placement.ts";
+import { blockInteraction, placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { interpolateEntity } from "./entities.ts";
@@ -184,6 +184,7 @@ async function main(): Promise<void> {
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
+	let closePending = false;
 	let positionsCorrected = 0;
 	let closed: string | null = null;
 	let selected = 1;
@@ -204,6 +205,7 @@ async function main(): Promise<void> {
 	const handlers = {
 		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
+			closePending = false;
 			seedReady = false;
 			if (transport.kind !== "local") generator = null;
 			tintMap.setWorld(null, null);
@@ -221,7 +223,13 @@ async function main(): Promise<void> {
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
 			removeUnloaded();
-			if (id === S2C.Inventory) syncInventory();
+			if (id === S2C.Inventory) {
+				syncInventory();
+				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
+				const visible = tableScreenVisible({ screen: core.screen, closePending });
+				if (visible && tableScreen.hidden) openInventoryScreen(true);
+				else if (!visible && !tableScreen.hidden) closeInventoryScreen(false);
+			}
 			if (id === S2C.BlockUpdate) {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				const x = v.getInt32(1), y = v.getInt32(5), z = v.getInt32(9);
@@ -294,6 +302,7 @@ async function main(): Promise<void> {
 			connection = "reconnecting";
 			picker.hidden = true;
 			inventoryScreen.hidden = true;
+			tableScreen.hidden = true;
 			cursorIcon.hidden = true;
 			$("start-to-title").hidden = false;
 			showMenuView("start");
@@ -310,6 +319,7 @@ async function main(): Promise<void> {
 			closed = reason;
 			picker.hidden = true;
 			inventoryScreen.hidden = true;
+			tableScreen.hidden = true;
 			cursorIcon.hidden = true;
 			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
@@ -616,62 +626,71 @@ async function main(): Promise<void> {
 	}
 	refreshSettings();
 
-	const inventoryScreen = document.createElement("section");
-	inventoryScreen.id = "inventory-screen";
-	inventoryScreen.setAttribute("role", "dialog");
-	inventoryScreen.setAttribute("aria-modal", "true");
-	inventoryScreen.setAttribute("aria-label", "インベントリとクラフト");
-	inventoryScreen.hidden = true;
-	inventoryScreen.style.cssText = "position:fixed;inset:10% auto auto 50%;transform:translateX(-50%);z-index:20;background:#292c30;color:white;padding:20px;border:2px solid #91999e;max-height:80vh;overflow:auto";
-	const heading = document.createElement("h2");
-	heading.textContent = "インベントリ / クラフト";
-	inventoryScreen.append(heading);
-	const inventoryButtons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
-	const craftingRow = document.createElement("div");
-	craftingRow.className = "inventory-crafting";
-	for (const [index, row] of INVENTORY_ROWS.entries()) {
-		const group = document.createElement("div");
-		const label = ["所持品", "ホットバー", "クラフト", "結果"][index];
-		group.setAttribute("aria-label", label);
-		group.className = `inventory-slots${index === 2 ? " inventory-crafting-grid" : index === 3 ? " inventory-result" : ""}`;
-		if (index !== 3) {
-			const title = document.createElement("h3");
-			title.textContent = label;
-			inventoryScreen.append(title);
+	function createInventoryScreen(table: boolean) {
+		const screen = document.createElement("section");
+		screen.id = table ? "crafting-table-screen" : "inventory-screen";
+		screen.className = "inventory-screen";
+		screen.setAttribute("role", "dialog");
+		screen.setAttribute("aria-modal", "true");
+		screen.setAttribute("aria-label", table ? "作業台" : "インベントリとクラフト");
+		screen.hidden = true;
+		const heading = document.createElement("h2");
+		heading.textContent = table ? "作業台" : "インベントリ / クラフト";
+		screen.append(heading);
+		const buttons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
+		const rows = table ? TABLE_ROWS : INVENTORY_ROWS;
+		const craftingRow = document.createElement("div");
+		craftingRow.className = "inventory-crafting";
+		for (const [index, row] of rows.entries()) {
+			const group = document.createElement("div");
+			const label = ["所持品", "ホットバー", "クラフト", "結果"][index];
+			group.setAttribute("aria-label", label);
+			group.className = `inventory-slots${index === 2 ? ` inventory-crafting-grid${table ? " inventory-table-grid" : ""}` : index === 3 ? " inventory-result" : ""}`;
+			if (index !== 3) {
+				const title = document.createElement("h3");
+				title.textContent = label;
+				screen.append(title);
+			}
+			for (const slot of row) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.dataset.slot = String(slot);
+				button.setAttribute("aria-label", `枠 ${slot}`);
+				button.style.cssText = "position:relative;width:48px;height:48px;background:#525960;border:1px solid #aab2ba;color:white";
+				const canvas = document.createElement("canvas");
+				canvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
+				const count = document.createElement("span");
+				count.style.cssText = "position:absolute;right:2px;bottom:0;text-shadow:1px 1px black";
+				button.append(canvas,count);
+				bindInventorySlot(button, slot, (slot, button, shift) => {
+					transport.send(core.encodeClickSlot(slot, button, shift));
+				});
+				buttons.set(slot,{canvas,count});
+				group.append(button);
+			}
+			if (index === 2) {
+				craftingRow.append(group);
+				screen.append(craftingRow);
+			} else if (index === 3) {
+				const arrow = document.createElement("span");
+				arrow.textContent = "→";
+				arrow.setAttribute("aria-hidden", "true");
+				craftingRow.append(arrow, group);
+			} else {
+				screen.append(group);
+			}
 		}
-		for (const slot of row) {
-			const button = document.createElement("button");
-			button.type = "button";
-			button.dataset.slot = String(slot);
-			button.setAttribute("aria-label", `枠 ${slot}`);
-			button.style.cssText = "position:relative;width:48px;height:48px;background:#525960;border:1px solid #aab2ba;color:white";
-			const canvas = document.createElement("canvas");
-			canvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
-			const count = document.createElement("span");
-			count.style.cssText = "position:absolute;right:2px;bottom:0;text-shadow:1px 1px black";
-			button.append(canvas,count);
-			bindInventorySlot(button, slot, (slot, button, shift) => {
-				transport.send(core.encodeClickSlot(slot, button, shift));
-			});
-			inventoryButtons.set(slot,{canvas,count});
-			group.append(button);
-		}
-		if (index === 2) {
-			craftingRow.append(group);
-			inventoryScreen.append(craftingRow);
-		} else if (index === 3) {
-			const arrow = document.createElement("span");
-			arrow.textContent = "→";
-			arrow.setAttribute("aria-hidden", "true");
-			craftingRow.append(arrow, group);
-		} else {
-			inventoryScreen.append(group);
-		}
+		const close = document.createElement("button");
+		close.textContent = "閉じる (E / Esc)";
+		close.addEventListener("click", () => closeInventoryScreen());
+		screen.append(close);
+		document.body.append(screen);
+		return { screen, buttons, table };
 	}
-	const inventoryClose = document.createElement("button");
-	inventoryClose.textContent = "閉じる (E / Esc)";
-	inventoryClose.addEventListener("click", closeInventoryScreen);
-	inventoryScreen.append(inventoryClose);
+	const inventoryView = createInventoryScreen(false);
+	const tableView = createInventoryScreen(true);
+	const inventoryScreen = inventoryView.screen;
+	const tableScreen = tableView.screen;
 	const cursorIcon = document.createElement("div");
 	cursorIcon.style.cssText = "position:fixed;pointer-events:none;z-index:30;color:white;text-shadow:1px 1px black";
 	const cursorCanvas = document.createElement("canvas");
@@ -679,34 +698,41 @@ async function main(): Promise<void> {
 	const cursorCount = document.createElement("span");
 	cursorIcon.append(cursorCanvas,cursorCount);
 	cursorIcon.hidden = true;
-	document.body.append(inventoryScreen,cursorIcon);
+	document.body.append(cursorIcon);
 	document.addEventListener("mousemove", event => {
 		cursorIcon.style.left = `${event.clientX+12}px`;
 		cursorIcon.style.top = `${event.clientY+12}px`;
 	});
 	function paintInventoryScreen(): void {
-		const display = inventoryDisplay(core.inventorySlots);
+		const active = tableScreen.hidden ? inventoryView : tableView;
+		const display = inventoryDisplay(core.inventorySlots, active.table);
 		for (const group of display.groups) for (const {slot,stack} of group) {
-			const view = inventoryButtons.get(slot)!;
+			const view = active.buttons.get(slot)!;
 			paintItemIcon(view.canvas, stack?.item);
 			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
 			view.canvas.dataset.count = String(stack?.count ?? 0);
 		}
 		paintItemIcon(cursorCanvas, display.cursor?.item);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
-		cursorIcon.hidden = inventoryScreen.hidden || !display.cursor;
+		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden) || !display.cursor;
 	}
-	function openInventoryScreen(): void {
+	function openInventoryScreen(table = false): void {
 		clearInput();
-		inventoryScreen.hidden = false;
+		inventoryScreen.hidden = table;
+		tableScreen.hidden = !table;
+		picker.hidden = true;
 		overlay.hidden = true;
 		paintInventoryScreen();
 		if (locked()) document.exitPointerLock();
 	}
-	function closeInventoryScreen(): void {
+	function closeInventoryScreen(send = true): void {
 		inventoryScreen.hidden = true;
+		tableScreen.hidden = true;
 		cursorIcon.hidden = true;
-		transport.send(core.encodeCloseInventory());
+		if (send) {
+			closePending = updateClosePending(closePending, { type: "close" });
+			transport.send(core.encodeCloseInventory());
+		}
 		clearInput();
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 		void requestPointerLock();
@@ -790,7 +816,7 @@ async function main(): Promise<void> {
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
@@ -801,7 +827,7 @@ async function main(): Promise<void> {
 		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
-		if (!picker.hidden || !inventoryScreen.hidden) { overlay.hidden = true; return; }
+		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -829,7 +855,7 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
-		if (!inventoryScreen.hidden) {
+		if (!inventoryScreen.hidden || !tableScreen.hidden) {
 			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
 				e.preventDefault();
 				if (!e.repeat) closeInventoryScreen();
@@ -916,7 +942,7 @@ async function main(): Promise<void> {
 		transport.send(core.encodeSetBlock(x, y, z, block));
 		return true;
 	};
-	function interact(button: number): void {
+	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
 		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
 		if (!hit) return;
@@ -924,6 +950,16 @@ async function main(): Promise<void> {
 			if (core.gameMode === "survival") return;
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
+			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
+			if (blockInteraction(block?.name, shift) === "open") {
+				if (!repeat) {
+					heldButtons.delete(2);
+					sendPosition();
+					closePending = updateClosePending(closePending, { type: "use" });
+					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
+				}
+				return;
+			}
 			if (!selected) return;
 			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
@@ -941,7 +977,7 @@ async function main(): Promise<void> {
 		e.preventDefault();
 		if (e.button === 0 && core.gameMode === "survival") { leftHeld = true; return; }
 		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
-		interact(e.button);
+		interact(e.button, false, e.shiftKey);
 	});
 	window.addEventListener("mouseup", e => { heldButtons.delete(e.button); if (e.button === 0) stopDig(); });
 	window.addEventListener("pagehide", () => transport.flush());
@@ -1070,7 +1106,7 @@ async function main(): Promise<void> {
 		if (locked()) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
-				interact(button);
+				interact(button, true);
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
@@ -1125,6 +1161,7 @@ async function main(): Promise<void> {
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
 			gameMode: core.gameMode,
+			screen: core.screen,
 			entities: core.entities,
 			dig: dig.active,
 			inventory: core.inventory,

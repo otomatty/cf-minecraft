@@ -45,6 +45,7 @@ struct Registry {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Block {
+    drop: Option<String>,
     dig_ticks: Option<u16>,
     tool: Option<String>,
     #[serde(default)]
@@ -511,6 +512,18 @@ fn generate(root: &Path, dest: &Path) {
             item.id, item.name, item.max_stack, block
         )
         .unwrap();
+    }
+    out.push_str("];\n");
+    out.push_str("static MINING_DROPS: &[(&str, u16)] = &[\n");
+    for block in &registry.blocks {
+        if let Some(name) = &block.drop {
+            let item = items
+                .items
+                .iter()
+                .find(|item| &item.name == name)
+                .unwrap_or_else(|| panic!("blocks.toml: {}: unknown drop item {name}", block.name));
+            writeln!(out, "({:?}, {}),", block.name, item.id).unwrap();
+        }
     }
     out.push_str("];\n");
     fs::write(dest.join("items.rs"), out).unwrap();
