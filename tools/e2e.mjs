@@ -957,7 +957,7 @@ async function survivalCrafting() {
                     if ([1,2].some(dy => api.getBlock(x,y+dy,z) !== log)) continue;
                     const floor = api.getBlock(x+1,y-1,z);
                     if (floor <= 0 || floor === api.stateId("water")) continue;
-                    if ([0,1].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
+                    if ([0,1,2].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
                     return [x,y,z];
                 }
             }

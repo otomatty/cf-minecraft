@@ -1,4 +1,4 @@
-import { bindInventorySlot, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS } from "./inventory-screen.ts";
+import { bindInventorySlot, tableScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS } from "./inventory-screen.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -184,6 +184,7 @@ async function main(): Promise<void> {
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
+	let closePending = false;
 	let positionsCorrected = 0;
 	let closed: string | null = null;
 	let selected = 1;
@@ -204,6 +205,7 @@ async function main(): Promise<void> {
 	const handlers = {
 		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
+			closePending = false;
 			seedReady = false;
 			if (transport.kind !== "local") generator = null;
 			tintMap.setWorld(null, null);
@@ -219,15 +221,14 @@ async function main(): Promise<void> {
 			transport.send(core.encodeHello(viewDistance));
 		},
 		onPacket: (data: Uint8Array) => {
-			const previousScreen = core.screen;
 			const id = core.packet(data);
 			removeUnloaded();
 			if (id === S2C.Inventory) {
 				syncInventory();
-				if (previousScreen !== core.screen) {
-					if (core.screen === 1) openInventoryScreen(true);
-					else if (!tableScreen.hidden) closeInventoryScreen(false);
-				}
+				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
+				const visible = tableScreenVisible({ screen: core.screen, closePending });
+				if (visible && tableScreen.hidden) openInventoryScreen(true);
+				else if (!visible && !tableScreen.hidden) closeInventoryScreen(false);
 			}
 			if (id === S2C.BlockUpdate) {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -728,7 +729,10 @@ async function main(): Promise<void> {
 		inventoryScreen.hidden = true;
 		tableScreen.hidden = true;
 		cursorIcon.hidden = true;
-		if (send) transport.send(core.encodeCloseInventory());
+		if (send) {
+			closePending = updateClosePending(closePending, { type: "close" });
+			transport.send(core.encodeCloseInventory());
+		}
 		clearInput();
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 		void requestPointerLock();
@@ -951,6 +955,7 @@ async function main(): Promise<void> {
 				if (!repeat) {
 					heldButtons.delete(2);
 					sendPosition();
+					closePending = updateClosePending(closePending, { type: "use" });
 					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
 				}
 				return;

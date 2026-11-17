@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bindInventorySlot, INVENTORY_ROWS, TABLE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
+import { bindInventorySlot, tableScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
 import { paintTexture } from "./textures.ts";
 
 test("inventory display maps all wire slots without mutating server state", () => {
@@ -114,4 +114,37 @@ test("table display maps wire 41–50 without confusing materials, result and cu
     for (const { slot, stack } of view.groups.slice(0, 2).flat()) assert.deepEqual(stack, slots[slot]);
     assert.deepEqual(slots, before);
     assert.ok(inventoryDisplay([], true).groups.flat().every(s => s.stack === null));
+});
+
+
+test("table reopens after close and use in one tick with screen still one", () => {
+    let closePending = updateClosePending(false, { type: "close" });
+    assert.equal(tableScreenVisible({ screen: 1, closePending }), false);
+    closePending = updateClosePending(closePending, { type: "use" });
+    closePending = updateClosePending(closePending, { type: "inventory", screen: 1 });
+    assert.equal(closePending, false);
+    assert.equal(tableScreenVisible({ screen: 1, closePending }), true);
+});
+
+test("stale open Inventory cannot undo a pending close", () => {
+    let closePending = updateClosePending(false, { type: "close" });
+    closePending = updateClosePending(closePending, { type: "inventory", screen: 1 });
+    assert.equal(closePending, true);
+    assert.equal(tableScreenVisible({ screen: 1, closePending }), false);
+    closePending = updateClosePending(closePending, { type: "inventory", screen: 0 });
+    assert.equal(closePending, false);
+    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
+});
+
+test("server closure hides an open table screen", () => {
+    assert.equal(tableScreenVisible({ screen: 1, closePending: false }), true);
+    const closePending = updateClosePending(false, { type: "inventory", screen: 0 });
+    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
+});
+
+test("a rejected use request leaves the table screen closed", () => {
+    let closePending = updateClosePending(true, { type: "use" });
+    assert.equal(closePending, false);
+    closePending = updateClosePending(closePending, { type: "inventory", screen: 0 });
+    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
 });

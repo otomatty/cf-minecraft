@@ -31,3 +31,17 @@ export function bindInventorySlot(
         send(slot, 1, event.button === 2 && event.shiftKey);
     });
 }
+
+/** Local close intent survives stale Inventory packets until confirmed or superseded. */
+export function updateClosePending(
+    closePending: boolean,
+    event: { type: "close" } | { type: "use" } | { type: "inventory"; screen: number },
+): boolean {
+    if (event.type === "close") return true;
+    if (event.type === "use") return false;
+    return event.screen === 0 ? false : closePending;
+}
+
+export function tableScreenVisible({ screen, closePending }: { screen: number; closePending: boolean }): boolean {
+    return screen === 1 && !closePending;
+}

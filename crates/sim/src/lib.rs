@@ -681,11 +681,17 @@ impl Server {
                 button,
                 shift,
             } => {
-                let client = self.clients.get_mut(&id).unwrap();
+                let client = &self.clients[&id];
                 if !client.joined {
                     self.stats.packets_rejected += 1;
                     return;
                 }
+                if !self.table_screen_valid(client) {
+                    self.return_crafting(id);
+                    self.stats.packets_rejected += 1;
+                    return;
+                }
+                let client = self.clients.get_mut(&id).unwrap();
                 if client.inventory.click(slot, button, shift).is_err() {
                     self.stats.packets_rejected += 1;
                 }
@@ -971,20 +977,21 @@ impl Server {
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
     }
 
+    fn table_screen_valid(&self, client: &Client) -> bool {
+        match client.inventory.screen {
+            inventory::Screen::None => true,
+            inventory::Screen::CraftingTable { pos: [x, y, z] } => {
+                self.world.get_block(x, y, z) == Some(blocks::CRAFTING_TABLE)
+                    && self.within_reach(client.pos, [x, y, z])
+            }
+        }
+    }
+
     fn tick_screens(&mut self) {
         let close: Vec<_> = self
             .clients
             .iter()
-            .filter_map(|(&id, c)| {
-                if let inventory::Screen::CraftingTable { pos: [x, y, z] } = c.inventory.screen {
-                    if self.world.get_block(x, y, z) != Some(blocks::CRAFTING_TABLE)
-                        || !self.within_reach(c.pos, [x, y, z])
-                    {
-                        return Some(id);
-                    }
-                }
-                None
-            })
+            .filter_map(|(&id, c)| (!self.table_screen_valid(c)).then_some(id))
             .collect();
         for id in close {
             self.return_crafting(id);
@@ -3677,6 +3684,143 @@ mod crafting_server_tests {
         assert_eq!(inv.table, [None; 9]);
         assert_eq!(inv.cursor, None);
         assert_eq!(s.stats.packets_rejected, 0);
+    }
+
+    #[test]
+    fn result_click_rechecks_table_before_crafting_in_the_same_tick() {
+        for broken in [false, true] {
+            for full in [false, true] {
+                let mut s = server();
+                let pos = table(&mut s);
+                // A small accepted PlayerPos movement will cross the reach boundary.
+                let start = [
+                    pos[0] as f64 + 0.5 - 7.9,
+                    s.clients[&1].pos[1],
+                    pos[2] as f64 + 0.5,
+                ];
+                s.handle_packet(
+                    1,
+                    &C2S::Teleport {
+                        x: start[0],
+                        y: start[1],
+                        z: start[2],
+                    }
+                    .encode(),
+                );
+                s.tick();
+                let planks = items::by_name("oak_planks").unwrap();
+                let stick = items::by_name("stick").unwrap();
+                let pickaxe = items::by_name("wooden_pickaxe").unwrap();
+                let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
+                *inv = Inventory::default();
+                if full {
+                    for slot in 0..36 {
+                        inv.set(
+                            slot,
+                            Some(Stack {
+                                item: items::by_name("stone").unwrap(),
+                                count: 64,
+                            }),
+                        )
+                        .unwrap();
+                    }
+                }
+                for slot in [0, 1, 2] {
+                    inv.table[slot] = Some(Stack {
+                        item: planks,
+                        count: 1,
+                    });
+                }
+                for slot in [4, 7] {
+                    inv.table[slot] = Some(Stack {
+                        item: stick,
+                        count: 1,
+                    });
+                }
+                use_table(&mut s, pos);
+                assert_eq!(
+                    s.clients[&1].inventory.result(),
+                    Some(Stack {
+                        item: pickaxe,
+                        count: 1
+                    })
+                );
+                assert!(matches!(
+                    s.clients[&1].inventory.screen,
+                    inventory::Screen::CraftingTable { .. }
+                ));
+                s.take_outbox();
+                let rejected = s.stats.packets_rejected;
+                if broken {
+                    s.world.set_block(pos[0], pos[1], pos[2], blocks::AIR);
+                } else {
+                    s.handle_packet(
+                        1,
+                        &C2S::PlayerPos {
+                            x: start[0] - 0.3,
+                            y: start[1],
+                            z: start[2],
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        }
+                        .encode(),
+                    );
+                }
+                s.handle_packet(
+                    1,
+                    &C2S::ClickSlot {
+                        slot: 50,
+                        button: 0,
+                        shift: false,
+                    }
+                    .encode(),
+                );
+                s.tick();
+                assert_eq!(s.stats.positions_rejected, 0);
+                if !broken {
+                    assert_eq!(s.clients[&1].pos, [start[0] - 0.3, start[1], start[2]]);
+                }
+                assert_eq!(s.stats.packets_rejected, rejected + 1);
+                let inv = &s.clients[&1].inventory;
+                assert_eq!(inv.screen, inventory::Screen::None);
+                assert_eq!(inv.table, [None; 9]);
+                assert_eq!(inv.cursor, None);
+                assert_eq!(inv.result(), None);
+                let count = |item| {
+                    inv.slots()
+                        .iter()
+                        .flatten()
+                        .filter(|s| s.item == item)
+                        .map(|s| u32::from(s.count))
+                        .sum::<u32>()
+                        + s.entities
+                            .values()
+                            .filter(|e| e.item == item)
+                            .map(|e| u32::from(e.count))
+                            .sum::<u32>()
+                };
+                assert_eq!(count(planks), 3);
+                assert_eq!(count(stick), 2);
+                assert_eq!(count(pickaxe), 0);
+                if full {
+                    assert_eq!(s.entities.len(), 5);
+                    assert!(s.entities.values().all(|e| e.pos[0] == s.clients[&1].pos[0]
+                        && e.pos[2] == s.clients[&1].pos[2]
+                        && (e.pos[1] - s.clients[&1].pos[1]).abs() < 0.2
+                        && e.pickup_delay > 0));
+                } else {
+                    assert!(s.entities.is_empty());
+                }
+                assert!(s.take_outbox().iter().any(|(_, p)| matches!(
+                    S2C::decode(p),
+                    Ok(S2C::Inventory {
+                        screen: 0,
+                        result: None,
+                        ..
+                    })
+                )));
+            }
+        }
     }
 
     #[test]
