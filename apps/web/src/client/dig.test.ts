@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceDig, newDigState, digVertices } from "./dig.ts";
+import { advanceDig, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
 import { paintCracks, TEX_SIZE } from "./textures.ts";
 const target = { x: 1, y: 2, z: 3, state: 1, ticks: 12 };
 
@@ -58,9 +58,48 @@ test("cracks have ten deterministic, strictly growing masks", () => {
 });
 
 test("overlay cube uses camera-relative vertices and the requested stage layer", () => {
-	const data = digVertices([{ x: 1000000, y: 2, z: 3, stage: 7 }], [1000000,2,3], 27);
+	const data = digVertices([{ x: 1000000, y: 2, z: 3, stage: 7, bounds: { min: [0,0,0], max: [1,1,1] } }], [1000000,2,3], 27);
 	assert.equal(data.length, 36 * 9);
 	assert.ok(Math.abs(data[0] + .002) < 1e-8);
 	assert.equal(data[6], 34);
 	assert.equal(digVertices([], [0,0,0], 0).length, 0);
+});
+
+test("updates between frames invalidate restored targets and remember a break cooldown", () => {
+	let r = advanceDig(newDigState(), true, target, null, 0);
+	r = advanceDig(r.state, true, target, target.state, 1000);
+	assert.equal(r.state.active?.stage, 9);
+	assert.equal(observeDigBlockUpdate(r.state, 99, target.y, target.z, 0, 1000), r.state);
+	let state = observeDigBlockUpdate(r.state, target.x, target.y, target.z, 0, 1000);
+	state = observeDigBlockUpdate(state, target.x, target.y, target.z, target.state, 1001);
+	r = advanceDig(state, true, target, target.state, 1010);
+	assert.deepEqual(r.commands, [{ type: "abort" }]);
+	assert.equal(r.state.active, null);
+	assert.equal(r.state.invalidated, false);
+	r = advanceDig(r.state, true, target, target.state, 1249);
+	assert.deepEqual(r.commands, []);
+	r = advanceDig(r.state, true, target, target.state, 1250);
+	assert.deepEqual(r.commands, [{ type: "start", target }]);
+	assert.equal(r.state.active?.stage, 0);
+	assert.equal(r.state.active?.started, 1250);
+});
+
+test("restored non-air updates restart held mining and release keeps it stopped", () => {
+	for (const held of [false, true]) {
+		const initial = advanceDig(newDigState(), true, target, null, 0).state;
+		let state = observeDigBlockUpdate(initial, target.x, target.y, target.z, 2, 100);
+		state = observeDigBlockUpdate(state, target.x, target.y, target.z, target.state, 101);
+		const r = advanceDig(state, held, target, target.state, 110);
+		assert.deepEqual(r.commands, held ? [{ type: "abort" }, { type: "start", target }] : [{ type: "abort" }]);
+		assert.equal(r.state.active?.started ?? null, held ? 110 : null);
+	}
+});
+
+test("lower slab cracks stay within the half-height selection bounds plus margin", () => {
+	const data = digVertices([{ x: 0, y: 0, z: 0, stage: 5, bounds: { min: [0,0,0], max: [1,.5,1] } }], [0,0,0], 27);
+	const heights = [...data].filter((_, i) => i % 9 === 1);
+	assert.equal(heights.length, 36);
+	assert.ok(Math.min(...heights) >= -.002001);
+	assert.ok(Math.max(...heights) <= .502001);
+	assert.ok(Math.max(...heights) >= .5);
 });

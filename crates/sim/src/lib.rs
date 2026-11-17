@@ -569,6 +569,11 @@ impl Server {
                     self.correct_block(id, x, y, z);
                     return;
                 }
+                if ticks == Some(0) {
+                    self.change_block(id, x, y, z, blocks::AIR);
+                    self.dig_updates.insert((id, [x, y, z]), 255);
+                    return;
+                }
                 self.clients.get_mut(&id).unwrap().dig = Some(Dig {
                     pos: [x, y, z],
                     state: state.unwrap(),
@@ -686,6 +691,15 @@ impl Server {
     fn change_block(&mut self, id: u32, x: i32, y: i32, z: i32, state: u16) {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
+                let miners: Vec<_> = self
+                    .clients
+                    .iter()
+                    .filter(|(_, c)| c.dig.is_some_and(|dig| dig.pos == [x, y, z]))
+                    .map(|(&id, _)| id)
+                    .collect();
+                for miner in miners {
+                    self.abort_dig(miner);
+                }
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
                         if let Some(item) = items::for_block(old) {

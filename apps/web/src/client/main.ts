@@ -1,4 +1,4 @@
-import { advanceDig, newDigState, type DigOverlay } from "./dig.ts";
+import { advanceDig, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
 // block breaking and placing, and a debug overlay.
@@ -221,6 +221,11 @@ async function main(): Promise<void> {
 			const id = core.packet(data);
 			removeUnloaded();
 			if (id === S2C.Inventory) syncInventory();
+			if (id === S2C.BlockUpdate) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				const x = v.getInt32(1), y = v.getInt32(5), z = v.getInt32(9);
+				dig = observeDigBlockUpdate(dig, x, y, z, core.getBlock(x, y, z), performance.now());
+			}
 			if (id === S2C.DigProgress) {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				const player = v.getUint32(1), stage = v.getUint8(17);
@@ -970,7 +975,11 @@ async function main(): Promise<void> {
 			texture: itemTextures.get(entity.item) ?? 0,
 			light: core.entityLight(entity.position),
 		}));
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])]);
+		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {
+			const bounds = core.selectionBounds(d.x, d.y, d.z);
+			return bounds ? [{ ...d, bounds }] : [];
+		});
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs);
 		window.__mc.frames++;
 
 		frames++;

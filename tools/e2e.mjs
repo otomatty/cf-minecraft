@@ -901,8 +901,13 @@ async function survivalInventory() {
 			await new Promise(resolve => setTimeout(resolve, 200));
 			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) !== 0, targets[i]), "survival: releasing early preserves the block");
 			await page.mouse.down();
-			await page.waitForFunction(() => window.__mc.stats().dig?.stage > 0);
-			check(await page.evaluate(() => window.__mc.stats().dig.stage >= 0), "survival: held mining exposes a crack stage");
+			const stageHandle = await page.waitForFunction(() => {
+				const stage = window.__mc.stats().dig?.stage;
+				return stage > 0 ? stage : false;
+			});
+			const stage = await stageHandle.jsonValue();
+			await stageHandle.dispose();
+			check(stage > 0 && stage <= 9, "survival: held mining exposes a crack stage");
 			await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, {}, targets[i]);
 			await page.mouse.up();
 			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, targets[i]), "survival: holding breaks the block");

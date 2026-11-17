@@ -1,6 +1,7 @@
 import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
+import type { DigBounds } from "./dig.ts";
 
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
@@ -64,6 +65,7 @@ export interface ClientExports {
 	client_mesh(cx: number, sy: number, cz: number): number;
 	client_take_unloaded(): number;
 	client_get_block(x: number, y: number, z: number): number;
+	client_selection_bounds(x: number, y: number, z: number): number;
 	client_raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
 	client_enc_hello(view: number): number;
 	client_player_position(axis: number): number;
@@ -327,6 +329,13 @@ export class ClientCore {
 	getBlock(x: number, y: number, z: number): number {
 		const b = this.x.client_get_block(x, y, z);
 		return b === 0xffffffff ? -1 : b;
+	}
+
+	selectionBounds(x: number, y: number, z: number): DigBounds | null {
+		const len = this.x.client_selection_bounds(x, y, z);
+		if (!len) return null;
+		const v = this.out(len);
+		return { min: [v[0] / 16, v[1] / 16, v[2] / 16], max: [v[3] / 16, v[4] / 16, v[5] / 16] };
 	}
 
 	raycast(origin: readonly number[], dir: readonly number[], max: number): RayHit | null {

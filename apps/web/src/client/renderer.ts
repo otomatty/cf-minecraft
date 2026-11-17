@@ -1,4 +1,4 @@
-import { digVertices, type DigOverlay } from "./dig.ts";
+import { digVertices, type RenderDig } from "./dig.ts";
 // WebGPU renderer for chunk sections.
 //
 // Fidelity notes (what matches the game, what does not yet):
@@ -608,7 +608,7 @@ override renderLayer`);
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly DigOverlay[] = []): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);

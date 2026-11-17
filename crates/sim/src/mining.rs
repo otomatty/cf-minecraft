@@ -259,3 +259,91 @@ fn identical_inputs_hash_identically_and_active_dig_changes_hash() {
     b.tick();
     assert_ne!(a.state_hash(), b.state_hash());
 }
+
+#[test]
+fn instant_digs_break_and_drop_before_same_tick_abort_or_replacement() {
+    for flower in [
+        blocks::SHORT_GRASS,
+        blocks::RED_FLOWER,
+        blocks::YELLOW_FLOWER,
+    ] {
+        for replace in [false, true] {
+            let (mut s, [x, y, z]) = setup();
+            s.world.set_block(x, y, z, flower);
+            s.world.set_block(x + 1, y, z, blocks::STONE);
+            start(&mut s, [x, y, z]);
+            if replace {
+                start(&mut s, [x + 1, y, z]);
+            } else {
+                s.handle_packet(1, &C2S::DigAbort.encode());
+            }
+            s.tick();
+            assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+            assert_eq!(s.get_block(x + 1, y, z), Some(blocks::STONE));
+            assert_eq!(s.stats.blocks_changed, 1);
+            assert_eq!(s.stats.packets_rejected, 0);
+            assert_eq!(s.entities.len(), 1);
+            assert_eq!(
+                s.entities.values().next().unwrap().item,
+                items::for_block(flower).unwrap()
+            );
+            assert_eq!(
+                s.clients[&1].dig.map(|d| d.pos),
+                replace.then_some([x + 1, y, z])
+            );
+        }
+    }
+}
+
+#[test]
+fn slab_changed_and_restored_in_one_tick_cancels_all_miners() {
+    let (mut s, [x, y, z]) = setup();
+    let pos = s.clients[&1].pos;
+    let sent = s.clients[&1].sent.clone();
+    s.clients.get_mut(&3).unwrap().pos = pos;
+    s.clients.get_mut(&3).unwrap().sent = sent;
+    s.world.set_block(x, y, z, blocks::OAK_SLAB);
+    start(&mut s, [x, y, z]);
+    s.handle_packet(3, &C2S::DigStart { x, y, z }.encode());
+    for _ in 0..5 {
+        s.tick();
+    }
+    s.take_outbox();
+    s.clients
+        .get_mut(&2)
+        .unwrap()
+        .inventory
+        .add(items::for_block(blocks::OAK_SLAB).unwrap(), 2);
+    for state in [blocks::OAK_SLAB + 1, blocks::OAK_SLAB] {
+        s.handle_packet(2, &C2S::SetBlock { x, y, z, state }.encode());
+    }
+    s.tick();
+    assert_eq!(s.stats.packets_rejected, 0);
+    assert_eq!(s.stats.blocks_changed, 2);
+    assert_eq!(s.get_block(x, y, z), Some(blocks::OAK_SLAB));
+    assert!(s.clients[&1].dig.is_none());
+    assert!(s.clients[&3].dig.is_none());
+    let packets = progress(&mut s);
+    assert_eq!(packets.len(), 4);
+    for player in [1, 3] {
+        for observer in 1..=3 {
+            if observer != player {
+                assert!(packets.contains(&(
+                    observer,
+                    S2C::DigProgress {
+                        player,
+                        x,
+                        y,
+                        z,
+                        stage: 255
+                    }
+                )));
+            }
+        }
+    }
+    for _ in 0..40 {
+        s.tick();
+    }
+    assert_eq!(s.get_block(x, y, z), Some(blocks::OAK_SLAB));
+    assert!(s.entities.is_empty());
+}
