@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
+import { bounded, diagnose, shouldDiagnoseRunFailure } from "./e2e-diag.mjs";
 
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
@@ -43,6 +44,9 @@ const browser = await puppeteer.launch({
 	headless: false,
 	args: ["--no-sandbox", "--ignore-gpu-blocklist", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--window-size=1280,720"],
 	defaultViewport: { width: 1280, height: 720 },
+	// A waitForFunction can occupy one CDP call for settle's full 120s;
+	// allow that wait, but fail sooner than the default 180s on a hung renderer.
+	protocolTimeout: 150000,
 });
 
 async function open(query) {
@@ -56,6 +60,13 @@ async function open(query) {
 	// Pointer lock is only granted to the focused tab.
 	await page.bringToFront();
 	return { page, errors };
+}
+
+async function diagnoseFailure(page, label, err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		await diagnose(browser, page, label, { edge, shots });
+		err.diagnosed = true;
+	}
 }
 
 /** Chunks the server keeps loaded around a player: a square of side 2 * view + 1. */
@@ -79,8 +90,10 @@ async function settle(page, label, chunks) {
 			chunks,
 		);
 	} catch (err) {
-		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
-		throw new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify(state)}`);
+		const state = await diagnose(browser, page, label, { edge, shots });
+		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets })}`);
+		error.diagnosed = true;
+		throw error;
 	}
 	// The stats the wait accepted, not a later reading: the world keeps changing.
 	return settled.jsonValue();
@@ -127,6 +140,9 @@ async function dayNight() {
 			const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
 			measurements.push({ brightness, sky });
 			check(errors.length === 0, `sky ${time}: no page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `sky-${time}`, err);
+			throw err;
 		} finally {
 			await page.close();
 		}
@@ -171,6 +187,9 @@ async function undergroundLighting() {
 		check(dark < surface*0.5,"lighting: underground darker than surface",`${dark.toFixed(1)} / ${surface.toFixed(1)}`);
 		check(lit > dark*2,"lighting: lamp brightens underground",`${lit.toFixed(1)} / ${dark.toFixed(1)}`);
 		check(errors.length===0,"lighting: no page errors",errors.slice(0,3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "lighting", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -247,6 +266,9 @@ async function transparentMaterials() {
 			}
 		}
 		check(errors.length === 0, "materials: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "materials", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -748,6 +770,9 @@ async function partialModels() {
 		await settle(page, "models reload", chunksInView(view));
 		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");
 		check(errors.length === 0, "models: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "models", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -841,6 +866,9 @@ async function biomeTints() {
 			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
 		}
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "tint-terrain", err);
+		throw err;
 	} finally { await page.close(); }
 	for (const gen of ["flat", "hills"]) {
 		const { page, errors } = await open(`server=local&world=e2e-tint-${gen}-${run}&gen=${gen}&seed=2026&view=2`);
@@ -851,6 +879,9 @@ async function biomeTints() {
 				return window.__mc.tint(p[0], p[2]) === null;
 			}), `tint: ${gen} keeps uncomputed default colors`);
 			check(errors.length === 0, `tint: no ${gen} page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `tint-${gen}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
 }
@@ -899,6 +930,9 @@ async function sectionCulling() {
 				}, images);
 				check(fraction < 0.005, "culling: fewer than 0.5% different pixels", `${(fraction * 100).toFixed(3)}%`);
 			}
+		} catch (err) {
+			await diagnoseFailure(page, `culling-${disabled ? "off" : "on"}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
 }
@@ -959,6 +993,9 @@ async function survivalCrafting() {
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.getElementById("inventory-screen").hidden);
         check(errors.length===0,"crafting: no page errors",errors.join(" | "));
+    } catch (err) {
+        await diagnoseFailure(page, "crafting", err);
+        throw err;
     } finally { await page.close(); }
 }
 
@@ -1039,6 +1076,9 @@ async function survivalInventory() {
 		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[0]), "survival: placement consumes one item (0 remaining)");
 		check(await page.$eval("#hotbar canvas", c => c.title === "" && c.dataset.count === "0"), "survival: last item leaves an empty slot");
 		check(errors.length === 0, "survival: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "survival", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -1059,6 +1099,9 @@ try {
 		check(stats.chunks === chunksInView(2), "local: genworkers=0 loads chunks");
 		const generation = await fallback.page.evaluate(() => window.__mc.stats().server?.generation);
 		check(!generation || generation.requested === 0, "local: genworkers=0 disables offload");
+	} catch (err) {
+		await diagnoseFailure(fallback.page, "generation-disabled", err);
+		throw err;
 	} finally { await fallback.page.close(); }
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
@@ -1067,6 +1110,17 @@ try {
 	await page.close();
 	await (await playthrough("ws")).close();
 } catch (err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		// Enumerating pages can itself require CDP; keep the failure path bounded.
+		const pages = await bounded(() => browser.pages(), 5000);
+		if (Array.isArray(pages)) {
+			for (const [i, page] of pages.entries()) {
+				if (page.url() !== "about:blank") await diagnose(browser, page, `run-timeout-${i}`, { edge, shots });
+			}
+		} else {
+			console.log(`DIAG run-timeout-pages ${JSON.stringify({ error: pages })}`);
+		}
+	}
 	check(false, "run completed", err.message);
 } finally {
 	await browser.close();

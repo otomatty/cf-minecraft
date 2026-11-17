@@ -69,6 +69,8 @@ node tools/tick-probe.mjs --players 8 --seconds 60 --view 8
 node tools/e2e.mjs        # ディスプレイのない環境では xvfb-run -a を前に付ける
 ```
 
+E2E でワールドの準備待ちに失敗した場合やタイムアウトした場合は、診断結果を `DIAG` 行と shots ディレクトリ（`--shots`、既定 `/tmp/shots`）の `diag-*.json` に出力し、スクリーンショットを取得できれば `diag-*.png` も保存します。CI では artifact の `e2e` に含まれます。
+
 プルリクエストと `main` へのプッシュで、GitHub Actions（`.github/workflows/ci.yml`）がフォーマットと clippy、Rust のテスト、WASM のビルド、型チェック、ホスト側テスト、ネイティブ・Node・Durable Object の決定論チェック、本番ビルドと公開前の確認（`cf deploy --dry-run`）、ブラウザの E2E を実行します。
 
 手元で同じ lint を走らせるには:
