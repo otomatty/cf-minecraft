@@ -31,7 +31,7 @@ pub enum GameMode {
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use protocol::{C2S, S2C};
+use protocol::{C2S, MAX_FURNACE_DISPLAY_TICKS, S2C};
 use world::io::Reader;
 use world::{blocks, items, Chunk, Fnv64, World, HEIGHT, MIN_Y};
 use worldgen::Generator;
@@ -100,6 +100,14 @@ impl Client {
         let (cx, cz) = self.center();
         (c.0 - cx).abs() <= self.view && (c.1 - cz).abs() <= self.view
     }
+}
+
+fn players_keep_chunk(clients: &BTreeMap<u32, Client>, cx: i32, cz: i32) -> bool {
+    clients.values().any(|c| {
+        let (px, pz) = c.center();
+        let r = c.view + UNLOAD_MARGIN;
+        (cx - px).abs() <= r && (cz - pz).abs() <= r
+    })
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,8 +199,8 @@ impl Server {
             id,
             S2C::Inventory {
                 furnace: f.slots.map(|s| s.map(|s| (s.item, s.count))),
-                burn: f.burn.min(1600) as u16,
-                total: f.total.min(1600) as u16,
+                burn: f.burn.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
+                total: f.total.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
                 progress: f.progress,
                 screen: match client.inventory.screen {
                     inventory::Screen::None => 0,
@@ -1057,7 +1065,11 @@ impl Server {
     }
     fn tick_furnaces(&mut self) {
         let mut changed = Vec::new();
+        let clients = &self.clients;
         for (&pos, f) in &mut self.furnaces {
+            if !players_keep_chunk(clients, pos[0] >> 4, pos[2] >> 4) {
+                continue;
+            }
             let before = f.clone();
             f.tick();
             if *f != before {
@@ -1286,12 +1298,7 @@ impl Server {
             .chunks
             .iter()
             .filter_map(|(&(cx, cz), chunk)| {
-                let keep = chunk.dirty
-                    || clients.values().any(|c| {
-                        let (px, pz) = c.center();
-                        let r = c.view + UNLOAD_MARGIN;
-                        (cx - px).abs() <= r && (cz - pz).abs() <= r
-                    });
+                let keep = chunk.dirty || players_keep_chunk(clients, cx, cz);
                 (!keep).then_some((cx, cz))
             })
             .collect();
@@ -4400,6 +4407,58 @@ mod furnace_server_tests {
             click(&mut s, 0, true);
             assert_eq!(s.furnaces[&pos].slots[0], stack("iron_ore", 3));
         }
+    }
+    #[test]
+    fn burning_furnace_outside_keep_range_pauses_unloads_and_resumes() {
+        let (mut s, pos) = setup();
+        let (cx, cz) = (pos[0] >> 4, pos[2] >> 4);
+        assert!(s
+            .clients
+            .values()
+            .all(|c| c.inventory.screen == inventory::Screen::None));
+        s.furnaces.get_mut(&pos).unwrap().slots = [stack("iron_ore", 3), stack("coal", 1), None];
+        for _ in 0..30 {
+            s.tick();
+        }
+        let paused = s.furnaces[&pos].clone();
+        assert!(paused.burn > 0 && paused.progress > 0);
+
+        let center = pos.map(|coord| f64::from(coord) + 0.5);
+        for c in s.clients.values_mut() {
+            let far_cx = cx + c.view + UNLOAD_MARGIN + 1;
+            c.pos = [f64::from(far_cx * 16) + 0.5, center[1], center[2]];
+        }
+        for _ in 0..10 {
+            s.tick();
+        }
+        assert_eq!(s.furnaces[&pos], paused);
+        assert!(s.world.chunks[&(cx, cz)].dirty);
+        s.unload_far_chunks();
+        assert!(s.world.chunks.contains_key(&(cx, cz)));
+
+        let bytes = loop {
+            let (x, z, bytes) = s.take_dirty().unwrap();
+            if (x, z) == (cx, cz) {
+                break bytes;
+            }
+        };
+        s.unload_far_chunks();
+        assert!(!s.world.chunks.contains_key(&(cx, cz)));
+        assert!(!s.furnaces.contains_key(&pos));
+
+        assert!(s.load_chunk(cx, cz, &bytes));
+        assert_eq!(s.furnaces[&pos], paused);
+        s.tick();
+        assert_eq!(s.furnaces[&pos], paused);
+        assert!(!s.world.chunks[&(cx, cz)].dirty);
+
+        for c in s.clients.values_mut() {
+            c.pos = center;
+        }
+        let mut resumed = paused.clone();
+        resumed.tick();
+        s.tick();
+        assert_eq!(s.furnaces[&pos], resumed);
     }
     #[test]
     fn persists_unopened_furnaces_and_rejects_corrupt_tails() {

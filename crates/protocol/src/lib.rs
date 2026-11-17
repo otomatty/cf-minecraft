@@ -9,6 +9,8 @@ use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
 pub const PROTOCOL_VERSION: u32 = 8;
+/// Senders clamp furnace display timers to this value, and decoding rejects larger values.
+pub const MAX_FURNACE_DISPLAY_TICKS: u16 = 1600;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
@@ -628,7 +630,7 @@ impl S2C {
                 let total = r.u16()?;
                 let progress = r.u16()?;
                 if burn > total
-                    || total > 1600
+                    || total > MAX_FURNACE_DISPLAY_TICKS
                     || progress >= world::smelting::SMELT_TICKS
                     || (screen != 2
                         && (furnace != [None; 3] || burn != 0 || total != 0 || progress != 0))
@@ -975,7 +977,7 @@ mod tests {
                 Some((items_id("iron_ingot"), 1)),
             ],
             burn: 1387,
-            total: 1600,
+            total: MAX_FURNACE_DISPLAY_TICKS,
             progress: 53,
             screen: 2,
             table: [None; 9],
