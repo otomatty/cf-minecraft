@@ -1,3 +1,4 @@
+import { advanceDig, newDigState, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
 // block breaking and placing, and a debug overlay.
@@ -209,6 +210,8 @@ async function main(): Promise<void> {
 				meshPool.reset();
 				core.resetWorld();
 				entityReceivedAt.clear();
+				remoteDigs.clear();
+				dig = newDigState();
 				removeUnloaded();
 			}
 			opened = true;
@@ -218,6 +221,19 @@ async function main(): Promise<void> {
 			const id = core.packet(data);
 			removeUnloaded();
 			if (id === S2C.Inventory) syncInventory();
+			if (id === S2C.DigProgress) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				const player = v.getUint32(1), stage = v.getUint8(17);
+				if (stage === 255) {
+					const old = remoteDigs.get(player);
+					if (old && old.x === v.getInt32(5) && old.y === v.getInt32(9) && old.z === v.getInt32(13)) remoteDigs.delete(player);
+				}
+				else remoteDigs.set(player, { x: v.getInt32(5), y: v.getInt32(9), z: v.getInt32(13), stage });
+			}
+			if (id === S2C.UnloadChunk) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
+			}
 			if (id === S2C.EntitySpawn || id === S2C.EntityMove) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
@@ -436,6 +452,16 @@ async function main(): Promise<void> {
 	let sprinting = false;
 	let lastForwardTap = -Infinity;
 	const heldButtons = new Map<number, number>();
+	let leftHeld = false;
+	let dig = newDigState();
+	const remoteDigs = new Map<number, DigOverlay>();
+	const stopDig = () => {
+		leftHeld = false;
+		const a = dig.active;
+		const next = advanceDig(dig, false, null, a ? core.getBlock(a.x, a.y, a.z) : null, performance.now());
+		dig = next.state;
+		if (connection === "open" && next.commands.length) transport.send(core.encodeDigAbort());
+	};
 	const locked = () => document.pointerLockElement === canvas;
 	const clearInput = () => {
 		keys.clear();
@@ -444,6 +470,7 @@ async function main(): Promise<void> {
 		lastJumpTap = -Infinity;
 		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
+		stopDig();
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
@@ -756,10 +783,7 @@ async function main(): Promise<void> {
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
 		if (connection !== "open") return false;
 		if (core.gameMode === "survival") {
-			if (block === 0) {
-				const name = registry[core.getBlock(x, y, z)]?.name;
-				if (name === "bedrock" || name === "water") return false;
-			} else if (!hotbarBlocks[selectedSlot]) return false;
+			if (block === 0 || !hotbarBlocks[selectedSlot]) return false;
 		}
 		if (!core.predictBlock(x, y, z, block)) return false;
 		// The server checks reach against the last position it knows.
@@ -772,6 +796,7 @@ async function main(): Promise<void> {
 		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
 		if (!hit) return;
 		if (button === 0) {
+			if (core.gameMode === "survival") return;
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
 			if (!selected) return;
@@ -789,10 +814,11 @@ async function main(): Promise<void> {
 	canvas.addEventListener("mousedown", (e) => {
 		if (!locked()) return;
 		e.preventDefault();
+		if (e.button === 0 && core.gameMode === "survival") { leftHeld = true; return; }
 		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
 		interact(e.button);
 	});
-	window.addEventListener("mouseup", e => heldButtons.delete(e.button));
+	window.addEventListener("mouseup", e => { heldButtons.delete(e.button); if (e.button === 0) stopDig(); });
 	window.addEventListener("pagehide", () => transport.flush());
 	window.addEventListener("pageshow", (event) => {
 		if (event.persisted) transport.resume?.();
@@ -864,6 +890,7 @@ async function main(): Promise<void> {
 				(serverStats
 					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
+			`Dig: ${dig.active ? `${dig.active.x},${dig.active.y},${dig.active.z} stage ${dig.active.stage}` : "-"}`,
 			`Biome: ${serverStats?.biome ?? "?"}  Game mode: ${core.gameMode}  Entities: ${core.entities.length}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
@@ -922,6 +949,19 @@ async function main(): Promise<void> {
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
+		if (core.gameMode === "survival") {
+			const blockState = target ? core.getBlock(target.x, target.y, target.z) : 0;
+			const ticks = registry[blockState]?.digTicks;
+			const digTarget = target && ticks != null ? { x: target.x, y: target.y, z: target.z, state: blockState, ticks } : null;
+			const a = dig.active;
+			const next = advanceDig(dig, leftHeld && locked() && joined && connection === "open", digTarget,
+				a ? core.getBlock(a.x, a.y, a.z) : null, now);
+			dig = next.state;
+			if (connection === "open") for (const command of next.commands) {
+				if (command.type === "abort") transport.send(core.encodeDigAbort());
+				else { const t = command.target; sendPosition(); transport.send(core.encodeDigStart(t.x,t.y,t.z)); }
+			}
+		}
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
@@ -930,7 +970,7 @@ async function main(): Promise<void> {
 			texture: itemTextures.get(entity.item) ?? 0,
 			light: core.entityLight(entity.position),
 		}));
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now);
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])]);
 		window.__mc.frames++;
 
 		frames++;
@@ -954,6 +994,7 @@ async function main(): Promise<void> {
 		stats: () => ({
 			gameMode: core.gameMode,
 			entities: core.entities,
+			dig: dig.active,
 			inventory: core.inventory,
 			selectedSlot: core.selectedSlot,
 			joined,

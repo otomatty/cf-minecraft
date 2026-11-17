@@ -287,3 +287,18 @@ export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
 	}
 	return pixels;
 }
+
+/** Original branching fissures: each stage adds a branch to the same 16x16 pattern. */
+export function paintCracks(stage: number): Uint8Array {
+	if (!Number.isInteger(stage) || stage < 0 || stage > 9) throw new RangeError("crack stage");
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let branch = 0; branch <= stage; branch++) {
+		for (let step = 0; step < 9; step++) {
+			const x = (3 + branch * 5 + step + Math.floor(step / 3)) % TEX_SIZE;
+			const y = (1 + branch * 3 + step * (branch % 2 ? 2 : 1)) % TEX_SIZE;
+			const at = (y * TEX_SIZE + x) * 4;
+			pixels.set([28, 23, 31, 210], at);
+		}
+	}
+	return pixels;
+}

@@ -299,6 +299,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 }
             }
         }
+        S2C::DigProgress { .. } => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
         }
@@ -1109,6 +1110,15 @@ pub extern "C" fn client_enc_set_block(x: i32, y: i32, z: i32, block: u32) -> us
     )
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_dig_start(x: i32, y: i32, z: i32) -> usize {
+    emit(state(), C2S::DigStart { x, y, z }.encode())
+}
+#[no_mangle]
+pub extern "C" fn client_enc_dig_abort() -> usize {
+    emit(state(), C2S::DigAbort.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
@@ -1136,9 +1146,9 @@ pub extern "C" fn client_block_registry() -> usize {
             blocks::Model::Stairs => "stairs",
             blocks::Model::Fence => "fence",
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"texture":"{}"}}"#,
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}"}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, blocks::TEXTURES[info.tex[1] as usize])
+            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), blocks::TEXTURES[info.tex[1] as usize])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }

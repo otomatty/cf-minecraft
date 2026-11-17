@@ -895,7 +895,17 @@ async function survivalInventory() {
 		check(await page.$eval("#block-picker", picker => picker.hidden), "survival: block picker stays closed");
 		for (let i = 0; i < targets.length; i++) {
 			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[i]);
-			await page.mouse.click(640, 360);
+			await page.mouse.down();
+			await page.waitForFunction(() => window.__mc.stats().dig !== null);
+			await page.mouse.up();
+			await new Promise(resolve => setTimeout(resolve, 200));
+			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) !== 0, targets[i]), "survival: releasing early preserves the block");
+			await page.mouse.down();
+			await page.waitForFunction(() => window.__mc.stats().dig?.stage > 0);
+			check(await page.evaluate(() => window.__mc.stats().dig.stage >= 0), "survival: held mining exposes a crack stage");
+			await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, {}, targets[i]);
+			await page.mouse.up();
+			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, targets[i]), "survival: holding breaks the block");
 			await page.waitForFunction(() => window.__mc.stats().entities.length > 0);
 			check(await page.evaluate(() => window.__mc.stats().entities.length > 0), "survival: breaking spawns a visible item entity");
 			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 1.62, z + 0.5, 0, 90), targets[i]);

@@ -12,6 +12,7 @@ legacy_count = 14
 
 [[blocks]]
 name = "air"
+unbreakable = true
 id = 0
 texture = "stone"
 occludes = false
@@ -19,11 +20,13 @@ solid = false
 
 [[blocks]]
 name = "stone"
+dig_ticks = 70
 id = 1
 texture = "stone"
 
 [[blocks]]
 name = "grass_block"
+dig_ticks = 14
 id = 2
 top = "grass_block_top"
 bottom = "dirt"
@@ -32,31 +35,37 @@ tint = ["top"]
 
 [[blocks]]
 name = "dirt"
+dig_ticks = 12
 id = 3
 texture = "dirt"
 
 [[blocks]]
 name = "cobblestone"
+dig_ticks = 70
 id = 4
 texture = "cobblestone"
 
 [[blocks]]
 name = "oak_planks"
+dig_ticks = 40
 id = 5
 texture = "oak_planks"
 
 [[blocks]]
 name = "bedrock"
+unbreakable = true
 id = 6
 texture = "bedrock"
 
 [[blocks]]
 name = "sand"
+dig_ticks = 12
 id = 7
 texture = "sand"
 
 [[blocks]]
 name = "oak_log"
+dig_ticks = 40
 id = 8
 top = "oak_log_top"
 bottom = "oak_log_top"
@@ -64,17 +73,20 @@ side = "oak_log"
 
 [[blocks]]
 name = "bricks"
+dig_ticks = 70
 id = 9
 texture = "bricks"
 
 [[blocks]]
 name = "lamp_block"
+dig_ticks = 10
 id = 10
 texture = "lamp_block"
 emission = 15
 
 [[blocks]]
 name = "glass"
+dig_ticks = 8
 id = 11
 layer = "cutout"
 texture = "glass"
@@ -82,6 +94,7 @@ cull_same = true
 
 [[blocks]]
 name = "oak_leaves"
+dig_ticks = 6
 id = 12
 layer = "cutout"
 texture = "oak_leaves"
@@ -91,6 +104,7 @@ tint = true
 
 [[blocks]]
 name = "water"
+unbreakable = true
 id = 13
 layer = "translucent"
 texture = "water"
@@ -100,6 +114,7 @@ tint = true
 
 [[blocks]]
 name = "oak_slab"
+dig_ticks = 40
 id = 14
 texture = "oak_planks"
 states = [
@@ -110,6 +125,7 @@ states = [
 
 [[blocks]]
 name = "cobblestone_slab"
+dig_ticks = 70
 id = 17
 texture = "cobblestone"
 states = [
@@ -120,6 +136,7 @@ states = [
 
 [[blocks]]
 name = "red_flower"
+dig_ticks = 0
 id = 20
 model = "cross"
 layer = "cutout"
@@ -127,6 +144,7 @@ texture = "red_flower"
 
 [[blocks]]
 name = "yellow_flower"
+dig_ticks = 0
 id = 21
 model = "cross"
 layer = "cutout"
@@ -134,6 +152,7 @@ texture = "yellow_flower"
 
 [[blocks]]
 name = "short_grass"
+dig_ticks = 0
 id = 22
 model = "cross"
 layer = "cutout"
@@ -142,6 +161,7 @@ tint = true
 
 [[blocks]]
 name = "oak_stairs"
+dig_ticks = 40
 id = 23
 model = "stairs"
 texture = "oak_planks"
@@ -158,6 +178,7 @@ states = [
 
 [[blocks]]
 name = "cobblestone_stairs"
+dig_ticks = 70
 id = 31
 model = "stairs"
 texture = "cobblestone"
@@ -174,27 +195,32 @@ states = [
 
 [[blocks]]
 name = "oak_fence"
+dig_ticks = 40
 id = 39
 model = "fence"
 texture = "oak_planks"
 
 [[blocks]]
 name = "snow_block"
+dig_ticks = 8
 id = 40
 texture = "snow_block"
 
 [[blocks]]
 name = "sandstone"
+dig_ticks = 50
 id = 41
 texture = "sandstone"
 
 [[blocks]]
 name = "gravel"
+dig_ticks = 14
 id = 42
 texture = "gravel"
 
 [[blocks]]
 name = "ice"
+dig_ticks = 12
 id = 43
 texture = "ice"
 layer = "translucent"
@@ -204,25 +230,30 @@ solid = true
 
 [[blocks]]
 name = "coarse_dirt"
+dig_ticks = 12
 id = 44
 texture = "coarse_dirt"
 
 [[blocks]]
 name = "coal_ore"
+dig_ticks = 90
 id = 45
 texture = "coal_ore"
 
 [[blocks]]
 name = "copper_ore"
+dig_ticks = 90
 id = 46
 texture = "copper_ore"
 
 [[blocks]]
 name = "iron_ore"
+dig_ticks = 90
 id = 47
 texture = "iron_ore"
 
 [[blocks]]
 name = "gold_ore"
+dig_ticks = 90
 id = 48
 texture = "gold_ore"

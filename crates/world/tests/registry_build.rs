@@ -131,7 +131,7 @@ fn one_new_entry_adds_a_block_and_texture() {
     let data = BLOCKS.replacen("\"gold_ore\",\n]", "\"gold_ore\", \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains("pub const TEST_CLAY: BlockState = 49;"));
     assert!(output.contains("pub const COUNT: BlockState = 50;"));
@@ -167,6 +167,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         [[blocks]]
         name = "test"
         id = 49
+        dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
         side = "grass_block_side"
@@ -179,7 +180,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 49\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 49\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"
@@ -189,8 +190,8 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
-        "name = \"stone\"\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
+        "name = \"stone\"\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
@@ -335,4 +336,19 @@ fn item_validation_and_optional_block() {
         &items.replacen("block = \"stone\"", "max_stack = 7", 1)
     )
     .is_ok());
+}
+
+#[test]
+fn mining_metadata_is_required_exclusive_and_bounded() {
+    for replacement in [
+        "",
+        "dig_ticks = -1\n",
+        "dig_ticks = 65536\n",
+        "dig_ticks = 70\nunbreakable = true\n",
+        "unbreakable = false\n",
+    ] {
+        assert!(
+            generate_fixture(&BLOCKS.replacen("dig_ticks = 70\n", replacement, 1), BIOMES).is_err()
+        );
+    }
 }

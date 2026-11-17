@@ -10,6 +10,8 @@ export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ClientExports {
+	client_enc_dig_start(x: number, y: number, z: number): number;
+	client_enc_dig_abort(): number;
 	client_entities(): number;
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
@@ -77,7 +79,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -360,6 +362,8 @@ export class ClientCore {
 		return this.out(this.x.client_enc_teleport(x, y, z));
 	}
 
+	encodeDigStart(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_start(x,y,z)); }
+	encodeDigAbort(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_abort()); }
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_set_block(x, y, z, block));
 	}

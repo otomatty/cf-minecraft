@@ -1,3 +1,4 @@
+import { digVertices, type DigOverlay } from "./dig.ts";
 // WebGPU renderer for chunk sections.
 //
 // Fidelity notes (what matches the game, what does not yet):
@@ -18,7 +19,7 @@ import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTr
 import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
-import { downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
+import { paintCracks, downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 
 const MAX_SECTIONS = 16384;
 /** A fence has a post and up to eight rails, with six faces per box. */
@@ -291,6 +292,9 @@ export class Renderer {
 	private readonly skyBind: GPUBindGroup;
 	private readonly terrain: GPURenderPipeline;
 	private readonly items: GPURenderPipeline;
+	private readonly cracks: GPURenderPipeline;
+	private readonly crackBuffer: GPUBuffer;
+	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
@@ -317,6 +321,8 @@ export class Renderer {
 	lost: string | null = null;
 
 	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
+		this.crackTextureBase = textureNames.length;
+		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
 		this.canvas = canvas;
 		this.device = device;
 		this.adapterInfo = adapterInfo;
@@ -351,7 +357,7 @@ export class Renderer {
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
 		textureNames.forEach((name, layer) => {
-			let pixels = paintTexture(name);
+			let pixels = name.startsWith("crack_") ? paintCracks(Number(name.slice(6))) : paintTexture(name);
 			this.texturePixels.set(name, pixels);
 			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS; level++, size >>= 1) {
 				device.queue.writeTexture(
@@ -445,7 +451,7 @@ override renderLayer`);
 		const itemShader = itemVertexShader.replace("pixel.a < 0.5", "pixel.a <= 0.0");
 		if (itemShader === itemVertexShader) throw new Error("Item shader alpha replacement did not match terrain shader");
 		const itemModule = device.createShaderModule({ code: itemShader });
-		this.items = device.createRenderPipeline({
+		const itemPipeline = (cracks: boolean): GPURenderPipeline => device.createRenderPipeline({
 			layout: pipelineLayout,
 			vertex: {
 				module: itemModule, entryPoint: "vs",
@@ -457,10 +463,13 @@ override renderLayer`);
 					{ shaderLocation: 4, offset: 28, format: "float32x2" },
 				] }],
 			},
-			fragment: { module: itemModule, entryPoint: "fs", constants: { renderLayer: 1 }, targets: [{ format: this.format }] },
+			fragment: { module: itemModule, entryPoint: "fs", constants: { renderLayer: cracks ? 2 : 1 }, targets: [{ format: this.format, ...(cracks ? { blend: { color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const }, alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const } } } : {}) }] },
 			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
-			depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: !cracks, depthCompare: "less" },
 		});
+		this.items = itemPipeline(false);
+		this.cracks = itemPipeline(true);
+		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
@@ -599,7 +608,7 @@ override renderLayer`);
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly DigOverlay[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -637,6 +646,8 @@ override renderLayer`);
 			this.device.queue.writeBuffer(this.outlineVertices, 0, outlineBox(target, block, frac));
 		}
 
+		const crackData = digVertices(digs.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], this.crackTextureBase);
+		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		const encoder = this.device.createCommandEncoder();
@@ -702,6 +713,13 @@ override renderLayer`);
 		const quads = visible.reduce((sum, mesh) => sum + mesh.quads, 0);
 
 		if (!cloudsFirst) drawClouds();
+
+		if (crackData.length) {
+			pass.setPipeline(this.cracks);
+			pass.setBindGroup(0, this.terrainBind);
+			pass.setVertexBuffer(0, this.crackBuffer);
+			pass.draw(crackData.length / 9);
+		}
 
 		if (target) {
 			pass.setPipeline(this.outline);

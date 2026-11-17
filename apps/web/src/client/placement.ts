@@ -2,6 +2,7 @@ import type { RayHit } from "./client-core.ts";
 import { FACE_NORMALS } from "./client-core.ts";
 
 export interface BlockStateInfo {
+	digTicks?: number | null;
 	name: string;
 	stateName: string;
 	first: number;
