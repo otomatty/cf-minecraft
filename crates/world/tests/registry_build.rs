@@ -31,6 +31,21 @@ fn generate_recipes_fixture(
     items: &str,
     recipes: &str,
 ) -> Result<String, String> {
+    generate_smelting_fixture(
+        blocks,
+        biomes,
+        items,
+        recipes,
+        include_str!("../../../data/registry/smelting.toml"),
+    )
+}
+fn generate_smelting_fixture(
+    blocks: &str,
+    biomes: &str,
+    items: &str,
+    recipes: &str,
+    smelting: &str,
+) -> Result<String, String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/registry-test-{}-{}",
         std::process::id(),
@@ -41,6 +56,7 @@ fn generate_recipes_fixture(
     fs::write(dir.join("biomes.toml"), biomes).unwrap();
     fs::write(dir.join("items.toml"), items).unwrap();
     fs::write(dir.join("recipes.toml"), recipes).unwrap();
+    fs::write(dir.join("smelting.toml"), smelting).unwrap();
     let output = std::process::Command::new(env!("REGISTRY_BUILD_SCRIPT"))
         .arg("--registry-fixture")
         .arg(&dir)
@@ -143,17 +159,17 @@ fn biome_recipes_validate_all_block_references_and_terrain_kinds() {
 fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
     let data = BLOCKS.replacen(
-        "\"crafting_table_bottom\",\n]",
-        "\"crafting_table_bottom\", \"test_clay\",\n]",
+        "\"furnace_top\",\n]",
+        "\"furnace_top\", \"test_clay\",\n]",
         1,
     );
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 50\ndig_ticks = 12\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 51\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 50;"));
-    assert!(output.contains("pub const COUNT: BlockState = 51;"));
-    assert!(output.contains("tex: [30, 30, 30, 30, 30, 30]"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 51;"));
+    assert!(output.contains("pub const COUNT: BlockState = 52;"));
+    assert!(output.contains("tex: [33, 33, 33, 33, 33, 33]"));
 }
 
 #[test]
@@ -184,7 +200,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 50
+        id = 51
         dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
@@ -198,7 +214,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 50\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 51\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"
@@ -452,4 +468,26 @@ fn mining_drop_references_must_name_an_existing_item() {
         BIOMES
     )
     .is_ok());
+}
+
+#[test]
+fn smelting_and_fuel_validation() {
+    let items = include_str!("../../../data/registry/items.toml");
+    let recipes = include_str!("../../../data/registry/recipes.toml");
+    let smelting = include_str!("../../../data/registry/smelting.toml");
+    for bad in [
+        smelting.replace("copper_ore", "unknown"),
+        smelting.replace("copper_ingot", "unknown"),
+        format!("{smelting}{smelting}"),
+    ] {
+        assert!(generate_smelting_fixture(BLOCKS, BIOMES, items, recipes, &bad).is_err());
+    }
+    for value in ["0", "-1", "1.5", "4294967296"] {
+        assert!(generate_items_fixture(
+            BLOCKS,
+            BIOMES,
+            &items.replacen("fuel = 320", &format!("fuel = {value}"), 1)
+        )
+        .is_err());
+    }
 }

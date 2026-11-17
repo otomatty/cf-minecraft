@@ -8,6 +8,7 @@ textures = [
   "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
   "coal_ore", "copper_ore", "iron_ore", "gold_ore",
   "crafting_table_top", "crafting_table_side", "crafting_table_bottom",
+  "furnace_front", "furnace_side", "furnace_top",
 ]
 legacy_count = 14
 
@@ -274,6 +275,7 @@ texture = "coarse_dirt"
 
 [[blocks]]
 name = "coal_ore"
+drop = "coal"
 tool = "pickaxe"
 min_tier = 1
 dig_ticks = 90
@@ -313,3 +315,14 @@ min_tier = 0
 top = "crafting_table_top"
 side = "crafting_table_side"
 bottom = "crafting_table_bottom"
+
+[[blocks]]
+name = "furnace"
+id = 50
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
+side = "furnace_side"
+north = "furnace_front"
+top = "furnace_top"
+bottom = "furnace_top"

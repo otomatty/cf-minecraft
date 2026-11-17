@@ -20,8 +20,9 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 50);
+	assert.equal(registry.length, 51);
 	assert.equal(id("crafting_table"), 49);
+	assert.equal(id("furnace"), 50);
 	assert.equal(slab, 14);
 	assert.equal(registry[slab + 1].stateName, "oak_slab[type=top]");
 	assert.equal(registry[slab + 2].occludes, true);
@@ -207,4 +208,9 @@ test("right-click opens a crafting table unless Shift requests placement", () =>
         assert.equal(blockInteraction(name, false), "place");
         assert.equal(blockInteraction(name, true), "place");
     }
+});
+
+test("right-click opens a furnace unless Shift requests placement", () => {
+    assert.equal(blockInteraction("furnace", false), "open");
+    assert.equal(blockInteraction("furnace", true), "place");
 });

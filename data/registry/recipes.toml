@@ -42,3 +42,38 @@ result = { item = "stone_axe", count = 1 }
 pattern = ["#", "|", "|"]
 key = { "#" = "cobblestone", "|" = "stick" }
 result = { item = "stone_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", "# #", "###"]
+key = { "#" = "cobblestone" }
+result = { item = "furnace", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_shovel", count = 1 }

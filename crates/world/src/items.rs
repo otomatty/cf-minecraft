@@ -18,6 +18,7 @@ impl Tool {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemInfo {
+    pub fuel: Option<u32>,
     pub texture: Option<&'static str>,
     pub tool: Option<Tool>,
     pub id: u16,

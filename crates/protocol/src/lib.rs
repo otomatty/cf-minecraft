@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +98,10 @@ pub enum S2C {
         id: u32,
     },
     Inventory {
+        furnace: [Option<(u16, u8)>; 3],
+        burn: u16,
+        total: u16,
+        progress: u16,
         screen: u8,
         table: [Option<(u16, u8)>; 9],
         selected: u8,
@@ -256,7 +260,7 @@ impl C2S {
         let packet = match r.u8()? {
             id::C2S_CLICK_SLOT => {
                 let (slot, button, shift) = (r.u8()?, r.u8()?, r.u8()?);
-                if slot > 50 || button > 1 || shift > 1 {
+                if slot > 53 || button > 1 || shift > 1 {
                     return Err(DecodeError);
                 }
                 C2S::ClickSlot {
@@ -401,6 +405,10 @@ impl S2C {
             }
 
             S2C::Inventory {
+                furnace,
+                burn,
+                total,
+                progress,
                 screen,
                 table,
                 selected,
@@ -421,6 +429,13 @@ impl S2C {
                     w.u16(slot.map_or(0, |s| s.0));
                     w.u8(slot.map_or(0, |s| s.1));
                 }
+                for slot in furnace {
+                    w.u16(slot.map_or(0, |s| s.0));
+                    w.u8(slot.map_or(0, |s| s.1));
+                }
+                w.u16(*burn);
+                w.u16(*total);
+                w.u16(*progress);
             }
 
             S2C::Welcome {
@@ -572,7 +587,7 @@ impl S2C {
                     }
                 }
                 let screen = r.u8()?;
-                if screen > 1 {
+                if screen > 2 {
                     return Err(DecodeError);
                 }
                 let mut table = [None; 9];
@@ -592,7 +607,39 @@ impl S2C {
                         *slot = Some((item, count));
                     }
                 }
+                let mut furnace = [None; 3];
+                for slot in &mut furnace {
+                    let item = r.u16()?;
+                    let count = r.u8()?;
+                    if item == 0 {
+                        if count != 0 {
+                            return Err(DecodeError);
+                        }
+                    } else {
+                        if !world::items::info(item)
+                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
+                        {
+                            return Err(DecodeError);
+                        }
+                        *slot = Some((item, count));
+                    }
+                }
+                let burn = r.u16()?;
+                let total = r.u16()?;
+                let progress = r.u16()?;
+                if burn > total
+                    || total > 1600
+                    || progress >= world::smelting::SMELT_TICKS
+                    || (screen != 2
+                        && (furnace != [None; 3] || burn != 0 || total != 0 || progress != 0))
+                {
+                    return Err(DecodeError);
+                }
                 S2C::Inventory {
+                    furnace,
+                    burn,
+                    total,
+                    progress,
                     screen,
                     table,
                     selected,
@@ -768,6 +815,10 @@ mod tests {
             S2C::EntityCount { id: 1, count: 3 },
             S2C::EntityRemove { id: 1 },
             S2C::Inventory {
+                furnace: [None; 3],
+                burn: 0,
+                total: 0,
+                progress: 0,
                 screen: 0,
                 table: [None; 9],
                 selected: 8,
@@ -828,7 +879,7 @@ mod tests {
             assert_eq!(C2S::decode(&packet.encode()), Ok(packet));
         }
         for bytes in [
-            vec![id::C2S_CLICK_SLOT, 51, 0, 0],
+            vec![id::C2S_CLICK_SLOT, 54, 0, 0],
             vec![id::C2S_CLICK_SLOT, 0, 2, 0],
             vec![id::C2S_CLICK_SLOT, 0, 0, 2],
             vec![id::C2S_CLOSE_INVENTORY, 0],
@@ -836,6 +887,10 @@ mod tests {
             assert!(C2S::decode(&bytes).is_err());
         }
         let packet = S2C::Inventory {
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
             screen: 0,
             table: [None; 9],
             selected: 3,
@@ -877,6 +932,10 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let p = S2C::Inventory {
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
             screen: 1,
             table: [Some((5, 3)); 9],
             selected: 0,
@@ -887,7 +946,7 @@ mod tests {
         };
         let bytes = p.encode();
         assert_eq!(S2C::decode(&bytes), Ok(p));
-        for screen in 2..=255 {
+        for screen in 3..=255 {
             let mut bad = bytes.clone();
             bad[129] = screen;
             assert!(S2C::decode(&bad).is_err());
@@ -908,8 +967,49 @@ mod tests {
         assert!(S2C::decode(&extra).is_err());
     }
     #[test]
+    fn furnace_packet_checks_stacks_timers_and_inactive_payload() {
+        let p = S2C::Inventory {
+            furnace: [
+                Some((items_id("iron_ore"), 3)),
+                None,
+                Some((items_id("iron_ingot"), 1)),
+            ],
+            burn: 1387,
+            total: 1600,
+            progress: 53,
+            screen: 2,
+            table: [None; 9],
+            selected: 0,
+            slots: vec![None; 36],
+            crafting: [None; 4],
+            result: None,
+            cursor: None,
+        };
+        fn items_id(name: &str) -> u16 {
+            world::items::by_name(name).unwrap()
+        }
+        let bytes = p.encode();
+        assert_eq!(S2C::decode(&bytes), Ok(p));
+        for (offset, value) in [
+            (129, 0),
+            (157, 255),
+            (159, 0),
+            (166, 255),
+            (168, 255),
+            (170, 255),
+        ] {
+            let mut bad = bytes.clone();
+            bad[offset] = value;
+            assert!(S2C::decode(&bad).is_err(), "{offset}");
+        }
+    }
+    #[test]
     fn inventory_packet_rejects_malformed_lengths_and_values() {
         let p = S2C::Inventory {
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
             screen: 0,
             table: [None; 9],
             selected: 0,
@@ -929,6 +1029,10 @@ mod tests {
         assert!(S2C::decode(&bad).is_err());
         assert!(S2C::decode(&bytes[..bytes.len() - 1]).is_err());
         let p = S2C::Inventory {
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
             screen: 0,
             table: [None; 9],
             selected: 8,
@@ -939,6 +1043,10 @@ mod tests {
         };
         assert_eq!(S2C::decode(&p.encode()), Ok(p));
         let mut bad = S2C::Inventory {
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
             screen: 0,
             table: [None; 9],
             selected: 0,

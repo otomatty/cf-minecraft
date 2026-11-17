@@ -1,4 +1,4 @@
-import { bindInventorySlot, tableScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS } from "./inventory-screen.ts";
+import { bindInventorySlot, containerScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, type InventoryScreenKind } from "./inventory-screen.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -226,9 +226,11 @@ async function main(): Promise<void> {
 			if (id === S2C.Inventory) {
 				syncInventory();
 				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
-				const visible = tableScreenVisible({ screen: core.screen, closePending });
-				if (visible && tableScreen.hidden) openInventoryScreen(true);
-				else if (!visible && !tableScreen.hidden) closeInventoryScreen(false);
+				const kind = ([1, 2] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
+				if (kind) {
+					const view = kind === 1 ? tableView : furnaceView;
+					if (view.screen.hidden) openInventoryScreen(kind);
+				} else if (!tableScreen.hidden || !furnaceScreen.hidden) closeInventoryScreen(false);
 			}
 			if (id === S2C.BlockUpdate) {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -303,6 +305,7 @@ async function main(): Promise<void> {
 			picker.hidden = true;
 			inventoryScreen.hidden = true;
 			tableScreen.hidden = true;
+			furnaceScreen.hidden = true;
 			cursorIcon.hidden = true;
 			$("start-to-title").hidden = false;
 			showMenuView("start");
@@ -320,6 +323,7 @@ async function main(): Promise<void> {
 			picker.hidden = true;
 			inventoryScreen.hidden = true;
 			tableScreen.hidden = true;
+			furnaceScreen.hidden = true;
 			cursorIcon.hidden = true;
 			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
@@ -626,26 +630,26 @@ async function main(): Promise<void> {
 	}
 	refreshSettings();
 
-	function createInventoryScreen(table: boolean) {
+	function createInventoryScreen(kind: InventoryScreenKind) {
 		const screen = document.createElement("section");
-		screen.id = table ? "crafting-table-screen" : "inventory-screen";
+		screen.id = kind === 2 ? "furnace-screen" : kind === 1 ? "crafting-table-screen" : "inventory-screen";
 		screen.className = "inventory-screen";
 		screen.setAttribute("role", "dialog");
 		screen.setAttribute("aria-modal", "true");
-		screen.setAttribute("aria-label", table ? "作業台" : "インベントリとクラフト");
+		screen.setAttribute("aria-label", kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリとクラフト");
 		screen.hidden = true;
 		const heading = document.createElement("h2");
-		heading.textContent = table ? "作業台" : "インベントリ / クラフト";
+		heading.textContent = kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリ / クラフト";
 		screen.append(heading);
 		const buttons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
-		const rows = table ? TABLE_ROWS : INVENTORY_ROWS;
+		const rows = kind === 2 ? FURNACE_ROWS : kind === 1 ? TABLE_ROWS : INVENTORY_ROWS;
 		const craftingRow = document.createElement("div");
 		craftingRow.className = "inventory-crafting";
 		for (const [index, row] of rows.entries()) {
 			const group = document.createElement("div");
-			const label = ["所持品", "ホットバー", "クラフト", "結果"][index];
+			const label = ["所持品", "ホットバー", kind === 2 ? "かまど（入力・燃料）" : "クラフト", "結果"][index];
 			group.setAttribute("aria-label", label);
-			group.className = `inventory-slots${index === 2 ? ` inventory-crafting-grid${table ? " inventory-table-grid" : ""}` : index === 3 ? " inventory-result" : ""}`;
+			group.className = `inventory-slots${index === 2 ? ` inventory-crafting-grid${kind === 2 ? " inventory-furnace-grid" : kind === 1 ? " inventory-table-grid" : ""}` : index === 3 ? " inventory-result" : ""}`;
 			if (index !== 3) {
 				const title = document.createElement("h3");
 				title.textContent = label;
@@ -655,7 +659,7 @@ async function main(): Promise<void> {
 				const button = document.createElement("button");
 				button.type = "button";
 				button.dataset.slot = String(slot);
-				button.setAttribute("aria-label", `枠 ${slot}`);
+				button.setAttribute("aria-label", kind === 2 && slot >= 51 ? `${["入力", "燃料", "出力"][slot - 51]} 枠 ${slot}` : `枠 ${slot}`);
 				button.style.cssText = "position:relative;width:48px;height:48px;background:#525960;border:1px solid #aab2ba;color:white";
 				const canvas = document.createElement("canvas");
 				canvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
@@ -680,17 +684,37 @@ async function main(): Promise<void> {
 				screen.append(group);
 			}
 		}
+		const gauges: HTMLProgressElement[] = [];
+		if (kind === 2) {
+			const meters = document.createElement("div");
+			meters.className = "furnace-gauges";
+			for (const [index, name] of ["燃焼", "精錬"].entries()) {
+				const label = document.createElement("label");
+				const progress = document.createElement("progress");
+				progress.id = `furnace-${index === 0 ? "burn" : "smelt"}`;
+				progress.setAttribute("role", "progressbar");
+				progress.setAttribute("aria-label", name);
+				progress.setAttribute("aria-valuemin", "0");
+				label.htmlFor = progress.id;
+				label.append(name, progress);
+				meters.append(label);
+				gauges.push(progress);
+			}
+			screen.append(meters);
+		}
 		const close = document.createElement("button");
 		close.textContent = "閉じる (E / Esc)";
 		close.addEventListener("click", () => closeInventoryScreen());
 		screen.append(close);
 		document.body.append(screen);
-		return { screen, buttons, table };
+		return { screen, buttons, kind, gauges };
 	}
-	const inventoryView = createInventoryScreen(false);
-	const tableView = createInventoryScreen(true);
+	const inventoryView = createInventoryScreen(0);
+	const tableView = createInventoryScreen(1);
 	const inventoryScreen = inventoryView.screen;
 	const tableScreen = tableView.screen;
+	const furnaceView = createInventoryScreen(2);
+	const furnaceScreen = furnaceView.screen;
 	const cursorIcon = document.createElement("div");
 	cursorIcon.style.cssText = "position:fixed;pointer-events:none;z-index:30;color:white;text-shadow:1px 1px black";
 	const cursorCanvas = document.createElement("canvas");
@@ -704,22 +728,33 @@ async function main(): Promise<void> {
 		cursorIcon.style.top = `${event.clientY+12}px`;
 	});
 	function paintInventoryScreen(): void {
-		const active = tableScreen.hidden ? inventoryView : tableView;
-		const display = inventoryDisplay(core.inventorySlots, active.table);
+		const active = !furnaceScreen.hidden ? furnaceView : !tableScreen.hidden ? tableView : inventoryView;
+		const display = inventoryDisplay(core.inventorySlots, active.kind);
 		for (const group of display.groups) for (const {slot,stack} of group) {
 			const view = active.buttons.get(slot)!;
 			paintItemIcon(view.canvas, stack?.item);
 			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
 			view.canvas.dataset.count = String(stack?.count ?? 0);
 		}
+		const [remaining, total, smelt] = core.furnaceTimes;
+		for (const [index, gauge] of furnaceView.gauges.entries()) {
+			const value = index === 0 ? remaining : smelt;
+			const max = index === 0 ? total : 160;
+			gauge.max = Math.max(1, max);
+			gauge.value = value;
+			gauge.setAttribute("aria-valuenow", String(value));
+			gauge.setAttribute("aria-valuemax", String(max));
+			gauge.textContent = `${value} / ${max}`;
+		}
 		paintItemIcon(cursorCanvas, display.cursor?.item);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
-		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden) || !display.cursor;
+		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
 	}
-	function openInventoryScreen(table = false): void {
+	function openInventoryScreen(kind: InventoryScreenKind = 0): void {
 		clearInput();
-		inventoryScreen.hidden = table;
-		tableScreen.hidden = !table;
+		inventoryScreen.hidden = kind !== 0;
+		tableScreen.hidden = kind !== 1;
+		furnaceScreen.hidden = kind !== 2;
 		picker.hidden = true;
 		overlay.hidden = true;
 		paintInventoryScreen();
@@ -728,6 +763,7 @@ async function main(): Promise<void> {
 	function closeInventoryScreen(send = true): void {
 		inventoryScreen.hidden = true;
 		tableScreen.hidden = true;
+		furnaceScreen.hidden = true;
 		cursorIcon.hidden = true;
 		if (send) {
 			closePending = updateClosePending(closePending, { type: "close" });
@@ -816,7 +852,7 @@ async function main(): Promise<void> {
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
@@ -827,7 +863,7 @@ async function main(): Promise<void> {
 		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
-		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden) { overlay.hidden = true; return; }
+		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -855,7 +891,7 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
-		if (!inventoryScreen.hidden || !tableScreen.hidden) {
+		if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) {
 			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
 				e.preventDefault();
 				if (!e.repeat) closeInventoryScreen();

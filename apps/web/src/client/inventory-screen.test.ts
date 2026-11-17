@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bindInventorySlot, tableScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
+import { bindInventorySlot, containerScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
 import { paintTexture } from "./textures.ts";
 
 test("inventory display maps all wire slots without mutating server state", () => {
@@ -101,50 +101,82 @@ test("slot activation sends exactly once for pointer and keyboard event sequence
 test("table display maps wire 41–50 without confusing materials, result and cursor", () => {
     const slots = Array.from({ length: 51 }, (_, i) => ({ item: i + 1, count: i + 1 }));
     const before = structuredClone(slots);
-    const view = inventoryDisplay(slots, true);
+    const view = inventoryDisplay(slots, 1);
     assert.deepEqual(TABLE_ROWS.map(row => row.length), [27, 9, 9, 1]);
     assert.deepEqual(view.groups[2].map(s => s.slot), [41,42,43,44,45,46,47,48,49]);
     for (let slot = 41; slot <= 49; slot++) {
-        assert.equal(inventoryDisplayIndex(slot, true), slot + 1);
+        assert.equal(inventoryDisplayIndex(slot, 1), slot + 1);
         assert.deepEqual(view.groups[2][slot - 41].stack, slots[slot + 1]);
     }
-    assert.equal(inventoryDisplayIndex(50, true), 40);
+    assert.equal(inventoryDisplayIndex(50, 1), 40);
     assert.deepEqual(view.groups[3], [{ slot: 50, stack: slots[40] }]);
     assert.deepEqual(view.cursor, slots[41]);
     for (const { slot, stack } of view.groups.slice(0, 2).flat()) assert.deepEqual(stack, slots[slot]);
     assert.deepEqual(slots, before);
-    assert.ok(inventoryDisplay([], true).groups.flat().every(s => s.stack === null));
+    assert.ok(inventoryDisplay([], 1).groups.flat().every(s => s.stack === null));
 });
 
 
-test("table reopens after close and use in one tick with screen still one", () => {
+for (const kind of [1, 2] as const) {
+test(`container ${kind} reopens after close and use in one tick`, () => {
     let closePending = updateClosePending(false, { type: "close" });
-    assert.equal(tableScreenVisible({ screen: 1, closePending }), false);
+    assert.equal(containerScreenVisible({ screen: kind, closePending }, kind), false);
     closePending = updateClosePending(closePending, { type: "use" });
-    closePending = updateClosePending(closePending, { type: "inventory", screen: 1 });
+    closePending = updateClosePending(closePending, { type: "inventory", screen: kind });
     assert.equal(closePending, false);
-    assert.equal(tableScreenVisible({ screen: 1, closePending }), true);
+    assert.equal(containerScreenVisible({ screen: kind, closePending }, kind), true);
 });
 
-test("stale open Inventory cannot undo a pending close", () => {
+test(`container ${kind}: stale open Inventory cannot undo a pending close`, () => {
     let closePending = updateClosePending(false, { type: "close" });
-    closePending = updateClosePending(closePending, { type: "inventory", screen: 1 });
+    closePending = updateClosePending(closePending, { type: "inventory", screen: kind });
     assert.equal(closePending, true);
-    assert.equal(tableScreenVisible({ screen: 1, closePending }), false);
+    assert.equal(containerScreenVisible({ screen: kind, closePending }, kind), false);
     closePending = updateClosePending(closePending, { type: "inventory", screen: 0 });
     assert.equal(closePending, false);
-    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
+    assert.equal(containerScreenVisible({ screen: 0, closePending }, kind), false);
 });
 
-test("server closure hides an open table screen", () => {
-    assert.equal(tableScreenVisible({ screen: 1, closePending: false }), true);
+test(`container ${kind}: server closure hides an open screen`, () => {
+    assert.equal(containerScreenVisible({ screen: kind, closePending: false }, kind), true);
     const closePending = updateClosePending(false, { type: "inventory", screen: 0 });
-    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
+    assert.equal(containerScreenVisible({ screen: 0, closePending }, kind), false);
 });
 
-test("a rejected use request leaves the table screen closed", () => {
+test(`container ${kind}: a rejected use request leaves the screen closed`, () => {
     let closePending = updateClosePending(true, { type: "use" });
     assert.equal(closePending, false);
     closePending = updateClosePending(closePending, { type: "inventory", screen: 0 });
-    assert.equal(tableScreenVisible({ screen: 0, closePending }), false);
+    assert.equal(containerScreenVisible({ screen: 0, closePending }, kind), false);
+});
+
+}
+
+test("furnace display uses wire 51–53 directly and keeps cursor separate", () => {
+    const slots = Array.from({ length: 54 }, (_, i) => ({ item: i + 1, count: i + 1 }));
+    const before = structuredClone(slots);
+    const view = inventoryDisplay(slots, 2);
+    assert.deepEqual(FURNACE_ROWS.map(row => row.length), [27, 9, 2, 1]);
+    assert.deepEqual(view.groups[2], [51, 52].map(slot => ({ slot, stack: slots[slot] })));
+    assert.deepEqual(view.groups[3], [{ slot: 53, stack: slots[53] }]);
+    for (const { slot, stack } of view.groups.flat()) {
+        assert.equal(inventoryDisplayIndex(slot, 2), slot);
+        assert.deepEqual(stack, slots[slot]);
+    }
+    assert.deepEqual(view.cursor, slots[41]);
+    assert.deepEqual(slots, before);
+    assert.ok(inventoryDisplay([], 2).groups.flat().every(s => s.stack === null));
+    assert.equal(containerScreenVisible({ screen: 1, closePending: false }, 2), false);
+    assert.equal(containerScreenVisible({ screen: 2, closePending: false }, 1), false);
+});
+
+test("furnace item and block textures are deterministic and distinct", () => {
+    const names = ["coal", "copper_ingot", "iron_ingot", "furnace_front", "furnace_side", "furnace_top"];
+    const images = names.map(name => paintTexture(name));
+    for (const [i, pixels] of images.entries()) {
+        assert.equal(pixels.length, 16 * 16 * 4);
+        assert.deepEqual(pixels, paintTexture(names[i]));
+        assert.notDeepEqual(pixels, paintTexture("unknown_texture"));
+        for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, images[j]);
+    }
 });

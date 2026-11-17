@@ -17,6 +17,7 @@
 //! the same state. `state_hash` makes that checkable.
 
 pub mod entity;
+pub mod furnace;
 pub mod inventory;
 pub mod scenario;
 use inventory::{Inventory, Stack};
@@ -113,6 +114,7 @@ pub struct Stats {
 }
 
 pub struct Server {
+    furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     entities: BTreeMap<u32, entity::Entity>,
     next_entity_id: u32,
     game_mode: GameMode,
@@ -144,6 +146,7 @@ impl Server {
             (generator == Generator::Terrain).then(|| worldgen::TerrainGenerator::new(seed));
         let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
+            furnaces: BTreeMap::new(),
             entities: BTreeMap::new(),
             next_entity_id: 1,
             game_mode: GameMode::Creative,
@@ -179,10 +182,23 @@ impl Server {
     fn send_inventory(&mut self, id: u32) {
         let client = self.clients.get_mut(&id).expect("client");
         client.inventory_dirty = false;
+        let f = if let inventory::Screen::Furnace { pos } = client.inventory.screen {
+            self.furnaces.get(&pos).cloned().unwrap_or_default()
+        } else {
+            furnace::Furnace::default()
+        };
         self.outbox.push((
             id,
             S2C::Inventory {
-                screen: u8::from(client.inventory.screen != inventory::Screen::None),
+                furnace: f.slots.map(|s| s.map(|s| (s.item, s.count))),
+                burn: f.burn.min(1600) as u16,
+                total: f.total.min(1600) as u16,
+                progress: f.progress,
+                screen: match client.inventory.screen {
+                    inventory::Screen::None => 0,
+                    inventory::Screen::CraftingTable { .. } => 1,
+                    inventory::Screen::Furnace { .. } => 2,
+                },
                 table: client.inventory.table.map(|s| s.map(|s| (s.item, s.count))),
                 crafting: client
                     .inventory
@@ -597,6 +613,7 @@ impl Server {
         if self.game_time % UNLOAD_INTERVAL == 0 {
             self.unload_far_chunks();
         }
+        self.tick_furnaces();
         self.sync_entities();
         let changed: Vec<_> = self
             .clients
@@ -692,10 +709,21 @@ impl Server {
                     return;
                 }
                 let client = self.clients.get_mut(&id).unwrap();
-                if client.inventory.click(slot, button, shift).is_err() {
+                let result = if let inventory::Screen::Furnace { pos } = client.inventory.screen {
+                    let f = self.furnaces.entry(pos).or_default();
+                    let before = f.clone();
+                    let result = client.inventory.click_furnace(f, slot, button, shift);
+                    if *f != before {
+                        self.furnace_changed(pos);
+                    }
+                    result
+                } else {
+                    client.inventory.click(slot, button, shift)
+                };
+                if result.is_err() {
                     self.stats.packets_rejected += 1;
                 }
-                client.inventory_dirty = true;
+                self.clients.get_mut(&id).unwrap().inventory_dirty = true;
                 self.abort_dig(id);
             }
             C2S::UseBlock { x, y, z } => {
@@ -703,10 +731,19 @@ impl Server {
                 let allowed = client.joined
                     && client.inventory.screen == inventory::Screen::None
                     && self.within_reach(client.pos, [x, y, z])
-                    && self.world.get_block(x, y, z) == Some(blocks::CRAFTING_TABLE);
+                    && matches!(
+                        self.world.get_block(x, y, z),
+                        Some(blocks::CRAFTING_TABLE | blocks::FURNACE)
+                    );
                 let client = self.clients.get_mut(&id).unwrap();
                 if allowed {
-                    client.inventory.screen = inventory::Screen::CraftingTable { pos: [x, y, z] };
+                    client.inventory.screen =
+                        if self.world.get_block(x, y, z) == Some(blocks::FURNACE) {
+                            self.furnaces.entry([x, y, z]).or_default();
+                            inventory::Screen::Furnace { pos: [x, y, z] }
+                        } else {
+                            inventory::Screen::CraftingTable { pos: [x, y, z] }
+                        };
                 } else {
                     self.stats.packets_rejected += 1;
                 }
@@ -823,6 +860,23 @@ impl Server {
     fn change_block(&mut self, id: u32, [x, y, z]: [i32; 3], state: u16, drops: bool) {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
+                if old == blocks::FURNACE {
+                    if let Some(f) = self.furnaces.remove(&[x, y, z]) {
+                        for stack in f.slots.into_iter().flatten() {
+                            self.spawn_item(
+                                stack.item,
+                                stack.count,
+                                [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
+                                [0.0, 0.1, 0.0],
+                                10,
+                            );
+                        }
+                    }
+                }
+                if state == blocks::FURNACE {
+                    self.furnaces.insert([x, y, z], furnace::Furnace::default());
+                }
+
                 let miners: Vec<_> = self
                     .clients
                     .iter()
@@ -980,6 +1034,10 @@ impl Server {
     fn table_screen_valid(&self, client: &Client) -> bool {
         match client.inventory.screen {
             inventory::Screen::None => true,
+            inventory::Screen::Furnace { pos: [x, y, z] } => {
+                self.world.get_block(x, y, z) == Some(blocks::FURNACE)
+                    && self.within_reach(client.pos, [x, y, z])
+            }
             inventory::Screen::CraftingTable { pos: [x, y, z] } => {
                 self.world.get_block(x, y, z) == Some(blocks::CRAFTING_TABLE)
                     && self.within_reach(client.pos, [x, y, z])
@@ -987,6 +1045,29 @@ impl Server {
         }
     }
 
+    fn furnace_changed(&mut self, pos: [i32; 3]) {
+        if let Some(c) = self.world.chunks.get_mut(&(pos[0] >> 4, pos[2] >> 4)) {
+            c.dirty = true;
+        }
+        for c in self.clients.values_mut() {
+            if c.inventory.screen == (inventory::Screen::Furnace { pos }) {
+                c.inventory_dirty = true;
+            }
+        }
+    }
+    fn tick_furnaces(&mut self) {
+        let mut changed = Vec::new();
+        for (&pos, f) in &mut self.furnaces {
+            let before = f.clone();
+            f.tick();
+            if *f != before {
+                changed.push(pos);
+            }
+        }
+        for pos in changed {
+            self.furnace_changed(pos);
+        }
+    }
     fn tick_screens(&mut self) {
         let close: Vec<_> = self
             .clients
@@ -1091,8 +1172,9 @@ impl Server {
         if self.world.chunks.contains_key(&c) || self.stored.contains(&c) {
             return false;
         }
-        match Chunk::read(cx, cz, &mut Reader::new(bytes)) {
-            Ok(chunk) => {
+        match Self::read_saved_chunk(cx, cz, bytes) {
+            Ok((chunk, furnaces)) => {
+                self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_generated += 1;
                 self.stats.chunks_generated_externally += 1;
@@ -1215,6 +1297,8 @@ impl Server {
             .collect();
         for (cx, cz) in removed {
             self.world.remove_chunk(cx, cz);
+            self.furnaces
+                .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
         }
     }
@@ -1243,8 +1327,9 @@ impl Server {
         if self.world.chunks.contains_key(&c) {
             return false;
         }
-        match Chunk::read(cx, cz, &mut Reader::new(bytes)) {
-            Ok(chunk) => {
+        match Self::read_saved_chunk(cx, cz, bytes) {
+            Ok((chunk, furnaces)) => {
+                self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_loaded_from_storage += 1;
                 true
@@ -1268,9 +1353,69 @@ impl Server {
         let chunk = self.world.chunks.values_mut().find(|c| c.dirty)?;
         chunk.dirty = false;
         self.stored.insert((chunk.cx, chunk.cz));
-        Some((chunk.cx, chunk.cz, chunk.to_bytes()))
+        let (cx, cz) = (chunk.cx, chunk.cz);
+        let mut w = world::io::Writer::new();
+        w.raw(&chunk.to_bytes());
+        let entries: Vec<_> = self
+            .furnaces
+            .iter()
+            .filter(|(p, _)| (p[0] >> 4, p[2] >> 4) == (cx, cz))
+            .collect();
+        w.varint(entries.len() as u32);
+        for (p, f) in entries {
+            w.u8(p[0].rem_euclid(16) as u8);
+            w.i32(p[1]);
+            w.u8(p[2].rem_euclid(16) as u8);
+            f.write(&mut w);
+        }
+        Some((cx, cz, w.finish()))
     }
 
+    fn read_saved_chunk(
+        cx: i32,
+        cz: i32,
+        bytes: &[u8],
+    ) -> Result<(Chunk, BTreeMap<[i32; 3], furnace::Furnace>), world::io::DecodeError> {
+        use world::io::DecodeError;
+        let mut r = Reader::new(bytes);
+        // Chunk::read deliberately rejects trailing bytes. Locate its prefix here.
+        for _ in 0..world::SECTIONS {
+            r.u16()?;
+            world::PalettedContainer::read(&mut r, blocks::COUNT)?;
+        }
+        let prefix = bytes.len() - r.remaining();
+        let chunk = Chunk::read(cx, cz, &mut Reader::new(&bytes[..prefix]))?;
+        let mut furnaces = BTreeMap::new();
+        if r.remaining() > 0 {
+            let count = r.varint()? as usize;
+            if count > 16 * 16 * HEIGHT as usize || r.remaining() != count * 25 {
+                return Err(DecodeError);
+            }
+            for _ in 0..count {
+                let x = r.u8()?;
+                let y = r.i32()?;
+                let z = r.u8()?;
+                if x >= 16 || z >= 16 || !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+                    return Err(DecodeError);
+                }
+                let p = [
+                    cx.wrapping_mul(16).wrapping_add(x as i32),
+                    y,
+                    cz.wrapping_mul(16).wrapping_add(z as i32),
+                ];
+                if chunk.get(x as usize, y, z as usize) != blocks::FURNACE {
+                    return Err(DecodeError);
+                }
+                if furnaces
+                    .insert(p, furnace::Furnace::read(&mut r)?)
+                    .is_some()
+                {
+                    return Err(DecodeError);
+                }
+            }
+        }
+        Ok((chunk, furnaces))
+    }
     pub fn dirty_chunks(&self) -> usize {
         self.world.chunks.values().filter(|c| c.dirty).count()
     }
@@ -1307,8 +1452,14 @@ impl Server {
                 h.bytes(&slot.map_or(0, |s| s.item).to_be_bytes());
                 h.u8(slot.map_or(0, |s| s.count));
             }
-            h.u8(u8::from(client.inventory.screen != inventory::Screen::None));
-            if let inventory::Screen::CraftingTable { pos } = client.inventory.screen {
+            h.u8(match client.inventory.screen {
+                inventory::Screen::None => 0,
+                inventory::Screen::CraftingTable { .. } => 1,
+                inventory::Screen::Furnace { .. } => 2,
+            });
+            if let inventory::Screen::CraftingTable { pos } | inventory::Screen::Furnace { pos } =
+                client.inventory.screen
+            {
                 for v in pos {
                     h.bytes(&v.to_be_bytes());
                 }
@@ -1324,6 +1475,15 @@ impl Server {
                 h.u8(dig.stage.unwrap_or(255));
                 h.u8(u8::from(dig.drops));
             }
+        }
+        h.i64(self.furnaces.len() as i64);
+        for (pos, f) in &self.furnaces {
+            for v in pos {
+                h.bytes(&v.to_be_bytes());
+            }
+            let mut w = world::io::Writer::new();
+            f.write(&mut w);
+            h.bytes(&w.finish());
         }
         h.bytes(&self.next_entity_id.to_be_bytes());
         h.i64(self.entities.len() as i64);
@@ -4078,5 +4238,280 @@ mod crafting_server_tests {
             .take_outbox()
             .iter()
             .any(|(_, p)| matches!(S2C::decode(p), Ok(S2C::Inventory { .. }))));
+    }
+}
+
+#[cfg(test)]
+mod furnace_server_tests {
+    use super::*;
+    fn stack(name: &str, count: u8) -> Option<Stack> {
+        Some(Stack {
+            item: items::by_name(name).unwrap(),
+            count,
+        })
+    }
+    fn setup() -> (Server, [i32; 3]) {
+        let mut s = Server::new(2026, Generator::Flat);
+        for id in 1..=2 {
+            s.connect_with_teleport(id, true);
+            s.handle_packet(
+                id,
+                &C2S::Hello {
+                    protocol: protocol::PROTOCOL_VERSION,
+                    view_distance: 0,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        let p = s.clients[&1].pos;
+        let pos = [
+            p[0].floor() as i32 + 1,
+            p[1].floor() as i32,
+            p[2].floor() as i32,
+        ];
+        s.change_block(1, pos, blocks::FURNACE, true);
+        for c in s.clients.values_mut() {
+            c.inventory = Inventory::default();
+        }
+        s.take_outbox();
+        (s, pos)
+    }
+    fn open(s: &mut Server, id: u32, [x, y, z]: [i32; 3]) {
+        s.handle_packet(id, &C2S::UseBlock { x, y, z }.encode());
+        s.tick();
+    }
+    fn click(s: &mut Server, slot: u8, shift: bool) {
+        s.handle_packet(
+            1,
+            &C2S::ClickSlot {
+                slot,
+                button: 0,
+                shift,
+            }
+            .encode(),
+        );
+        s.tick();
+    }
+    #[test]
+    fn shared_screen_routes_clicks_rejects_invalid_slots_and_closes() {
+        let (mut s, pos) = setup();
+        for slot in 51..=53 {
+            click(&mut s, slot, false);
+        }
+        assert_eq!(s.stats.packets_rejected, 3);
+        open(&mut s, 1, [pos[0] + 20, pos[1], pos[2]]);
+        assert_eq!(s.stats.packets_rejected, 4);
+        open(&mut s, 1, pos);
+        open(&mut s, 1, pos);
+        assert_eq!(s.stats.packets_rejected, 5);
+        open(&mut s, 2, pos);
+        for slot in 36..=50 {
+            click(&mut s, slot, false);
+        }
+        assert_eq!(s.stats.packets_rejected, 20);
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, stack("iron_ore", 3))
+            .unwrap();
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(1, stack("coal", 1))
+            .unwrap();
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(2, stack("dirt", 2))
+            .unwrap();
+        click(&mut s, 0, true);
+        s.take_outbox();
+        click(&mut s, 1, true);
+        let packets = s.take_outbox();
+        for id in 1..=2 {
+            assert!(packets.iter().any(|(to, p)| *to == id
+                && matches!(
+                    S2C::decode(p),
+                    Ok(S2C::Inventory {
+                        screen: 2,
+                        burn: 1599,
+                        ..
+                    })
+                )));
+        }
+        assert_eq!(s.furnaces[&pos].slots[0], stack("iron_ore", 3));
+        click(&mut s, 2, true);
+        assert_eq!(s.clients[&1].inventory.slots()[9], stack("dirt", 2));
+        s.clients.get_mut(&1).unwrap().inventory.cursor = stack("dirt", 1);
+        click(&mut s, 52, false);
+        assert_eq!(s.furnaces[&pos].slots[1], None);
+        click(&mut s, 53, false);
+        assert_eq!(s.furnaces[&pos].slots[2], None);
+        s.handle_packet(1, &C2S::CloseInventory.encode());
+        s.tick();
+        assert_eq!(s.furnaces[&pos].slots[0], stack("iron_ore", 3));
+        assert_eq!(s.clients[&1].inventory.cursor, None);
+        s.clients.get_mut(&2).unwrap().pos[0] += 30.0;
+        s.tick();
+        assert_eq!(s.clients[&2].inventory.screen, inventory::Screen::None);
+        // Validate before clicking, too.
+        s.clients.get_mut(&1).unwrap().inventory.screen = inventory::Screen::Furnace { pos };
+        s.clients.get_mut(&1).unwrap().pos[0] += 30.0;
+        let before = s.furnaces[&pos].slots;
+        click(&mut s, 51, true);
+        assert_eq!(s.furnaces[&pos].slots, before);
+        assert_eq!(s.clients[&1].inventory.screen, inventory::Screen::None);
+    }
+    #[test]
+    fn opens_furnace_without_a_saved_entry_as_empty() {
+        for empty_tail in [false, true] {
+            let (mut s, pos) = setup();
+            let c = (pos[0] >> 4, pos[2] >> 4);
+            let mut bytes = s.world.chunks[&c].to_bytes();
+            if empty_tail {
+                bytes.push(0);
+            }
+            s.world.remove_chunk(c.0, c.1);
+            s.furnaces.clear();
+            assert!(s.load_chunk(c.0, c.1, &bytes));
+            assert_eq!(
+                s.world.get_block(pos[0], pos[1], pos[2]),
+                Some(blocks::FURNACE)
+            );
+            s.tick();
+            assert!(!s.furnaces.contains_key(&pos));
+
+            open(&mut s, 1, pos);
+            assert_eq!(
+                s.clients[&1].inventory.screen,
+                inventory::Screen::Furnace { pos }
+            );
+            assert_eq!(s.furnaces[&pos], furnace::Furnace::default());
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, stack("iron_ore", 3))
+                .unwrap();
+            click(&mut s, 0, true);
+            assert_eq!(s.furnaces[&pos].slots[0], stack("iron_ore", 3));
+        }
+    }
+    #[test]
+    fn persists_unopened_furnaces_and_rejects_corrupt_tails() {
+        let (mut s, pos) = setup();
+        s.furnaces.get_mut(&pos).unwrap().slots = [stack("iron_ore", 3), stack("coal", 1), None];
+        for _ in 0..213 {
+            s.tick();
+        }
+        let f = s.furnaces[&pos].clone();
+        assert_eq!(f.slots[2], stack("iron_ingot", 1));
+        assert_eq!(f.progress, 53);
+        let hash = s.state_hash();
+        s.furnaces.get_mut(&pos).unwrap().progress += 1;
+        assert_ne!(s.state_hash(), hash);
+        s.furnaces.insert(pos, f.clone());
+        let c = (pos[0] >> 4, pos[2] >> 4);
+        let bytes = loop {
+            let (x, z, b) = s.take_dirty().unwrap();
+            if (x, z) == c {
+                break b;
+            }
+        };
+        let prefix = s.world.chunks[&c].to_bytes();
+        assert!(Chunk::read(c.0, c.1, &mut Reader::new(&prefix)).is_ok());
+        s.clients.clear();
+        s.unload_far_chunks();
+        assert!(!s.furnaces.contains_key(&pos));
+        assert!(s.load_chunk(c.0, c.1, &bytes));
+        assert_eq!(s.furnaces[&pos], f);
+        s.world.remove_chunk(c.0, c.1);
+        s.furnaces.clear();
+        assert!(s.load_chunk(c.0, c.1, &prefix));
+        assert!(!s.furnaces.contains_key(&pos));
+        for end in prefix.len() + 1..bytes.len() {
+            assert!(Server::read_saved_chunk(c.0, c.1, &bytes[..end]).is_err());
+        }
+        for (offset, value) in [(0, 2), (1, 16), (6, 16), (7, 255), (9, 0)] {
+            let mut bad = bytes.clone();
+            bad[prefix.len() + offset] = value;
+            assert!(
+                Server::read_saved_chunk(c.0, c.1, &bad).is_err(),
+                "offset {offset}"
+            );
+        }
+        let mut bad = bytes.clone();
+        bad.push(0);
+        assert!(Server::read_saved_chunk(c.0, c.1, &bad).is_err());
+        let mut bad = bytes.clone();
+        bad[prefix.len() + 1] = (pos[0] + 1).rem_euclid(16) as u8;
+        assert!(Server::read_saved_chunk(c.0, c.1, &bad).is_err());
+    }
+    #[test]
+    fn wooden_pickaxe_mines_coal_instead_of_the_ore() {
+        let (mut s, pos) = setup();
+        s.set_game_mode(GameMode::Survival);
+        s.change_block(1, pos, blocks::COAL_ORE, false);
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, stack("wooden_pickaxe", 1))
+            .unwrap();
+        s.handle_packet(
+            1,
+            &C2S::DigStart {
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            }
+            .encode(),
+        );
+        let (ticks, drops) =
+            items::mining(blocks::COAL_ORE, items::by_name("wooden_pickaxe")).unwrap();
+        assert!(drops);
+        for _ in 0..=ticks {
+            s.tick();
+        }
+        assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
+        assert!(s
+            .entities
+            .values()
+            .any(|e| Some(e.item) == items::by_name("coal")));
+        assert!(!s
+            .entities
+            .values()
+            .any(|e| Some(e.item) == items::by_name("coal_ore")));
+    }
+    #[test]
+    fn destruction_drops_contents_in_both_modes() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut s, pos) = setup();
+            s.set_game_mode(mode);
+            s.furnaces.get_mut(&pos).unwrap().slots = [
+                stack("iron_ore", 3),
+                stack("coal", 1),
+                stack("iron_ingot", 2),
+            ];
+            s.change_block(1, pos, blocks::AIR, false);
+            assert!(!s.furnaces.contains_key(&pos));
+            let mut contents: Vec<_> = s.entities.values().map(|e| (e.item, e.count)).collect();
+            contents.sort();
+            let mut expected: Vec<_> = [
+                stack("iron_ore", 3),
+                stack("coal", 1),
+                stack("iron_ingot", 2),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|s| (s.item, s.count))
+            .collect();
+            expected.sort();
+            assert_eq!(contents, expected);
+        }
     }
 }

@@ -62,6 +62,26 @@ async function open(query) {
 	return { page, errors };
 }
 
+async function resumePointerLock(page, label) {
+	const waitFor = async (step, predicate, options) => {
+		try { return await page.waitForFunction(predicate, options); }
+		catch (error) { throw new Error(`${step}: ${error.message}`, { cause: error }); }
+	};
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+		try {
+			await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
+			await page.click("#overlay", { offset: { x: 10, y: 10 } });
+			await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
+			return;
+		} catch (error) {
+			// Lock can arrive between the visibility check and the click.
+			if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+			if (attempt === 5) throw new Error(`${label}: resume failed after ${attempt} attempts: ${error.message}`, { cause: error });
+		}
+	}
+}
+
 async function diagnoseFailure(page, label, err) {
 	if (shouldDiagnoseRunFailure(err)) {
 		await diagnose(browser, page, label, { edge, shots });
@@ -610,29 +630,14 @@ async function partialModels() {
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
 		await page.keyboard.press("KeyE");
 		await waitFor("picker closed with inventory key", () => document.getElementById("block-picker").hidden);
-		const resume = async label => {
-			for (let attempt = 1; attempt <= 5; attempt++) {
-				if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
-				try {
-					await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
-					await page.click("#overlay", { offset: { x: 10, y: 10 } });
-					await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
-					return;
-				} catch (error) {
-					// Lock can arrive between the visibility check and the click.
-					if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
-					if (attempt === 5) throw new Error(`models ${label}: resume failed after ${attempt} attempts: ${error.message}`, { cause: error });
-				}
-			}
-		};
-		await resume("resume after inventory key");
+		await resumePointerLock(page, "models resume after inventory key");
 		await page.keyboard.press("KeyE");
 		await waitFor("picker reopened before Escape", () => !document.getElementById("block-picker").hidden);
 		await page.keyboard.press("Escape");
 		await waitFor("picker closed with Escape into game menu", () => document.getElementById("block-picker").hidden
 			&& !document.getElementById("overlay").hidden && !document.pointerLockElement
 			&& !document.getElementById("game-menu").hidden);
-		await resume("resume after Escape");
+		await resumePointerLock(page, "models resume after Escape");
 
 		// Break the slab, then place a flower on the supporting full cube.
 		await page.mouse.click(640, 360, { button: "left" });
@@ -677,7 +682,7 @@ async function partialModels() {
 			await page.mouse.move(640, 360);
 			await page.keyboard.press("KeyE");
 			await waitFor(`picker closed after ${name}`, () => document.getElementById("block-picker").hidden);
-			await resume(`resume after selecting ${name}`);
+			await resumePointerLock(page, `models resume after selecting ${name}`);
 		};
 
 		// Replace the flower through real interaction. Looking down retains yaw:
@@ -1087,6 +1092,101 @@ async function survivalCrafting() {
     } finally { await page.close(); }
 }
 
+async function furnaceSmelting() {
+    const { page, errors } = await open(`server=local&world=e2e-furnace-${run}&mode=creative&gen=flat&seed=2026&view=3&time=6000`);
+    try {
+        const stats = await settle(page, "furnace smelting", chunksInView(3));
+        check(stats.gameMode === "creative" && stats.generatorName === "Flat", "furnace: Flat creative world");
+        await page.mouse.click(640, 360);
+        await resumePointerLock(page, "furnace initial pointer lock");
+        const pickBlock = async (name, slot) => {
+            await page.keyboard.press(`Digit${slot + 1}`);
+            await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, slot);
+            await page.keyboard.press("KeyE");
+            await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+            await page.click(`#block-grid [data-block="${name}"]`);
+            await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+            check(await page.$eval("#hotbar canvas.selected", (c, name) => c.title === name, name), `furnace: picker selects ${name}`);
+            await page.mouse.move(640, 360);
+            await page.keyboard.press("KeyE");
+            await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+            await resumePointerLock(page, `furnace resume after selecting ${name}`);
+        };
+        await pickBlock("furnace", 0);
+        await pickBlock("iron_ore", 1);
+        await pickBlock("coal", 2);
+        const target = await page.evaluate(() => {
+            const api = window.__mc;
+            const [sx, sy, sz] = api.stats().spawn.map(Math.floor);
+            for (let y = sy + 4; y >= sy - 8; y--) {
+                if (api.getBlock(sx - 1, y - 1, sz) !== 0 && api.getBlock(sx - 1, y, sz) === 0) return [sx - 1, y, sz];
+            }
+            throw new Error("furnace: no ground in front of spawn");
+        });
+        await page.keyboard.press("Digit1");
+        await page.waitForFunction(() => window.__mc.stats().selectedSlot === 0);
+        // Move before setting the camera: pointer-locked movement changes yaw.
+        await page.mouse.move(640, 360);
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(2.12,1)*180/Math.PI), target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c = window.__mc.stats().camera, p = c.pitch*Math.PI/180;
+            const hit = window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x === x && hit?.y === y-1 && hit?.z === z && hit?.face === 1;
+        }, {}, target);
+        await page.mouse.click(640, 360, { button: "right" });
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("furnace"), {}, target);
+        check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("furnace"), target), "furnace: places furnace on the ground");
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI), target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c = window.__mc.stats().camera, p = c.pitch*Math.PI/180;
+            const hit = window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x === x && hit?.y === y && hit?.z === z;
+        }, {}, target);
+        await page.mouse.click(640, 360, { button: "right" });
+        await page.waitForFunction(() => !document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 2);
+        check(await page.evaluate(() => !document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 2), "furnace: right-click opens furnace screen");
+        const clickSlot = async (slot, count) => {
+            await page.click(`#furnace-screen [data-slot="${slot}"]`);
+            await page.waitForFunction((slot, count) => document.querySelector(`#furnace-screen [data-slot="${slot}"] canvas`).dataset.count === String(count), {}, slot, count);
+        };
+        await clickSlot(1, 0);
+        await clickSlot(51, 1);
+        check(await page.$eval('#furnace-screen [data-slot="51"] canvas', c => c.title === "iron_ore"), "furnace: moves iron ore into input");
+        await clickSlot(2, 0);
+        await clickSlot(52, 0); // The server consumes the one coal as burning starts.
+        await page.waitForFunction(() => {
+            const burn = document.getElementById("furnace-burn");
+            const smelt = document.getElementById("furnace-smelt");
+            return Number(burn.getAttribute("aria-valuenow")) > 0 && Number(burn.getAttribute("aria-valuemax")) === 1600
+                && Number(smelt.getAttribute("aria-valuenow")) > 0 && Number(smelt.getAttribute("aria-valuemax")) === 160;
+        }, { timeout: 20000 });
+        const burning = await page.$eval("#furnace-burn", el => Number(el.getAttribute("aria-valuenow")));
+        await page.waitForFunction(before => {
+            const value = Number(document.getElementById("furnace-burn").getAttribute("aria-valuenow"));
+            return value > 0 && value < before;
+        }, { timeout: 20000 }, burning);
+        check(true, "furnace: burn gauge decreases and smelting gauge advances");
+        await page.waitForFunction(() => {
+            const output = document.querySelector('#furnace-screen [data-slot="53"] canvas');
+            return output.title === "iron_ingot" && output.dataset.count === "1";
+        }, { timeout: 20000 });
+        check(await page.$eval('#furnace-screen [data-slot="53"] canvas', c => c.title === "iron_ingot" && c.dataset.count === "1"), "furnace: smelts iron ingot after 160 ticks");
+        await page.keyboard.down("ShiftLeft");
+        try { await clickSlot(53, 0); }
+        finally { await page.keyboard.up("ShiftLeft"); }
+        await page.waitForFunction(() => [...document.querySelectorAll('#furnace-screen [data-slot]')].some(button => Number(button.dataset.slot) < 36 && button.querySelector("canvas").title === "iron_ingot"));
+        check(true, "furnace: shift-click takes iron ingot into inventory");
+        await page.click("#furnace-screen > button:last-child");
+        await page.waitForFunction(() => document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 0);
+        check(await page.evaluate(() => document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 0), "furnace: closes furnace screen");
+        await resumePointerLock(page, "furnace resume after closing furnace");
+        check(errors.length === 0, "furnace: no page errors", errors.join(" | "));
+    } catch (err) {
+        await diagnoseFailure(page, "furnace", err);
+        throw err;
+    } finally { await page.close(); }
+}
+
 async function survivalInventory() {
 	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -1178,6 +1278,7 @@ try {
 	await partialModels();
 	await survivalInventory();
 	await survivalCrafting();
+	await furnaceSmelting();
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();

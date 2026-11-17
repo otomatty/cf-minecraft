@@ -53,7 +53,7 @@ export function placementState(
 	return { x, y, z, state };
 }
 
-/** Right-click uses a table before attempting placement, including with an empty hand. */
+/** Right-click uses a table or furnace before attempting placement, including with an empty hand. */
 export function blockInteraction(blockName: string | undefined, shift: boolean): "open" | "place" {
-    return blockName === "crafting_table" && !shift ? "open" : "place";
+    return (blockName === "crafting_table" || blockName === "furnace") && !shift ? "open" : "place";
 }

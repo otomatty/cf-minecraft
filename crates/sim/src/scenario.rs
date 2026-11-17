@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn creative_inventory_scenario_fingerprint() {
-        // Previously 20ff82c4ae0b595b; table and screen now participate in state_hash and Inventory.
-        assert_eq!(run(2026, 600), 0x612c9952de3a956b);
+        // Previously 612c9952de3a956b; furnace state and protocol 8 Inventory now participate.
+        assert_eq!(run(2026, 600), 0x88dd38b5138d405e);
     }
 
     #[test]

@@ -340,8 +340,11 @@ mod tests {
         }
         assert_eq!(
             (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
-            (23, 31, 39, 50)
+            (23, 31, 39, 51)
         );
+        assert_eq!(FURNACE, 50);
+        assert_eq!(block(FURNACE).unwrap().count, 1);
+        assert!(properties(FURNACE).is_empty());
         for base in [OAK_STAIRS, COBBLESTONE_STAIRS] {
             assert_eq!(block(base).unwrap().count, 8);
             for (f, facing) in ["north", "south", "west", "east"].iter().enumerate() {

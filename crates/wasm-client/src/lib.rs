@@ -50,6 +50,7 @@ struct State {
     selected: u8,
     slots: Vec<Option<(u16, u8)>>,
     screen: u8,
+    furnace_times: [u16; 3],
     seed: i64,
     spawn: [f64; 3],
     view_distance: u32,
@@ -194,8 +195,9 @@ pub extern "C" fn client_new() {
         light_exports: None,
         game_mode: 0,
         selected: 0,
-        slots: vec![None; 51],
+        slots: vec![None; 54],
         screen: 0,
+        furnace_times: [0; 3],
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -307,6 +309,10 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         }
 
         S2C::Inventory {
+            furnace,
+            burn,
+            total,
+            progress,
             screen,
             table,
             selected,
@@ -318,6 +324,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             slots.extend(crafting);
             slots.extend([result, cursor]);
             slots.extend(table);
+            slots.extend(furnace);
+            st.furnace_times = [burn, total, progress];
             st.screen = screen;
             st.selected = selected;
             st.slots = slots;
@@ -1370,6 +1378,15 @@ pub extern "C" fn client_enc_close_inventory() -> usize {
     let st = state();
     st.out = C2S::CloseInventory.encode();
     st.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn client_furnace_time(index: u32) -> u32 {
+    state()
+        .furnace_times
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0) as u32
 }
 
 #[cfg(test)]
