@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { bounded, processCpuDeltas, safeFilename, shouldDiagnoseRunFailure, summarizeTargets } from "./e2e-diag.mjs";
+import { bounded, diagnose, processCpuDeltas, safeFilename, shouldDiagnoseRunFailure, summarizeTargets } from "./e2e-diag.mjs";
 
 test("run failures are diagnosed only for unmarked timeout messages", () => {
 	assert.equal(shouldDiagnoseRunFailure(new Error("Runtime.callFunctionOn timed out")), true);
@@ -15,6 +18,83 @@ test("run failures are diagnosed only for unmarked timeout messages", () => {
 	const detailOnly = new Error("navigation failed");
 	detailOnly.diagnostics = { targets: "timed out after 3000ms" };
 	assert.equal(shouldDiagnoseRunFailure(detailOnly), false);
+});
+
+test("Puppeteer timeout names and messages are recognized directly and through causes", () => {
+	const named = new Error("selector was not found");
+	named.name = "TimeoutError";
+	for (const timeout of [
+		named,
+		new Error("Navigation timeout of 30000 ms exceeded"),
+		new Error("Waiting failed: 15000ms exceeded"),
+		new Error("Runtime.callFunctionOn timed out"),
+	]) {
+		assert.equal(shouldDiagnoseRunFailure(timeout), true);
+		const wrapped = new Error("stage failed", { cause: new Error("operation failed", { cause: timeout }) });
+		assert.equal(shouldDiagnoseRunFailure(wrapped), true);
+		wrapped.diagnosed = true;
+		assert.equal(shouldDiagnoseRunFailure(wrapped), false);
+		timeout.diagnosed = true;
+		assert.equal(shouldDiagnoseRunFailure(timeout), false);
+		assert.equal(shouldDiagnoseRunFailure(new Error("stage failed", { cause: timeout })), false);
+	}
+	assert.equal(shouldDiagnoseRunFailure(new Error("stage failed", { cause: new Error("connection closed") })), false);
+});
+
+test("timeout cause inspection stops after five errors and handles cycles", () => {
+	let err = new Error("Waiting failed: 15000ms exceeded");
+	for (let i = 0; i < 4; i++) err = new Error("wrapped", { cause: err });
+	assert.equal(shouldDiagnoseRunFailure(err), true);
+	assert.equal(shouldDiagnoseRunFailure(new Error("too deep", { cause: err })), false);
+	const cycle = new Error("failed");
+	cycle.cause = cycle;
+	assert.equal(shouldDiagnoseRunFailure(cycle), false);
+	assert.equal(shouldDiagnoseRunFailure(null), false);
+});
+
+test("diagnostic screenshots use CDP command deadlines and detach on success or failure", async (t) => {
+	const shots = await mkdtemp(join(tmpdir(), "e2e-diag-test-"));
+	t.mock.method(console, "log", () => {});
+	try {
+		for (const fails of [false, true]) {
+			let detached = 0;
+			let closed = 0;
+			const session = {
+				async send(...args) {
+					assert.deepEqual(args, ["Page.captureScreenshot", { format: "png" }, { timeout: 5000 }]);
+					if (fails) throw new Error("Page.captureScreenshot timed out");
+					return { data: Buffer.from("test png bytes").toString("base64") };
+				},
+				async detach() { detached++; },
+			};
+			const page = {
+				async evaluate() { return { readyState: "complete" }; },
+				target() { return { async createCDPSession() { return session; } }; },
+				async screenshot() { assert.fail("Puppeteer screenshot lock must not be used"); },
+			};
+			const browser = {
+				// Skip browser-level CPU sampling to keep this mock-based test fast.
+				target() { return { async createCDPSession() { throw new Error("browser CDP unavailable"); } }; },
+				async newPage() {
+					return { async goto() {}, async evaluate() { return "complete"; }, async close() { closed++; } };
+				},
+			};
+			const label = fails ? "capture-failure" : "capture-success";
+			const result = await diagnose(browser, page, label, { edge: "http://localhost", shots });
+			assert.equal(detached, 1);
+			assert.equal(closed, 1);
+			assert.equal(result.screenshotSessionDetach, "detached");
+			if (fails) {
+				assert.equal(result.screenshot, "Page.captureScreenshot timed out");
+			} else {
+				assert.equal(result.screenshot, join(shots, `diag-${label}.png`));
+				assert.equal(await readFile(result.screenshot, "utf8"), "test png bytes");
+			}
+			assert.deepEqual(JSON.parse(await readFile(join(shots, `diag-${label}.json`), "utf8")), result);
+		}
+	} finally {
+		await rm(shots, { recursive: true, force: true });
+	}
 });
 
 test("targets are grouped by type and final URL component without query", () => {

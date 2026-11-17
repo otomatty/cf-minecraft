@@ -62,6 +62,13 @@ async function open(query) {
 	return { page, errors };
 }
 
+async function diagnoseFailure(page, label, err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		await diagnose(browser, page, label, { edge, shots });
+		err.diagnosed = true;
+	}
+}
+
 /** Chunks the server keeps loaded around a player: a square of side 2 * view + 1. */
 const chunksInView = (view) => (2 * view + 1) ** 2;
 
@@ -133,6 +140,9 @@ async function dayNight() {
 			const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
 			measurements.push({ brightness, sky });
 			check(errors.length === 0, `sky ${time}: no page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `sky-${time}`, err);
+			throw err;
 		} finally {
 			await page.close();
 		}
@@ -177,6 +187,9 @@ async function undergroundLighting() {
 		check(dark < surface*0.5,"lighting: underground darker than surface",`${dark.toFixed(1)} / ${surface.toFixed(1)}`);
 		check(lit > dark*2,"lighting: lamp brightens underground",`${lit.toFixed(1)} / ${dark.toFixed(1)}`);
 		check(errors.length===0,"lighting: no page errors",errors.slice(0,3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "lighting", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -253,6 +266,9 @@ async function transparentMaterials() {
 			}
 		}
 		check(errors.length === 0, "materials: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "materials", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -754,6 +770,9 @@ async function partialModels() {
 		await settle(page, "models reload", chunksInView(view));
 		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");
 		check(errors.length === 0, "models: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "models", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -847,6 +866,9 @@ async function biomeTints() {
 			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
 		}
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "tint-terrain", err);
+		throw err;
 	} finally { await page.close(); }
 	for (const gen of ["flat", "hills"]) {
 		const { page, errors } = await open(`server=local&world=e2e-tint-${gen}-${run}&gen=${gen}&seed=2026&view=2`);
@@ -857,6 +879,9 @@ async function biomeTints() {
 				return window.__mc.tint(p[0], p[2]) === null;
 			}), `tint: ${gen} keeps uncomputed default colors`);
 			check(errors.length === 0, `tint: no ${gen} page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `tint-${gen}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
 }
@@ -905,6 +930,9 @@ async function sectionCulling() {
 				}, images);
 				check(fraction < 0.005, "culling: fewer than 0.5% different pixels", `${(fraction * 100).toFixed(3)}%`);
 			}
+		} catch (err) {
+			await diagnoseFailure(page, `culling-${disabled ? "off" : "on"}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
 }
@@ -965,6 +993,9 @@ async function survivalCrafting() {
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.getElementById("inventory-screen").hidden);
         check(errors.length===0,"crafting: no page errors",errors.join(" | "));
+    } catch (err) {
+        await diagnoseFailure(page, "crafting", err);
+        throw err;
     } finally { await page.close(); }
 }
 
@@ -1045,6 +1076,9 @@ async function survivalInventory() {
 		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[0]), "survival: placement consumes one item (0 remaining)");
 		check(await page.$eval("#hotbar canvas", c => c.title === "" && c.dataset.count === "0"), "survival: last item leaves an empty slot");
 		check(errors.length === 0, "survival: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "survival", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -1065,6 +1099,9 @@ try {
 		check(stats.chunks === chunksInView(2), "local: genworkers=0 loads chunks");
 		const generation = await fallback.page.evaluate(() => window.__mc.stats().server?.generation);
 		check(!generation || generation.requested === 0, "local: genworkers=0 disables offload");
+	} catch (err) {
+		await diagnoseFailure(fallback.page, "generation-disabled", err);
+		throw err;
 	} finally { await fallback.page.close(); }
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);

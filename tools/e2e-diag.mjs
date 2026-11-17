@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export function shouldDiagnoseRunFailure(err) {
-	return !err.diagnosed && /timed out/i.test(err.message);
+	let timeout = false;
+	// Inspect at most five errors, including the original, even for cyclic causes.
+	for (let depth = 0; err && depth < 5; depth++, err = err.cause) {
+		if (err.diagnosed) return false;
+		timeout ||= err.name === "TimeoutError" || /timed out|Navigation timeout of \d+ ms exceeded|Waiting failed: \d+ms exceeded/i.test(err.message);
+	}
+	return timeout;
 }
 
 /** Return errors and deadlines as data; also catches synchronous throws. */
@@ -52,7 +58,7 @@ export function processCpuDeltas(before, after) {
 }
 
 export async function diagnose(browser, page, label, { edge, shots }) {
-	// Individual deadlines (including cleanup and the sampling gap) total ~43s.
+	// Individual deadlines (including cleanup and the sampling gap) total ~47s.
 	const file = join(shots, `diag-${safeFilename(label)}`);
 	const result = {};
 	result.page = await bounded(() => page.evaluate(() => {
@@ -110,10 +116,33 @@ export async function diagnose(browser, page, label, { edge, shots }) {
 		freshExpired = true;
 		if (fresh) result.freshTabClose = await bounded(async () => { await fresh.close(); return "closed"; }, 1000);
 	}
-	result.screenshot = await bounded(async () => {
-		await page.screenshot({ path: `${file}.png` });
-		return `${file}.png`;
-	}, 5000);
+	// Raw CDP avoids Puppeteer's screenshot lock, which can delay page.close()
+	// after a bounded page.screenshot() has already returned a timeout.
+	let screenshotSession;
+	let screenshotExpired = false;
+	try {
+		const ready = await bounded(async () => {
+			screenshotSession = await page.target().createCDPSession();
+			if (screenshotExpired) {
+				await bounded(() => screenshotSession.detach(), 1000);
+				return "screenshot session arrived after deadline";
+			}
+			return true;
+		}, 3000);
+		if (ready === true) {
+			// CDPSession.send's third argument is supported in puppeteer-core 25.16.0.
+			const capture = await bounded(() => screenshotSession.send("Page.captureScreenshot", { format: "png" }, { timeout: 5000 }), 5000);
+			result.screenshot = typeof capture === "string" ? capture : await bounded(async () => {
+				await writeFile(`${file}.png`, Buffer.from(capture.data, "base64"));
+				return `${file}.png`;
+			}, 500);
+		} else {
+			result.screenshot = ready;
+		}
+	} finally {
+		screenshotExpired = true;
+		if (screenshotSession) result.screenshotSessionDetach = await bounded(async () => { await screenshotSession.detach(); return "detached"; }, 1000);
+	}
 	if (connected === true) result.sessionDetach = await bounded(async () => { await session.detach(); return "detached"; }, 1000);
 	const saved = await bounded(async () => {
 		await mkdir(shots, { recursive: true });
