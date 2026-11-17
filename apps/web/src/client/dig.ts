@@ -70,3 +70,11 @@ export function invalidateDigSelection(state: DigState): DigState {
 export function digSelection(slot: number, stack: { item: number } | null | undefined): string {
 	return JSON.stringify([slot, stack?.item ?? null]);
 }
+
+/** Keep the comparison baseline aligned with both local selection and inventory updates. */
+export function updateDigSelection(
+	state: DigState, previous: string, slot: number, stack: { item: number } | null | undefined,
+): { state: DigState; selection: string } {
+	const selection = digSelection(slot, stack);
+	return { state: selection === previous ? state : invalidateDigSelection(state), selection };
+}

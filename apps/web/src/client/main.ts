@@ -1,4 +1,4 @@
-import { advanceDig, digSelection, invalidateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
+import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
 // block breaking and placing, and a debug overlay.
@@ -406,7 +406,9 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	function selectSlot(slot: number, send = true): void {
-		if (slot !== selectedSlot) dig = invalidateDigSelection(dig);
+		const next = updateDigSelection(dig, heldInventory, slot, core.inventory[slot]);
+		dig = next.state;
+		heldInventory = next.selection;
 		if (send) {
 			pendingSelectedSlot = slot;
 			transport.send(core.encodeSelectSlot(slot));
@@ -417,9 +419,6 @@ async function main(): Promise<void> {
 	}
 	function syncInventory(): void {
 		const inventory = core.inventory;
-		const held = digSelection(core.selectedSlot, inventory[core.selectedSlot]);
-		if (held !== heldInventory) dig = invalidateDigSelection(dig);
-		heldInventory = held;
 		hotbarBlocks = hotbarStates(inventory, items);
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];

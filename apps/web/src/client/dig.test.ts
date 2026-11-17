@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceDig, digSelection, invalidateDigSelection, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
+import { advanceDig, digSelection, updateDigSelection, invalidateDigSelection, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
 import { paintCracks, TEX_SIZE } from "./textures.ts";
 const target = { x: 1, y: 2, z: 3, state: 1, ticks: 12 };
 
@@ -146,4 +146,43 @@ test("count-only Inventory updates preserve local mining progress", () => {
 	assert.notEqual(digSelection(1, stack), heldInventory);
 	assert.notEqual(digSelection(0, null), heldInventory);
 	assert.equal(digSelection(0, undefined), digSelection(0, null));
+});
+
+
+test("selection acknowledgement preserves a dig started after a local slot switch", () => {
+	const inventory = [{ item: 31, count: 1 }, { item: 34, count: 1 }];
+	const oldTarget = { ...target, selection: digSelection(0, inventory[0]) };
+	const oldDig = advanceDig(newDigState(), true, oldTarget, null, 0).state;
+	const local = updateDigSelection(oldDig, oldTarget.selection, 1, inventory[1]);
+	assert.equal(local.state.invalidated, true);
+	const nextTarget = { ...target, selection: local.selection };
+	const started = advanceDig(local.state, true, nextTarget, target.state, 100);
+	assert.deepEqual(started.commands.map(c => c.type), ["abort", "start"]);
+
+	// A confirmation of the optimistic selection uses the already updated baseline.
+	const confirmed = updateDigSelection(started.state, local.selection, 1, inventory[1]);
+	assert.equal(confirmed.state.invalidated, false);
+	const continued = advanceDig(confirmed.state, true, nextTarget, target.state, 400);
+	assert.deepEqual(continued.commands, []);
+	assert.equal(continued.state.active?.started, 100);
+	assert.equal(continued.state.active?.stage, 5);
+
+	// An actual item change in that same selected slot still cancels the dig.
+	const changed = updateDigSelection(continued.state, confirmed.selection, 1, { item: 35 });
+	assert.equal(changed.state.invalidated, true);
+	const restarted = advanceDig(changed.state, true, { ...target, selection: changed.selection }, target.state, 500);
+	assert.deepEqual(restarted.commands.map(c => c.type), ["abort", "start"]);
+	assert.equal(restarted.state.active?.started, 500);
+});
+
+test("switching away and back before a frame keeps the dig invalidated", () => {
+	const held = { item: 31 };
+	const firstTarget = { ...target, selection: digSelection(0, held) };
+	const state = advanceDig(newDigState(), true, firstTarget, null, 0).state;
+	const away = updateDigSelection(state, firstTarget.selection, 1, held);
+	const back = updateDigSelection(away.state, away.selection, 0, held);
+	assert.equal(back.selection, firstTarget.selection);
+	assert.equal(back.state.invalidated, true);
+	const restarted = advanceDig(back.state, true, firstTarget, target.state, 100);
+	assert.deepEqual(restarted.commands.map(c => c.type), ["abort", "start"]);
 });
