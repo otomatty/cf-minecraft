@@ -39,7 +39,7 @@ fn progress(s: &mut Server) -> Vec<(u32, S2C)> {
 #[test]
 fn exact_duration_zero_duration_and_drops_for_every_state() {
     for state in 0..blocks::COUNT {
-        let Some(ticks) = blocks::info(state).dig_ticks else {
+        let Some((ticks, drops)) = items::mining(state, None) else {
             continue;
         };
         let (mut s, [x, y, z]) = setup();
@@ -53,11 +53,13 @@ fn exact_duration_zero_duration_and_drops_for_every_state() {
         assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
         assert!(s.clients[&1].dig.is_none());
         assert_eq!(s.stats.blocks_changed, 1);
-        assert_eq!(s.entities.len(), 1);
-        assert_eq!(
-            s.entities.values().next().unwrap().item,
-            items::for_block(state).unwrap()
-        );
+        assert_eq!(s.entities.len(), usize::from(drops));
+        if drops {
+            assert_eq!(
+                s.entities.values().next().unwrap().item,
+                items::for_block(state).unwrap()
+            );
+        }
     }
 }
 
@@ -175,15 +177,15 @@ fn progress_only_changes_once_per_tick_and_filters_observers() {
     let (mut s, [x, y, z]) = setup();
     s.world.set_block(x, y, z, blocks::STONE);
     start(&mut s, [x, y, z]);
-    for elapsed in 0..=70 {
+    for elapsed in 0..=140 {
         // Observer 3 is joined but streams distant chunks.
         s.tick();
         let packets = progress(&mut s);
-        if elapsed % 7 == 0 {
-            let stage = if elapsed == 70 {
+        if elapsed % 14 == 0 {
+            let stage = if elapsed == 140 {
                 255
             } else {
-                (elapsed / 7) as u8
+                (elapsed / 14) as u8
             };
             assert_eq!(
                 packets,
@@ -346,4 +348,108 @@ fn slab_changed_and_restored_in_one_tick_cancels_all_miners() {
     }
     assert_eq!(s.get_block(x, y, z), Some(blocks::OAK_SLAB));
     assert!(s.entities.is_empty());
+}
+
+#[test]
+fn survival_tools_use_exact_duration_and_gate_drops() {
+    for (block, held, ticks, drops) in [
+        (blocks::STONE, Some("wooden_pickaxe"), 35, true),
+        (blocks::STONE, None, 140, false),
+        (blocks::GOLD_ORE, Some("stone_pickaxe"), 46, false),
+        (blocks::GOLD_ORE, Some("copper_pickaxe"), 18, true),
+    ] {
+        let (mut s, [x, y, z]) = setup();
+        if let Some(name) = held {
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .add(items::by_name(name).unwrap(), 1);
+        }
+        s.world.set_block(x, y, z, block);
+        start(&mut s, [x, y, z]);
+        s.tick();
+        for _ in 0..ticks {
+            assert_eq!(s.get_block(x, y, z), Some(block));
+            s.tick();
+        }
+        assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+        assert_eq!(s.entities.len(), usize::from(drops));
+    }
+}
+
+#[test]
+fn changing_slots_or_held_contents_aborts_even_between_ticks() {
+    for reason in 0..4 {
+        let (mut s, [x, y, z]) = setup();
+        let tool = items::by_name("wooden_pickaxe").unwrap();
+        if reason != 3 {
+            s.clients.get_mut(&1).unwrap().inventory.add(tool, 1);
+        }
+        s.world.set_block(x, y, z, blocks::STONE);
+        start(&mut s, [x, y, z]);
+        s.tick();
+        match reason {
+            0 | 1 => {
+                s.handle_packet(1, &C2S::SelectSlot { slot: 1 }.encode());
+                if reason == 1 {
+                    s.handle_packet(1, &C2S::SelectSlot { slot: 0 }.encode());
+                }
+            }
+            2 => s.handle_packet(1, &C2S::DropItem { dir: [0.0; 3] }.encode()),
+            _ => s.spawn_item(tool, 1, s.clients[&1].pos, [0.0; 3], 0),
+        }
+        s.tick();
+        assert!(s.clients[&1].dig.is_none());
+        assert!(progress(&mut s)
+            .iter()
+            .any(|(_, p)| matches!(p, S2C::DigProgress { stage: 255, .. })));
+        for _ in 0..150 {
+            s.tick();
+        }
+        assert_eq!(s.get_block(x, y, z), Some(blocks::STONE));
+    }
+}
+
+#[test]
+fn held_item_count_changes_preserve_the_original_completion_tick() {
+    for pickup in [true, false] {
+        let (mut s, [x, y, z]) = setup();
+        let dirt = items::for_block(blocks::DIRT).unwrap();
+        s.clients.get_mut(&1).unwrap().inventory.add(dirt, 2);
+        s.world.set_block(x, y, z, blocks::DIRT);
+        start(&mut s, [x, y, z]);
+        s.tick();
+        let dig = s.clients[&1].dig.unwrap();
+        assert_eq!(dig.ticks, 12);
+        for elapsed in 1..=12 {
+            if elapsed == 4 {
+                if pickup {
+                    s.spawn_item(dirt, 1, s.clients[&1].pos, [0.0; 3], 0);
+                } else {
+                    s.handle_packet(1, &C2S::DropItem { dir: [0.0; 3] }.encode());
+                }
+            }
+            s.tick();
+            if elapsed == 4 {
+                assert_eq!(
+                    s.clients[&1].inventory.selected_stack(),
+                    Some(Stack {
+                        item: dirt,
+                        count: if pickup { 3 } else { 1 },
+                    })
+                );
+            }
+            if elapsed < 12 {
+                assert_eq!(s.get_block(x, y, z), Some(blocks::DIRT));
+                assert_eq!(s.clients[&1].dig.unwrap().start, dig.start);
+                assert!(!progress(&mut s)
+                    .iter()
+                    .any(|(_, p)| matches!(p, S2C::DigProgress { stage: 255, .. })));
+            }
+        }
+        assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+        assert!(s.clients[&1].dig.is_none());
+        assert_eq!(s.stats.blocks_changed, 1);
+    }
 }

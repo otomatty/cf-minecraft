@@ -14,6 +14,22 @@ struct Item {
     #[serde(default = "max_stack")]
     max_stack: u8,
     block: Option<String>,
+    texture: Option<String>,
+    tool: Option<Tool>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tool {
+    kind: String,
+    tier: u8,
+}
+fn tool_kind(s: &str) -> &'static str {
+    match s {
+        "pickaxe" => "Pickaxe",
+        "axe" => "Axe",
+        "shovel" => "Shovel",
+        _ => panic!("registry: unknown tool kind {s}"),
+    }
 }
 fn max_stack() -> u8 {
     64
@@ -30,6 +46,9 @@ struct Registry {
 #[serde(deny_unknown_fields)]
 struct Block {
     dig_ticks: Option<u16>,
+    tool: Option<String>,
+    #[serde(default)]
+    min_tier: u8,
     #[serde(default)]
     unbreakable: bool,
     name: String,
@@ -262,6 +281,14 @@ fn generate(root: &Path, dest: &Path) {
             "blocks.toml: {}: specify dig_ticks or unbreakable",
             b.name
         );
+        assert!(b.min_tier <= 4, "blocks.toml: min_tier must be 0..=4");
+        assert!(
+            b.min_tier == 0 || b.tool.is_some(),
+            "blocks.toml: min_tier requires tool"
+        );
+        if let Some(kind) = &b.tool {
+            tool_kind(kind);
+        }
         identifier(&b.name);
         model(&b.model);
         assert!(
@@ -399,7 +426,10 @@ fn generate(root: &Path, dest: &Path) {
                     b.name
                 );
             }
-            writeln!(infos, "BlockInfo {{ dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            let tool = b.tool.as_ref().map_or("None".into(), |kind| {
+                format!("Some(crate::items::ToolKind::{})", tool_kind(kind))
+            });
+            writeln!(infos, "BlockInfo {{ tool: {tool}, min_tier: {}, dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.min_tier, b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
             let pairs: Vec<_> = s
                 .properties
                 .iter()
@@ -444,6 +474,28 @@ fn generate(root: &Path, dest: &Path) {
             (1..=64).contains(&item.max_stack),
             "items.toml: max_stack must be 1..=64"
         );
+        assert!(
+            item.block.is_some() || item.texture.is_some(),
+            "items.toml: block or texture required"
+        );
+        if let Some(texture) = &item.texture {
+            identifier(texture);
+        }
+        let tool = item.tool.map_or("None".into(), |tool| {
+            assert!(item.max_stack == 1, "items.toml: tool max_stack must be 1");
+            assert!(
+                (1..=4).contains(&tool.tier),
+                "items.toml: tool tier must be 1..=4"
+            );
+            format!(
+                "Some(Tool {{ kind: ToolKind::{}, tier: {} }})",
+                tool_kind(&tool.kind),
+                tool.tier
+            )
+        });
+        let texture = item
+            .texture
+            .map_or("None".into(), |t| format!("Some({t:?})"));
         let block = item.block.map(|name| {
             registry
                 .blocks
@@ -454,7 +506,7 @@ fn generate(root: &Path, dest: &Path) {
         });
         writeln!(
             out,
-            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?} }},",
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool} }},",
             item.id, item.name, item.max_stack, block
         )
         .unwrap();

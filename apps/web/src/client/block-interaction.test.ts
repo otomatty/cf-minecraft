@@ -178,3 +178,22 @@ test("biome blocks expose picker entries and original art, with translucent ice"
 		}
 	}
 });
+
+
+test("WASM mining rules use the selected tool, tier gates and integer rounding", () => {
+	const item = (name: string) => core.itemRegistry().find(item => item.name === name)!.id;
+	for (const [block, held, ticks, drops] of [
+		["stone", 0, 140, false],
+		["stone", item("wooden_pickaxe"), 35, true],
+		["stone", item("iron_axe"), 140, false],
+		["gold_ore", item("stone_pickaxe"), 46, false],
+		["gold_ore", item("copper_pickaxe"), 18, true],
+		["grass_block", item("iron_shovel"), 3, true],
+		["red_flower", item("iron_shovel"), 0, true],
+		["bedrock", 0, null, false],
+	] as const) {
+		assert.equal(core.miningTicks(id(block), held), ticks);
+		assert.equal(core.miningDrops(id(block), held), drops);
+	}
+	assert.equal(core.miningTicks(65535, 0), null);
+});

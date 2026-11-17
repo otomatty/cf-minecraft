@@ -149,3 +149,87 @@ block = "iron_ore"
 name = "gold_ore"
 id = 30
 block = "gold_ore"
+
+[[items]]
+name = "wooden_pickaxe"
+id = 31
+max_stack = 1
+texture = "wooden_pickaxe"
+tool = { kind = "pickaxe", tier = 1 }
+
+[[items]]
+name = "wooden_axe"
+id = 32
+max_stack = 1
+texture = "wooden_axe"
+tool = { kind = "axe", tier = 1 }
+
+[[items]]
+name = "wooden_shovel"
+id = 33
+max_stack = 1
+texture = "wooden_shovel"
+tool = { kind = "shovel", tier = 1 }
+
+[[items]]
+name = "stone_pickaxe"
+id = 34
+max_stack = 1
+texture = "stone_pickaxe"
+tool = { kind = "pickaxe", tier = 2 }
+
+[[items]]
+name = "stone_axe"
+id = 35
+max_stack = 1
+texture = "stone_axe"
+tool = { kind = "axe", tier = 2 }
+
+[[items]]
+name = "stone_shovel"
+id = 36
+max_stack = 1
+texture = "stone_shovel"
+tool = { kind = "shovel", tier = 2 }
+
+[[items]]
+name = "copper_pickaxe"
+id = 37
+max_stack = 1
+texture = "copper_pickaxe"
+tool = { kind = "pickaxe", tier = 3 }
+
+[[items]]
+name = "copper_axe"
+id = 38
+max_stack = 1
+texture = "copper_axe"
+tool = { kind = "axe", tier = 3 }
+
+[[items]]
+name = "copper_shovel"
+id = 39
+max_stack = 1
+texture = "copper_shovel"
+tool = { kind = "shovel", tier = 3 }
+
+[[items]]
+name = "iron_pickaxe"
+id = 40
+max_stack = 1
+texture = "iron_pickaxe"
+tool = { kind = "pickaxe", tier = 4 }
+
+[[items]]
+name = "iron_axe"
+id = 41
+max_stack = 1
+texture = "iron_axe"
+tool = { kind = "axe", tier = 4 }
+
+[[items]]
+name = "iron_shovel"
+id = 42
+max_stack = 1
+texture = "iron_shovel"
+tool = { kind = "shovel", tier = 4 }

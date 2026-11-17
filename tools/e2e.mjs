@@ -560,6 +560,18 @@ async function partialModels() {
 		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
 		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
+		const toolNames = ["wooden", "stone", "copper", "iron"].flatMap(tier => ["pickaxe", "axe", "shovel"].map(kind => `${tier}_${kind}`));
+		check(toolNames.every(name => names.filter(n => n === name).length === 1), "tools: picker includes all twelve tools once");
+		for (const name of toolNames) {
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await waitFor(`authoritative tool slot ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			check(await page.$eval("#hotbar canvas.selected", (canvas, name) => {
+				const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+				return canvas.title === name && canvas.dataset.count === "1"
+					&& pixels.some((v, i) => i % 4 === 3 && v === 255)
+					&& pixels.some((v, i) => i % 4 === 3 && v === 0);
+			}, name), `tools: ${name} is selected and its transparent icon is drawn`);
+		}
 		await page.click('#block-grid [data-block="red_flower"]');
 		await waitFor("authoritative red flower slot", () => document.querySelector("#hotbar canvas.selected")?.title === "red_flower");
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");

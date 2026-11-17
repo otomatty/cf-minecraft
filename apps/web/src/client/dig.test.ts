@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { advanceDig, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
+import { advanceDig, digSelection, invalidateDigSelection, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
 import { paintCracks, TEX_SIZE } from "./textures.ts";
 const target = { x: 1, y: 2, z: 3, state: 1, ticks: 12 };
 
@@ -102,4 +102,48 @@ test("lower slab cracks stay within the half-height selection bounds plus margin
 	assert.ok(Math.min(...heights) >= -.002001);
 	assert.ok(Math.max(...heights) <= .502001);
 	assert.ok(Math.max(...heights) >= .5);
+});
+
+
+test("switching held slot or contents aborts and restarts while held", () => {
+	const first = { ...target, selection: digSelection(0, { item: 31 }), ticks: 35 };
+	const initial = advanceDig(newDigState(), true, first, null, 0).state;
+	for (const selection of [digSelection(1, { item: 31 }), digSelection(0, { item: 32 }), digSelection(0, null)]) {
+		const nextTarget = { ...target, selection, ticks: 70 };
+		const result = advanceDig(initial, true, nextTarget, target.state, 500);
+		assert.deepEqual(result.commands.map(c => c.type), ["abort", "start"]);
+		assert.equal(result.state.active?.started, 500);
+		assert.equal(result.state.active?.ticks, 70);
+	}
+	// Switching away and back before a frame must still restart.
+	const invalidated = invalidateDigSelection(initial);
+	const result = advanceDig(invalidated, true, first, target.state, 600);
+	assert.deepEqual(result.commands.map(c => c.type), ["abort", "start"]);
+	const released = advanceDig(invalidated, false, first, target.state, 600);
+	assert.deepEqual(released.commands, [{ type: "abort" }]);
+	assert.equal(released.state.active, null);
+});
+
+
+test("count-only Inventory updates preserve local mining progress", () => {
+	let stack = { item: 3, count: 2 };
+	const heldInventory = digSelection(0, stack);
+	const initialTarget = { ...target, selection: heldInventory };
+	let state = advanceDig(newDigState(), true, initialTarget, null, 100).state;
+	for (const count of [3, 4, 3, 1]) {
+		stack = { ...stack, count };
+		const held = digSelection(0, stack);
+		assert.equal(held, heldInventory);
+		if (held !== heldInventory) state = invalidateDigSelection(state);
+		const nextTarget = { ...target, selection: digSelection(0, stack) };
+		const result = advanceDig(state, true, nextTarget, target.state, 400);
+		assert.deepEqual(result.commands, []);
+		assert.equal(result.state.active?.started, 100);
+		assert.equal(result.state.active?.stage, 5);
+		state = result.state;
+	}
+	assert.notEqual(digSelection(0, { item: 4 }), heldInventory);
+	assert.notEqual(digSelection(1, stack), heldInventory);
+	assert.notEqual(digSelection(0, null), heldInventory);
+	assert.equal(digSelection(0, undefined), digSelection(0, null));
 });

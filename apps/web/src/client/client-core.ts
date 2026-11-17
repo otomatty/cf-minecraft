@@ -6,13 +6,15 @@ import type { DigBounds } from "./dig.ts";
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
-export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null }
+export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null }
 export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ClientExports {
 	client_enc_dig_start(x: number, y: number, z: number): number;
 	client_enc_dig_abort(): number;
+	client_mining_ticks(block: number, held: number): number;
+	client_mining_drops(block: number, held: number): boolean;
 	client_entities(): number;
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
@@ -372,6 +374,8 @@ export class ClientCore {
 	}
 
 	encodeDigStart(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_start(x,y,z)); }
+	miningDrops(block: number, held: number): boolean { return Boolean(this.x.client_mining_drops(block, held)); }
+	miningTicks(block: number, held: number): number | null { const ticks = this.x.client_mining_ticks(block, held); return ticks < 0 ? null : ticks; }
 	encodeDigAbort(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_abort()); }
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_set_block(x, y, z, block));
