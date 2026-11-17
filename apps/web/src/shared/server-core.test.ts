@@ -82,7 +82,8 @@ test("inventory and game mode cross the server/client ABI and survive reconnect"
 	server.packet(1, client.encodeCreativeSetSlot(35, slab.id, 17)); server.tick();
 	assert.equal(server.takeOutbox().filter(p => p.data[0] === 6).length, 1);
 	const saved = server.inventoryData(1)!;
-	assert.equal(saved[0], 1);
+	assert.equal(saved[0], 2);
+	assert.equal(saved.length, 125);
 	server.disconnect(1);
 	assert.equal(server.inventoryData(1), undefined);
 	join(saved);

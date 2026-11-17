@@ -214,9 +214,14 @@ impl Inventory {
     }
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(1);
+        w.u8(2);
         w.u8(self.selected);
-        for slot in self.slots {
+        for slot in self
+            .slots
+            .into_iter()
+            .chain(self.crafting)
+            .chain([self.cursor])
+        {
             w.u16(slot.map_or(0, |s| s.item));
             w.u8(slot.map_or(0, |s| s.count));
         }
@@ -224,18 +229,30 @@ impl Inventory {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
-        if r.u8()? != 1 {
+        let version = r.u8()?;
+        if !matches!(version, 1 | 2) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
         result.select(r.u8()?)?;
-        for i in 0..SLOT_COUNT {
+        let count = SLOT_COUNT + if version == 2 { 5 } else { 0 };
+        for slot in result
+            .slots
+            .iter_mut()
+            .chain(result.crafting.iter_mut())
+            .chain(std::iter::once(&mut result.cursor))
+            .take(count)
+        {
             let item = r.u16()?;
             let count = r.u8()?;
             if item == 0 && count != 0 {
                 return Err(DecodeError);
             }
-            result.set(i as u8, (item != 0).then_some(Stack { item, count }))?;
+            let stack = (item != 0).then_some(Stack { item, count });
+            if stack.is_some_and(|s| !valid(s)) {
+                return Err(DecodeError);
+            }
+            *slot = stack;
         }
         if r.remaining() != 0 {
             return Err(DecodeError);
@@ -261,12 +278,53 @@ mod tests {
         assert_eq!(inv.add(u16::MAX, 3), 3);
     }
     #[test]
+    fn persistence_v2_preserves_transient_slots_and_reads_v1() {
+        let mut inv = Inventory::creative();
+        inv.select(7).unwrap();
+        inv.crafting = [
+            Some(Stack { item: 8, count: 64 }),
+            None,
+            Some(Stack { item: 5, count: 3 }),
+            Some(Stack { item: 31, count: 1 }),
+        ];
+        inv.cursor = Some(Stack { item: 43, count: 5 });
+        let bytes = inv.to_bytes();
+        assert_eq!(bytes.len(), 125);
+        assert_eq!(bytes[0], 2);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok(inv.clone()));
+        let mut legacy = bytes[..110].to_vec();
+        legacy[0] = 1;
+        let mut expected = inv.clone();
+        expected.crafting = [None; 4];
+        expected.cursor = None;
+        assert_eq!(Inventory::from_bytes(&legacy), Ok(expected));
+        for data in [&bytes, &legacy] {
+            for length in 0..data.len() {
+                assert!(Inventory::from_bytes(&data[..length]).is_err());
+            }
+            let mut extra = data.clone();
+            extra.push(0);
+            assert!(Inventory::from_bytes(&extra).is_err());
+        }
+        for offset in [110, 113, 116, 119, 122] {
+            for (item, count) in [(0u16, 1), (u16::MAX, 1), (8, 0), (8, 65), (31, 2)] {
+                let mut bad = bytes.clone();
+                bad[offset..offset + 2].copy_from_slice(&item.to_be_bytes());
+                bad[offset + 2] = count;
+                assert!(
+                    Inventory::from_bytes(&bad).is_err(),
+                    "{offset}: {item}/{count}"
+                );
+            }
+        }
+    }
+    #[test]
     fn persistence_is_strict_and_round_trips() {
         let mut inv = Inventory::creative();
         inv.select(8).unwrap();
         let bytes = inv.to_bytes();
         assert_eq!(Inventory::from_bytes(&bytes), Ok(inv));
-        for (at, value) in [(0, 2), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        for (at, value) in [(0, 3), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
