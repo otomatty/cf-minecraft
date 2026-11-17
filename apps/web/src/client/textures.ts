@@ -199,6 +199,8 @@ const PAINTERS: Record<string, (rand: () => number) => Painter> = {
 
 /** RGBA pixels of one texture. Unknown names get a magenta/black checker so gaps are obvious. */
 export function paintTexture(name: string): Uint8Array {
+	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel)$/.exec(name);
+	if (tool) return paintTool(tool[1], tool[2]);
 	const rand = mulberry32(hashName(name));
 	const plant = name === "red_flower" || name === "yellow_flower" || name === "short_grass";
 	const make = PAINTERS[name];
@@ -299,6 +301,23 @@ export function paintCracks(stage: number): Uint8Array {
 			const at = (y * TEX_SIZE + x) * 4;
 			pixels.set([28, 23, 31, 210], at);
 		}
+	}
+	return pixels;
+}
+
+/** Original upright silhouettes: a two-pixel grip and three distinct heads. */
+function paintTool(tier: string, kind: string): Uint8Array {
+	const colors: Record<string, Rgb> = { wooden: [168, 115, 58], stone: [120, 134, 148], copper: [209, 119, 73], iron: [204, 221, 226] };
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
+		const handle = (x === 7 || x === 8) && y >= 5;
+		const head = kind === "pickaxe" ? ((y === 3 || y === 4) && x >= 3 && x <= 12) || (y === 5 && (x === 3 || x === 12))
+			: kind === "axe" ? x >= 4 && x <= 9 && y >= 2 && y <= 6 && (x !== 4 || y >= 3)
+			: x >= 5 && x <= 10 && y >= 2 && y <= 6 && (y !== 6 || x >= 6 && x <= 9);
+		if (!handle && !head) continue;
+		const color = head ? shade(colors[tier], (x + y) % 3 === 0 ? .82 : 1) : x === 7 ? [111, 75, 43] : [151, 101, 54];
+		const i = (y * TEX_SIZE + x) * 4;
+		pixels.set([clamp(color[0]), clamp(color[1]), clamp(color[2]), 255], i);
 	}
 	return pixels;
 }

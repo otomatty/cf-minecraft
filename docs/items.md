@@ -2,7 +2,7 @@
 
 `data/registry/items.toml` はこのプロジェクト独自のアイテム定義。`world/build.rs` が読み、`world::items` の表を生成する。ID は保存用の安定した `u16` で、1 から割り当て、既存 ID を変更しない。0 は空の枠を表す。ブロックの状態 ID とは別の名前空間。
 
-各エントリーは `name`（snake_case）、`id`、`max_stack`（省略時64、1〜64）、任意の `block` を持つ。重複した名前・ID、ID 0、不明なブロック、不正なスタック上限はビルドエラー。今回は air 以外の全ブロックに同名アイテムを1つずつ定義する。水のアイテムはクリエイティブ用。ブロック以外のアイテムも `block` の省略で表現できる。
+各エントリーは `name`（snake_case）、`id`、`max_stack`（省略時64、1〜64）、任意の `block`、`texture`、`tool = { kind, tier }` を持つ。`block` と `texture` の両方が無い定義はビルドエラー。道具は `max_stack = 1` が必須。重複した名前・ID、ID 0、不明なブロック、不正なスタック上限はビルドエラー。今回は air 以外の全ブロックに同名アイテムを1つずつ定義する。水のアイテムはクリエイティブ用。ブロック以外のアイテムも `block` の省略で表現できる。
 
 `items::ITEMS` / `COUNT`、`info(id)`、`by_name(name)`、`for_block(state)` を公開する。置く状態はそのブロックの最初の状態。スラブや階段などのどの状態も同じアイテムに戻る。
 
@@ -19,7 +19,7 @@
 `Server::set_game_mode` で接続前にワールドのモードを設定する。既定は `Creative`。
 
 - Creative: 初期ホットバーは stone、dirt、oak_planks、oak_slab、oak_log、glass、oak_leaves、water、lamp_block を各1個。既存と同じ有効な状態を置け、数は減らない。ブロック選択と中クリックはサーバーへ枠設定を送る。
-- Survival: 初期インベントリは空。置く状態のアイテムと選択枠のアイテムが一致し、置き換える先が AIR・WATER・SHORT_GRASS、または置く状態と同じブロック名の場合のみ配置できる。同じブロック名なら状態の変更（下半分のスラブから両方のスラブなど）を許す。変更に成功すると1個消費する。破壊は素手の時間制採掘を使い、完了時に対応アイテムのエンティティをドロップする。硬さ、受付・中断条件、クライアントの動きは [mining.md](mining.md) を参照。近づくとインベントリに入る。入りきらない分は地面に残る。両モードで選択枠から Q（キー設定で変更可能）で捨てられる。移動、待ち時間、拾得範囲、寿命、プロトコルの数値は [entities.md](entities.md) を参照。
+- Survival: 初期インベントリは空。置く状態のアイテムと選択枠のアイテムが一致し、置き換える先が AIR・WATER・SHORT_GRASS、または置く状態と同じブロック名の場合のみ配置できる。同じブロック名なら状態の変更（下半分のスラブから両方のスラブなど）を許す。変更に成功すると1個消費する。破壊は道具に対応した時間制採掘を使い、段階条件を満たす場合に対応アイテムをドロップする。硬さ、受付・中断条件、クライアントの動きは [mining.md](mining.md) を参照。近づくとインベントリに入る。入りきらない分は地面に残る。両モードで選択枠から Q（キー設定で変更可能）で捨てられる。移動、待ち時間、拾得範囲、寿命、プロトコルの数値は [entities.md](entities.md) を参照。
 
 両モードで従来の距離、チャンク送信済み、状態、植物の支持面などの判定を維持する。拒否された編集は送信者へ実際のブロックを訂正送信する。
 
@@ -48,3 +48,22 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 マルチプレイはSQLiteの `meta.gamemode` にモードを保存し、欠落時はcreative。変更UIは今回提供しない。ユーザーごとのインベントリは位置と一緒にメモリ上で記録して再接続へ渡す。Durable Object再起動を越える永続化はM4。
 
 エンティティ追加後の現在のシナリオ値と旧値からの変更理由は [entities.md](entities.md#決定性の現在値) を参照。
+
+## 道具アイテム
+
+| ID | 名前（texture も同名） | 種類 | tier |
+| --- | --- | --- | --- |
+| 31 | wooden_pickaxe | pickaxe | 1 |
+| 32 | wooden_axe | axe | 1 |
+| 33 | wooden_shovel | shovel | 1 |
+| 34 | stone_pickaxe | pickaxe | 2 |
+| 35 | stone_axe | axe | 2 |
+| 36 | stone_shovel | shovel | 2 |
+| 37 | copper_pickaxe | pickaxe | 3 |
+| 38 | copper_axe | axe | 3 |
+| 39 | copper_shovel | shovel | 3 |
+| 40 | iron_pickaxe | pickaxe | 4 |
+| 41 | iron_axe | axe | 4 |
+| 42 | iron_shovel | shovel | 4 |
+
+12種類すべて `block = None`、`max_stack = 1`。`items::info` から `tool.kind`、`tool.tier`、`tool.speed()` と `texture` を取得できる。Creative の選択画面で選んでホットバーへ入れ、Qで捨てられる。採掘速度とドロップ条件は [mining.md](mining.md#道具とドロップ条件) を参照。耐久値は未実装。Survival の入手用クラフトは次の PR で追加する。

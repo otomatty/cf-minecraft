@@ -456,22 +456,33 @@ async function inputs() {
 
 	// Stand above the spawn column and look straight down at it.
 	await page.evaluate((s) => window.__mc.setCamera(s[0], s[1] + 3, s[2], 0, 90), stats.spawn);
-	const targetLine = async () => {
-		await new Promise((r) => setTimeout(r, 400));
-		return page.evaluate(() => document.getElementById("hud").textContent.split("\n").find((l) => l.startsWith("Target")));
+	const checkTarget = async (expected, label) => {
+		try {
+			await page.waitForFunction(
+				expected => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")) === expected,
+				{ timeout: 5000 },
+				expected,
+			);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			const actual = await page.evaluate(() => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")));
+			check(false, label, `expected ${expected}; got ${actual ?? "<missing Target line>"}`);
+			return;
+		}
+		check(true, label);
 	};
 	const top = sy - 1;
 	const [topName, underName] = await page.evaluate(([x, y, z]) => {
 		return [window.__mc.stateName(window.__mc.getBlock(x, y, z)), window.__mc.stateName(window.__mc.getBlock(x, y - 1, z))];
 	}, [sx, top, sz]);
 	check(stats.generator === 2, "input: movement and mouse placement run on Terrain");
-	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below", await targetLine());
+	await checkTarget(`Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below");
 
 	await page.mouse.down({ button: "left" });
 	await page.mouse.up({ button: "left" });
 	await new Promise((r) => setTimeout(r, 300));
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
-	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next", await targetLine());
+	await checkTarget(`Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next");
 
 	await page.keyboard.press("Digit3");
 	await page.mouse.down({ button: "right" });
@@ -560,6 +571,18 @@ async function partialModels() {
 		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
 		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
+		const toolNames = ["wooden", "stone", "copper", "iron"].flatMap(tier => ["pickaxe", "axe", "shovel"].map(kind => `${tier}_${kind}`));
+		check(toolNames.every(name => names.filter(n => n === name).length === 1), "tools: picker includes all twelve tools once");
+		for (const name of toolNames) {
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await waitFor(`authoritative tool slot ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			check(await page.$eval("#hotbar canvas.selected", (canvas, name) => {
+				const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+				return canvas.title === name && canvas.dataset.count === "1"
+					&& pixels.some((v, i) => i % 4 === 3 && v === 255)
+					&& pixels.some((v, i) => i % 4 === 3 && v === 0);
+			}, name), `tools: ${name} is selected and its transparent icon is drawn`);
+		}
 		await page.click('#block-grid [data-block="red_flower"]');
 		await waitFor("authoritative red flower slot", () => document.querySelector("#hotbar canvas.selected")?.title === "red_flower");
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
@@ -932,8 +955,21 @@ async function survivalInventory() {
 		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
 		const restored = await settle(page, "survival reload", chunksInView(2));
 		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
-		check(restored.inventory[0]?.item === savedItem && restored.inventory[0]?.count === 1
-			&& await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1"), "survival: reload restores one grass block in the first slot");
+		let inventoryRestored = true;
+		let inventoryDetail = "";
+		try {
+			await page.waitForFunction(item => {
+				const slot = window.__mc.stats().inventory[0];
+				return slot?.item === item && slot?.count === 1;
+			}, { timeout: 5000 }, savedItem);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			inventoryRestored = false;
+			const slot = await page.evaluate(() => window.__mc.stats().inventory[0]);
+			inventoryDetail = `expected item ${savedItem}, count 1; inventory[0]=${JSON.stringify(slot)}`;
+		}
+		const hotbarRestored = await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1");
+		check(inventoryRestored && hotbarRestored, "survival: reload restores one grass block in the first slot", inventoryDetail);
 		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[0]);
 		await page.mouse.click(640, 360);
 		await page.waitForFunction(() => document.pointerLockElement?.id === "view");

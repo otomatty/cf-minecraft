@@ -42,6 +42,8 @@ pub enum Model {
 
 #[derive(Clone, Copy)]
 pub struct BlockInfo {
+    pub tool: Option<crate::items::ToolKind>,
+    pub min_tier: u8,
     pub dig_ticks: Option<u16>,
     pub model: Model,
     pub layer: RenderLayer,

@@ -1,4 +1,4 @@
-import { advanceDig, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
+import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
 // block breaking and placing, and a debug overlay.
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
-	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(registry[item.block ?? 0]?.texture))]));
+	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -388,6 +388,8 @@ async function main(): Promise<void> {
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
 	let pendingSelectedSlot: number | null = null;
+	let dig = newDigState();
+	let heldInventory = "";
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
 		c.width = c.height = TEX_SIZE;
 		c.title = "";
@@ -404,6 +406,9 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	function selectSlot(slot: number, send = true): void {
+		const next = updateDigSelection(dig, heldInventory, slot, core.inventory[slot]);
+		dig = next.state;
+		heldInventory = next.selection;
 		if (send) {
 			pendingSelectedSlot = slot;
 			transport.send(core.encodeSelectSlot(slot));
@@ -417,7 +422,7 @@ async function main(): Promise<void> {
 		hotbarBlocks = hotbarStates(inventory, items);
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
-			paintIcon(c, hotbarBlocks[i]);
+			paintItemIcon(c, inventory[i]?.item);
 			const count = inventory[i]?.count ?? 0;
 			c.dataset.count = String(count);
 			if (count >= 2) {
@@ -440,6 +445,15 @@ async function main(): Promise<void> {
 		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
 		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
 	}
+	function paintItemIcon(c: HTMLCanvasElement, id?: number): void {
+		const item = items.find(item => item.id === id);
+		paintIcon(c, item?.block ?? 0);
+		if (item?.block == null && item?.texture) {
+			const pixels = renderer.texturePixels.get(item.texture);
+			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+			c.title = item.name;
+		}
+	}
 	function replaceSlot(state: number): void {
 		if (core.gameMode !== "creative") return;
 		const item = items.find(item => item.block === registry[state].first);
@@ -458,7 +472,6 @@ async function main(): Promise<void> {
 	let lastForwardTap = -Infinity;
 	const heldButtons = new Map<number, number>();
 	let leftHeld = false;
-	let dig = newDigState();
 	const remoteDigs = new Map<number, DigOverlay>();
 	const stopDig = () => {
 		leftHeld = false;
@@ -599,18 +612,17 @@ async function main(): Promise<void> {
 
 	const picker = $("block-picker");
 	const pickerButtons: HTMLButtonElement[] = [];
-	registry.forEach((info, state) => {
-		if (state === 0 || info.first !== state) return;
+	items.forEach(info => {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.dataset.block = info.name;
 		button.title = info.name;
 		const icon = document.createElement("canvas");
-		paintIcon(icon, state);
+		paintItemIcon(icon, info.id);
 		const label = document.createElement("span");
 		label.textContent = info.name;
 		button.append(icon, label);
-		button.addEventListener("click", () => replaceSlot(state));
+		button.addEventListener("click", () => { if (core.gameMode === "creative") transport.send(core.encodeCreativeSetSlot(selectedSlot, info.id, 1)); });
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
@@ -621,7 +633,7 @@ async function main(): Promise<void> {
 		picker.hidden = false;
 		overlay.hidden = true;
 		if (locked()) document.exitPointerLock();
-		pickerButtons.find(button => button.dataset.block === registry[selected].name)?.focus();
+		pickerButtons.find(button => button.dataset.block === slots[selectedSlot].title)?.focus();
 	}
 	function closePicker(reason: "inventory" | "escape" | "button"): void {
 		picker.hidden = true;
@@ -956,8 +968,10 @@ async function main(): Promise<void> {
 		}
 		if (core.gameMode === "survival") {
 			const blockState = target ? core.getBlock(target.x, target.y, target.z) : 0;
-			const ticks = registry[blockState]?.digTicks;
-			const digTarget = target && ticks != null ? { x: target.x, y: target.y, z: target.z, state: blockState, ticks } : null;
+			const held = core.inventory[selectedSlot];
+			const selection = digSelection(selectedSlot, held);
+			const ticks = core.miningTicks(blockState, held?.item ?? 0);
+			const digTarget = target && ticks != null ? { x: target.x, y: target.y, z: target.z, state: blockState, ticks, selection } : null;
 			const a = dig.active;
 			const next = advanceDig(dig, leftHeld && locked() && joined && connection === "open", digTarget,
 				a ? core.getBlock(a.x, a.y, a.z) : null, now);
@@ -973,6 +987,7 @@ async function main(): Promise<void> {
 		const renderItems = core.entities.map(entity => ({
 			position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
 			texture: itemTextures.get(entity.item) ?? 0,
+			flat: items.find(item => item.id === entity.item)?.block == null,
 			light: core.entityLight(entity.position),
 		}));
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {

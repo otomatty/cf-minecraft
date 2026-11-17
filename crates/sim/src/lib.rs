@@ -65,7 +65,8 @@ struct Dig {
     pos: [i32; 3],
     state: u16,
     start: i64,
-    ticks: u16,
+    ticks: u32,
+    drops: bool,
     stage: Option<u8>,
 }
 
@@ -228,6 +229,20 @@ impl Server {
         );
     }
     fn tick_entities(&mut self) {
+        let held: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.dig.is_some())
+            .map(|(&id, c)| {
+                (
+                    id,
+                    (
+                        c.inventory.selected(),
+                        c.inventory.selected_stack().map(|stack| stack.item),
+                    ),
+                )
+            })
+            .collect();
         for e in self.entities.values_mut() {
             if self.world.chunks.contains_key(&e.chunk()) {
                 e.tick(&self.world);
@@ -259,6 +274,19 @@ impl Server {
             }
         }
         self.entities.retain(|_, e| e.count != 0);
+        for (id, before) in held {
+            if before
+                != (
+                    self.clients[&id].inventory.selected(),
+                    self.clients[&id]
+                        .inventory
+                        .selected_stack()
+                        .map(|stack| stack.item),
+                )
+            {
+                self.abort_dig(id);
+            }
+        }
     }
     /// Returns the number of candidate pairs compared, also used by budget tests.
     fn merge_entities(&mut self) -> usize {
@@ -511,8 +539,8 @@ impl Server {
         }
         self.tick_digs();
         self.stream_chunks();
-        self.flush_digs();
         self.tick_entities();
+        self.flush_digs();
 
         self.game_time += 1;
         self.day_time += 1;
@@ -548,6 +576,27 @@ impl Server {
     }
 
     fn apply(&mut self, id: u32, packet: C2S) {
+        let before = (
+            self.clients[&id].inventory.selected(),
+            self.clients[&id]
+                .inventory
+                .selected_stack()
+                .map(|stack| stack.item),
+        );
+        self.apply_packet(id, packet);
+        let after = (
+            self.clients[&id].inventory.selected(),
+            self.clients[&id]
+                .inventory
+                .selected_stack()
+                .map(|stack| stack.item),
+        );
+        if before != after {
+            self.abort_dig(id);
+        }
+    }
+
+    fn apply_packet(&mut self, id: u32, packet: C2S) {
         match packet {
             C2S::DigAbort => {
                 if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
@@ -563,14 +612,23 @@ impl Server {
                 }
                 self.abort_dig(id);
                 let state = self.world.get_block(x, y, z);
-                let ticks = state.and_then(|s| blocks::info(s).dig_ticks);
-                if !self.can_edit(id, x, y, z, blocks::AIR) || ticks.is_none() {
+                let mining = state.and_then(|s| {
+                    items::mining(
+                        s,
+                        self.clients[&id]
+                            .inventory
+                            .selected_stack()
+                            .map(|stack| stack.item),
+                    )
+                });
+                if !self.can_edit(id, x, y, z, blocks::AIR) || mining.is_none() {
                     self.stats.packets_rejected += 1;
                     self.correct_block(id, x, y, z);
                     return;
                 }
-                if ticks == Some(0) {
-                    self.change_block(id, x, y, z, blocks::AIR);
+                let (ticks, drops) = mining.unwrap();
+                if ticks == 0 {
+                    self.change_block(id, [x, y, z], blocks::AIR, drops);
                     self.dig_updates.insert((id, [x, y, z]), 255);
                     return;
                 }
@@ -578,7 +636,8 @@ impl Server {
                     pos: [x, y, z],
                     state: state.unwrap(),
                     start: self.game_time,
-                    ticks: ticks.unwrap(),
+                    ticks,
+                    drops,
                     stage: None,
                 });
             }
@@ -683,12 +742,12 @@ impl Server {
                     self.correct_block(id, x, y, z);
                     return;
                 }
-                self.change_block(id, x, y, z, state);
+                self.change_block(id, [x, y, z], state, true);
             }
         }
     }
 
-    fn change_block(&mut self, id: u32, x: i32, y: i32, z: i32, state: u16) {
+    fn change_block(&mut self, id: u32, [x, y, z]: [i32; 3], state: u16, drops: bool) {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
                 let miners: Vec<_> = self
@@ -702,7 +761,7 @@ impl Server {
                 }
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
-                        if let Some(item) = items::for_block(old) {
+                        if let Some(item) = items::for_block(old).filter(|_| drops) {
                             let mut random = jmath::JavaRandom::new(
                                 self.seed.wrapping_add(self.next_entity_id as i64),
                             );
@@ -753,7 +812,7 @@ impl Server {
             }
             let elapsed = self.game_time - dig.start;
             if elapsed >= i64::from(dig.ticks) {
-                self.change_block(id, x, y, z, blocks::AIR);
+                self.change_block(id, [x, y, z], blocks::AIR, dig.drops);
                 self.abort_dig(id);
             } else {
                 let stage = ((elapsed * 10 / i64::from(dig.ticks)).min(9)) as u8;
@@ -1144,6 +1203,7 @@ impl Server {
                 h.i64(dig.start);
                 h.bytes(&dig.ticks.to_be_bytes());
                 h.u8(dig.stage.unwrap_or(255));
+                h.u8(u8::from(dig.drops));
             }
         }
         h.bytes(&self.next_entity_id.to_be_bytes());
@@ -1332,11 +1392,33 @@ mod tests {
         assert_eq!(s.clients[&1].inventory, Inventory::default());
         for state in [blocks::STONE, blocks::OAK_SLAB + 1, blocks::OAK_STAIRS + 7] {
             s.world.set_block(pos[0], pos[1], pos[2], state);
+            if state == blocks::STONE {
+                let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
+                inv.set(
+                    8,
+                    Some(Stack {
+                        item: items::by_name("wooden_pickaxe").unwrap(),
+                        count: 1,
+                    }),
+                )
+                .unwrap();
+                inv.select(8).unwrap();
+            }
+            let ticks = items::mining(
+                state,
+                s.clients[&1]
+                    .inventory
+                    .selected_stack()
+                    .map(|stack| stack.item),
+            )
+            .unwrap()
+            .0;
             dig_start(&mut s, 1, pos);
-            for _ in 0..=blocks::info(state).dig_ticks.unwrap() {
+            for _ in 0..=ticks {
                 s.tick();
             }
             assert_eq!(s.entities.len(), 1);
+            s.clients.get_mut(&1).unwrap().inventory.select(0).unwrap();
             assert!(s.clients[&1].inventory.selected_stack().is_none());
             for _ in 0..9 {
                 s.tick();

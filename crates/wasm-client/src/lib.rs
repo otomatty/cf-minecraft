@@ -1146,7 +1146,12 @@ pub extern "C" fn client_enc_dig_abort() -> usize {
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
-    emit(state(), blocks::TEXTURES.join("\n").into_bytes())
+    let names: Vec<_> = blocks::TEXTURES
+        .iter()
+        .copied()
+        .chain(world::items::ITEMS.iter().filter_map(|item| item.texture))
+        .collect();
+    emit(state(), names.join("\n").into_bytes())
 }
 
 /// Output: newline-separated block names, line number = block id.
@@ -1265,6 +1270,16 @@ pub extern "C" fn client_enc_creative_set_slot(slot: u8, item: u16, count: u8) -
     state().out.len()
 }
 #[no_mangle]
+pub extern "C" fn client_mining_ticks(block: u16, held: u16) -> i32 {
+    world::items::mining(block, (held != 0).then_some(held)).map_or(-1, |(ticks, _)| ticks as i32)
+}
+
+#[no_mangle]
+pub extern "C" fn client_mining_drops(block: u16, held: u16) -> bool {
+    world::items::mining(block, (held != 0).then_some(held)).is_some_and(|(_, drops)| drops)
+}
+
+#[no_mangle]
 pub extern "C" fn client_item_registry() -> usize {
     use std::fmt::Write;
     let mut out = String::from("[");
@@ -1274,11 +1289,12 @@ pub extern "C" fn client_item_registry() -> usize {
         }
         write!(
             out,
-            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{}}}",
+            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{}}}",
             item.id,
             item.name,
             item.max_stack,
-            item.block.map_or("null".into(), |b| b.to_string())
+            item.block.map_or("null".into(), |b| b.to_string()),
+            item.texture.map_or("null".into(), |t| format!("{t:?}"))
         )
         .unwrap();
     }

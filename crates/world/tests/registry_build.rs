@@ -190,8 +190,8 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
-        "name = \"stone\"\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
+        "name = \"stone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
@@ -333,7 +333,7 @@ fn item_validation_and_optional_block() {
     assert!(generate_items_fixture(
         BLOCKS,
         BIOMES,
-        &items.replacen("block = \"stone\"", "max_stack = 7", 1)
+        &items.replacen("block = \"stone\"", "texture = \"stone\"\nmax_stack = 7", 1)
     )
     .is_ok());
 }
@@ -350,5 +350,34 @@ fn mining_metadata_is_required_exclusive_and_bounded() {
         assert!(
             generate_fixture(&BLOCKS.replacen("dig_ticks = 70\n", replacement, 1), BIOMES).is_err()
         );
+    }
+}
+
+#[test]
+fn tools_and_harvest_requirements_are_validated() {
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        ("max_stack = 1", "max_stack = 2", "tool max_stack must be 1"),
+        ("block = \"stone\"", "", "block or texture required"),
+        ("tier = 1", "tier = 0", "tool tier must be 1..=4"),
+        ("tier = 1", "tier = 5", "tool tier must be 1..=4"),
+        (
+            "kind = \"pickaxe\"",
+            "kind = \"hammer\"",
+            "unknown tool kind",
+        ),
+    ] {
+        assert!(
+            generate_items_fixture(BLOCKS, BIOMES, &items.replacen(from, to, 1))
+                .unwrap_err()
+                .contains(message)
+        );
+    }
+    for (from, to) in [
+        ("tool = \"pickaxe\"\n", ""),
+        ("min_tier = 1", "min_tier = 5"),
+        ("tool = \"pickaxe\"", "tool = \"hammer\""),
+    ] {
+        assert!(generate_fixture(&BLOCKS.replacen(from, to, 1), BIOMES).is_err());
     }
 }

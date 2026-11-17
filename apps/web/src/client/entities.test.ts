@@ -63,3 +63,23 @@ test("render items are capped before vertex generation and preserve input order"
 	assert.deepEqual(limitRenderItems(items.slice(0, 3)), items.slice(0, 3));
 	assert.equal(limitRenderItems(items.slice(0, MAX_RENDER_ITEMS)).length, MAX_RENDER_ITEMS);
 });
+
+
+test("non-block drops are rotating double-sided planes with full sprite UVs", () => {
+	const item: RenderItem = { position: [3, 4, 5], texture: 28, light: [15, 0], flat: true };
+	const vertices = itemVertices([item], [0, 0, 0], 0);
+	assert.equal(vertices.length, 12 * 9);
+	for (let i = 0; i < vertices.length; i += 9) {
+		assert.equal(vertices[i + 2], 5);
+		assert.equal(vertices[i + 6], 28);
+	}
+	for (let side = 0; side < 2; side++) {
+		const start = side * 6 * 9;
+		assert.deepEqual(new Set(Array.from({ length: 6 }, (_, i) => `${vertices[start + i * 9 + 3]}:${vertices[start + i * 9 + 4]}`)), new Set(["0:0", "0:1", "1:0", "1:1"]));
+		const a = start, b = start + 9, c = start + 18;
+		const normalZ = (vertices[b] - vertices[a]) * (vertices[c+1] - vertices[a+1]) - (vertices[b+1] - vertices[a+1]) * (vertices[c] - vertices[a]);
+		assert.ok(side === 0 ? normalZ > 0 : normalZ < 0);
+	}
+	const rotated = itemVertices([item], [0, 0, 0], Math.PI * 1000);
+	assert.notEqual(rotated[2], vertices[2]);
+});

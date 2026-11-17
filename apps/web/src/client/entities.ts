@@ -7,6 +7,7 @@ export function interpolateEntity(previous: readonly number[], current: readonly
 export interface RenderItem {
 	position: [number, number, number];
 	texture: number;
+	flat?: boolean;
 	/** Sky light first, block light second; lightmap UVs use the reverse order. */
 	light: [sky: number, block: number];
 }
@@ -26,15 +27,17 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 	const faces = [[0, 1, 2, 3], [7, 6, 5, 4], [1, 0, 4, 5], [3, 2, 6, 7], [0, 3, 7, 4], [2, 1, 5, 6]];
 	const angle = timeMs / 2000, c = Math.cos(angle), s = Math.sin(angle);
 	for (const item of items) {
-		for (const [face, indices] of faces.entries()) {
+		const itemCorners = item.flat ? [[0,0,.5],[1,0,.5],[1,1,.5],[0,1,.5]] : corners;
+		const itemFaces = item.flat ? [[0,1,2,3],[1,0,3,2]] : faces;
+		for (const [face, indices] of itemFaces.entries()) {
 			for (const i of [0, 1, 2, 0, 2, 3]) {
-				const vertex = corners[indices[i]];
+				const vertex = itemCorners[indices[i]];
 				const x = (vertex[0] - 0.5) * 0.25, z = (vertex[2] - 0.5) * 0.25;
 				out.push(
 					item.position[0] - camera[0] + x * c - z * s,
 					item.position[1] - camera[1] + vertex[1] * 0.25 + 0.04 + Math.sin(timeMs / 500) * 0.03,
 					item.position[2] - camera[2] + x * s + z * c,
-					[0, 1, 1, 0][i], [1, 1, 0, 0][i], [0.5, 1, 0.8, 0.8, 0.6, 0.6][face], item.texture,
+					[0, 1, 1, 0][i], [1, 1, 0, 0][i], (item.flat ? 1 : [0.5, 1, 0.8, 0.8, 0.6, 0.6][face]), item.texture,
 					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16,
 				);
 			}

@@ -1,5 +1,5 @@
 /** Mining presentation clock. Only an authoritative block change completes a dig. */
-export interface DigTarget { x: number; y: number; z: number; state: number; ticks: number }
+export interface DigTarget { x: number; y: number; z: number; state: number; ticks: number; selection?: string }
 export interface DigState { active: (DigTarget & { started: number; stage: number }) | null; readyAt: number; invalidated: boolean }
 export type DigCommand = { type: "start"; target: DigTarget } | { type: "abort" };
 export const newDigState = (): DigState => ({ active: null, readyAt: 0, invalidated: false });
@@ -25,7 +25,7 @@ export function advanceDig(
 		if (active) commands.push({ type: "abort" });
 		return { state: { active: null, readyAt, invalidated: false }, commands };
 	}
-	const same = active && target && active.x === target.x && active.y === target.y && active.z === target.z && active.state === target.state;
+	const same = active && target && active.x === target.x && active.y === target.y && active.z === target.z && active.state === target.state && active.selection === target.selection;
 	if (active && !same) {
 		commands.push({ type: "abort" });
 		active = null;
@@ -59,4 +59,22 @@ export function digVertices(digs: readonly RenderDig[], camera: readonly number[
 			[0,1,1,0][i], [1,1,0,0][i], 1, textureBase + dig.stage, .96875, .96875);
 	}
 	return new Float32Array(out);
+}
+
+/** Called for each inventory/selection update, including changes between frames. */
+export function invalidateDigSelection(state: DigState): DigState {
+    return state.active ? { ...state, invalidated: true } : state;
+}
+
+/** Mining depends on the slot and item identity, independent of stack count. */
+export function digSelection(slot: number, stack: { item: number } | null | undefined): string {
+	return JSON.stringify([slot, stack?.item ?? null]);
+}
+
+/** Keep the comparison baseline aligned with both local selection and inventory updates. */
+export function updateDigSelection(
+	state: DigState, previous: string, slot: number, stack: { item: number } | null | undefined,
+): { state: DigState; selection: string } {
+	const selection = digSelection(slot, stack);
+	return { state: selection === previous ? state : invalidateDigSelection(state), selection };
 }

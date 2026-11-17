@@ -645,7 +645,7 @@ test("player reads propagate lookup and content read failures", async t => {
 		t.mock.method(dir, "getFileHandle", async () => { throw failure; });
 		await assert.rejects(store.readPlayer(), error => error === failure);
 	}
-	for (const stage of ["getFile", "arrayBuffer"] as const) {
+	for (const stage of ["createSyncAccessHandle", "getSize", "read"] as const) {
 		const dir = new MemoryDirectory(), store = await open(dir);
 		dir.seed("player.dat", new Uint8Array([1, 0]));
 		const handle = await dir.getFileHandle("player.dat");
@@ -653,13 +653,15 @@ test("player reads propagate lookup and content read failures", async t => {
 		const failure = new DOMException("read failed", "NotFoundError");
 		t.mock.method(dir, "getFileHandle", async () => ({
 			...handle,
-			getFile: async () => {
-				if (stage === "getFile") throw failure;
-				return { size: 2, arrayBuffer: async () => { throw failure; } };
+			createSyncAccessHandle: async () => {
+				if (stage === "createSyncAccessHandle") throw failure;
+				const access = await handle.createSyncAccessHandle();
+				return { ...access, [stage]: () => { throw failure; } };
 			},
 		}));
 		await assert.rejects(store.readPlayer(), error => error === failure);
 		assert.deepEqual(dir.files.get("player.dat")!.durable, new Uint8Array([1, 0]));
+		assert.equal(dir.files.get("player.dat")!.open, false, "release the handle even after a read failure");
 	}
 });
 
@@ -675,4 +677,38 @@ test("player inventory saves with chunks and metadata and participates in OPFS a
 	const dirs = importRoot();
 	await store.importArchive("inventory-copy", archive);
 	assert.deepEqual(dirs.get("world-inventory-copy")?.files.get("player.dat")?.durable, player);
+});
+
+
+test("player reads wait for another worker's sync writer and return its completed contents", async t => {
+	const dir = new MemoryDirectory(), store = await open(dir);
+	const player = Uint8Array.from({ length: 2048 }, (_, i) => i % 256);
+	dir.seed("player.dat", new Uint8Array([1, 0]));
+	const handle = await dir.getFileHandle("player.dat");
+	const writer = await handle.createSyncAccessHandle();
+	writer.truncate(0);
+	let attempts = 0;
+	let released = false;
+	t.mock.method(dir, "getFileHandle", async () => ({
+		...handle,
+		getFile: async () => { throw new Error("player reads must use the exclusive sync handle"); },
+		createSyncAccessHandle: async () => {
+			attempts++;
+			if (dir.files.get("player.dat")!.open) {
+				if (attempts === 1) setTimeout(() => {
+					let written = 0;
+					while (written < player.length) written += writer.write(player.subarray(written), { at: written });
+					writer.flush();
+					writer.close();
+					released = true;
+				}, 0);
+				throw new DOMException("locked by another worker", "NoModificationAllowedError");
+			}
+			return handle.createSyncAccessHandle();
+		},
+	}));
+	assert.deepEqual(await store.readPlayer(), player);
+	assert.equal(released, true);
+	assert.equal(attempts, 2);
+	assert.equal(dir.files.get("player.dat")!.open, false);
 });
