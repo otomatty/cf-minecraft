@@ -64,6 +64,8 @@ result = { item = "oak_planks", count = 4 }
 | oak_planks ×1 + stick ×2 | `#` / `\|` / `\|` | wooden_shovel ×1 |
 | cobblestone + stick | 上の3種と同じ形・個数 | stone_pickaxe / stone_axe / stone_shovel 各1 |
 
+石の道具の材料となる丸石（cobblestone）は、石（stone）を木のつるはしで掘って拾うことで手に入る。
+
 道具の6レシピは高さ3なので2×2では作れない。斧は左右反転しない。銅・鉄の道具はかまどのPRで追加する。build.rs は既存の3×3・空白・key検証をそのまま使用する。
 
 ## 閉じる、切断、保存

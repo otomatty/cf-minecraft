@@ -21,6 +21,7 @@ solid = false
 
 [[blocks]]
 name = "stone"
+drop = "cobblestone"
 tool = "pickaxe"
 min_tier = 1
 dig_ticks = 70

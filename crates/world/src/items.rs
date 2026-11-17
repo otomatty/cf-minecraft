@@ -47,9 +47,38 @@ pub fn for_block(state: BlockState) -> Option<u16> {
         })
         .map(|item| item.id)
 }
+/// Item produced by mining; tool and tier eligibility is checked separately by `mining`.
+pub fn mining_drop(state: BlockState) -> Option<u16> {
+    if state == blocks::AIR || !blocks::is_valid(state) {
+        return None;
+    }
+    MINING_DROPS
+        .iter()
+        .find(|(name, _)| *name == blocks::info(state).name)
+        .map(|(_, item)| *item)
+        .or_else(|| for_block(state))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mining_drop_overrides_only_the_harvested_item() {
+        for (state, name) in [
+            (blocks::STONE, "cobblestone"),
+            (blocks::COBBLESTONE, "cobblestone"),
+            (blocks::OAK_LOG, "oak_log"),
+            (blocks::OAK_SLAB + 1, "oak_slab"),
+        ] {
+            assert_eq!(mining_drop(state), by_name(name));
+        }
+        assert_eq!(mining_drop(blocks::AIR), None);
+        assert_eq!(mining_drop(blocks::COUNT), None);
+        let stone = for_block(blocks::STONE).unwrap();
+        assert_eq!(Some(stone), by_name("stone"));
+        assert_eq!(info(stone).unwrap().block, Some(blocks::STONE));
+    }
+
     #[test]
     fn every_non_air_state_has_the_named_item() {
         assert_eq!(for_block(blocks::AIR), None);

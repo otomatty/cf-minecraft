@@ -828,7 +828,7 @@ impl Server {
                 }
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
-                        if let Some(item) = items::for_block(old).filter(|_| drops) {
+                        if let Some(item) = items::mining_drop(old).filter(|_| drops) {
                             let mut random = jmath::JavaRandom::new(
                                 self.seed.wrapping_add(self.next_entity_id as i64),
                             );
@@ -1502,7 +1502,11 @@ mod tests {
     fn survival_breaks_collect_and_placements_consume_all_block_states() {
         let (mut s, pos) = survival();
         assert_eq!(s.clients[&1].inventory, Inventory::default());
-        for state in [blocks::STONE, blocks::OAK_SLAB + 1, blocks::OAK_STAIRS + 7] {
+        for (state, placed) in [
+            (blocks::STONE, blocks::COBBLESTONE),
+            (blocks::OAK_SLAB + 1, blocks::OAK_SLAB + 1),
+            (blocks::OAK_STAIRS + 7, blocks::OAK_STAIRS + 7),
+        ] {
             s.world.set_block(pos[0], pos[1], pos[2], state);
             if state == blocks::STONE {
                 let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
@@ -1539,17 +1543,36 @@ mod tests {
             assert_eq!(
                 s.clients[&1].inventory.selected_stack(),
                 Some(Stack {
-                    item: items::for_block(state).unwrap(),
+                    item: items::for_block(placed).unwrap(),
                     count: 1
                 })
             );
             assert_eq!(inventories(&mut s).len(), 1);
-            edit(&mut s, pos, state);
+            edit(&mut s, pos, placed);
             s.tick();
             assert!(s.clients[&1].inventory.selected_stack().is_none());
             assert_eq!(inventories(&mut s).len(), 1);
-            assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(state));
+            assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(placed));
         }
+        // A stone item still places stone, independently of the mining override.
+        s.world.set_block(pos[0], pos[1], pos[2], blocks::AIR);
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(
+                0,
+                Some(Stack {
+                    item: items::by_name("stone").unwrap(),
+                    count: 1,
+                }),
+            )
+            .unwrap();
+        edit(&mut s, pos, blocks::STONE);
+        s.tick();
+        assert_eq!(s.get_block(pos[0], pos[1], pos[2]), Some(blocks::STONE));
+        assert!(s.clients[&1].inventory.selected_stack().is_none());
+        assert_eq!(s.stats.packets_rejected, 0);
     }
     #[test]
     fn survival_rejects_empty_wrong_items_and_unbreakable_blocks_with_correction() {
@@ -3537,6 +3560,125 @@ mod crafting_server_tests {
         assert_eq!(inv.table, [None; 9]);
         assert_eq!(s.stats.packets_rejected, 0);
     }
+    #[test]
+    fn mined_stone_to_stone_pickaxe_through_packet_clicks() {
+        let mut s = server();
+        s.set_game_mode(GameMode::Survival);
+        let table_pos = table(&mut s);
+        let [x, y, z] = s.clients[&1].pos.map(|v| v.floor() as i32);
+        let wooden_pickaxe = items::by_name("wooden_pickaxe").unwrap();
+        let cobblestone = items::by_name("cobblestone").unwrap();
+        let stick = items::by_name("stick").unwrap();
+        let inv = &mut s.clients.get_mut(&1).unwrap().inventory;
+        *inv = Inventory::default();
+        inv.set(
+            0,
+            Some(Stack {
+                item: wooden_pickaxe,
+                count: 1,
+            }),
+        )
+        .unwrap();
+        inv.set(
+            1,
+            Some(Stack {
+                item: stick,
+                count: 2,
+            }),
+        )
+        .unwrap();
+
+        for dz in 0..3 {
+            let z = z + dz;
+            s.world.set_block(x, y, z, blocks::STONE).unwrap();
+            s.handle_packet(1, &C2S::DigStart { x, y, z }.encode());
+            s.tick(); // Start tick has elapsed time zero.
+            for _ in 0..35 {
+                s.tick();
+            }
+            assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+            assert_eq!(s.entities.len(), 1);
+            let entity = s.entities.values().next().unwrap();
+            assert_eq!((entity.item, entity.count), (cobblestone, 1));
+            assert!(s.take_outbox().iter().any(|(_, packet)| matches!(
+                S2C::decode(packet),
+                Ok(S2C::EntitySpawn { item, count: 1, .. }) if item == cobblestone
+            )));
+            s.handle_packet(
+                1,
+                &C2S::Teleport {
+                    x: x as f64 + 0.5,
+                    y: y as f64,
+                    z: z as f64 + 0.5,
+                }
+                .encode(),
+            );
+            for _ in 0..30 {
+                s.tick();
+            }
+            assert!(s.entities.is_empty());
+            assert_eq!(
+                s.clients[&1].inventory.slots()[2],
+                Some(Stack {
+                    item: cobblestone,
+                    count: (dz + 1) as u8,
+                })
+            );
+        }
+
+        use_table(&mut s, table_pos);
+        for (slot, button) in [(2, 0), (41, 1), (42, 1), (43, 1), (1, 0), (45, 1), (48, 1)] {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button,
+                    shift: false,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        assert_eq!(
+            s.clients[&1].inventory.result(),
+            Some(Stack {
+                item: items::by_name("stone_pickaxe").unwrap(),
+                count: 1,
+            })
+        );
+        for slot in [50, 3] {
+            s.handle_packet(
+                1,
+                &C2S::ClickSlot {
+                    slot,
+                    button: 0,
+                    shift: false,
+                }
+                .encode(),
+            );
+        }
+        s.tick();
+        let inv = &s.clients[&1].inventory;
+        assert_eq!(
+            inv.slots()[3],
+            Some(Stack {
+                item: items::by_name("stone_pickaxe").unwrap(),
+                count: 1,
+            })
+        );
+        assert_eq!(
+            inv.slots()[0],
+            Some(Stack {
+                item: wooden_pickaxe,
+                count: 1
+            })
+        );
+        assert_eq!(&inv.slots()[1..3], &[None, None]);
+        assert_eq!(inv.table, [None; 9]);
+        assert_eq!(inv.cursor, None);
+        assert_eq!(s.stats.packets_rejected, 0);
+    }
+
     #[test]
     fn destroying_table_or_leaving_reach_returns_or_drops_contents() {
         for broken in [false, true] {
