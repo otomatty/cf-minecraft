@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
+import { bounded, diagnose, shouldDiagnoseRunFailure } from "./e2e-diag.mjs";
 
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
@@ -43,6 +44,9 @@ const browser = await puppeteer.launch({
 	headless: false,
 	args: ["--no-sandbox", "--ignore-gpu-blocklist", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--window-size=1280,720"],
 	defaultViewport: { width: 1280, height: 720 },
+	// A waitForFunction can occupy one CDP call for settle's full 120s;
+	// allow that wait, but fail sooner than the default 180s on a hung renderer.
+	protocolTimeout: 150000,
 });
 
 async function open(query) {
@@ -79,8 +83,10 @@ async function settle(page, label, chunks) {
 			chunks,
 		);
 	} catch (err) {
-		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
-		throw new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify(state)}`);
+		const state = await diagnose(browser, page, label, { edge, shots });
+		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets })}`);
+		error.diagnosed = true;
+		throw error;
 	}
 	// The stats the wait accepted, not a later reading: the world keeps changing.
 	return settled.jsonValue();
@@ -1067,6 +1073,17 @@ try {
 	await page.close();
 	await (await playthrough("ws")).close();
 } catch (err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		// Enumerating pages can itself require CDP; keep the failure path bounded.
+		const pages = await bounded(() => browser.pages(), 5000);
+		if (Array.isArray(pages)) {
+			for (const [i, page] of pages.entries()) {
+				if (page.url() !== "about:blank") await diagnose(browser, page, `run-timeout-${i}`, { edge, shots });
+			}
+		} else {
+			console.log(`DIAG run-timeout-pages ${JSON.stringify({ error: pages })}`);
+		}
+	}
 	check(false, "run completed", err.message);
 } finally {
 	await browser.close();
