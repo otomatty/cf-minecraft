@@ -456,22 +456,33 @@ async function inputs() {
 
 	// Stand above the spawn column and look straight down at it.
 	await page.evaluate((s) => window.__mc.setCamera(s[0], s[1] + 3, s[2], 0, 90), stats.spawn);
-	const targetLine = async () => {
-		await new Promise((r) => setTimeout(r, 400));
-		return page.evaluate(() => document.getElementById("hud").textContent.split("\n").find((l) => l.startsWith("Target")));
+	const checkTarget = async (expected, label) => {
+		try {
+			await page.waitForFunction(
+				expected => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")) === expected,
+				{ timeout: 5000 },
+				expected,
+			);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			const actual = await page.evaluate(() => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")));
+			check(false, label, `expected ${expected}; got ${actual ?? "<missing Target line>"}`);
+			return;
+		}
+		check(true, label);
 	};
 	const top = sy - 1;
 	const [topName, underName] = await page.evaluate(([x, y, z]) => {
 		return [window.__mc.stateName(window.__mc.getBlock(x, y, z)), window.__mc.stateName(window.__mc.getBlock(x, y - 1, z))];
 	}, [sx, top, sz]);
 	check(stats.generator === 2, "input: movement and mouse placement run on Terrain");
-	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below", await targetLine());
+	await checkTarget(`Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below");
 
 	await page.mouse.down({ button: "left" });
 	await page.mouse.up({ button: "left" });
 	await new Promise((r) => setTimeout(r, 300));
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
-	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next", await targetLine());
+	await checkTarget(`Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next");
 
 	await page.keyboard.press("Digit3");
 	await page.mouse.down({ button: "right" });
