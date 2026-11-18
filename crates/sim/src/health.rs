@@ -725,6 +725,22 @@ mod tests {
     }
 
     #[test]
+    fn eating_bread_consumes_one_and_restores_five_food() {
+        let bread = items::by_name("bread").unwrap();
+        let mut s = with_food(GameMode::Survival, 12, bread);
+        send(&mut s, C2S::UseItem);
+        advance(&mut s, 32);
+        assert_eq!(vitals(&s).food, 17);
+        assert_eq!(
+            s.clients[&1].inventory.selected_stack(),
+            Some(Stack {
+                item: bread,
+                count: 1
+            })
+        );
+    }
+
+    #[test]
     fn eating_repeats_every_32_ticks_and_clamps_food() {
         let mut s = with_food(GameMode::Survival, 15, 49);
         send(&mut s, C2S::UseItem);

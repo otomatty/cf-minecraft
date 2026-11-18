@@ -399,7 +399,8 @@ export class Renderer {
 		const tiles = textureNames.map((name, layer) => {
 			const pixels = name.startsWith("crack_") ? paintCracks(Number(name.slice(6))) : paintTexture(name);
 			this.texturePixels.set(name, pixels);
-			if (["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"].includes(name)) cutouts.add(layer);
+			if (["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass",
+				"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].includes(name)) cutouts.add(layer);
 			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
 		});
 		if (textureNames.includes("water") || textureNames.includes("water_flow")) {

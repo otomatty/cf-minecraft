@@ -77,3 +77,28 @@ result = { item = "iron_axe", count = 1 }
 pattern = ["#", "|", "|"]
 key = { "#" = "iron_ingot", "|" = "stick" }
 result = { item = "iron_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["##", " |", " |"]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_hoe", count = 1 }
+
+[[recipes]]
+pattern = ["##", " |", " |"]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_hoe", count = 1 }
+
+[[recipes]]
+pattern = ["##", " |", " |"]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_hoe", count = 1 }
+
+[[recipes]]
+pattern = ["##", " |", " |"]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_hoe", count = 1 }
+
+[[recipes]]
+pattern = ["###"]
+key = { "#" = "wheat" }
+result = { item = "bread", count = 1 }

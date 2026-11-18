@@ -10,6 +10,8 @@ textures = [
   "crafting_table_top", "crafting_table_side", "crafting_table_bottom",
   "furnace_front", "furnace_side", "furnace_top",
   "sandstone_top", "sandstone_bottom", "water_flow",
+  "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
+  "wheat_green", "wheat_ripe",
 ]
 legacy_count = 14
 
@@ -341,3 +343,35 @@ texture = "oak_leaves"
 cull_same = true
 opacity = 1
 tint = true
+
+[[blocks]]
+name = "farmland"
+id = 52
+drop = "dirt"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 12
+texture = "dirt"
+top = "farmland_dry"
+states = [
+  { properties = [["moist", "false"]] },
+  { properties = [["moist", "true"]], top = "farmland_moist" },
+]
+
+[[blocks]]
+name = "wheat"
+id = 54
+dig_ticks = 0
+model = "cross"
+layer = "cutout"
+texture = "wheat_sprout"
+states = [
+  { properties = [["age", "0"]] },
+  { properties = [["age", "1"]] },
+  { properties = [["age", "2"]], texture = "wheat_shoot" },
+  { properties = [["age", "3"]], texture = "wheat_shoot" },
+  { properties = [["age", "4"]], texture = "wheat_green" },
+  { properties = [["age", "5"]], texture = "wheat_green" },
+  { properties = [["age", "6"]], texture = "wheat_green" },
+  { properties = [["age", "7"]], texture = "wheat_ripe" },
+]

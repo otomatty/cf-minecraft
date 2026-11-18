@@ -43,6 +43,10 @@ fn exact_duration_zero_duration_and_drops_for_every_state() {
             continue;
         };
         let (mut s, [x, y, z]) = setup();
+        if blocks::is_wheat(state) {
+            s.world.set_block(x, y - 1, z, blocks::FARMLAND);
+        }
+        let started = s.game_time;
         s.world.set_block(x, y, z, state);
         start(&mut s, [x, y, z]);
         s.tick(); // elapsed=0
@@ -53,13 +57,48 @@ fn exact_duration_zero_duration_and_drops_for_every_state() {
         assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
         assert!(s.clients[&1].dig.is_none());
         assert_eq!(s.stats.blocks_changed, 1);
-        assert_eq!(s.entities.len(), usize::from(drops));
-        if drops {
-            assert_eq!(
-                s.entities.values().next().unwrap().item,
-                items::for_block(state).unwrap()
-            );
+        match state {
+            blocks::SHORT_GRASS => assert_grass_drop(&s, [x, y, z], started),
+            state if blocks::is_wheat(state) => assert_wheat_drops(&s, state),
+            _ => {
+                assert_eq!(s.entities.len(), usize::from(drops));
+                if drops {
+                    assert_eq!(
+                        s.entities.values().next().unwrap().item,
+                        items::for_block(state).unwrap()
+                    );
+                }
+            }
         }
+    }
+}
+
+fn assert_grass_drop(s: &Server, pos: [i32; 3], mined_at: i64) {
+    let mut same_roll = Server::new(s.seed, Generator::Flat);
+    same_roll.game_time = mined_at;
+    let hit = same_roll.block_drop_random(pos).next_int_bound(8) == 0;
+    assert_eq!(s.entities.len(), usize::from(hit));
+    if hit {
+        let drop = s.entities.values().next().unwrap();
+        assert_eq!(Some(drop.item), items::by_name("wheat_seeds"));
+        assert_eq!(drop.count, 1);
+    }
+}
+
+fn assert_wheat_drops(s: &Server, state: u16) {
+    let seeds = items::by_name("wheat_seeds").unwrap();
+    let wheat = items::by_name("wheat").unwrap();
+    let seed_drop = s.entities.values().find(|e| e.item == seeds).unwrap();
+    if state == blocks::RIPE_WHEAT {
+        assert!((1..=2).contains(&seed_drop.count));
+        assert_eq!(
+            s.entities.values().find(|e| e.item == wheat).unwrap().count,
+            1
+        );
+        assert_eq!(s.entities.len(), 2);
+    } else {
+        assert_eq!(seed_drop.count, 1);
+        assert_eq!(s.entities.len(), 1);
     }
 }
 
@@ -273,6 +312,7 @@ fn instant_digs_break_and_drop_before_same_tick_abort_or_replacement() {
             let (mut s, [x, y, z]) = setup();
             s.world.set_block(x, y, z, flower);
             s.world.set_block(x + 1, y, z, blocks::STONE);
+            let started = s.game_time;
             start(&mut s, [x, y, z]);
             if replace {
                 start(&mut s, [x + 1, y, z]);
@@ -284,17 +324,238 @@ fn instant_digs_break_and_drop_before_same_tick_abort_or_replacement() {
             assert_eq!(s.get_block(x + 1, y, z), Some(blocks::STONE));
             assert_eq!(s.stats.blocks_changed, 1);
             assert_eq!(s.stats.packets_rejected, 0);
-            assert_eq!(s.entities.len(), 1);
-            assert_eq!(
-                s.entities.values().next().unwrap().item,
-                items::for_block(flower).unwrap()
-            );
+            if flower == blocks::SHORT_GRASS {
+                assert_grass_drop(&s, [x, y, z], started);
+            } else {
+                assert_eq!(s.entities.len(), 1);
+                assert_eq!(
+                    s.entities.values().next().unwrap().item,
+                    items::for_block(flower).unwrap()
+                );
+            }
             assert_eq!(
                 s.clients[&1].dig.map(|d| d.pos),
                 replace.then_some([x + 1, y, z])
             );
         }
     }
+}
+
+#[test]
+fn short_grass_seed_rolls_change_after_misses_and_repeat_from_the_same_state() {
+    let run = || {
+        let (mut s, pos @ [x, y, z]) = setup();
+        (0..128)
+            .map(|_| {
+                s.world.set_block(x, y, z, blocks::SHORT_GRASS);
+                let mined_at = s.game_time;
+                let next_id = s.next_entity_id;
+                start(&mut s, pos);
+                s.tick();
+                assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+                assert_grass_drop(&s, pos, mined_at);
+                let hit = !s.entities.is_empty();
+                if !hit {
+                    assert_eq!(s.next_entity_id, next_id);
+                }
+                s.entities.clear();
+                hit
+            })
+            .collect::<Vec<_>>()
+    };
+    let results = run();
+    assert_eq!(results, run());
+    assert!(results.windows(2).any(|pair| pair == [false, true]));
+}
+
+#[test]
+fn digging_farmland_breaks_its_crop_and_drops_dirt_wheat_and_seeds() {
+    let (mut s, pos @ [x, y, z]) = setup();
+    s.world.set_block(x, y, z, blocks::FARMLAND);
+    s.world.set_block(x, y + 1, z, blocks::RIPE_WHEAT);
+    start(&mut s, pos);
+    for _ in 0..=12 {
+        s.tick();
+    }
+    assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+    assert_eq!(s.get_block(x, y + 1, z), Some(blocks::AIR));
+    assert_eq!(s.stats.blocks_changed, 2);
+    let dirt = s.entities.remove(&1).unwrap();
+    assert_eq!(Some(dirt.item), items::by_name("dirt"));
+    assert_eq!(dirt.count, 1);
+    assert_wheat_drops(&s, blocks::RIPE_WHEAT);
+}
+
+#[test]
+fn seeds_place_at_age_zero_only_in_air_above_farmland_in_both_modes() {
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        for (below, old, state, succeeds) in [
+            (blocks::FARMLAND, blocks::AIR, blocks::WHEAT, true),
+            (blocks::MOIST_FARMLAND, blocks::AIR, blocks::WHEAT, true),
+            (blocks::DIRT, blocks::AIR, blocks::WHEAT, false),
+            (blocks::FARMLAND, blocks::WATER, blocks::WHEAT, false),
+            (blocks::FARMLAND, blocks::SHORT_GRASS, blocks::WHEAT, false),
+            (blocks::FARMLAND, blocks::WHEAT + 1, blocks::WHEAT, false),
+            (blocks::FARMLAND, blocks::AIR, blocks::RIPE_WHEAT, false),
+        ] {
+            let (mut s, [x, y, z]) = setup();
+            s.set_game_mode(mode);
+            let seeds = Stack {
+                item: items::by_name("wheat_seeds").unwrap(),
+                count: 2,
+            };
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(seeds))
+                .unwrap();
+            s.world.set_block(x, y - 1, z, below);
+            s.world.set_block(x, y, z, old);
+            s.apply(1, C2S::SetBlock { x, y, z, state });
+            assert_eq!(s.stats.packets_rejected, u64::from(!succeeds));
+            assert_eq!(
+                s.get_block(x, y, z),
+                Some(if succeeds { state } else { old })
+            );
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack().unwrap().count,
+                if succeeds && mode == GameMode::Survival {
+                    1
+                } else {
+                    2
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn hoe_uses_grass_and_dirt_in_both_modes_and_interrupts_mining() {
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        for ground in [blocks::GRASS_BLOCK, blocks::DIRT] {
+            let (mut s, pos @ [x, y, z]) = setup();
+            s.set_game_mode(mode);
+            s.world.set_block(x, y, z, ground);
+            let hoe = Stack {
+                item: items::by_name("wooden_hoe").unwrap(),
+                count: 1,
+            };
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(hoe))
+                .unwrap();
+            s.clients.get_mut(&2).unwrap().dig = Some(Dig {
+                pos,
+                state: ground,
+                start: s.game_time,
+                ticks: 12,
+                drops: true,
+                stage: None,
+            });
+            s.apply(1, C2S::UseBlock { x, y, z });
+            assert_eq!(s.get_block(x, y, z), Some(blocks::FARMLAND));
+            assert_eq!(s.clients[&1].inventory.selected_stack(), Some(hoe));
+            assert_eq!(s.clients[&1].inventory.screen, inventory::Screen::None);
+            assert_eq!(s.stats.packets_rejected, 0);
+            assert_eq!(s.stats.blocks_changed, 1);
+            assert!(s.clients[&2].dig.is_none());
+            assert!(s.take_outbox().contains(&(
+                2,
+                S2C::BlockUpdate {
+                    x,
+                    y,
+                    z,
+                    state: blocks::FARMLAND,
+                }
+                .encode()
+            )));
+        }
+    }
+}
+
+#[test]
+fn hoe_use_rejections_resend_inventory_and_workstations_still_open() {
+    use inventory::Screen;
+    for (ground, above, item, offset, screen) in [
+        (blocks::DIRT, blocks::GLASS, "wooden_hoe", 0, Screen::None),
+        (blocks::DIRT, blocks::AIR, "iron_shovel", 0, Screen::None),
+        (blocks::DIRT, blocks::AIR, "stone_hoe", 10, Screen::None),
+        (blocks::STONE, blocks::AIR, "copper_hoe", 0, Screen::None),
+        (
+            blocks::DIRT,
+            blocks::AIR,
+            "iron_hoe",
+            0,
+            Screen::CraftingTable { pos: [0; 3] },
+        ),
+        (
+            blocks::CRAFTING_TABLE,
+            blocks::AIR,
+            "wooden_hoe",
+            0,
+            Screen::None,
+        ),
+        (blocks::FURNACE, blocks::AIR, "wooden_hoe", 0, Screen::None),
+    ] {
+        let (mut s, [x, y, z]) = setup();
+        let x = x + offset;
+        let pos = [x, y, z];
+        s.world.set_block(x, y, z, ground).unwrap();
+        s.world.set_block(x, y + 1, z, above);
+        let client = s.clients.get_mut(&1).unwrap();
+        let stack = Stack {
+            item: items::by_name(item).unwrap(),
+            count: 1,
+        };
+        client.inventory.set(0, Some(stack)).unwrap();
+        client.inventory.screen = screen;
+        client.inventory_dirty = false;
+        s.apply(1, C2S::UseBlock { x, y, z });
+        let (expected_screen, rejected) = match ground {
+            blocks::CRAFTING_TABLE => (Screen::CraftingTable { pos }, 0),
+            blocks::FURNACE => (Screen::Furnace { pos }, 0),
+            _ => (screen, 1),
+        };
+        assert_eq!(s.stats.packets_rejected, rejected);
+        assert_eq!(s.get_block(x, y, z), Some(ground));
+        assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+        assert_eq!(s.clients[&1].inventory.screen, expected_screen);
+        assert!(s.clients[&1].inventory_dirty);
+    }
+}
+
+#[test]
+fn creative_edits_break_unsupported_wheat_and_short_grass_without_drops() {
+    let (mut s, [x, y, z]) = setup();
+    s.set_game_mode(GameMode::Creative);
+    s.world.set_block(x, y, z, blocks::FARMLAND);
+    s.world.set_block(x, y + 1, z, blocks::RIPE_WHEAT);
+    s.apply(
+        1,
+        C2S::SetBlock {
+            x,
+            y,
+            z,
+            state: blocks::STONE,
+        },
+    );
+    assert_eq!(s.get_block(x, y + 1, z), Some(blocks::AIR));
+    s.world.set_block(x, y, z, blocks::SHORT_GRASS);
+    s.apply(
+        1,
+        C2S::SetBlock {
+            x,
+            y,
+            z,
+            state: blocks::AIR,
+        },
+    );
+    assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+    assert_eq!(s.stats.packets_rejected, 0);
+    assert!(s.entities.is_empty());
 }
 
 #[test]

@@ -52,11 +52,21 @@ export function placementState(
 	} else if (registry[current]?.name !== "air" && registry[current]?.name !== "water") {
 		return null;
 	}
-	if (block.model === "cross" && !registry[getBlock(x, y - 1, z)]?.occludes) return null;
+	if (block.model === "cross") {
+		const below = registry[getBlock(x, y - 1, z)];
+		if (block.name === "wheat") {
+			if (registry[current]?.name !== "air" || below?.name !== "farmland") return null;
+		} else if (!below?.occludes) return null;
+	}
 	return { x, y, z, state };
 }
 
 /** Right-click uses a table or furnace before attempting placement, including with an empty hand. */
 export function blockInteraction(blockName: string | undefined, shift: boolean): "open" | "place" {
     return (blockName === "crafting_table" || blockName === "furnace") && !shift ? "open" : "place";
+}
+
+export function canTill(heldName: string | undefined, blockName: string | undefined, aboveName: string | undefined): boolean {
+	return (blockName === "grass_block" || blockName === "dirt") && aboveName === "air"
+		&& heldName !== undefined && /^(wooden|stone|copper|iron)_hoe$/.test(heldName);
 }

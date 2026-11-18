@@ -30,6 +30,7 @@ fn tool_kind(s: &str) -> &'static str {
         "pickaxe" => "Pickaxe",
         "axe" => "Axe",
         "shovel" => "Shovel",
+        "hoe" => "Hoe",
         _ => panic!("registry: unknown tool kind {s}"),
     }
 }
@@ -100,6 +101,9 @@ struct State {
     model: Option<String>,
     occludes: Option<bool>,
     opacity: Option<u8>,
+    texture: Option<String>,
+    #[serde(alias = "up")]
+    top: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,7 +157,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> T {
     toml::from_str(&data).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 impl Block {
-    fn textures(&self, atlas: &[String]) -> [u16; 6] {
+    fn textures(&self, state: &State, atlas: &[String]) -> [u16; 6] {
         let resolve = |name: &String| {
             atlas
                 .iter()
@@ -171,6 +175,8 @@ impl Block {
             &self.south,
             &self.west,
             &self.east,
+            &state.texture,
+            &state.top,
         ]
         .into_iter()
         .flatten()
@@ -179,7 +185,11 @@ impl Block {
         }
         [
             &self.bottom,
-            &self.top,
+            if state.top.is_some() {
+                &state.top
+            } else {
+                &self.top
+            },
             &self.north,
             &self.south,
             &self.west,
@@ -191,6 +201,7 @@ impl Block {
             let name = face
                 .as_ref()
                 .or(if i >= 2 { self.side.as_ref() } else { None })
+                .or(state.texture.as_ref())
                 .or(self.texture.as_ref())
                 .unwrap_or_else(|| {
                     panic!(
@@ -348,7 +359,6 @@ fn generate(root: &Path, dest: &Path) {
         } else {
             &b.states
         };
-        let tex = b.textures(textures);
         let tint = b.tint();
         let layer = match b.layer.as_str() {
             "opaque" => "Opaque",
@@ -372,6 +382,7 @@ fn generate(root: &Path, dest: &Path) {
         )
         .unwrap();
         for s in states {
+            let tex = b.textures(s, textures);
             let m = s.model.as_deref().unwrap_or(&b.model);
             let occludes = s
                 .occludes
@@ -393,7 +404,9 @@ fn generate(root: &Path, dest: &Path) {
             let mut keys = BTreeSet::new();
             for (key, value) in &s.properties {
                 identifier(key);
-                identifier(value);
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    identifier(value);
+                }
                 assert!(
                     keys.insert(key),
                     "blocks.toml: {}: duplicate property {key}",

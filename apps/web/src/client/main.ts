@@ -22,7 +22,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
-import { blockInteraction, placementState } from "./placement.ts";
+import { blockInteraction, canTill, placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { interpolateEntity } from "./entities.ts";
@@ -499,7 +499,7 @@ async function main(): Promise<void> {
 	function paintItemIcon(c: HTMLCanvasElement, id?: number): void {
 		const item = items.find(item => item.id === id);
 		paintIcon(c, item?.block ?? 0);
-		if (item?.block == null && item?.texture) {
+		if (item?.texture) {
 			c.width = c.height = TEX_SIZE;
 			const pixels = renderer.texturePixels.get(item.texture);
 			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
@@ -1040,11 +1040,14 @@ async function main(): Promise<void> {
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
 			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
-			if (blockInteraction(block?.name, shift) === "open") {
+			const open = blockInteraction(block?.name, shift) === "open";
+			const held = items.find(item => item.id === core.inventory[selectedSlot]?.item);
+			const above = registry[core.getBlock(hit.x, hit.y + 1, hit.z)];
+			if (open || canTill(held?.name, block?.name, above?.name)) {
 				if (!repeat) {
 					heldButtons.delete(2);
 					sendPosition();
-					closePending = updateClosePending(closePending, { type: "use" });
+					if (open) closePending = updateClosePending(closePending, { type: "use" });
 					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
 				}
 				return;
@@ -1286,12 +1289,15 @@ async function main(): Promise<void> {
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
-		const renderItems = core.entities.map(entity => ({
-			position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
-			texture: itemTextures.get(entity.item) ?? 0,
-			flat: items.find(item => item.id === entity.item)?.block == null,
-			light: core.entityLight(entity.position),
-		}));
+		const renderItems = core.entities.map(entity => {
+			const item = items.find(item => item.id === entity.item);
+			return {
+				position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
+				texture: itemTextures.get(entity.item) ?? 0,
+				flat: item?.texture != null || item?.block == null,
+				light: core.entityLight(entity.position),
+			};
+		});
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];

@@ -836,26 +836,34 @@ impl Server {
             }
             C2S::UseBlock { x, y, z } => {
                 let client = &self.clients[&id];
+                let pos = [x, y, z];
                 let allowed = client.joined
                     && client.inventory.screen == inventory::Screen::None
-                    && self.within_reach(client.pos, [x, y, z])
-                    && matches!(
-                        self.world.get_block(x, y, z),
-                        Some(blocks::CRAFTING_TABLE | blocks::FURNACE)
-                    );
+                    && self.within_reach(client.pos, pos);
+                let target = allowed.then(|| self.world.get_block(x, y, z)).flatten();
+                let held_tool = client
+                    .inventory
+                    .selected_stack()
+                    .and_then(|stack| items::info(stack.item))
+                    .and_then(|item| item.tool);
                 let client = self.clients.get_mut(&id).unwrap();
-                if allowed {
-                    client.inventory.screen =
-                        if self.world.get_block(x, y, z) == Some(blocks::FURNACE) {
-                            self.furnaces.entry([x, y, z]).or_default();
-                            inventory::Screen::Furnace { pos: [x, y, z] }
-                        } else {
-                            inventory::Screen::CraftingTable { pos: [x, y, z] }
-                        };
-                } else {
-                    self.stats.packets_rejected += 1;
-                }
                 client.inventory_dirty = true;
+                match target {
+                    Some(blocks::FURNACE) => {
+                        self.furnaces.entry(pos).or_default();
+                        client.inventory.screen = inventory::Screen::Furnace { pos };
+                    }
+                    Some(blocks::CRAFTING_TABLE) => {
+                        client.inventory.screen = inventory::Screen::CraftingTable { pos };
+                    }
+                    Some(blocks::GRASS_BLOCK | blocks::DIRT)
+                        if held_tool.is_some_and(|tool| tool.kind == items::ToolKind::Hoe)
+                            && self.world.get_block(x, y + 1, z) == Some(blocks::AIR) =>
+                    {
+                        self.change_block_naturally(pos, blocks::FARMLAND);
+                    }
+                    _ => self.stats.packets_rejected += 1,
+                }
             }
             C2S::CloseInventory => {
                 self.return_crafting(id);
@@ -992,11 +1000,8 @@ impl Server {
                 self.abort_digs_at([x, y, z]);
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
-                        if let Some(mut item) = items::mining_drop(old).filter(|_| drops) {
-                            if old == blocks::OAK_LEAVES && self.leaf_drops_apple() {
-                                item = items::by_name("apple").unwrap();
-                            }
-                            self.spawn_block_drop(item, [x, y, z], 0.25);
+                        if drops {
+                            self.spawn_mining_drops([x, y, z], old);
                         }
                     } else {
                         let client = self.clients.get_mut(&id).unwrap();
@@ -1006,7 +1011,37 @@ impl Server {
                 }
                 self.stats.blocks_changed += 1;
                 self.broadcast_block(x, y, z, state);
+                self.check_wheat_above([x, y, z], state);
             }
+        }
+    }
+
+    fn block_drop_random(&self, pos: [i32; 3]) -> jmath::JavaRandom {
+        let mut hash = Fnv64::new();
+        hash.bytes(&self.seed.to_be_bytes());
+        hash.bytes(&self.game_time.to_be_bytes());
+        for axis in pos {
+            hash.bytes(&axis.to_be_bytes());
+        }
+        jmath::JavaRandom::new(jmath::mix_stafford13(hash.finish()) as i64)
+    }
+
+    fn spawn_mining_drops(&mut self, pos: [i32; 3], state: u16) {
+        if state == blocks::SHORT_GRASS {
+            if self.block_drop_random(pos).next_int_bound(8) == 0 {
+                self.spawn_block_drop(items::by_name("wheat_seeds").unwrap(), 1, pos, 0.25);
+            }
+        } else if let Some(mut item) = items::mining_drop(state) {
+            let count = if state == blocks::RIPE_WHEAT {
+                self.spawn_block_drop(items::by_name("wheat").unwrap(), 1, pos, 0.25);
+                1 + self.block_drop_random(pos).next_int_bound(2) as u8
+            } else {
+                if state == blocks::OAK_LEAVES && self.leaf_drops_apple() {
+                    item = items::by_name("apple").unwrap();
+                }
+                1
+            };
+            self.spawn_block_drop(item, count, pos, 0.25);
         }
     }
 
@@ -1016,7 +1051,7 @@ impl Server {
         roll.next_int_bound(10) == 0
     }
 
-    fn spawn_block_drop(&mut self, item: u16, [x, y, z]: [i32; 3], height: f64) {
+    fn spawn_block_drop(&mut self, item: u16, count: u8, [x, y, z]: [i32; 3], height: f64) {
         let mut random = jmath::JavaRandom::new(self.seed.wrapping_add(self.next_entity_id as i64));
         let velocity = [
             random.next_double() * 0.1 - 0.05,
@@ -1025,7 +1060,7 @@ impl Server {
         ];
         self.spawn_item(
             item,
-            1,
+            count,
             [x as f64 + 0.5, y as f64 + height, z as f64 + 0.5],
             velocity,
             10,

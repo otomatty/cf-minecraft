@@ -25,9 +25,10 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
-	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel)$/.exec(name);
+	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.exec(name);
 	if (tool) return paintTool(tool[1], tool[2]);
-	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name) ?? equipmentTexture(name);
+	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
+		?? cropTexture(name) ?? equipmentTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -126,7 +127,44 @@ function hashName(name: string): number {
 const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
 const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
 
+function cropTexture(name: string): Uint8Array | undefined {
+	const stage = ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].indexOf(name);
+	if (stage < 0) return undefined;
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	const paint = (x: number, y: number, color: Rgb) =>
+		pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
+	for (const [i, base] of [3, 6, 9, 12].entries()) {
+		const tip = 12 - stage * 3 + i % 2;
+		const lean = i % 2 === 0 ? -1 : 1;
+		for (let y = tip; y < TEX_SIZE; y++) {
+			const x = y < 12 ? base + lean : base;
+			paint(x, y, stage === 3 ? [154, 119, 51] : [56, 108, 49]);
+			if (stage === 3 && y < tip + 5) {
+				paint(x + lean, y, y % 2 ? [221, 164, 72] : [247, 198, 101]);
+				paint(x, y, [191, 139, 59]);
+			} else if (y === tip + 1 || (stage > 0 && y === 12)) {
+				paint(x + lean, y, [100, 156, 61]);
+			}
+		}
+	}
+	return pixels;
+}
+
+const furrow = (color: Rgb): Painter => (x, y, rand) => {
+	const ridge = (x + Math.floor((y + x % 3) / 5)) % 5;
+	return shade(color, (ridge === 0 ? .65 : ridge === 1 ? .83 : 1.1) + rand() * .19);
+};
+
 const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter> = {
+	farmland_dry: () => furrow([137, 91, 58]),
+	farmland_moist: () => furrow([86, 56, 48]),
+	wheat_seeds: () => (x, y) => (x + y) % 3 === 0 ? [220, 195, 107] : [158, 125, 56],
+	wheat: () => (x, y) => x === 7 || y > 10 ? [154, 104, 44] : [230, 180, 72],
+	bread: () => (x, y) => {
+		if (y >= 11 || x === 2 || x === 13) return [151, 79, 38];
+		if (y < 8 && (x + y === 12 || x + y === 16)) return [251, 211, 139];
+		return shade([222, 147, 67], 1.1 - y * .018);
+	},
 	apple: () => (x, y) => {
 		if (y <= 4 && x >= 9) return [85, 157, 58];
 		if (y <= 4) return [111, 67, 39];
@@ -155,6 +193,18 @@ function equipmentTexture(name: string): Uint8Array | undefined {
 			const [r, g, b] = paint(x, y, rand);
 			let visible = true;
 			switch (name) {
+				case "wheat_seeds":
+					visible = [[4, 5], [9, 4], [7, 9], [11, 10], [4, 12]]
+						.some(([sx, sy]) => (x === sx && y === sy) || (x === sx + 1 && y === sy - 1));
+					break;
+				case "wheat":
+					visible = (x === 7 && y >= 2 && y <= 14)
+						|| (x >= 5 && x <= 9 && y >= 3 && y <= 10 && (x + y) % 3 !== 0);
+					break;
+				case "bread":
+					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12 && x + y >= 8 && x - y <= 7
+						&& x + y <= 24;
+					break;
 				case "apple":
 					visible = (x === 8 && y >= 2 && y <= 4)
 						|| (x >= 9 && x <= 12 && y >= 2 && y <= 4 && x + y <= 14)
@@ -191,14 +241,15 @@ export function paintCracks(stage: number): Uint8Array {
 	return pixels;
 }
 
-/** Original upright silhouettes: a two-pixel grip and three distinct heads. */
+/** Original upright silhouettes: a two-pixel grip and distinct heads. */
 function paintTool(tier: string, kind: string): Uint8Array {
 	const colors: Record<string, Rgb> = { wooden: [168, 115, 58], stone: [120, 134, 148], copper: [209, 119, 73], iron: [204, 221, 226] };
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-		const handle = (x === 7 || x === 8) && y >= 5;
+		const handle = (x === 7 || x === 8) && y >= (kind === "hoe" ? 4 : 5);
 		const head = kind === "pickaxe" ? ((y === 3 || y === 4) && x >= 3 && x <= 12) || (y === 5 && (x === 3 || x === 12))
 			: kind === "axe" ? x >= 4 && x <= 9 && y >= 2 && y <= 6 && (x !== 4 || y >= 3)
+			: kind === "hoe" ? (y === 3 && x >= 7 && x <= 12) || (x >= 11 && x <= 12 && y >= 4 && y <= 6)
 			: x >= 5 && x <= 10 && y >= 2 && y <= 6 && (y !== 6 || x >= 6 && x <= 9);
 		if (!handle && !head) continue;
 		const color = head ? shade(colors[tier], (x + y) % 3 === 0 ? .82 : 1) : x === 7 ? [111, 75, 43] : [151, 101, 54];

@@ -613,8 +613,8 @@ async function partialModels() {
 		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
 		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
-		const toolNames = ["wooden", "stone", "copper", "iron"].flatMap(tier => ["pickaxe", "axe", "shovel"].map(kind => `${tier}_${kind}`));
-		check(toolNames.every(name => names.filter(n => n === name).length === 1), "tools: picker includes all twelve tools once");
+		const toolNames = ["wooden", "stone", "copper", "iron"].flatMap(tier => ["pickaxe", "axe", "shovel", "hoe"].map(kind => `${tier}_${kind}`));
+		check(toolNames.every(name => names.filter(n => n === name).length === 1), "tools: picker includes all sixteen tools once");
 		for (const name of toolNames) {
 			await page.click(`#block-grid [data-block="${name}"]`);
 			await waitFor(`authoritative tool slot ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
@@ -1316,6 +1316,52 @@ async function furnaceSmelting() {
     } finally { await page.close(); }
 }
 
+async function farming() {
+	const { page, errors } = await open(`server=local&world=e2e-farm-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "farming", chunksInView(2));
+		await resumePointerLock(page, "farming: initial pointer lock");
+		for (const [slot, name] of [[0, "wooden_hoe"], [1, "wheat_seeds"]]) {
+			await page.keyboard.press(`Digit${slot + 1}`);
+			await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, slot);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			await page.mouse.move(640, 360);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+			await resumePointerLock(page, `farming: resume after selecting ${name}`);
+		}
+		const target = [Math.floor(spawn[0]) + 1, Math.floor(spawn[1]) - 1, Math.floor(spawn[2])];
+		await page.keyboard.press("Digit1");
+		await page.waitForFunction(() => window.__mc.stats().selectedSlot === 0);
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), target);
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("grass_block") && api.getBlock(x, y + 1, z) === 0;
+		}, {}, target);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("farmland[moist=false]");
+		}, {}, target);
+		check(true, "farming: right-click with hoe tills grass into dry farmland");
+		await page.keyboard.press("Digit2");
+		await page.waitForFunction(() => window.__mc.stats().selectedSlot === 1);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y + 1, z) === api.stateId("wheat[age=0]");
+		}, {}, target);
+		check(true, "farming: right-click with seeds plants age-zero wheat");
+		check(errors.length === 0, "farming: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "farming", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function survivalInventory() {
 	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -1599,6 +1645,7 @@ try {
 	await survivalHunger();
 	await survivalCrafting();
 	await leafDecay();
+	await farming();
 	await furnaceSmelting();
 	await dayNight();
 	await undergroundLighting();

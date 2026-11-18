@@ -5,6 +5,7 @@ pub enum ToolKind {
     Pickaxe,
     Axe,
     Shovel,
+    Hoe,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tool {
@@ -56,9 +57,9 @@ fn placed_item(state: BlockState) -> Option<u16> {
         })
         .map(|item| item.id)
 }
-/// Item produced by mining; tool and tier eligibility is checked separately by `mining`.
+/// Default item produced by mining. The simulation handles random drops.
 pub fn mining_drop(state: BlockState) -> Option<u16> {
-    if state == blocks::AIR || !blocks::is_valid(state) {
+    if matches!(state, blocks::AIR | blocks::SHORT_GRASS) || !blocks::is_valid(state) {
         return None;
     }
     explicit_mining_drop(state).or_else(|| placed_item(state))
@@ -75,10 +76,16 @@ fn explicit_mining_drop(state: BlockState) -> Option<u16> {
 mod tests {
     use super::*;
     #[test]
-    fn only_apple_restores_food() {
+    fn apple_and_bread_restore_food() {
         assert_eq!(by_name("apple"), Some(49));
+        assert_eq!(by_name("bread"), Some(56));
         for item in ITEMS {
-            assert_eq!(food(item.id), (item.id == 49).then_some(4));
+            let expected = match item.id {
+                49 => Some(4),
+                56 => Some(5),
+                _ => None,
+            };
+            assert_eq!(food(item.id), expected);
         }
         assert_eq!(food(0), None);
     }
@@ -90,10 +97,14 @@ mod tests {
             (blocks::COBBLESTONE, "cobblestone"),
             (blocks::OAK_LOG, "oak_log"),
             (blocks::OAK_SLAB + 1, "oak_slab"),
+            (blocks::FARMLAND, "dirt"),
+            (blocks::MOIST_FARMLAND, "dirt"),
+            (blocks::RIPE_WHEAT, "wheat_seeds"),
         ] {
             assert_eq!(mining_drop(state), by_name(name));
         }
         assert_eq!(mining_drop(blocks::AIR), None);
+        assert_eq!(mining_drop(blocks::SHORT_GRASS), None);
         assert_eq!(mining_drop(blocks::COUNT), None);
         let stone = for_block(blocks::STONE).unwrap();
         assert_eq!(Some(stone), by_name("stone"));
@@ -108,6 +119,8 @@ mod tests {
             let id = for_block(state).unwrap();
             let name = match state {
                 blocks::OAK_LEAVES | blocks::PLACED_OAK_LEAVES => "oak_leaves",
+                state if blocks::is_farmland(state) => "dirt",
+                state if blocks::is_wheat(state) => "wheat_seeds",
                 _ => blocks::info(state).name,
             };
             assert_eq!(info(id).unwrap().name, name);
@@ -146,6 +159,8 @@ mod mining_tests {
             (blocks::DIRT, None, Some((12, true))),
             (blocks::DIRT, Some("wooden_shovel"), Some((6, true))),
             (blocks::DIRT, Some("iron_axe"), Some((12, true))),
+            (blocks::DIRT, Some("iron_hoe"), Some((12, true))),
+            (blocks::FARMLAND, Some("wooden_shovel"), Some((6, true))),
             (blocks::STONE, None, Some((140, false))),
             (blocks::STONE, Some("wooden_axe"), Some((140, false))),
             (blocks::STONE, Some("wooden_pickaxe"), Some((35, true))),

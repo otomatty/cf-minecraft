@@ -99,6 +99,17 @@ pub fn is_oak_leaves(state: BlockState) -> bool {
     matches!(state, OAK_LEAVES | PLACED_OAK_LEAVES)
 }
 
+pub const MOIST_FARMLAND: BlockState = FARMLAND + 1;
+pub const RIPE_WHEAT: BlockState = WHEAT + 7;
+
+pub fn is_farmland(state: BlockState) -> bool {
+    matches!(state, FARMLAND | MOIST_FARMLAND)
+}
+
+pub fn is_wheat(state: BlockState) -> bool {
+    (WHEAT..=RIPE_WHEAT).contains(&state)
+}
+
 /// A block owns a contiguous range; its first state is the inventory default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
@@ -295,8 +306,11 @@ pub fn collision_boxes(
     shape_boxes(state, neighbor, ShapePurpose::Collision, |b| boxes.push(b));
     boxes
 }
-/// Server placement policy: any replacement is allowed; plants need support.
-pub fn can_place(_old: BlockState, new: BlockState, below: BlockState) -> bool {
+/// Server placement policy: plants need support and wheat is planted as seed.
+pub fn can_place(old: BlockState, new: BlockState, below: BlockState) -> bool {
+    if is_wheat(new) {
+        return new == WHEAT && old == AIR && is_farmland(below);
+    }
     is_valid(new) && (info(new).model != Model::Cross || occludes(below))
 }
 
@@ -353,9 +367,11 @@ mod tests {
                 COBBLESTONE_STAIRS,
                 OAK_FENCE,
                 PLACED_OAK_LEAVES,
+                FARMLAND,
+                WHEAT,
                 COUNT
             ),
-            (23, 31, 39, 51, 52)
+            (23, 31, 39, 51, 52, 54, 62)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);
