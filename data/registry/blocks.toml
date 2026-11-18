@@ -7,6 +7,7 @@ textures = [
   "yellow_flower", "short_grass",
   "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
   "coal_ore", "copper_ore", "iron_ore", "gold_ore",
+  "sandstone_top", "sandstone_bottom", "water_flow",
 ]
 legacy_count = 14
 
@@ -28,7 +29,7 @@ id = 2
 top = "grass_block_top"
 bottom = "dirt"
 side = "grass_block_side"
-tint = ["top"]
+tint = ["top", "side"]
 
 [[blocks]]
 name = "dirt"
@@ -94,6 +95,7 @@ name = "water"
 id = 13
 layer = "translucent"
 texture = "water"
+side = "water_flow"
 solid = false
 opacity = 1
 tint = true
@@ -186,7 +188,9 @@ texture = "snow_block"
 [[blocks]]
 name = "sandstone"
 id = 41
-texture = "sandstone"
+side = "sandstone"
+top = "sandstone_top"
+bottom = "sandstone_bottom"
 
 [[blocks]]
 name = "gravel"

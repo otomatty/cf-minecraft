@@ -26,7 +26,7 @@ import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
-import { TEX_SIZE, textureIconPixels } from "./textures.ts";
+import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
 
 const EYE_HEIGHT = 1.62;
@@ -354,11 +354,16 @@ async function main(): Promise<void> {
 	let hotbarBlocks = defaultHotbar(registry);
 	try { hotbarBlocks = loadHotbar(localStorage, registry); } catch { /* Keep defaults if storage access throws. */ }
 	let selectedSlot = 0;
+	const icons = new Map<number, ImageData>();
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
-		c.width = c.height = TEX_SIZE;
+		c.width = c.height = ICON_SIZE;
 		const info = registry[state];
-		const pixels = renderer.texturePixels.get(info.texture);
-		if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(info.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+		let icon = icons.get(state);
+		if (!icon) {
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels), ICON_SIZE, ICON_SIZE);
+			icons.set(state, icon);
+		}
+		c.getContext("2d")!.putImageData(icon, 0, 0);
 		c.title = info.name;
 	}
 	for (const block of hotbarBlocks) {

@@ -9,6 +9,9 @@ export interface BlockStateInfo {
 	model: "cube" | "boxes" | "cross" | "stairs" | "fence";
 	occludes: boolean;
 	texture: string;
+	/** Texture names in mesher order: down, up, north, south, west, east. */
+	faces: [string, string, string, string, string, string];
+	boxes: [[number, number, number], [number, number, number]][];
 }
 
 /**

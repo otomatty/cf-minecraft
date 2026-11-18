@@ -17,7 +17,9 @@ import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTr
 import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
-import { downsample, GRASS_TINT, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
+import { downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
+import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
+import { grassSideAtlasPixels } from "./flora-textures.ts";
 
 const MAX_SECTIONS = 16384;
 /** A fence has a post and up to eight rails, with six faces per box. */
@@ -41,7 +43,7 @@ struct Globals {
 	camFrac: vec4<f32>,
 	fogColor: vec4<f32>,
 	fogRange: vec4<f32>,
-	grassTint: vec4<f32>,
+	waterLayers: vec4<u32>,
 	skyColor: vec4<f32>,
 	sunset: vec4<f32>,
 	celestial: vec4<f32>,
@@ -71,6 +73,28 @@ struct VOut {
 	@location(5) light: vec2<f32>,
 };
 
+// Recover the owning cube from its face and unrotated UV, so all four vertices
+// choose the same turn, including faces on section boundaries and at negative coordinates.
+fn rotatedBlockUV(world: vec3<i32>, face: u32, uv: vec2<f32>) -> vec2<f32> {
+	var corner: vec3<f32>;
+	switch face {
+		case 0u: { corner = vec3<f32>(uv.x, 0.0, 1.0 - uv.y); }
+		case 1u: { corner = vec3<f32>(uv.x, 1.0, uv.y); }
+		case 2u: { corner = vec3<f32>(1.0 - uv.x, 1.0 - uv.y, 0.0); }
+		case 3u: { corner = vec3<f32>(uv.x, 1.0 - uv.y, 1.0); }
+		case 4u: { corner = vec3<f32>(0.0, 1.0 - uv.y, uv.x); }
+		default: { corner = vec3<f32>(1.0, 1.0 - uv.y, 1.0 - uv.x); }
+	}
+	let p = bitcast<vec3<u32>>(world - vec3<i32>(corner));
+	let seed = (p.x * 374761393u) ^ (p.y * 668265263u) ^ (p.z * 2246822519u) ^ face;
+	switch (((seed ^ (seed >> 13u)) * 1274126177u) >> 30u) {
+		case 1u: { return vec2<f32>(1.0 - uv.y, uv.x); }
+		case 2u: { return vec2<f32>(1.0) - uv; }
+		case 3u: { return vec2<f32>(uv.y, 1.0 - uv.x); }
+		default: { return uv; }
+	}
+}
+
 @vertex
 fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut {
 	var local = vec3<f32>(f32(a.x & 511u), f32((a.x >> 9u) & 511u), f32((a.x >> 18u) & 511u)) / 16.0;
@@ -91,11 +115,17 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	out.shade = faceShade[face] * aoShade[ao];
 	out.rel = rel;
 	out.layer = a.y & 4095u;
+	if (__ISOTROPIC_FACE__) {
+		out.uv = rotatedBlockUV(origins[section].xyz + vec3<i32>(local), face, out.uv);
+	}
 	out.tintColor = vec3<f32>(1.0);
 	if (((a.y >> 12u) & 1u) == 1u) {
 		var tintLayer = 0;
 		if (out.layer == __LEAVES_LAYER__u) { tintLayer = 1; }
-		if (out.layer == __WATER_LAYER__u) { tintLayer = 2; }
+		if (out.layer == __WATER_LAYER__u || out.layer == __FLOW_LAYER__u) {
+			tintLayer = 2;
+			out.layer = select(g.waterLayers.x, g.waterLayers.y, out.layer == __FLOW_LAYER__u);
+		}
 		let worldXZ = vec2<f32>(origins[section].xz & vec2<i32>(1023)) + local.xz;
 		let uv = worldXZ / 4.0 / 256.0;
 		let step = 1.0 / 256.0;
@@ -116,7 +146,12 @@ override renderLayer: u32 = 0u;
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
 	var color = pixel.rgb;
-	color = color * in.tintColor;
+	if (in.layer == __GRASS_SIDE_LAYER__u) {
+		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
+		color += pixel.a * in.tintColor;
+	} else {
+		color = color * in.tintColor;
+	}
 	color = color * in.shade * textureSample(lightTex, lightSampler, in.light).rgb;
 	if (renderLayer == 1u && pixel.a < 0.5) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
@@ -127,9 +162,17 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
 /** Resolve tint layers from the same ordered names used to upload the texture array. */
 export function terrainShader(textureNames: readonly string[]): string {
+	const matches = (names: string[]) => textureNames.flatMap((name, layer) =>
+		names.includes(name) ? [`out.layer == ${layer}u`] : []).join(" || ") || "false";
+	// Bedrock's blocks.json marks these cube faces as isotropic.
+	const allFaces = matches(["dirt", "coarse_dirt", "sand", "snow_block"]);
+	const caps = matches(["grass_block_top", "sandstone_top", "sandstone_bottom", "oak_leaves"]);
 	// Missing names use an impossible packed texture index rather than tinting layer zero.
 	return TERRAIN_WGSL
+		.replace("__ISOTROPIC_FACE__", `${allFaces} || (face <= 1u && (${caps}))`)
+		.replace("__GRASS_SIDE_LAYER__", String(textureNames.indexOf("grass_block_side") >>> 0))
 		.replace("__LEAVES_LAYER__", String(textureNames.indexOf("oak_leaves") >>> 0))
+		.replaceAll("__FLOW_LAYER__", String(textureNames.indexOf("water_flow") >>> 0))
 		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
 }
 
@@ -140,7 +183,7 @@ struct Globals {
 	camFrac: vec4<f32>,
 	fogColor: vec4<f32>,
 	fogRange: vec4<f32>,
-	grassTint: vec4<f32>,
+	waterLayers: vec4<u32>,
 	skyColor: vec4<f32>,
 	sunset: vec4<f32>,
 	celestial: vec4<f32>,
@@ -309,6 +352,7 @@ export class Renderer {
 	private readonly globalsData = new ArrayBuffer(GLOBALS_BYTES);
 	private readonly globalsF32 = new Float32Array(this.globalsData);
 	private readonly globalsI32 = new Int32Array(this.globalsData);
+	private readonly firstWaterFrame: number;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
@@ -341,25 +385,36 @@ export class Renderer {
 		this.quadIndices = device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
 		device.queue.writeBuffer(this.quadIndices, 0, indices);
 
+		this.firstWaterFrame = textureNames.length;
+		const cutouts = new Set<number>();
+		const tiles = textureNames.map((name, layer) => {
+			const pixels = paintTexture(name);
+			this.texturePixels.set(name, pixels);
+			if (["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"].includes(name)) cutouts.add(layer);
+			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
+		});
+		if (textureNames.includes("water") || textureNames.includes("water_flow")) {
+			for (const flowing of [false, true]) {
+				for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) tiles.push(waterTextureFrame(frame, flowing));
+			}
+		}
 		const texture = device.createTexture({
-			size: [TEX_SIZE, TEX_SIZE, Math.max(2, textureNames.length)],
+			size: [TEX_SIZE, TEX_SIZE, Math.max(2, tiles.length)],
 			format: "rgba8unorm",
 			mipLevelCount: MIP_LEVELS,
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
-		textureNames.forEach((name, layer) => {
-			let pixels = paintTexture(name);
-			this.texturePixels.set(name, pixels);
-			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS; level++, size >>= 1) {
-				device.queue.writeTexture(
-					{ texture, mipLevel: level, origin: [0, 0, layer] },
-					pixels,
-					{ bytesPerRow: size * 4 },
-					[size, size, 1],
-				);
-				if (size > 1) pixels = downsample(pixels, size, ["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"].includes(name));
-			}
-		});
+		// Upload the entire array in five writes, including both animation strips.
+		for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS && tiles.length; level++, size >>= 1) {
+			const tileBytes = size * size * 4;
+			const mip = new Uint8Array(tiles.length * tileBytes);
+			tiles.forEach((pixels, layer) => {
+				mip.set(pixels, layer * tileBytes);
+				if (size > 1) tiles[layer] = downsample(pixels, size, cutouts.has(layer));
+			});
+			device.queue.writeTexture({ texture, mipLevel: level }, mip,
+				{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, tiles.length]);
+		}
 		const sampler = device.createSampler({
 			magFilter: "nearest",
 			minFilter: "nearest",
@@ -586,7 +641,9 @@ export class Renderer {
 		f.set([...sky.fogColor, 1], 24);
 		const fogEnd = viewDistance * 16;
 		f.set([fogEnd * 0.75, fogEnd, 0, 0], 28);
-		f.set([GRASS_TINT[0] / 255, GRASS_TINT[1] / 255, GRASS_TINT[2] / 255, 1], 32);
+		const tick = Math.floor(dayTime);
+		i[32] = this.firstWaterFrame + Math.floor(tick / 2) % WATER_FRAME_COUNT;
+		i[33] = this.firstWaterFrame + WATER_FRAME_COUNT + tick % WATER_FRAME_COUNT;
 		f.set([...sky.skyColor, sky.skyBrightness], 36);
 		f.set([...sky.sunsetColor, sky.sunsetStrength], 40);
 		f.set([sky.angle, sky.starBrightness, sky.moonPhase, 0], 44);

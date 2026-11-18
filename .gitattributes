@@ -1,0 +1,3 @@
+# Registry fixture edits and the snapshot comparison use literal LF delimiters.
+data/registry/*.toml text eol=lf
+crates/world/tests/registry-v1.txt text eol=lf

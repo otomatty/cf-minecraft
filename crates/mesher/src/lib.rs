@@ -760,8 +760,14 @@ mod tests {
         }
         let mut out = Vec::new();
         assert_eq!(mesh_section_layers(&p, None, &mut out), [6, 6, 6]);
-        for (quads, texture) in out.chunks(48).zip([0, 13, 14]) {
-            assert!(quads.chunks(2).all(|v| v[1] & 4095 == texture));
+        for (quads, state) in out
+            .chunks(48)
+            .zip([blocks::STONE, blocks::OAK_LEAVES, blocks::WATER])
+        {
+            for vertex in quads.chunks_exact(2) {
+                let face = ((vertex[0] >> 27) & 7) as usize;
+                assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[face]));
+            }
         }
     }
 
@@ -939,11 +945,11 @@ mod tests {
             }
         }
         assert_eq!(faces_seen, [true; 6]);
-        // Grass: dirt below, tinted grayscale top, side texture around.
+        // Both the turf and the fringe on the side use the biome colour.
         let layer_of = |f: usize| quads.iter().find(|q| q[0].face == f).unwrap()[0];
         assert_eq!((layer_of(DOWN).layer, layer_of(DOWN).tint), (3, false));
         assert_eq!((layer_of(UP).layer, layer_of(UP).tint), (1, true));
-        assert_eq!((layer_of(EAST).layer, layer_of(EAST).tint), (2, false));
+        assert_eq!((layer_of(EAST).layer, layer_of(EAST).tint), (2, true));
     }
 
     #[test]

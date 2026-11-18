@@ -52,7 +52,7 @@ fn data_errors_identify_the_problem() {
             "duplicate texture stone",
         ),
         (
-            "tint = [\"top\"]",
+            "tint = [\"top\", \"side\"]",
             "tint = [\"typo\"]",
             "unknown tint face typo",
         ),
@@ -119,14 +119,15 @@ fn biome_recipes_validate_all_block_references_and_terrain_kinds() {
 #[test]
 fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
-    let data = BLOCKS.replacen("\"gold_ore\",\n]", "\"gold_ore\", \"test_clay\",\n]", 1);
+    let data = BLOCKS.replacen("\n]", "\n  \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
     let data =
         format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains("pub const TEST_CLAY: BlockState = 49;"));
     assert!(output.contains("pub const COUNT: BlockState = 50;"));
-    assert!(output.contains("tex: [27, 27, 27, 27, 27, 27]"));
+    let new_layer = world::blocks::TEXTURES.len();
+    assert!(output.contains(&format!("tex: {:?}", [new_layer; 6])));
 }
 
 #[test]

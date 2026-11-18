@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
+import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { placementState } from "./placement.ts";
 import { defaultHotbar, HOTBAR_KEY, loadHotbar, saveHotbar } from "./hotbar.ts";
 
@@ -11,6 +12,25 @@ const registry = core.blockRegistry();
 const id = (name: string) => registry.findIndex(b => b.stateName === name || b.name === name);
 const slab = id("oak_slab");
 const air = id("air");
+
+test("inventory icons use registered faces and distinguish blocks built from the same material", () => {
+	const atlas = new Map(core.textureNames().map(name => [name, paintTexture(name)]));
+	const missing = paintTexture("missing");
+	for (const [name, pixels] of atlas) assert.notDeepEqual(pixels, missing, name);
+	const icon = name => blockIconPixels(registry[id(name)], atlas);
+	const coverage = name => icon(name).filter((value, i) => i % 4 === 3 && value !== 0).length;
+	assert.deepEqual(registry[id("sandstone")].faces, ["sandstone_bottom", "sandstone_top", ...Array(4).fill("sandstone")]);
+	assert.deepEqual(registry[id("oak_log")].faces, ["oak_log_top", "oak_log_top", ...Array(4).fill("oak_log")]);
+	assert.deepEqual(registry[id("water")].faces, ["water", "water", ...Array(4).fill("water_flow")]);
+	assert.ok(coverage("oak_fence") < coverage("oak_slab"));
+	assert.ok(coverage("oak_slab") < coverage("oak_stairs"));
+	assert.ok(coverage("oak_stairs") < coverage("oak_planks"));
+	for (const block of registry.filter(b => b.name !== "air")) {
+		const pixels = blockIconPixels(block, atlas);
+		assert.equal(pixels.length, ICON_SIZE * ICON_SIZE * 4);
+		assert.ok(pixels.some((value, i) => i % 4 === 3 && value > 0), block.stateName);
+	}
+});
 const stone = id("stone");
 const hit = (face: number, hitY = 0.25): RayHit => ({ x: 0, y: -2, z: 0, face, hitY, min: [0, 0, 0], max: [1, 1, 1] });
 const world = (target = stone, adjacent = air, support = stone) => (x: number, y: number, z: number) => {
