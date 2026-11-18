@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{C2S, PROTOCOL_VERSION, S2C};
+use protocol::{C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -19,7 +19,14 @@ use worldgen::{Generator, TerrainGenerator};
 /// so no faces are built against the unknown, then re-meshed on arrival.
 const UNKNOWN: u16 = blocks::STONE;
 
+struct ItemEntity {
+    item: u16,
+    count: u8,
+    pos: [f64; 3],
+    previous: [f64; 3],
+}
 struct State {
+    entities: BTreeMap<u32, ItemEntity>,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -39,6 +46,16 @@ struct State {
     external_light: bool,
     light_generations: BTreeMap<(i32, i32), (u32, u32)>,
     light_exports: Option<BTreeSet<(i32, usize, i32)>>,
+    game_mode: u8,
+    health: u8,
+    air: u16,
+    food: u8,
+    dead: bool,
+    death_cause: u8,
+    selected: u8,
+    slots: Vec<Option<(u16, u8)>>,
+    screen: u8,
+    furnace_times: [u16; 3],
     seed: i64,
     spawn: [f64; 3],
     view_distance: u32,
@@ -162,6 +179,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn client_new() {
     let st = State {
+        entities: BTreeMap::new(),
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -180,6 +198,16 @@ pub extern "C" fn client_new() {
         external_light: false,
         light_generations: BTreeMap::new(),
         light_exports: None,
+        game_mode: 0,
+        health: MAX_HEALTH,
+        air: MAX_AIR,
+        food: MAX_FOOD,
+        dead: false,
+        death_cause: 0,
+        selected: 0,
+        slots: vec![None; 54],
+        screen: 0,
+        furnace_times: [0; 3],
         seed: 0,
         spawn: [0.0; 3],
         view_distance: 0,
@@ -204,6 +232,7 @@ pub extern "C" fn client_reset_world() {
     if st.light_exports.is_none() {
         st.unloaded.extend(st.world.chunks.keys().copied());
     }
+    st.entities.clear();
     st.connectivity.clear();
     st.visibility_stale = true;
     st.world.chunks.clear();
@@ -252,16 +281,93 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         return u32::MAX;
     };
     match packet {
+        S2C::EntitySpawn {
+            id,
+            item,
+            count,
+            x,
+            y,
+            z,
+            ..
+        } => {
+            st.entities.insert(
+                id,
+                ItemEntity {
+                    item,
+                    count,
+                    pos: [x, y, z],
+                    previous: [x, y, z],
+                },
+            );
+        }
+        S2C::EntityMove { id, x, y, z } => {
+            if let Some(e) = st.entities.get_mut(&id) {
+                e.previous = e.pos;
+                e.pos = [x, y, z];
+            }
+        }
+        S2C::EntityCount { id, count } => {
+            if let Some(e) = st.entities.get_mut(&id) {
+                if world::items::info(e.item).is_some_and(|i| count <= i.max_stack) {
+                    e.count = count;
+                }
+            }
+        }
+        S2C::DigProgress { .. } => {}
+        S2C::EntityRemove { id } => {
+            st.entities.remove(&id);
+        }
+
+        S2C::Inventory {
+            furnace,
+            burn,
+            total,
+            progress,
+            screen,
+            table,
+            selected,
+            mut slots,
+            crafting,
+            result,
+            cursor,
+        } => {
+            slots.extend(crafting);
+            slots.extend([result, cursor]);
+            slots.extend(table);
+            slots.extend(furnace);
+            st.furnace_times = [burn, total, progress];
+            st.screen = screen;
+            st.selected = selected;
+            st.slots = slots;
+        }
         S2C::Welcome {
             seed,
             game_time,
             spawn,
             view_distance,
+            game_mode,
         } => {
+            st.game_mode = game_mode;
+            if game_mode == 1 {
+                st.flying = false;
+            }
             st.seed = seed;
             st.game_time = game_time;
             st.spawn = spawn;
             st.view_distance = view_distance as u32;
+        }
+        S2C::PlayerStatus {
+            health,
+            air,
+            dead,
+            cause,
+            food,
+        } => {
+            st.health = health;
+            st.air = air;
+            st.food = food;
+            st.dead = dead;
+            st.death_cause = cause;
         }
         S2C::PlayerCorrect { x, y, z } => {
             st.player = physics::Player::new([x, y, z]);
@@ -916,6 +1022,30 @@ pub extern "C" fn client_get_block(x: i32, y: i32, z: i32) -> u32 {
         .map_or(u32::MAX, |b| b as u32)
 }
 
+/// Output: local min XYZ then max XYZ, six u8 in sixteenths; zero bytes if absent.
+#[no_mangle]
+pub extern "C" fn client_selection_bounds(x: i32, y: i32, z: i32) -> usize {
+    let st = state();
+    let Some(block) = st.world.get_block(x, y, z) else {
+        return 0;
+    };
+    let boxes = blocks::selection_boxes(block, |dx, dy, dz| {
+        st.world
+            .get_block(x + dx, y + dy, z + dz)
+            .unwrap_or(blocks::AIR)
+    });
+    let Some(mut bounds) = boxes.first().copied() else {
+        return 0;
+    };
+    for b in &boxes[1..] {
+        for a in 0..3 {
+            bounds.min[a] = bounds.min[a].min(b.min[a]);
+            bounds.max[a] = bounds.max[a].max(b.max[a]);
+        }
+    }
+    emit(st, bounds.min.into_iter().chain(bounds.max).collect())
+}
+
 /// Walks the grid and intersects selection boxes, including non-solid plants.
 /// Output: x/y/z/face, local min/max XYZ in sixteenths (ten i32 LE),
 /// then the intersection local Y as f64 LE (0..=1, including the top edge).
@@ -1032,6 +1162,21 @@ pub extern "C" fn client_enc_teleport(x: f64, y: f64, z: f64) -> usize {
     emit(state(), C2S::Teleport { x, y, z }.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_respawn() -> usize {
+    emit(state(), C2S::Respawn.encode())
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_use_item() -> usize {
+    emit(state(), C2S::UseItem.encode())
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_stop_using_item() -> usize {
+    emit(state(), C2S::StopUsingItem.encode())
+}
+
 /// Authoritative feet position, including the most recent correction.
 #[no_mangle]
 pub extern "C" fn client_player_position(axis: usize) -> f64 {
@@ -1052,10 +1197,24 @@ pub extern "C" fn client_enc_set_block(x: i32, y: i32, z: i32, block: u32) -> us
     )
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_dig_start(x: i32, y: i32, z: i32) -> usize {
+    emit(state(), C2S::DigStart { x, y, z }.encode())
+}
+#[no_mangle]
+pub extern "C" fn client_enc_dig_abort() -> usize {
+    emit(state(), C2S::DigAbort.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
-    emit(state(), blocks::TEXTURES.join("\n").into_bytes())
+    let names: Vec<_> = blocks::TEXTURES
+        .iter()
+        .copied()
+        .chain(world::items::ITEMS.iter().filter_map(|item| item.texture))
+        .collect();
+    emit(state(), names.join("\n").into_bytes())
 }
 
 /// Output: newline-separated block names, line number = block id.
@@ -1092,9 +1251,9 @@ pub extern "C" fn client_block_registry() -> usize {
                 |b| boxes.push([b.min, b.max]));
             boxes
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, faces[1])
+            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }
@@ -1104,7 +1263,7 @@ pub extern "C" fn client_block_registry() -> usize {
 pub extern "C" fn client_player_reset(x: f64, y: f64, z: f64) {
     let st = state();
     st.player = physics::Player::new([x, y, z]);
-    st.flying = true;
+    st.flying = st.game_mode == 0;
 }
 
 struct Collisions<'a>(&'a World);
@@ -1119,7 +1278,7 @@ impl physics::CollisionWorld for Collisions<'_> {
 #[no_mangle]
 pub extern "C" fn client_player_toggle_flight() -> u32 {
     let st = state();
-    if !st.flying || st.player.is_clear(&Collisions(&st.world)) {
+    if st.game_mode == 0 && (!st.flying || st.player.is_clear(&Collisions(&st.world))) {
         st.flying = !st.flying;
     }
     u32::from(st.flying)
@@ -1150,11 +1309,231 @@ pub extern "C" fn client_player_tick(forward: f32, strafe: f32, yaw: f32, flags:
     st.out.push(u8::from(st.flying));
 }
 
+#[no_mangle]
+pub extern "C" fn client_health() -> u32 {
+    u32::from(state().health)
+}
+
+#[no_mangle]
+pub extern "C" fn client_food() -> u32 {
+    u32::from(state().food)
+}
+
+#[no_mangle]
+pub extern "C" fn client_air() -> u32 {
+    u32::from(state().air)
+}
+
+#[no_mangle]
+pub extern "C" fn client_dead() -> u32 {
+    u32::from(state().dead)
+}
+
+#[no_mangle]
+pub extern "C" fn client_death_cause() -> u32 {
+    u32::from(state().death_cause)
+}
+
+#[no_mangle]
+pub extern "C" fn client_game_mode() -> u32 {
+    state().game_mode as u32
+}
+#[no_mangle]
+pub extern "C" fn client_selected_slot() -> u32 {
+    state().selected as u32
+}
+#[no_mangle]
+pub extern "C" fn client_slot_item(slot: usize) -> u32 {
+    state()
+        .slots
+        .get(slot)
+        .copied()
+        .flatten()
+        .map_or(0, |s| s.0 as u32)
+}
+#[no_mangle]
+pub extern "C" fn client_slot_count(slot: usize) -> u32 {
+    state()
+        .slots
+        .get(slot)
+        .copied()
+        .flatten()
+        .map_or(0, |s| s.1 as u32)
+}
+#[no_mangle]
+pub extern "C" fn client_enc_select_slot(slot: u8) -> usize {
+    state().out = C2S::SelectSlot { slot }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_enc_creative_set_slot(slot: u8, item: u16, count: u8) -> usize {
+    state().out = C2S::CreativeSetSlot { slot, item, count }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_mining_ticks(block: u16, held: u16) -> i32 {
+    world::items::mining(block, (held != 0).then_some(held)).map_or(-1, |(ticks, _)| ticks as i32)
+}
+
+#[no_mangle]
+pub extern "C" fn client_mining_drops(block: u16, held: u16) -> bool {
+    world::items::mining(block, (held != 0).then_some(held)).is_some_and(|(_, drops)| drops)
+}
+
+#[no_mangle]
+pub extern "C" fn client_item_registry() -> usize {
+    use std::fmt::Write;
+    let mut out = String::from("[");
+    for (i, item) in world::items::ITEMS.iter().enumerate() {
+        if i != 0 {
+            out.push(',');
+        }
+        write!(
+            out,
+            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{},\"food\":{}}}",
+            item.id,
+            item.name,
+            item.max_stack,
+            item.block.map_or("null".into(), |b| b.to_string()),
+            item.texture.map_or("null".into(), |t| format!("{t:?}")),
+            item.food.map_or("null".into(), |value| value.to_string())
+        )
+        .unwrap();
+    }
+    out.push(']');
+    state().out = out.into_bytes();
+    state().out.len()
+}
+
+/// Sorted packed records: ID u32, item u16, count u8, current/previous f64 triples.
+#[no_mangle]
+pub extern "C" fn client_entities() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, e) in &st.entities {
+        w.i32(id as i32);
+        w.u16(e.item);
+        w.u8(e.count);
+        for v in e.pos.into_iter().chain(e.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_entity_light(x: i32, y: i32, z: i32) -> u32 {
+    let st = state();
+    st.world.sky_light(x, y, z) as u32 * 16 + st.world.block_light(x, y, z) as u32
+}
+#[no_mangle]
+pub extern "C" fn client_enc_drop_item(x: f32, y: f32, z: f32) -> usize {
+    let st = state();
+    st.out = C2S::DropItem { dir: [x, y, z] }.encode();
+    st.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_click_slot(slot: u32, button: u32, shift: u32) -> usize {
+    let st = state();
+    st.out = C2S::ClickSlot {
+        slot: slot as u8,
+        button: button as u8,
+        shift: shift != 0,
+    }
+    .encode();
+    st.out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_screen() -> u32 {
+    state().screen as u32
+}
+#[no_mangle]
+pub extern "C" fn client_enc_use_block(x: i32, y: i32, z: i32) -> usize {
+    state().out = C2S::UseBlock { x, y, z }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_enc_close_inventory() -> usize {
+    let st = state();
+    st.out = C2S::CloseInventory.encode();
+    st.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn client_furnace_time(index: u32) -> u32 {
+    state()
+        .furnace_times
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn item_mirror_updates_previous_count_removal_and_reset() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let receive = |p: S2C| {
+            let bytes = p.encode();
+            assert_ne!(
+                unsafe { client_packet(bytes.as_ptr(), bytes.len()) },
+                u32::MAX
+            );
+        };
+        receive(S2C::EntitySpawn {
+            id: 7,
+            kind: 0,
+            item: 1,
+            count: 3,
+            x: 2.0,
+            y: 3.0,
+            z: 4.0,
+        });
+        assert_eq!(state().entities[&7].previous, [2.0, 3.0, 4.0]);
+        receive(S2C::EntityMove {
+            id: 7,
+            x: 3.0,
+            y: 4.0,
+            z: 5.0,
+        });
+        receive(S2C::EntityCount { id: 7, count: 2 });
+        let e = &state().entities[&7];
+        assert_eq!(e.pos, [3.0, 4.0, 5.0]);
+        assert_eq!(e.previous, [2.0, 3.0, 4.0]);
+        assert_eq!(e.count, 2);
+        assert_eq!(client_entities(), 55);
+        assert_eq!(
+            client_entity_light(2, 3, 4),
+            state().world.sky_light(2, 3, 4) as u32 * 16
+                + state().world.block_light(2, 3, 4) as u32
+        );
+        receive(S2C::EntityRemove { id: 7 });
+        assert!(state().entities.is_empty());
+        receive(S2C::EntitySpawn {
+            id: 8,
+            kind: 0,
+            item: 1,
+            count: 1,
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        });
+        client_reset_world();
+        assert!(state().entities.is_empty());
+        client_enc_drop_item(1.0, 0.0, 0.0);
+        assert_eq!(
+            C2S::decode(&state().out),
+            Ok(C2S::DropItem {
+                dir: [1.0, 0.0, 0.0]
+            })
+        );
+    }
 
     fn receive(chunk: &Chunk) {
         let packet = S2C::ChunkData {
@@ -1360,6 +1739,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn selection_bounds_enclose_every_box_and_follow_fence_neighbors() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.set_lighting_enabled(false);
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        for (block, expected) in [
+            (blocks::STONE, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_SLAB, [0, 0, 0, 16, 8, 16]),
+            (blocks::OAK_SLAB + 1, [0, 8, 0, 16, 16, 16]),
+            (blocks::OAK_SLAB + 2, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_STAIRS, [0, 0, 0, 16, 16, 16]),
+            (blocks::OAK_FENCE, [6, 0, 6, 10, 16, 10]),
+            (blocks::RED_FLOWER, [5, 0, 5, 11, 10, 11]),
+        ] {
+            state().world.set_block(2, 80, 2, block);
+            assert_eq!(client_selection_bounds(2, 80, 2), 6);
+            assert_eq!(state().out, expected);
+        }
+        state().world.set_block(2, 80, 2, blocks::OAK_FENCE);
+        state().world.set_block(3, 80, 2, blocks::STONE);
+        assert_eq!(client_selection_bounds(2, 80, 2), 6);
+        assert_eq!(state().out, [6, 0, 6, 16, 16, 10]);
+        state().world.set_block(3, 80, 2, blocks::AIR);
+        assert_eq!(client_selection_bounds(2, 80, 2), 6);
+        assert_eq!(state().out, [6, 0, 6, 10, 16, 10]);
+        for block in [blocks::AIR, blocks::WATER] {
+            state().world.set_block(2, 80, 2, block);
+            assert_eq!(client_selection_bounds(2, 80, 2), 0);
+        }
+        assert_eq!(client_selection_bounds(32, 80, 32), 0);
     }
 
     #[test]

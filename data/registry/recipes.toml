@@ -1,0 +1,79 @@
+# Original small-grid recipes. File order is matching priority.
+[[recipes]]
+ingredients = ["oak_log"]
+result = { item = "oak_planks", count = 4 }
+
+[[recipes]]
+pattern = ["#", "#"]
+key = { "#" = "oak_planks" }
+result = { item = "stick", count = 4 }
+
+[[recipes]]
+pattern = ["##", "##"]
+key = { "#" = "oak_planks" }
+result = { item = "crafting_table", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "oak_planks", "|" = "stick" }
+result = { item = "wooden_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "cobblestone", "|" = "stick" }
+result = { item = "stone_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", "# #", "###"]
+key = { "#" = "cobblestone" }
+result = { item = "furnace", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "copper_ingot", "|" = "stick" }
+result = { item = "copper_shovel", count = 1 }
+
+[[recipes]]
+pattern = ["###", " | ", " | "]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_pickaxe", count = 1 }
+
+[[recipes]]
+pattern = ["##", "#|", " |"]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_axe", count = 1 }
+
+[[recipes]]
+pattern = ["#", "|", "|"]
+key = { "#" = "iron_ingot", "|" = "stick" }
+result = { item = "iron_shovel", count = 1 }

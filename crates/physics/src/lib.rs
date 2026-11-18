@@ -153,6 +153,20 @@ impl Player {
     pub fn is_clear(&self, world: &impl CollisionWorld) -> bool {
         !occupied(world, self.bounds())
     }
+    /// Checks the footprint immediately below the feet with prediction's
+    /// collision boxes. Boxes intersecting the player's sides are not support.
+    pub fn is_grounded(&self, world: &impl CollisionWorld) -> bool {
+        const GROUND_PROBE: f64 = 0.001;
+        let mut probe = self.bounds();
+        let feet = probe.min[1];
+        probe.min[1] = feet - GROUND_PROBE;
+        probe.max[1] = feet;
+        let mut grounded = false;
+        visit(world, probe, |b| {
+            grounded |= b.max[1] <= feet && probe.intersects(b)
+        });
+        grounded
+    }
     pub fn tick(&mut self, input: Input, world: &impl CollisionWorld) {
         let grounded = self.on_ground;
         let sprint = input.sprint && (input.flying || !input.sneak);

@@ -1,0 +1,276 @@
+# Stable, independently assigned item IDs. Never renumber saved IDs.
+
+[[items]]
+name = "stone"
+id = 1
+block = "stone"
+
+[[items]]
+name = "grass_block"
+id = 2
+block = "grass_block"
+
+[[items]]
+name = "dirt"
+id = 3
+block = "dirt"
+
+[[items]]
+name = "cobblestone"
+id = 4
+block = "cobblestone"
+
+[[items]]
+name = "oak_planks"
+fuel = 320
+id = 5
+block = "oak_planks"
+
+[[items]]
+name = "bedrock"
+id = 6
+block = "bedrock"
+
+[[items]]
+name = "sand"
+id = 7
+block = "sand"
+
+[[items]]
+name = "oak_log"
+fuel = 320
+id = 8
+block = "oak_log"
+
+[[items]]
+name = "bricks"
+id = 9
+block = "bricks"
+
+[[items]]
+name = "lamp_block"
+id = 10
+block = "lamp_block"
+
+[[items]]
+name = "glass"
+id = 11
+block = "glass"
+
+[[items]]
+name = "oak_leaves"
+id = 12
+block = "oak_leaves"
+
+[[items]]
+name = "water"
+id = 13
+block = "water"
+
+[[items]]
+name = "oak_slab"
+id = 14
+block = "oak_slab"
+
+[[items]]
+name = "cobblestone_slab"
+id = 15
+block = "cobblestone_slab"
+
+[[items]]
+name = "red_flower"
+id = 16
+block = "red_flower"
+
+[[items]]
+name = "yellow_flower"
+id = 17
+block = "yellow_flower"
+
+[[items]]
+name = "short_grass"
+id = 18
+block = "short_grass"
+
+[[items]]
+name = "oak_stairs"
+id = 19
+block = "oak_stairs"
+
+[[items]]
+name = "cobblestone_stairs"
+id = 20
+block = "cobblestone_stairs"
+
+[[items]]
+name = "oak_fence"
+id = 21
+block = "oak_fence"
+
+[[items]]
+name = "snow_block"
+id = 22
+block = "snow_block"
+
+[[items]]
+name = "sandstone"
+id = 23
+block = "sandstone"
+
+[[items]]
+name = "gravel"
+id = 24
+block = "gravel"
+
+[[items]]
+name = "ice"
+id = 25
+block = "ice"
+
+[[items]]
+name = "coarse_dirt"
+id = 26
+block = "coarse_dirt"
+
+[[items]]
+name = "coal_ore"
+id = 27
+block = "coal_ore"
+
+[[items]]
+name = "copper_ore"
+id = 28
+block = "copper_ore"
+
+[[items]]
+name = "iron_ore"
+id = 29
+block = "iron_ore"
+
+[[items]]
+name = "gold_ore"
+id = 30
+block = "gold_ore"
+
+[[items]]
+name = "wooden_pickaxe"
+id = 31
+max_stack = 1
+texture = "wooden_pickaxe"
+tool = { kind = "pickaxe", tier = 1 }
+
+[[items]]
+name = "wooden_axe"
+id = 32
+max_stack = 1
+texture = "wooden_axe"
+tool = { kind = "axe", tier = 1 }
+
+[[items]]
+name = "wooden_shovel"
+id = 33
+max_stack = 1
+texture = "wooden_shovel"
+tool = { kind = "shovel", tier = 1 }
+
+[[items]]
+name = "stone_pickaxe"
+id = 34
+max_stack = 1
+texture = "stone_pickaxe"
+tool = { kind = "pickaxe", tier = 2 }
+
+[[items]]
+name = "stone_axe"
+id = 35
+max_stack = 1
+texture = "stone_axe"
+tool = { kind = "axe", tier = 2 }
+
+[[items]]
+name = "stone_shovel"
+id = 36
+max_stack = 1
+texture = "stone_shovel"
+tool = { kind = "shovel", tier = 2 }
+
+[[items]]
+name = "copper_pickaxe"
+id = 37
+max_stack = 1
+texture = "copper_pickaxe"
+tool = { kind = "pickaxe", tier = 3 }
+
+[[items]]
+name = "copper_axe"
+id = 38
+max_stack = 1
+texture = "copper_axe"
+tool = { kind = "axe", tier = 3 }
+
+[[items]]
+name = "copper_shovel"
+id = 39
+max_stack = 1
+texture = "copper_shovel"
+tool = { kind = "shovel", tier = 3 }
+
+[[items]]
+name = "iron_pickaxe"
+id = 40
+max_stack = 1
+texture = "iron_pickaxe"
+tool = { kind = "pickaxe", tier = 4 }
+
+[[items]]
+name = "iron_axe"
+id = 41
+max_stack = 1
+texture = "iron_axe"
+tool = { kind = "axe", tier = 4 }
+
+[[items]]
+name = "iron_shovel"
+id = 42
+max_stack = 1
+texture = "iron_shovel"
+tool = { kind = "shovel", tier = 4 }
+
+[[items]]
+name = "stick"
+fuel = 80
+id = 43
+texture = "stick"
+
+[[items]]
+name = "crafting_table"
+fuel = 320
+id = 44
+block = "crafting_table"
+
+[[items]]
+name = "coal"
+id = 45
+fuel = 1600
+texture = "coal"
+
+[[items]]
+name = "copper_ingot"
+id = 46
+texture = "copper_ingot"
+
+[[items]]
+name = "iron_ingot"
+id = 47
+texture = "iron_ingot"
+
+[[items]]
+name = "furnace"
+id = 48
+block = "furnace"
+
+[[items]]
+id = 49
+name = "apple"
+texture = "apple"
+food = 4

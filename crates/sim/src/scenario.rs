@@ -111,8 +111,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_scenario_fingerprint_is_unchanged() {
-        assert_eq!(run(2026, 600), 0x88d6e0e1abd58ec4);
+    fn creative_inventory_scenario_fingerprint() {
+        // Previously 35cac1f1644e93a7. Hunger state and the PlayerStatus food byte now participate.
+        assert_eq!(run(2026, 600), 0x5958269535e4ab7b);
     }
 
     #[test]

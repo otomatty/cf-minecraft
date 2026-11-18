@@ -3,6 +3,42 @@ use std::{collections::BTreeSet, fmt::Write, fs, path::Path};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Items {
+    items: Vec<Item>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Item {
+    name: String,
+    id: u16,
+    #[serde(default = "max_stack")]
+    max_stack: u8,
+    block: Option<String>,
+    texture: Option<String>,
+    tool: Option<Tool>,
+    fuel: Option<u32>,
+    food: Option<u8>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tool {
+    kind: String,
+    tier: u8,
+}
+fn tool_kind(s: &str) -> &'static str {
+    match s {
+        "pickaxe" => "Pickaxe",
+        "axe" => "Axe",
+        "shovel" => "Shovel",
+        _ => panic!("registry: unknown tool kind {s}"),
+    }
+}
+fn max_stack() -> u8 {
+    64
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Registry {
     legacy_count: u16,
     textures: Vec<String>,
@@ -11,6 +47,13 @@ struct Registry {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Block {
+    drop: Option<String>,
+    dig_ticks: Option<u16>,
+    tool: Option<String>,
+    #[serde(default)]
+    min_tier: u8,
+    #[serde(default)]
+    unbreakable: bool,
     name: String,
     id: u16,
     #[serde(default = "cube")]
@@ -236,6 +279,19 @@ fn generate(root: &Path, dest: &Path) {
         );
     }
     for b in &registry.blocks {
+        assert!(
+            b.unbreakable != b.dig_ticks.is_some(),
+            "blocks.toml: {}: specify dig_ticks or unbreakable",
+            b.name
+        );
+        assert!(b.min_tier <= 4, "blocks.toml: min_tier must be 0..=4");
+        assert!(
+            b.min_tier == 0 || b.tool.is_some(),
+            "blocks.toml: min_tier requires tool"
+        );
+        if let Some(kind) = &b.tool {
+            tool_kind(kind);
+        }
         identifier(&b.name);
         model(&b.model);
         assert!(
@@ -373,7 +429,10 @@ fn generate(root: &Path, dest: &Path) {
                     b.name
                 );
             }
-            writeln!(infos, "BlockInfo {{ model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            let tool = b.tool.as_ref().map_or("None".into(), |kind| {
+                format!("Some(crate::items::ToolKind::{})", tool_kind(kind))
+            });
+            writeln!(infos, "BlockInfo {{ tool: {tool}, min_tier: {}, dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.min_tier, b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
             let pairs: Vec<_> = s
                 .properties
                 .iter()
@@ -397,6 +456,90 @@ fn generate(root: &Path, dest: &Path) {
     );
     writeln!(out, "pub const COUNT: BlockState = {count};\nstatic INFO: [BlockInfo; {count}] = [{infos}];\nstatic BLOCKS: &[Block] = &[{blocks}];\nstatic PROPERTIES: &[&[(&str, &str)]] = &[{props}];").unwrap();
     fs::write(dest.join("blocks.rs"), out).unwrap();
+
+    let items: Items = read(&root.join("items.toml"));
+    let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut out = format!(
+        "pub const COUNT: usize = {};\npub static ITEMS: &[ItemInfo] = &[\n",
+        items.items.len()
+    );
+    for item in &items.items {
+        identifier(&item.name);
+        assert!(
+            item.fuel.is_none_or(|v| v > 0),
+            "items.toml: fuel must be positive"
+        );
+        assert!(
+            item.food.is_none_or(|value| (1..=20).contains(&value)),
+            "items.toml: food must be 1..=20"
+        );
+        assert!(
+            names.insert(item.name.clone()),
+            "items.toml: duplicate item {}",
+            item.name
+        );
+        assert!(item.id != 0, "items.toml: item id must not be 0");
+        assert!(ids.insert(item.id), "items.toml: duplicate id {}", item.id);
+        assert!(
+            (1..=64).contains(&item.max_stack),
+            "items.toml: max_stack must be 1..=64"
+        );
+        assert!(
+            item.block.is_some() || item.texture.is_some(),
+            "items.toml: block or texture required"
+        );
+        if let Some(texture) = &item.texture {
+            identifier(texture);
+        }
+        let tool = item.tool.as_ref().map_or("None".into(), |tool| {
+            assert!(item.max_stack == 1, "items.toml: tool max_stack must be 1");
+            assert!(
+                (1..=4).contains(&tool.tier),
+                "items.toml: tool tier must be 1..=4"
+            );
+            format!(
+                "Some(Tool {{ kind: ToolKind::{}, tier: {} }})",
+                tool_kind(&tool.kind),
+                tool.tier
+            )
+        });
+        let texture = item
+            .texture
+            .as_ref()
+            .map_or("None".into(), |t| format!("Some({t:?})"));
+        let block = item.block.as_ref().map(|name| {
+            registry
+                .blocks
+                .iter()
+                .find(|b| &b.name == name)
+                .unwrap_or_else(|| panic!("items.toml: unknown block {name}"))
+                .id
+        });
+        writeln!(
+            out,
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?}, food: {:?} }},",
+            item.id, item.name, item.max_stack, block, item.fuel, item.food
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    out.push_str("static MINING_DROPS: &[(&str, u16)] = &[\n");
+    for block in &registry.blocks {
+        if let Some(name) = &block.drop {
+            let item = items
+                .items
+                .iter()
+                .find(|item| &item.name == name)
+                .unwrap_or_else(|| panic!("blocks.toml: {}: unknown drop item {name}", block.name));
+            writeln!(out, "({:?}, {}),", block.name, item.id).unwrap();
+        }
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("items.rs"), out).unwrap();
+
+    generate_recipes(root, dest, &items.items);
+    generate_smelting(root, dest, &items.items);
 
     let biomes: Biomes = read(&root.join("biomes.toml"));
     let mut names = BTreeSet::new();
@@ -465,4 +608,158 @@ fn generate(root: &Path, dest: &Path) {
     }
     out.push_str("];\n");
     fs::write(dest.join("biomes.rs"), out).unwrap();
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recipes {
+    recipes: Vec<Recipe>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recipe {
+    pattern: Option<Vec<String>>,
+    key: Option<std::collections::BTreeMap<String, String>>,
+    ingredients: Option<Vec<String>>,
+    result: RecipeResult,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeResult {
+    item: String,
+    count: u8,
+}
+fn generate_recipes(root: &Path, dest: &Path, items: &[Item]) {
+    let recipes: Recipes = read(&root.join("recipes.toml"));
+    let resolve = |name: &str| {
+        items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("recipes.toml: unknown item {name}"))
+    };
+    let mut seen = BTreeSet::new();
+    let mut out = String::from("pub static RECIPES: &[Recipe] = &[\n");
+    for recipe in recipes.recipes {
+        let result = resolve(&recipe.result.item);
+        assert!(
+            (1..=result.max_stack).contains(&recipe.result.count),
+            "recipes.toml: invalid result count"
+        );
+        let (width, height, mut cells) = if let Some(pattern) = recipe.pattern {
+            assert!(
+                recipe.ingredients.is_none(),
+                "recipes.toml: mixed recipe kinds"
+            );
+            assert!(
+                (1..=3).contains(&pattern.len()),
+                "recipes.toml: pattern height"
+            );
+            let width = pattern[0].chars().count();
+            assert!((1..=3).contains(&width), "recipes.toml: pattern width");
+            let key = recipe.key.expect("recipes.toml: missing key");
+            for (ch, name) in &key {
+                assert!(
+                    ch.chars().count() == 1 && ch != " ",
+                    "recipes.toml: invalid key"
+                );
+                resolve(name);
+            }
+            let mut used = BTreeSet::new();
+            let mut cells = Vec::new();
+            for row in &pattern {
+                assert_eq!(
+                    row.chars().count(),
+                    width,
+                    "recipes.toml: unequal row lengths"
+                );
+                for ch in row.chars() {
+                    cells.push(if ch == ' ' {
+                        0
+                    } else {
+                        let ch = ch.to_string();
+                        used.insert(ch.clone());
+                        resolve(
+                            key.get(&ch)
+                                .expect("recipes.toml: character missing from key"),
+                        )
+                        .id
+                    });
+                }
+            }
+            assert_eq!(used.len(), key.len(), "recipes.toml: unused key");
+            assert!(cells.iter().any(|&i| i != 0), "recipes.toml: empty pattern");
+            // Canonical bounding rectangle also detects duplicates with outer padding.
+            let xs: Vec<_> = (0..width)
+                .filter(|&x| (0..pattern.len()).any(|y| cells[y * width + x] != 0))
+                .collect();
+            let ys: Vec<_> = (0..pattern.len())
+                .filter(|&y| (0..width).any(|x| cells[y * width + x] != 0))
+                .collect();
+            let (left, right, top, bottom) = (xs[0], xs[xs.len() - 1], ys[0], ys[ys.len() - 1]);
+            let cropped = (top..=bottom)
+                .flat_map(|y| (left..=right).map(move |x| (y, x)))
+                .map(|(y, x)| cells[y * width + x])
+                .collect();
+            (right - left + 1, bottom - top + 1, cropped)
+        } else {
+            assert!(recipe.key.is_none(), "recipes.toml: shapeless key");
+            let ingredients = recipe
+                .ingredients
+                .expect("recipes.toml: missing ingredients");
+            assert!(
+                (1..=9).contains(&ingredients.len()),
+                "recipes.toml: ingredients length"
+            );
+            (
+                0,
+                0,
+                ingredients
+                    .iter()
+                    .map(|i| resolve(i).id)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if width == 0 {
+            cells.sort_unstable();
+        }
+        assert!(
+            seen.insert((width, height, cells.clone())),
+            "recipes.toml: duplicate recipe"
+        );
+        writeln!(out,"Recipe {{ width: {width}, height: {height}, ingredients: &{cells:?}, item: {}, count: {} }},", result.id, recipe.result.count).unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("recipes.rs"), out).unwrap();
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Smelting {
+    smelting: Vec<Smelt>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Smelt {
+    input: String,
+    output: String,
+}
+fn generate_smelting(root: &Path, dest: &Path, items: &[Item]) {
+    let data: Smelting = read(&root.join("smelting.toml"));
+    let mut seen = BTreeSet::new();
+    let mut out = String::from("pub const RECIPES: &[(u16,u16)] = &[\n");
+    for r in data.smelting {
+        let resolve = |name: &str| {
+            items
+                .iter()
+                .find(|i| i.name == name)
+                .unwrap_or_else(|| panic!("smelting.toml: unknown item {name}"))
+                .id
+        };
+        let input = resolve(&r.input);
+        let output = resolve(&r.output);
+        assert!(seen.insert(input), "smelting.toml: duplicate input");
+        writeln!(out, "({input}, {output}),").unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(dest.join("smelting.rs"), out).unwrap();
 }

@@ -42,6 +42,9 @@ pub enum Model {
 
 #[derive(Clone, Copy)]
 pub struct BlockInfo {
+    pub tool: Option<crate::items::ToolKind>,
+    pub min_tier: u8,
+    pub dig_ticks: Option<u16>,
     pub model: Model,
     pub layer: RenderLayer,
     /// Full opaque cube: hides adjacent faces and blocks AO/light samples.
@@ -337,8 +340,11 @@ mod tests {
         }
         assert_eq!(
             (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
-            (23, 31, 39, 49)
+            (23, 31, 39, 51)
         );
+        assert_eq!(FURNACE, 50);
+        assert_eq!(block(FURNACE).unwrap().count, 1);
+        assert!(properties(FURNACE).is_empty());
         for base in [OAK_STAIRS, COBBLESTONE_STAIRS] {
             assert_eq!(block(base).unwrap().count, 8);
             for (f, facing) in ["north", "south", "west", "east"].iter().enumerate() {

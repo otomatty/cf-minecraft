@@ -7,12 +7,15 @@ textures = [
   "yellow_flower", "short_grass",
   "snow_block", "sandstone", "gravel", "ice", "coarse_dirt",
   "coal_ore", "copper_ore", "iron_ore", "gold_ore",
+  "crafting_table_top", "crafting_table_side", "crafting_table_bottom",
+  "furnace_front", "furnace_side", "furnace_top",
   "sandstone_top", "sandstone_bottom", "water_flow",
 ]
 legacy_count = 14
 
 [[blocks]]
 name = "air"
+unbreakable = true
 id = 0
 texture = "stone"
 occludes = false
@@ -20,11 +23,18 @@ solid = false
 
 [[blocks]]
 name = "stone"
+drop = "cobblestone"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
 id = 1
 texture = "stone"
 
 [[blocks]]
 name = "grass_block"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 14
 id = 2
 top = "grass_block_top"
 bottom = "dirt"
@@ -33,31 +43,47 @@ tint = ["top", "side"]
 
 [[blocks]]
 name = "dirt"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 12
 id = 3
 texture = "dirt"
 
 [[blocks]]
 name = "cobblestone"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
 id = 4
 texture = "cobblestone"
 
 [[blocks]]
 name = "oak_planks"
+tool = "axe"
+min_tier = 0
+dig_ticks = 40
 id = 5
 texture = "oak_planks"
 
 [[blocks]]
 name = "bedrock"
+unbreakable = true
 id = 6
 texture = "bedrock"
 
 [[blocks]]
 name = "sand"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 12
 id = 7
 texture = "sand"
 
 [[blocks]]
 name = "oak_log"
+tool = "axe"
+min_tier = 0
+dig_ticks = 40
 id = 8
 top = "oak_log_top"
 bottom = "oak_log_top"
@@ -65,17 +91,22 @@ side = "oak_log"
 
 [[blocks]]
 name = "bricks"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
 id = 9
 texture = "bricks"
 
 [[blocks]]
 name = "lamp_block"
+dig_ticks = 10
 id = 10
 texture = "lamp_block"
 emission = 15
 
 [[blocks]]
 name = "glass"
+dig_ticks = 8
 id = 11
 layer = "cutout"
 texture = "glass"
@@ -83,6 +114,7 @@ cull_same = true
 
 [[blocks]]
 name = "oak_leaves"
+dig_ticks = 6
 id = 12
 layer = "cutout"
 texture = "oak_leaves"
@@ -92,6 +124,7 @@ tint = true
 
 [[blocks]]
 name = "water"
+unbreakable = true
 id = 13
 layer = "translucent"
 texture = "water"
@@ -102,6 +135,9 @@ tint = true
 
 [[blocks]]
 name = "oak_slab"
+tool = "axe"
+min_tier = 0
+dig_ticks = 40
 id = 14
 texture = "oak_planks"
 states = [
@@ -112,6 +148,9 @@ states = [
 
 [[blocks]]
 name = "cobblestone_slab"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
 id = 17
 texture = "cobblestone"
 states = [
@@ -122,6 +161,7 @@ states = [
 
 [[blocks]]
 name = "red_flower"
+dig_ticks = 0
 id = 20
 model = "cross"
 layer = "cutout"
@@ -129,6 +169,7 @@ texture = "red_flower"
 
 [[blocks]]
 name = "yellow_flower"
+dig_ticks = 0
 id = 21
 model = "cross"
 layer = "cutout"
@@ -136,6 +177,7 @@ texture = "yellow_flower"
 
 [[blocks]]
 name = "short_grass"
+dig_ticks = 0
 id = 22
 model = "cross"
 layer = "cutout"
@@ -144,6 +186,9 @@ tint = true
 
 [[blocks]]
 name = "oak_stairs"
+tool = "axe"
+min_tier = 0
+dig_ticks = 40
 id = 23
 model = "stairs"
 texture = "oak_planks"
@@ -160,6 +205,9 @@ states = [
 
 [[blocks]]
 name = "cobblestone_stairs"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
 id = 31
 model = "stairs"
 texture = "cobblestone"
@@ -176,17 +224,26 @@ states = [
 
 [[blocks]]
 name = "oak_fence"
+tool = "axe"
+min_tier = 0
+dig_ticks = 40
 id = 39
 model = "fence"
 texture = "oak_planks"
 
 [[blocks]]
 name = "snow_block"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 8
 id = 40
 texture = "snow_block"
 
 [[blocks]]
 name = "sandstone"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 50
 id = 41
 side = "sandstone"
 top = "sandstone_top"
@@ -194,11 +251,17 @@ bottom = "sandstone_bottom"
 
 [[blocks]]
 name = "gravel"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 14
 id = 42
 texture = "gravel"
 
 [[blocks]]
 name = "ice"
+tool = "pickaxe"
+min_tier = 0
+dig_ticks = 12
 id = 43
 texture = "ice"
 layer = "translucent"
@@ -208,25 +271,62 @@ solid = true
 
 [[blocks]]
 name = "coarse_dirt"
+tool = "shovel"
+min_tier = 0
+dig_ticks = 12
 id = 44
 texture = "coarse_dirt"
 
 [[blocks]]
 name = "coal_ore"
+drop = "coal"
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 90
 id = 45
 texture = "coal_ore"
 
 [[blocks]]
 name = "copper_ore"
+tool = "pickaxe"
+min_tier = 2
+dig_ticks = 90
 id = 46
 texture = "copper_ore"
 
 [[blocks]]
 name = "iron_ore"
+tool = "pickaxe"
+min_tier = 2
+dig_ticks = 90
 id = 47
 texture = "iron_ore"
 
 [[blocks]]
 name = "gold_ore"
+tool = "pickaxe"
+min_tier = 3
+dig_ticks = 90
 id = 48
 texture = "gold_ore"
+
+[[blocks]]
+name = "crafting_table"
+id = 49
+dig_ticks = 40
+tool = "axe"
+min_tier = 0
+top = "crafting_table_top"
+side = "crafting_table_side"
+bottom = "crafting_table_bottom"
+
+[[blocks]]
+name = "furnace"
+id = 50
+tool = "pickaxe"
+min_tier = 1
+dig_ticks = 70
+side = "furnace_side"
+north = "furnace_front"
+top = "furnace_top"
+bottom = "furnace_top"

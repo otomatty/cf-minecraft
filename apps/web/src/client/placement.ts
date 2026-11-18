@@ -2,6 +2,7 @@ import type { RayHit } from "./client-core.ts";
 import { FACE_NORMALS } from "./client-core.ts";
 
 export interface BlockStateInfo {
+	digTicks?: number | null;
 	name: string;
 	stateName: string;
 	first: number;
@@ -53,4 +54,9 @@ export function placementState(
 	}
 	if (block.model === "cross" && !registry[getBlock(x, y - 1, z)]?.occludes) return null;
 	return { x, y, z, state };
+}
+
+/** Right-click uses a table or furnace before attempting placement, including with an empty hand. */
+export function blockInteraction(blockName: string | undefined, shift: boolean): "open" | "place" {
+    return (blockName === "crafting_table" || blockName === "furnace") && !shift ? "open" : "place";
 }

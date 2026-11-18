@@ -97,7 +97,12 @@ impl Tree {
 }
 
 impl TerrainGenerator {
-    fn tree(&self, root: Candidate, height_at: impl Fn(i32, i32) -> i32) -> Option<Tree> {
+    fn tree(
+        &self,
+        root: Candidate,
+        entrances: &[crate::entrances::Entrance],
+        height_at: impl Fn(i32, i32) -> i32,
+    ) -> Option<Tree> {
         let top = height_at(root.x, root.z);
         if top <= SEA_LEVEL {
             return None;
@@ -120,6 +125,21 @@ impl TerrainGenerator {
         {
             return None;
         }
+        let neighbors = [
+            (root.x - 1, root.z),
+            (root.x + 1, root.z),
+            (root.x, root.z - 1),
+            (root.x, root.z + 1),
+        ]
+        .map(|(x, z)| height_at(x, z));
+        if self
+            .caves
+            .is_cave(root.x, top, root.z, top, neighbors)
+            .is_some()
+            || entrances.iter().any(|e| e.contains(root.x, top, root.z))
+        {
+            return None;
+        }
         let [min, max] = b.tree_height;
         let height = i32::from(min) + (root.variation % u64::from(max - min + 1)) as i32;
         let tip = if b.tree_shape == TreeShape::Cone {
@@ -127,13 +147,20 @@ impl TerrainGenerator {
         } else {
             1
         };
-        (top + height + tip < MIN_Y + HEIGHT).then_some(Tree {
+        let tree = (top + height + tip < MIN_Y + HEIGHT).then_some(Tree {
             root,
             top,
             height,
             shape: b.tree_shape,
             tip,
-        })
+        })?;
+        // Preserve the stair passage's jump clearance, including crowns whose
+        // roots are outside the passage or in a neighbouring chunk.
+        let mut obstructs = false;
+        tree.blocks(|x, y, z, _| {
+            obstructs |= entrances.iter().any(|e| e.contains(x, y, z));
+        });
+        (!obstructs).then_some(tree)
     }
 
     pub(crate) fn plant_trees(
@@ -141,6 +168,7 @@ impl TerrainGenerator {
         chunk: &mut Chunk,
         cx: i32,
         cz: i32,
+        entrances: &[crate::entrances::Entrance],
         height_at: impl Fn(i32, i32) -> i32,
     ) {
         let max_density = BIOMES.iter().map(|b| b.tree_density).fold(0.0, f64::max);
@@ -155,7 +183,9 @@ impl TerrainGenerator {
                 {
                     continue;
                 }
-                if let Some(tree) = self.tree(root, |x, z| height_at(x - cx * 16, z - cz * 16)) {
+                if let Some(tree) =
+                    self.tree(root, entrances, |x, z| height_at(x - cx * 16, z - cz * 16))
+                {
                     tree.blocks(|x, y, z, state| {
                         let (x, z) = (x - cx * 16, z - cz * 16);
                         if (0..16).contains(&x) && (0..16).contains(&z) {
@@ -175,9 +205,13 @@ impl TerrainGenerator {
     #[cfg(test)]
     fn tree_blocks(&self, qx: i32, qz: i32) -> Vec<(i32, i32, i32, BlockState)> {
         let mut result = Vec::new();
-        if let Some(tree) = self.tree(Candidate::new(self.seed, qx, qz), |x, z| {
-            self.surface_y(x, z)
-        }) {
+        let root = Candidate::new(self.seed, qx, qz);
+        let entrances = self.entrances_for_chunk(
+            root.x.div_euclid(16),
+            root.z.div_euclid(16),
+            MAX_CROWN_RADIUS,
+        );
+        if let Some(tree) = self.tree(root, &entrances, |x, z| self.surface_y(x, z)) {
             tree.blocks(|x, y, z, state| result.push((x, y, z, state)));
         }
         result
@@ -280,6 +314,38 @@ mod tests {
             }
         }
         assert!(crossed > 100 && logs > 100);
+    }
+
+    #[test]
+    fn trees_near_entrances_have_intact_ground_in_either_chunk_order() {
+        let t = TerrainGenerator::new(2026);
+        let mut chunks = Vec::new();
+        let (mut roots, mut holes) = (0, 0);
+        // Include wooded origin chunks as well as the rocky entrance hillside.
+        let probes = (8..=12)
+            .flat_map(|cz| (-15..=-11).map(move |cx| (cx, cz)))
+            .chain((-2..=2).flat_map(|cz| (-2..=2).map(move |cx| (cx, cz))));
+        for (cx, cz) in probes {
+            let chunk = t.generate(cx, cz);
+            for z in 0..16 {
+                for x in 0..16 {
+                    let top = t.surface_y(cx * 16 + x as i32, cz * 16 + z as i32);
+                    if chunk.get(x, top, z) == blocks::AIR {
+                        holes += 1;
+                        assert_ne!(chunk.get(x, top + 1, z), blocks::OAK_LOG);
+                    }
+                    if chunk.get(x, top + 1, z) == blocks::OAK_LOG {
+                        roots += 1;
+                        assert!(blocks::info(chunk.get(x, top, z)).solid);
+                    }
+                }
+            }
+            chunks.push(((cx, cz), chunk));
+        }
+        assert!(roots > 0 && holes > 0, "roots={roots}, holes={holes}");
+        for ((cx, cz), chunk) in chunks.into_iter().rev() {
+            assert_eq!(chunk, t.generate(cx, cz));
+        }
     }
 
     #[test]

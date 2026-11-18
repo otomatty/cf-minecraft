@@ -25,7 +25,9 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
-	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name);
+	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel)$/.exec(name);
+	if (tool) return paintTool(tool[1], tool[2]);
+	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name) ?? equipmentTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -97,6 +99,111 @@ export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
 				pixels.set([shade * 0.94, shade * 0.97, shade, radius < 0.88 ? 255 : 0], i);
 			}
 		}
+	}
+	return pixels;
+}
+
+type Rgb = readonly [number, number, number];
+type Painter = (x: number, y: number, rand: () => number) => Rgb;
+
+function mulberry32(seed: number): () => number {
+	let a = seed >>> 0;
+	return () => {
+		a = (a + 0x6d2b79f5) >>> 0;
+		let t = a;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+function hashName(name: string): number {
+	let h = 2166136261;
+	for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 16777619);
+	return h >>> 0;
+}
+
+const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
+
+const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter> = {
+	apple: () => (x, y) => {
+		if (y <= 4 && x >= 9) return [85, 157, 58];
+		if (y <= 4) return [111, 67, 39];
+		if (x >= 4 && x <= 6 && y <= 8) return [248, 111, 99];
+		return shade([211, 43, 54], 1.15 - (x + y) * .016);
+	},
+    coal: () => (x,y,r) => shade([47, 48, 55], .7 + r()*.6 + (x+y)%3*.08),
+    copper_ingot: () => (x,y) => shade([204, 113, 70], y < 7 ? 1.2 : .8 + x*.012),
+    iron_ingot: () => (x,y) => shade([179, 190, 202], y < 7 ? 1.2 : .8 + x*.012),
+    furnace_top: () => (x,y,r) => shade([111, 116, 125], x < 2 || y < 2 || x > 13 || y > 13 ? .68 : .9+r()*.2),
+    furnace_side: () => (x,y,r) => shade([108, 113, 121], y%5 === 0 || (x+(Math.floor(y/5)%2)*4)%8 === 0 ? .65 : .9+r()*.2),
+    furnace_front: () => (x,y,r) => x >= 3 && x <= 12 && y >= 6 && y <= 12 ? [31, 29, 34] : shade([112, 118, 126], y === 4 || y === 14 ? .65 : .9+r()*.2),
+    stick: () => (x) => x % 2 ? [185, 139, 77] : [116, 79, 42],
+    crafting_table_top: () => (x,y,r) => shade([174, 128, 70], x < 2 || y < 2 || x > 13 || y > 13 ? .62 : x % 5 === 2 || y % 5 === 2 ? .75 : .94+r()*.12),
+    crafting_table_side: () => (x,y,r) => shade([146, 103, 57], x < 3 || x > 12 ? .66 : y < 3 ? 1.2 : y === 7 || y === 12 ? .72 : .94+r()*.12),
+    crafting_table_bottom: () => (x,y) => shade([124, 87, 49], x === y || x+y === 15 ? .65 : y%4 === 0 ? .82 : 1),
+};
+
+function equipmentTexture(name: string): Uint8Array | undefined {
+	if (!Object.hasOwn(EQUIPMENT_AND_WORKSTATIONS, name)) return undefined;
+	const rand = mulberry32(hashName(name));
+	const paint = EQUIPMENT_AND_WORKSTATIONS[name](rand);
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 0; y < TEX_SIZE; y++) {
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const [r, g, b] = paint(x, y, rand);
+			let visible = true;
+			switch (name) {
+				case "apple":
+					visible = (x === 8 && y >= 2 && y <= 4)
+						|| (x >= 9 && x <= 12 && y >= 2 && y <= 4 && x + y <= 14)
+						|| ((x - 7.5) ** 2 + (y - 9) ** 2 <= 30 && y >= 5 && y <= 13);
+					break;
+				case "coal":
+					visible = x >= 3 && x <= 12 && y >= 3 && y <= 12 && x + y >= 8 && x + y <= 23;
+					break;
+				case "copper_ingot":
+				case "iron_ingot":
+					visible = x >= 2 && x <= 13 && y >= 5 && y <= 11 && x + y >= 8;
+					break;
+				case "stick":
+					visible = y >= 2 && y <= 13 && (x === 7 || x === 8);
+			}
+			pixels.set([clamp(r), clamp(g), clamp(b), visible ? 255 : 0], (y * TEX_SIZE + x) * 4);
+		}
+	}
+	return pixels;
+}
+
+/** Original branching fissures: each stage adds a branch to the same 16x16 pattern. */
+export function paintCracks(stage: number): Uint8Array {
+	if (!Number.isInteger(stage) || stage < 0 || stage > 9) throw new RangeError("crack stage");
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let branch = 0; branch <= stage; branch++) {
+		for (let step = 0; step < 9; step++) {
+			const x = (3 + branch * 5 + step + Math.floor(step / 3)) % TEX_SIZE;
+			const y = (1 + branch * 3 + step * (branch % 2 ? 2 : 1)) % TEX_SIZE;
+			const at = (y * TEX_SIZE + x) * 4;
+			pixels.set([28, 23, 31, 210], at);
+		}
+	}
+	return pixels;
+}
+
+/** Original upright silhouettes: a two-pixel grip and three distinct heads. */
+function paintTool(tier: string, kind: string): Uint8Array {
+	const colors: Record<string, Rgb> = { wooden: [168, 115, 58], stone: [120, 134, 148], copper: [209, 119, 73], iron: [204, 221, 226] };
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
+		const handle = (x === 7 || x === 8) && y >= 5;
+		const head = kind === "pickaxe" ? ((y === 3 || y === 4) && x >= 3 && x <= 12) || (y === 5 && (x === 3 || x === 12))
+			: kind === "axe" ? x >= 4 && x <= 9 && y >= 2 && y <= 6 && (x !== 4 || y >= 3)
+			: x >= 5 && x <= 10 && y >= 2 && y <= 6 && (y !== 6 || x >= 6 && x <= 9);
+		if (!handle && !head) continue;
+		const color = head ? shade(colors[tier], (x + y) % 3 === 0 ? .82 : 1) : x === 7 ? [111, 75, 43] : [151, 101, 54];
+		const i = (y * TEX_SIZE + x) * 4;
+		pixels.set([clamp(color[0]), clamp(color[1]), clamp(color[2]), 255], i);
 	}
 	return pixels;
 }

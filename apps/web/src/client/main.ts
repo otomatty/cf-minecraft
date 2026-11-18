@@ -1,3 +1,5 @@
+import { bindInventorySlot, containerScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, type InventoryScreenKind } from "./inventory-screen.ts";
+import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
 // block breaking and placing, and a debug overlay.
@@ -19,15 +21,18 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
-import { defaultHotbar, loadHotbar, saveHotbar } from "./hotbar.ts";
-import { placementState } from "./placement.ts";
+import { hotbarStates } from "./hotbar.ts";
+import { blockInteraction, placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
+import { interpolateEntity } from "./entities.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
+import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
+import { bubbleCount, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
@@ -50,6 +55,7 @@ const hud = $<HTMLPreElement>("hud");
 const overlay = $<HTMLDivElement>("overlay");
 const statusLine = $<HTMLParagraphElement>("status");
 const hotbar = $<HTMLDivElement>("hotbar");
+const deathScreen = $<HTMLDialogElement>("death-screen");
 
 type MenuView = "start" | "menu" | "controls" | "settings";
 let failed = false;
@@ -73,6 +79,7 @@ function fail(message: string): void {
 	statusLine.className = "error";
 	$("start-to-title").hidden = false;
 	$("block-picker").hidden = true;
+	deathScreen.close();
 	if (document.pointerLockElement !== null) document.exitPointerLock();
 	showMenuView("start");
 	hud.textContent = message;
@@ -140,9 +147,12 @@ async function main(): Promise<void> {
 	if (serverKind === "ws" && !await canEnterWorld()) return;
 	const core = await ClientCore.load(clientWasmUrl);
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
-	const renderer = await Renderer.create(canvas, core.textureNames());
+	const textureNames = core.textureNames();
+	const renderer = await Renderer.create(canvas, textureNames);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
+	const items = core.itemRegistry();
+	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -178,6 +188,7 @@ async function main(): Promise<void> {
 	let opened = false;
 	let connection: "open" | "reconnecting" | "closed" = "closed";
 	let reconnects = 0;
+	let closePending = false;
 	let positionsCorrected = 0;
 	let closed: string | null = null;
 	let selected = 1;
@@ -192,17 +203,23 @@ async function main(): Promise<void> {
 	let frame: FrameStats = { sections: 0, drawn: 0, quads: 0, skyBrightness: 1 };
 	let timeReceivedAt = performance.now();
 	let fps = 0;
+	const entityReceivedAt = new Map<number, number>();
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
 		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
+			closePending = false;
 			seedReady = false;
+			previousHealth = null;
 			if (transport.kind !== "local") generator = null;
 			tintMap.setWorld(null, null);
 			if (opened) {
 				meshPool.reset();
 				core.resetWorld();
+				entityReceivedAt.clear();
+				remoteDigs.clear();
+				dig = newDigState();
 				removeUnloaded();
 			}
 			opened = true;
@@ -211,7 +228,40 @@ async function main(): Promise<void> {
 		onPacket: (data: Uint8Array) => {
 			const id = core.packet(data);
 			removeUnloaded();
+			if (id === S2C.Inventory) {
+				syncInventory();
+				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
+				const kind = !core.dead && ([1, 2] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
+				if (kind) {
+					const view = kind === 1 ? tableView : furnaceView;
+					if (view.screen.hidden) openInventoryScreen(kind);
+				} else if (!tableScreen.hidden || !furnaceScreen.hidden) closeInventoryScreen(false);
+			}
+			if (id === S2C.BlockUpdate) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				const x = v.getInt32(1), y = v.getInt32(5), z = v.getInt32(9);
+				dig = observeDigBlockUpdate(dig, x, y, z, core.getBlock(x, y, z), performance.now());
+			}
+			if (id === S2C.DigProgress) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				const player = v.getUint32(1), stage = v.getUint8(17);
+				if (stage === 255) {
+					const old = remoteDigs.get(player);
+					if (old && old.x === v.getInt32(5) && old.y === v.getInt32(9) && old.z === v.getInt32(13)) remoteDigs.delete(player);
+				}
+				else remoteDigs.set(player, { x: v.getInt32(5), y: v.getInt32(9), z: v.getInt32(13), stage });
+			}
+			if (id === S2C.UnloadChunk) {
+				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
+			}
+			if (id === S2C.EntitySpawn || id === S2C.EntityMove) {
+				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				entityReceivedAt.set(view.getUint32(1), performance.now());
+			}
+			if (id === S2C.EntityRemove) entityReceivedAt.delete(new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1));
 			if (id === S2C.Welcome) {
+				pendingSelectedSlot = null;
 				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
@@ -238,6 +288,8 @@ async function main(): Promise<void> {
 				}
 				if (!locked()) showMenuView(wasJoined ? "menu" : "start");
 				if (autopilot) overlay.hidden = true;
+			} else if (id === S2C.PlayerStatus) {
+				syncVitals();
 			} else if (id === S2C.PlayerCorrect) {
 				positionsCorrected++;
 				position = core.playerPosition;
@@ -257,7 +309,10 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
+			stopEating();
 			picker.hidden = true;
+			hideInventoryScreens();
+			deathScreen.close();
 			$("start-to-title").hidden = false;
 			showMenuView("start");
 			timeSamples.length = 0;
@@ -268,10 +323,12 @@ async function main(): Promise<void> {
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
+			stopEating();
 			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
 			picker.hidden = true;
+			hideInventoryScreens();
 			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
@@ -279,7 +336,7 @@ async function main(): Promise<void> {
 	const transport: Transport =
 		serverKind === "ws"
 			? new WebSocketTransport(worldName, handlers)
-			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime);
+			: new LocalTransport(serverWasmUrl, worldName, seedParam, requestedGenerator, handlers, startTime, params.get("genworkers") !== "0", params.get("mode") === "survival" ? "survival" : "creative");
 
 	const local = () => {
 		if (!(transport instanceof LocalTransport)) throw new Error("シングルプレイでのみ使えます");
@@ -351,12 +408,24 @@ async function main(): Promise<void> {
 
 	// ---- hotbar ------------------------------------------------------------
 	const slots: HTMLCanvasElement[] = [];
-	let hotbarBlocks = defaultHotbar(registry);
-	try { hotbarBlocks = loadHotbar(localStorage, registry); } catch { /* Keep defaults if storage access throws. */ }
+	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
+	let pendingSelectedSlot: number | null = null;
+	const eatProgress = $<HTMLProgressElement>("eat-progress");
+	let eating: { item: number; count: number; startedAt: number } | null = null;
+	function stopEating(): void {
+		if (!eating) return;
+		eating = null;
+		eatProgress.hidden = true;
+		if (connection === "open") transport.send(core.encodeStopUsingItem());
+	}
+	let dig = newDigState();
+	let heldInventory = "";
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
 		c.width = c.height = ICON_SIZE;
+		c.title = "";
+		if (!state) return;
 		const info = registry[state];
 		let icon = icons.get(state);
 		if (!icon) {
@@ -372,18 +441,78 @@ async function main(): Promise<void> {
 		hotbar.append(c);
 		slots.push(c);
 	}
-	function selectSlot(slot: number): void {
+	function selectSlot(slot: number, send = true): void {
+		if (slot !== selectedSlot) stopEating();
+		const next = updateDigSelection(dig, heldInventory, slot, core.inventory[slot]);
+		dig = next.state;
+		heldInventory = next.selection;
+		if (send) {
+			pendingSelectedSlot = slot;
+			transport.send(core.encodeSelectSlot(slot));
+		}
 		selectedSlot = slot;
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
 	}
-	function replaceSlot(state: number): void {
-		hotbarBlocks[selectedSlot] = registry[state].first;
-		paintIcon(slots[selectedSlot], hotbarBlocks[selectedSlot]);
-		selectSlot(selectedSlot);
-		try { saveHotbar(localStorage, hotbarBlocks, registry); } catch { /* Usable until reload if storage is disabled. */ }
+	function syncInventory(): void {
+		const inventory = core.inventory;
+		paintInventoryScreen();
+		hotbarBlocks = hotbarStates(inventory, items);
+		for (let i = 0; i < 9; i++) {
+			const c = slots[i];
+			paintItemIcon(c, inventory[i]?.item);
+			const count = inventory[i]?.count ?? 0;
+			c.dataset.count = String(count);
+			if (count >= 2) {
+				const icon = document.createElement("canvas");
+				icon.width = c.width;
+				icon.height = c.height;
+				icon.getContext("2d")!.drawImage(c, 0, 0);
+				c.width = c.height = 64;
+				const ctx = c.getContext("2d")!;
+				ctx.imageSmoothingEnabled = false;
+				ctx.drawImage(icon, 0, 0, 64, 64);
+				ctx.font = "bold 23px monospace";
+				ctx.textAlign = "right";
+				ctx.lineWidth = 4;
+				ctx.strokeStyle = "black";
+				ctx.strokeText(String(count), 62, 61);
+				ctx.fillStyle = "white";
+				ctx.fillText(String(count), 62, 61);
+			}
+		}
+		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
+		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
+		if (eating) {
+			const stack = inventory[selectedSlot];
+			if (stack?.item !== eating.item) {
+				stopEating();
+			} else {
+				if (stack.count < eating.count) {
+					eating.startedAt = performance.now();
+					eatProgress.value = 0;
+				}
+				eating.count = stack.count;
+			}
+		}
 	}
-	selectSlot(0);
+	function paintItemIcon(c: HTMLCanvasElement, id?: number): void {
+		const item = items.find(item => item.id === id);
+		paintIcon(c, item?.block ?? 0);
+		if (item?.block == null && item?.texture) {
+			c.width = c.height = TEX_SIZE;
+			const pixels = renderer.texturePixels.get(item.texture);
+			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+			c.title = item.name;
+		}
+	}
+	function replaceSlot(state: number): void {
+		if (core.gameMode !== "creative") return;
+		const item = items.find(item => item.block === registry[state].first);
+		if (!item) return;
+		transport.send(core.encodeCreativeSetSlot(selectedSlot, item.id, 1));
+	}
+	selectSlot(0, false);
 
 	// ---- input -------------------------------------------------------------
 	let settings = defaultSettings();
@@ -394,6 +523,15 @@ async function main(): Promise<void> {
 	let sprinting = false;
 	let lastForwardTap = -Infinity;
 	const heldButtons = new Map<number, number>();
+	let leftHeld = false;
+	const remoteDigs = new Map<number, DigOverlay>();
+	const stopDig = () => {
+		leftHeld = false;
+		const a = dig.active;
+		const next = advanceDig(dig, false, null, a ? core.getBlock(a.x, a.y, a.z) : null, performance.now());
+		dig = next.state;
+		if (!core.dead && connection === "open" && next.commands.length) transport.send(core.encodeDigAbort());
+	};
 	const locked = () => document.pointerLockElement === canvas;
 	const clearInput = () => {
 		keys.clear();
@@ -402,10 +540,12 @@ async function main(): Promise<void> {
 		lastJumpTap = -Infinity;
 		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
+		stopDig();
+		stopEating();
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
-	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択" };
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択", drop: "アイテムを捨てる" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
@@ -523,30 +663,176 @@ async function main(): Promise<void> {
 	}
 	refreshSettings();
 
+	function createInventoryScreen(kind: InventoryScreenKind) {
+		const screen = document.createElement("section");
+		screen.id = kind === 2 ? "furnace-screen" : kind === 1 ? "crafting-table-screen" : "inventory-screen";
+		screen.className = "inventory-screen";
+		screen.setAttribute("role", "dialog");
+		screen.setAttribute("aria-modal", "true");
+		screen.setAttribute("aria-label", kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリとクラフト");
+		screen.hidden = true;
+		const heading = document.createElement("h2");
+		heading.textContent = kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリ / クラフト";
+		screen.append(heading);
+		const buttons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
+		const rows = kind === 2 ? FURNACE_ROWS : kind === 1 ? TABLE_ROWS : INVENTORY_ROWS;
+		const craftingRow = document.createElement("div");
+		craftingRow.className = "inventory-crafting";
+		for (const [index, row] of rows.entries()) {
+			const group = document.createElement("div");
+			const label = ["所持品", "ホットバー", kind === 2 ? "かまど（入力・燃料）" : "クラフト", "結果"][index];
+			group.setAttribute("aria-label", label);
+			group.className = `inventory-slots${index === 2 ? ` inventory-crafting-grid${kind === 2 ? " inventory-furnace-grid" : kind === 1 ? " inventory-table-grid" : ""}` : index === 3 ? " inventory-result" : ""}`;
+			if (index !== 3) {
+				const title = document.createElement("h3");
+				title.textContent = label;
+				screen.append(title);
+			}
+			for (const slot of row) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.dataset.slot = String(slot);
+				button.setAttribute("aria-label", kind === 2 && slot >= 51 ? `${["入力", "燃料", "出力"][slot - 51]} 枠 ${slot}` : `枠 ${slot}`);
+				button.style.cssText = "position:relative;width:48px;height:48px;background:#525960;border:1px solid #aab2ba;color:white";
+				const canvas = document.createElement("canvas");
+				canvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
+				const count = document.createElement("span");
+				count.style.cssText = "position:absolute;right:2px;bottom:0;text-shadow:1px 1px black";
+				button.append(canvas,count);
+				bindInventorySlot(button, slot, (slot, button, shift) => {
+					transport.send(core.encodeClickSlot(slot, button, shift));
+				});
+				buttons.set(slot,{canvas,count});
+				group.append(button);
+			}
+			if (index === 2) {
+				craftingRow.append(group);
+				screen.append(craftingRow);
+			} else if (index === 3) {
+				const arrow = document.createElement("span");
+				arrow.textContent = "→";
+				arrow.setAttribute("aria-hidden", "true");
+				craftingRow.append(arrow, group);
+			} else {
+				screen.append(group);
+			}
+		}
+		const gauges: HTMLProgressElement[] = [];
+		if (kind === 2) {
+			const meters = document.createElement("div");
+			meters.className = "furnace-gauges";
+			for (const [index, name] of ["燃焼", "精錬"].entries()) {
+				const label = document.createElement("label");
+				const progress = document.createElement("progress");
+				progress.id = `furnace-${index === 0 ? "burn" : "smelt"}`;
+				progress.setAttribute("role", "progressbar");
+				progress.setAttribute("aria-label", name);
+				progress.setAttribute("aria-valuemin", "0");
+				label.htmlFor = progress.id;
+				label.append(name, progress);
+				meters.append(label);
+				gauges.push(progress);
+			}
+			screen.append(meters);
+		}
+		const close = document.createElement("button");
+		close.textContent = "閉じる (E / Esc)";
+		close.addEventListener("click", () => closeInventoryScreen());
+		screen.append(close);
+		document.body.append(screen);
+		return { screen, buttons, kind, gauges };
+	}
+	const inventoryView = createInventoryScreen(0);
+	const tableView = createInventoryScreen(1);
+	const inventoryScreen = inventoryView.screen;
+	const tableScreen = tableView.screen;
+	const furnaceView = createInventoryScreen(2);
+	const furnaceScreen = furnaceView.screen;
+	const cursorIcon = document.createElement("div");
+	cursorIcon.style.cssText = "position:fixed;pointer-events:none;z-index:30;color:white;text-shadow:1px 1px black";
+	const cursorCanvas = document.createElement("canvas");
+	cursorCanvas.style.cssText = "width:32px;height:32px;image-rendering:pixelated";
+	const cursorCount = document.createElement("span");
+	cursorIcon.append(cursorCanvas,cursorCount);
+	cursorIcon.hidden = true;
+	document.body.append(cursorIcon);
+	document.addEventListener("mousemove", event => {
+		cursorIcon.style.left = `${event.clientX+12}px`;
+		cursorIcon.style.top = `${event.clientY+12}px`;
+	});
+	function paintInventoryScreen(): void {
+		const active = !furnaceScreen.hidden ? furnaceView : !tableScreen.hidden ? tableView : inventoryView;
+		const display = inventoryDisplay(core.inventorySlots, active.kind);
+		for (const group of display.groups) for (const {slot,stack} of group) {
+			const view = active.buttons.get(slot)!;
+			paintItemIcon(view.canvas, stack?.item);
+			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
+			view.canvas.dataset.count = String(stack?.count ?? 0);
+		}
+		const [remaining, total, smelt] = core.furnaceTimes;
+		for (const [index, gauge] of furnaceView.gauges.entries()) {
+			const value = index === 0 ? remaining : smelt;
+			const max = index === 0 ? total : 160;
+			gauge.max = Math.max(1, max);
+			gauge.value = value;
+			gauge.setAttribute("aria-valuenow", String(value));
+			gauge.setAttribute("aria-valuemax", String(max));
+			gauge.textContent = `${value} / ${max}`;
+		}
+		paintItemIcon(cursorCanvas, display.cursor?.item);
+		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
+		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
+	}
+	function openInventoryScreen(kind: InventoryScreenKind = 0): void {
+		clearInput();
+		inventoryScreen.hidden = kind !== 0;
+		tableScreen.hidden = kind !== 1;
+		furnaceScreen.hidden = kind !== 2;
+		picker.hidden = true;
+		overlay.hidden = true;
+		paintInventoryScreen();
+		if (locked()) document.exitPointerLock();
+	}
+	function hideInventoryScreens(): void {
+		inventoryScreen.hidden = true;
+		tableScreen.hidden = true;
+		furnaceScreen.hidden = true;
+		cursorIcon.hidden = true;
+	}
+	function closeInventoryScreen(send = true): void {
+		hideInventoryScreens();
+		if (send) {
+			closePending = updateClosePending(closePending, { type: "close" });
+			transport.send(core.encodeCloseInventory());
+		}
+		clearInput();
+		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
+		void requestPointerLock();
+	}
 	const picker = $("block-picker");
 	const pickerButtons: HTMLButtonElement[] = [];
-	registry.forEach((info, state) => {
-		if (state === 0 || info.first !== state) return;
+	items.forEach(info => {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.dataset.block = info.name;
 		button.title = info.name;
 		const icon = document.createElement("canvas");
-		paintIcon(icon, state);
+		paintItemIcon(icon, info.id);
 		const label = document.createElement("span");
 		label.textContent = info.name;
 		button.append(icon, label);
-		button.addEventListener("click", () => replaceSlot(state));
+		button.addEventListener("click", () => { if (core.gameMode === "creative") transport.send(core.encodeCreativeSetSlot(selectedSlot, info.id, 1)); });
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
 	function openPicker(): void {
+		if (core.gameMode !== "creative") return;
 		picker.querySelector("p")!.textContent = `クリックで現在のホットバー枠に設定。${settings.keys.inventory} / Esc で閉じます。`;
 		clearInput();
 		picker.hidden = false;
 		overlay.hidden = true;
 		if (locked()) document.exitPointerLock();
-		pickerButtons.find(button => button.dataset.block === registry[selected].name)?.focus();
+		pickerButtons.find(button => button.dataset.block === slots[selectedSlot].title)?.focus();
 	}
 	function closePicker(reason: "inventory" | "escape" | "button"): void {
 		picker.hidden = true;
@@ -587,11 +873,11 @@ async function main(): Promise<void> {
 		}
 	}
 	async function requestPointerLock(): Promise<void> {
-		if (failed) return;
+		if (failed || core.dead) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
-			if (failed) return;
+			if (failed || core.dead) return;
 			try { await canvas.requestPointerLock(); }
 			catch { pointerLockFailed(); }
 		}
@@ -602,7 +888,7 @@ async function main(): Promise<void> {
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && !failed && connection === "open" && picker.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
@@ -611,18 +897,26 @@ async function main(): Promise<void> {
 			showMenuView("start");
 			return;
 		}
+		if (deathScreen.open) {
+			if (locked()) document.exitPointerLock();
+			return;
+		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
-		if (!picker.hidden) { overlay.hidden = true; return; }
+		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		const degrees = mouseDegrees(settings.sensitivity);
 		camera.yaw = (camera.yaw + e.movementX * degrees) % 360;
 		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
 	});
 	window.addEventListener("keydown", (e) => {
+		if (core.dead && connection === "open" && !failed) {
+			if (e.code === "Escape") e.preventDefault();
+			return;
+		}
 		if (!overlay.hidden && menuView === "settings") {
 			if (capturing) {
 				e.preventDefault();
@@ -641,6 +935,13 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
+		if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) {
+			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
+				e.preventDefault();
+				if (!e.repeat) closeInventoryScreen();
+			}
+			return;
+		}
 		if (!picker.hidden) {
 			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
 				e.preventDefault();
@@ -655,12 +956,17 @@ async function main(): Promise<void> {
 		}
 		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {
 			e.preventDefault();
-			if (!e.repeat) openPicker();
+			if (!e.repeat) { if (core.gameMode === "survival") openInventoryScreen(); else openPicker(); }
 			return;
 		}
 		if (matchesKey(e.code, settings.keys.fullscreen) && !e.repeat) {
 			e.preventDefault();
 			void toggleFullscreen();
+			return;
+		}
+		if (matchesKey(e.code, settings.keys.drop) && locked() && joined && connection === "open") {
+			e.preventDefault();
+			if (!e.repeat) transport.send(core.encodeDropItem(forward(camera.yaw, camera.pitch)));
 			return;
 		}
 		if (e.code === "F8") {
@@ -694,32 +1000,62 @@ async function main(): Promise<void> {
 	});
 	window.addEventListener("blur", clearInput);
 	canvas.addEventListener("wheel", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		e.preventDefault();
 		selectSlot((selectedSlot + Math.sign(e.deltaY) + slots.length) % slots.length);
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 	const sendPosition = () => {
-		if (autopilot) return;
+		if (autopilot || core.dead) return;
 		// Rendering may interpolate through a corner; report only resolved physics feet.
 		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
-		if (connection !== "open") return false;
+		if (connection !== "open" || core.dead) return false;
+		if (core.gameMode === "survival") {
+			if (block === 0 || !hotbarBlocks[selectedSlot]) return false;
+		}
 		if (!core.predictBlock(x, y, z, block)) return false;
 		// The server checks reach against the last position it knows.
 		sendPosition();
 		transport.send(core.encodeSetBlock(x, y, z, block));
 		return true;
 	};
-	function interact(button: number): void {
+	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
 		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
+		if (button === 2 && !repeat && !eating && core.gameMode === "survival" && !core.dead
+			&& core.food < MAX_FOOD && connection === "open"
+			&& inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) {
+			const stack = core.inventory[selectedSlot];
+			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
+			if (stack && items.find(item => item.id === stack.item)?.food
+				&& blockInteraction(targetBlock?.name, false) !== "open") {
+				heldButtons.delete(2);
+				transport.send(core.encodeUseItem());
+				eating = { item: stack.item, count: stack.count, startedAt: performance.now() };
+				eatProgress.value = 0;
+				eatProgress.hidden = false;
+				return;
+			}
+		}
 		if (!hit) return;
 		if (button === 0) {
+			if (core.gameMode === "survival") return;
 			setBlock(hit.x, hit.y, hit.z, 0);
 		} else if (button === 2) {
+			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
+			if (blockInteraction(block?.name, shift) === "open") {
+				if (!repeat) {
+					heldButtons.delete(2);
+					sendPosition();
+					closePending = updateClosePending(closePending, { type: "use" });
+					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
+				}
+				return;
+			}
+			if (!selected) return;
 			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
@@ -727,17 +1063,22 @@ async function main(): Promise<void> {
 			if (block && block.first > 0) {
 				const slot = hotbarBlocks.indexOf(block.first);
 				if (slot >= 0) selectSlot(slot);
-				else replaceSlot(block.first);
+				else if (core.gameMode === "creative") replaceSlot(block.first);
 			}
 		}
 	}
 	canvas.addEventListener("mousedown", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		e.preventDefault();
+		if (e.button === 0 && core.gameMode === "survival") { leftHeld = true; return; }
 		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
-		interact(e.button);
+		interact(e.button, false, e.shiftKey);
 	});
-	window.addEventListener("mouseup", e => heldButtons.delete(e.button));
+	window.addEventListener("mouseup", e => {
+		heldButtons.delete(e.button);
+		if (e.button === 0) stopDig();
+		if (e.button === 2) stopEating();
+	});
 	window.addEventListener("pagehide", () => transport.flush());
 	window.addEventListener("pageshow", (event) => {
 		if (event.persisted) transport.resume?.();
@@ -749,6 +1090,7 @@ async function main(): Promise<void> {
 	// ---- simulation of the camera ---------------------------------------
 	const spawnForAutopilot = () => core.spawn;
 	function move(dt: number, timeMs: number): void {
+		if (core.dead) return;
 		if (autopilot) {
 			const [sx, sy, sz] = spawnForAutopilot();
 			if (joined && autopilotStartedAt === null && core.chunkCount >= (2 * core.viewDistance + 1) ** 2 && core.dirtyCount === 0) {
@@ -769,7 +1111,8 @@ async function main(): Promise<void> {
 			pendingFlightToggle = false;
 			const fwd = (pressed(settings.keys.forward) ? 1 : 0) - (pressed(settings.keys.backward) ? 1 : 0);
 			const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
-			const sprint = sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement));
+			const sprint = (core.gameMode !== "survival" || core.food > 6)
+				&& (sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)));
 			const state = core.tickPlayer(fwd, strafe, camera.yaw, pendingJump || pressed(settings.keys.up), sprint, pressed(settings.keys.down));
 			pendingJump = false;
 			position = state.position;
@@ -782,6 +1125,69 @@ async function main(): Promise<void> {
 	}
 
 	// ---- HUD ---------------------------------------------------------------
+	const vitals = $("vitals");
+	const healthMeter = $("health");
+	const airMeter = $("air");
+	const foodMeter = $("food");
+	const damageFlash = $("damage-flash");
+	const respawn = $<HTMLButtonElement>("respawn");
+	const deathCauses = ["", "落下してやられた", "ブロックの中で窒息した", "溺れた", "奈落に落ちた"];
+	const hearts = heartStates(core.health).map(() => document.createElement("span"));
+	for (const heart of hearts) heart.className = "heart";
+	healthMeter.append(...hearts);
+	const foodIcons = foodStates(core.food).map(() => document.createElement("span"));
+	for (const icon of foodIcons) icon.className = "food";
+	foodMeter.append(...foodIcons);
+	const bubbles = Array.from({ length: bubbleCount(MAX_AIR) }, () => document.createElement("span"));
+	for (const bubble of bubbles) bubble.className = "bubble";
+	airMeter.append(...bubbles);
+	let previousHealth: number | null = null;
+
+	respawn.addEventListener("click", () => {
+		if (!core.dead || connection !== "open") return;
+		respawn.disabled = true;
+		transport.send(core.encodeRespawn());
+	});
+	deathScreen.addEventListener("cancel", event => event.preventDefault());
+
+	function syncVitals(): void {
+		const { health, air, food, dead, deathCause, gameMode } = core;
+		if (food === MAX_FOOD || dead || gameMode !== "survival") stopEating();
+		vitals.hidden = gameMode !== "survival";
+		if (!vitals.hidden) {
+			healthMeter.setAttribute("aria-valuenow", String(health));
+			heartStates(health).forEach((state, i) => { hearts[i].dataset.state = state; });
+			foodMeter.setAttribute("aria-valuenow", String(food));
+			foodStates(food).forEach((state, i) => { foodIcons[i].dataset.state = state; });
+			airMeter.setAttribute("aria-valuenow", String(air));
+			airMeter.hidden = air === MAX_AIR;
+			const count = bubbleCount(air);
+			bubbles.forEach((bubble, i) => { bubble.hidden = i >= count; });
+			if (previousHealth !== null && health < previousHealth) {
+				damageFlash.getAnimations().forEach(animation => animation.cancel());
+				damageFlash.hidden = false;
+				damageFlash.animate([{ opacity: 1 }, { opacity: 0 }], 300).onfinish = () => { damageFlash.hidden = true; };
+			}
+		}
+		previousHealth = health;
+
+		if (failed) return;
+		if (dead && !deathScreen.open) {
+			clearInput();
+			hideInventoryScreens();
+			picker.hidden = true;
+			overlay.hidden = true;
+			if (locked()) document.exitPointerLock();
+			$("death-cause").textContent = deathCauses[deathCause];
+			respawn.disabled = false;
+			deathScreen.showModal();
+		} else if (!dead && deathScreen.open) {
+			deathScreen.close();
+			showMenuView("menu");
+			if (!autopilot) void requestPointerLock();
+		}
+	}
+
 	const FACING = ["south (+Z)", "west (-X)", "north (-Z)", "east (+X)"];
 	function measuredTps(): number {
 		if (serverStats) return serverStats.tps;
@@ -809,7 +1215,8 @@ async function main(): Promise<void> {
 				(serverStats
 					? `  MSPT ${mspt}  loaded ${serverStats.loadedChunks}  save ${serverStats.persistence}  wasm ${(serverStats.memoryBytes / 1048576).toFixed(0)} MiB`
 					: ""),
-			`Biome: ${serverStats?.biome ?? "?"}`,
+			`Dig: ${dig.active ? `${dig.active.x},${dig.active.y},${dig.active.z} stage ${dig.active.stage}` : "-"}`,
+			`Biome: ${serverStats?.biome ?? "?"}  Game mode: ${core.gameMode}  Entities: ${core.entities.length}`,
 			`Seed: ${core.seed}  Generator: ${generatorName()}  Day ${Math.floor(day / 24000)} ${clock}  (tick ${core.gameTime})`,
 			target ? `Target: ${target.x} ${target.y} ${target.z}  ${registry[core.getBlock(target.x, target.y, target.z)]?.stateName ?? "?"}` : "Target: -",
 		];
@@ -860,17 +1267,43 @@ async function main(): Promise<void> {
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
-		if (locked()) {
+		if (eating) eatProgress.value = Math.min(eatProgress.max, now - eating.startedAt);
+		if (locked() && !core.dead) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
-				interact(button);
+				interact(button, true);
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
+			}
+		}
+		if (core.gameMode === "survival" && !core.dead) {
+			const blockState = target ? core.getBlock(target.x, target.y, target.z) : 0;
+			const held = core.inventory[selectedSlot];
+			const selection = digSelection(selectedSlot, held);
+			const ticks = core.miningTicks(blockState, held?.item ?? 0);
+			const digTarget = target && ticks != null ? { x: target.x, y: target.y, z: target.z, state: blockState, ticks, selection } : null;
+			const a = dig.active;
+			const next = advanceDig(dig, leftHeld && locked() && joined && connection === "open", digTarget,
+				a ? core.getBlock(a.x, a.y, a.z) : null, now);
+			dig = next.state;
+			if (connection === "open") for (const command of next.commands) {
+				if (command.type === "abort") transport.send(core.encodeDigAbort());
+				else { const t = command.target; sendPosition(); transport.send(core.encodeDigStart(t.x,t.y,t.z)); }
 			}
 		}
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"));
+		const renderItems = core.entities.map(entity => ({
+			position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
+			texture: itemTextures.get(entity.item) ?? 0,
+			flat: items.find(item => item.id === entity.item)?.block == null,
+			light: core.entityLight(entity.position),
+		}));
+		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {
+			const bounds = core.selectionBounds(d.x, d.y, d.z);
+			return bounds ? [{ ...d, bounds }] : [];
+		});
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs);
 		window.__mc.frames++;
 
 		frames++;
@@ -892,6 +1325,15 @@ async function main(): Promise<void> {
 		frames: 0,
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
+			gameMode: core.gameMode,
+			health: core.health,
+			food: core.food,
+			dead: core.dead,
+			screen: core.screen,
+			entities: core.entities,
+			dig: dig.active,
+			inventory: core.inventory,
+			selectedSlot: core.selectedSlot,
 			joined,
 			joinedGameTime,
 			autopilotStarted: autopilotStartedAt !== null,

@@ -10,6 +10,42 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // Exercise the exact build pipeline without changing checked-in data.
 fn generate_fixture(blocks: &str, biomes: &str) -> Result<String, String> {
+    generate_items_fixture(
+        blocks,
+        biomes,
+        include_str!("../../../data/registry/items.toml"),
+    )
+}
+
+fn generate_items_fixture(blocks: &str, biomes: &str, items: &str) -> Result<String, String> {
+    generate_recipes_fixture(
+        blocks,
+        biomes,
+        items,
+        include_str!("../../../data/registry/recipes.toml"),
+    )
+}
+fn generate_recipes_fixture(
+    blocks: &str,
+    biomes: &str,
+    items: &str,
+    recipes: &str,
+) -> Result<String, String> {
+    generate_smelting_fixture(
+        blocks,
+        biomes,
+        items,
+        recipes,
+        include_str!("../../../data/registry/smelting.toml"),
+    )
+}
+fn generate_smelting_fixture(
+    blocks: &str,
+    biomes: &str,
+    items: &str,
+    recipes: &str,
+    smelting: &str,
+) -> Result<String, String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/registry-test-{}-{}",
         std::process::id(),
@@ -18,6 +54,9 @@ fn generate_fixture(blocks: &str, biomes: &str) -> Result<String, String> {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("blocks.toml"), blocks).unwrap();
     fs::write(dir.join("biomes.toml"), biomes).unwrap();
+    fs::write(dir.join("items.toml"), items).unwrap();
+    fs::write(dir.join("recipes.toml"), recipes).unwrap();
+    fs::write(dir.join("smelting.toml"), smelting).unwrap();
     let output = std::process::Command::new(env!("REGISTRY_BUILD_SCRIPT"))
         .arg("--registry-fixture")
         .arg(&dir)
@@ -122,10 +161,10 @@ fn one_new_entry_adds_a_block_and_texture() {
     let data = BLOCKS.replacen("\n]", "\n  \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 49\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 51\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 49;"));
-    assert!(output.contains("pub const COUNT: BlockState = 50;"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 51;"));
+    assert!(output.contains("pub const COUNT: BlockState = 52;"));
     let new_layer = world::blocks::TEXTURES.len();
     assert!(output.contains(&format!("tex: {:?}", [new_layer; 6])));
 }
@@ -158,7 +197,8 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 49
+        id = 51
+        dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
         side = "grass_block_side"
@@ -171,7 +211,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 49\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 51\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"
@@ -181,8 +221,8 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
-        "name = \"stone\"\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
@@ -287,5 +327,164 @@ fn tree_data_is_required_and_validated() {
     ] {
         let error = generate_fixture(BLOCKS, &BIOMES.replacen(from, to, 1)).unwrap_err();
         assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
+fn item_validation_and_optional_block() {
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        (
+            "name = \"dirt\"",
+            "name = \"stone\"",
+            "duplicate item stone",
+        ),
+        ("id = 1\n", "id = 0\n", "must not be 0"),
+        ("id = 2\n", "id = 1\n", "duplicate id 1"),
+        (
+            "block = \"stone\"",
+            "block = \"missing\"",
+            "unknown block missing",
+        ),
+        (
+            "id = 1\n",
+            "id = 1\nmax_stack = 0\n",
+            "max_stack must be 1..=64",
+        ),
+        (
+            "id = 1\n",
+            "id = 1\nmax_stack = 65\n",
+            "max_stack must be 1..=64",
+        ),
+    ] {
+        let error =
+            generate_items_fixture(BLOCKS, BIOMES, &items.replacen(from, to, 1)).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    assert!(generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("block = \"stone\"", "texture = \"stone\"\nmax_stack = 7", 1)
+    )
+    .is_ok());
+}
+
+#[test]
+fn mining_metadata_is_required_exclusive_and_bounded() {
+    for replacement in [
+        "",
+        "dig_ticks = -1\n",
+        "dig_ticks = 65536\n",
+        "dig_ticks = 70\nunbreakable = true\n",
+        "unbreakable = false\n",
+    ] {
+        assert!(
+            generate_fixture(&BLOCKS.replacen("dig_ticks = 70\n", replacement, 1), BIOMES).is_err()
+        );
+    }
+}
+
+#[test]
+fn tools_and_harvest_requirements_are_validated() {
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        ("max_stack = 1", "max_stack = 2", "tool max_stack must be 1"),
+        ("block = \"stone\"", "", "block or texture required"),
+        ("tier = 1", "tier = 0", "tool tier must be 1..=4"),
+        ("tier = 1", "tier = 5", "tool tier must be 1..=4"),
+        (
+            "kind = \"pickaxe\"",
+            "kind = \"hammer\"",
+            "unknown tool kind",
+        ),
+    ] {
+        assert!(
+            generate_items_fixture(BLOCKS, BIOMES, &items.replacen(from, to, 1))
+                .unwrap_err()
+                .contains(message)
+        );
+    }
+    for (from, to) in [
+        ("tool = \"pickaxe\"\n", ""),
+        ("min_tier = 1", "min_tier = 5"),
+        ("tool = \"pickaxe\"", "tool = \"hammer\""),
+    ] {
+        assert!(generate_fixture(&BLOCKS.replacen(from, to, 1), BIOMES).is_err());
+    }
+}
+
+#[test]
+fn crafting_recipe_validation() {
+    let recipes = include_str!("../../../data/registry/recipes.toml");
+    let items = include_str!("../../../data/registry/items.toml");
+    for (from, to, message) in [
+        ("oak_log", "missing", "unknown item"),
+        ("item = \"stick\"", "item = \"missing\"", "unknown item"),
+        ("count = 4", "count = 0", "invalid result count"),
+        ("count = 4", "count = 65", "invalid result count"),
+        ("[\"#\", \"#\"]", "[\"#\", \"##\"]", "unequal row lengths"),
+        ("[\"#\", \"#\"]", "[\"?\", \"#\"]", "character missing"),
+        ("key = {", "key = { \"x\" = \"oak_log\",", "unused key"),
+        ("[\"oak_log\"]", "[]", "ingredients length"),
+        ("[\"#\", \"#\"]", "[\"####\"]", "pattern width"),
+        (
+            "[\"#\", \"#\"]",
+            "[\"#\",\"#\",\"#\",\"#\"]",
+            "pattern height",
+        ),
+    ] {
+        assert!(recipes.contains(from));
+        let error = generate_recipes_fixture(BLOCKS, BIOMES, items, &recipes.replacen(from, to, 1))
+            .unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    for duplicate in [
+        "[[recipes]]\ningredients = [\"oak_log\"]\nresult = { item = \"stick\", count = 1 }",
+        "[[recipes]]\npattern = [\" x\", \" x\"]\nkey = { x = \"oak_planks\" }\nresult = { item = \"stick\", count = 1 }",
+    ] {
+        assert!(generate_recipes_fixture(BLOCKS,BIOMES,items,&format!("{recipes}\n{duplicate}")).unwrap_err().contains("duplicate recipe"));
+    }
+}
+
+#[test]
+fn mining_drop_references_must_name_an_existing_item() {
+    for (replacement, message) in [
+        ("drop = \"missing\"", "unknown drop item missing"),
+        ("drop = \"\"", "unknown drop item"),
+        ("drop = 4", "invalid type"),
+    ] {
+        let data = BLOCKS.replacen("drop = \"cobblestone\"", replacement, 1);
+        assert_ne!(data, BLOCKS);
+        let error = generate_fixture(&data, BIOMES).unwrap_err();
+        assert!(error.contains("blocks.toml"), "{error}");
+        assert!(error.contains(message), "{error}");
+    }
+    // The override may reference a non-block item as well.
+    assert!(generate_fixture(
+        &BLOCKS.replacen("drop = \"cobblestone\"", "drop = \"stick\"", 1),
+        BIOMES
+    )
+    .is_ok());
+}
+
+#[test]
+fn smelting_and_fuel_validation() {
+    let items = include_str!("../../../data/registry/items.toml");
+    let recipes = include_str!("../../../data/registry/recipes.toml");
+    let smelting = include_str!("../../../data/registry/smelting.toml");
+    for bad in [
+        smelting.replace("copper_ore", "unknown"),
+        smelting.replace("copper_ingot", "unknown"),
+        format!("{smelting}{smelting}"),
+    ] {
+        assert!(generate_smelting_fixture(BLOCKS, BIOMES, items, recipes, &bad).is_err());
+    }
+    for value in ["0", "-1", "1.5", "4294967296"] {
+        assert!(generate_items_fixture(
+            BLOCKS,
+            BIOMES,
+            &items.replacen("fuel = 320", &format!("fuel = {value}"), 1)
+        )
+        .is_err());
     }
 }

@@ -4,8 +4,8 @@ import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { placementState } from "./placement.ts";
-import { defaultHotbar, HOTBAR_KEY, loadHotbar, saveHotbar } from "./hotbar.ts";
+import { blockInteraction, placementState } from "./placement.ts";
+import { hotbarStates } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 const registry = core.blockRegistry();
@@ -40,7 +40,9 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 49);
+	assert.equal(registry.length, 51);
+	assert.equal(id("crafting_table"), 49);
+	assert.equal(id("furnace"), 50);
 	assert.equal(slab, 14);
 	assert.equal(registry[slab + 1].stateName, "oak_slab[type=top]");
 	assert.equal(registry[slab + 2].occludes, true);
@@ -163,33 +165,23 @@ test("plants require an occluding block directly beneath the destination", () =>
 	}
 });
 
-test("hotbar defaults include slabs; names round trip and restore block defaults", () => {
-	const values = new Map<string, string>();
-	const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
-	const defaults = defaultHotbar(registry);
-	assert.equal(defaults.length, 9);
-	assert.equal(defaults[3], slab);
-	assert.deepEqual(loadHotbar(storage, registry), defaults);
-	const slots = [...defaults];
-	slots[3] = slab + 1;
-	slots[0] = id("red_flower");
-	assert.equal(saveHotbar(storage, slots, registry), true);
-	assert.deepEqual(JSON.parse(values.get(HOTBAR_KEY)!), slots.map(state => registry[state].name));
-	assert.deepEqual(loadHotbar(storage, registry), slots.map(state => registry[state].first));
-	const duplicate = Array(9).fill(slab);
-	assert.equal(saveHotbar(storage, duplicate, registry), true);
-	assert.deepEqual(loadHotbar(storage, registry), duplicate);
+test("hotbar mirrors authoritative items including default slab block states", () => {
+	const items = [{ id: 101, block: stone }, { id: 102, block: slab }];
+	const slots = Array.from({ length: 36 }, () => null as { item: number; count: number } | null);
+	slots[0] = { item: 101, count: 64 };
+	slots[3] = { item: 102, count: 2 };
+	slots[9] = { item: 101, count: 1 };
+	assert.deepEqual(hotbarStates(slots, items), [stone, 0, 0, slab, 0, 0, 0, 0, 0]);
+	assert.equal(slots[0]?.count, 64);
 });
 
-test("corrupt hotbars and denied storage use fresh defaults without throwing", () => {
-	for (const data of ["{", "null", "{}", "[]", JSON.stringify(Array(8).fill("stone")), JSON.stringify(Array(9).fill("air")), JSON.stringify(Array(9).fill(1)), JSON.stringify(Array(9).fill("missing")), JSON.stringify(Array(9).fill("oak_slab[type=top]"))]) {
-		assert.deepEqual(loadHotbar({ getItem: () => data }, registry), defaultHotbar(registry));
-	}
-	assert.deepEqual(loadHotbar({ getItem() { throw new Error("denied"); } }, registry), defaultHotbar(registry));
-	assert.equal(saveHotbar({ setItem() { throw new Error("quota"); } }, defaultHotbar(registry), registry), false);
-	const first = defaultHotbar(registry);
-	first[0] = air;
-	assert.equal(defaultHotbar(registry)[0], stone);
+test("empty, unknown and non-block items have empty hotbar icons", () => {
+	const items = [{ id: 8, block: null }, { id: 9, block: stone }];
+	const slots = [{ item: 8 }, { item: 65535 }, null, { item: 9 }, ...Array(32).fill(null)];
+	const states = hotbarStates(slots, items);
+	assert.deepEqual(states, [0, 0, 0, stone, 0, 0, 0, 0, 0]);
+	states[3] = air;
+	assert.equal(hotbarStates(slots, items)[3], stone);
 });
 
 
@@ -207,4 +199,38 @@ test("biome blocks expose picker entries and original art, with translucent ice"
 			assert.ok(name === "ice" ? pixels[i+3] > 0 && pixels[i+3] < 255 : pixels[i+3] === 255);
 		}
 	}
+});
+
+
+test("WASM mining rules use the selected tool, tier gates and integer rounding", () => {
+	const item = (name: string) => core.itemRegistry().find(item => item.name === name)!.id;
+	for (const [block, held, ticks, drops] of [
+		["stone", 0, 140, false],
+		["stone", item("wooden_pickaxe"), 35, true],
+		["stone", item("iron_axe"), 140, false],
+		["gold_ore", item("stone_pickaxe"), 46, false],
+		["gold_ore", item("copper_pickaxe"), 18, true],
+		["grass_block", item("iron_shovel"), 3, true],
+		["red_flower", item("iron_shovel"), 0, true],
+		["bedrock", 0, null, false],
+	] as const) {
+		assert.equal(core.miningTicks(id(block), held), ticks);
+		assert.equal(core.miningDrops(id(block), held), drops);
+	}
+	assert.equal(core.miningTicks(65535, 0), null);
+});
+
+
+test("right-click opens a crafting table unless Shift requests placement", () => {
+    assert.equal(blockInteraction("crafting_table", false), "open");
+    assert.equal(blockInteraction("crafting_table", true), "place");
+    for (const name of ["stone", "oak_log", "air", undefined]) {
+        assert.equal(blockInteraction(name, false), "place");
+        assert.equal(blockInteraction(name, true), "place");
+    }
+});
+
+test("right-click opens a furnace unless Shift requests placement", () => {
+    assert.equal(blockInteraction("furnace", false), "open");
+    assert.equal(blockInteraction("furnace", true), "place");
 });

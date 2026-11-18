@@ -10,7 +10,7 @@ export function isRegionName(name: string): boolean {
 	return Number.isSafeInteger(rx) && Number.isSafeInteger(rz)
 		&& name === `r.${Math.floor(rx * 32 / 32)}.${Math.floor(rz * 32 / 32)}`;
 }
-const validName = (name: string) => name === "meta.json" || isRegionName(name);
+const validName = (name: string) => name === "meta.json" || name === "player.dat" || isRegionName(name);
 const table = Uint32Array.from({ length: 256 }, (_, n) => {
 	for (let i = 0; i < 8; i++) n = (n >>> 1) ^ (n & 1 ? 0xedb88320 : 0);
 	return n >>> 0;

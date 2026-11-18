@@ -6,6 +6,7 @@ import {
 import { RegionCodec } from "../shared/region-codec.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
+import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
 import serverWasm from "../wasm/server.wasm";
 
 // One world = one Durable Object: the dedicated server.
@@ -19,6 +20,8 @@ import serverWasm from "../wasm/server.wasm";
 // at most that window of edits is lost and players reconnect. (The game itself
 // autosaves every five minutes.)
 
+// Limit generation work between ticks when RPCs share the same process to reduce timer jitter.
+const MAX_GENERATION_IN_FLIGHT = 8;
 const MAX_PLAYERS = 16;
 const MAX_PACKET_BYTES = 256;
 /** Packets accepted per client per tick before the connection is dropped. */
@@ -35,6 +38,7 @@ const ACCESS_RECHECK_MS = 60_000;
 
 export interface WorldMetrics {
 	ticking: boolean;
+	generation: GenerationStats | null;
 	seed: string | null;
 	gameTime: number;
 	players: number;
@@ -51,12 +55,15 @@ export interface WorldMetrics {
 
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
+	private generation: GenerationDispatcher | null = null;
+	private generationFailed = false;
 	private codec: RegionCodec | null = null;
 	private seed: bigint | null = null;
 	private generator: number = Generator.DebugHills;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
 	// Memory only: eviction/recreation starts players at spawn, not a saved position.
+	private readonly inventories = new Map<string, Uint8Array>();
 	private readonly positions = new Map<string, [number, number, number]>();
 	private readonly sessions = new Map<number, string>();
 	private worldName: string | null = null;
@@ -127,10 +134,36 @@ export class WorldDO extends DurableObject<Env> {
 		const core = new ServerCore(instance);
 		this.codec = new RegionCodec(instance);
 		core.start(this.seed, this.generator);
+		const gameMode = this.meta("gamemode") ?? "creative";
+		this.setMeta("gamemode", gameMode);
+		core.setGameMode(gameMode === "survival" ? "survival" : "creative");
 		core.setTime(BigInt(this.meta("gameTime") ?? "0"), BigInt(this.meta("dayTime") ?? "0"));
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
 		core.setStored(stored.map((r) => [r.cx, r.cz] as const));
 		this.core = core;
+		this.generationFailed = false;
+		if ((this.env.GEN_OFFLOAD as string | undefined) !== "0") {
+			try {
+				const entry = (this.ctx.exports as unknown as { ChunkGen?: { generate(seed: string, generator: number, cx: number, cz: number): Promise<Uint8Array> } }).ChunkGen;
+				if (!entry) throw new Error("ChunkGen entrypoint unavailable");
+				const seed = this.seed.toString();
+				const generator = this.generator;
+				this.generation = new GenerationDispatcher(async (cx, cz) => {
+					try {
+						if (this.generationFailed) throw new Error("Generation offload disabled");
+						return await entry.generate(seed, generator, cx, cz);
+					}
+					catch (error) {
+						if (this.core === core) {
+							if (!this.generationFailed) console.warn("Generation offload disabled", error);
+							this.generationFailed = true;
+						}
+						throw error;
+					}
+				}, MAX_GENERATION_IN_FLIGHT, 5000);
+				core.setExternalGeneration(MAX_GENERATION_IN_FLIGHT);
+			} catch (error) { console.warn("Generation offload unavailable", error); }
+		}
 		return core;
 	}
 
@@ -167,13 +200,7 @@ export class WorldDO extends DurableObject<Env> {
 		const core = this.ensureCore();
 		if (previous !== undefined) {
 			this.sockets.get(previous)?.close(LOGGED_IN_ELSEWHERE, "logged in elsewhere");
-			if (this.sockets.delete(previous)) {
-				this.rememberPosition(previous);
-				this.users.delete(previous);
-				this.sessions.delete(previous);
-				this.packetCounts.delete(previous);
-				core.disconnect(previous);
-			}
+			this.releaseClient(previous);
 		}
 		const pair = new WebSocketPair();
 		const client = pair[0];
@@ -186,7 +213,7 @@ export class WorldDO extends DurableObject<Env> {
 		server.binaryType = "arraybuffer";
 
 		const id = this.nextClient++;
-		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user));
+		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user));
 		this.sockets.set(id, server);
 		this.users.set(id, user);
 		const session = request.headers.get("X-MC-Session");
@@ -195,13 +222,7 @@ export class WorldDO extends DurableObject<Env> {
 		this.worldName = new URL(request.url).pathname.split("/").filter(Boolean)[1];
 
 		const drop = () => {
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				core.disconnect(id);
-			}
+			this.releaseClient(id);
 		};
 		server.addEventListener("message", (event) => {
 			if (!this.sockets.has(id)) return;
@@ -227,10 +248,23 @@ export class WorldDO extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	private releaseClient(id: number): void {
+		if (!this.sockets.delete(id)) return;
+		const core = this.ensureCore();
+		core.returnCrafting(id);
+		this.rememberPosition(id);
+		this.users.delete(id);
+		this.sessions.delete(id);
+		this.packetCounts.delete(id);
+		core.disconnect(id);
+	}
+
 	private rememberPosition(id: number): void {
 		const user = this.users.get(id);
 		const position = this.ensureCore().clientPosition(id);
 		if (user !== undefined && position !== undefined) this.positions.set(user, position);
+		const inventory = this.ensureCore().inventoryData(id);
+		if (user !== undefined && inventory !== undefined) this.inventories.set(user, inventory);
 	}
 
 	revoke(userId: string): number {
@@ -248,15 +282,8 @@ export class WorldDO extends DurableObject<Env> {
 		let revoked = 0;
 		for (const [id, user] of this.users) {
 			if (user !== userId) continue;
-			const core = this.ensureCore();
 			this.sockets.get(id)?.close(ACCESS_REVOKED, "access revoked");
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				core.disconnect(id);
-			}
+			this.releaseClient(id);
 			revoked++;
 		}
 		return revoked;
@@ -267,13 +294,7 @@ export class WorldDO extends DurableObject<Env> {
 		const count = this.sockets.size;
 		for (const [id, socket] of this.sockets) {
 			socket.close(code, reason);
-			if (this.sockets.delete(id)) {
-				this.rememberPosition(id);
-				this.users.delete(id);
-				this.sessions.delete(id);
-				this.packetCounts.delete(id);
-				this.ensureCore().disconnect(id);
-			}
+			this.releaseClient(id);
 		}
 		return count;
 	}
@@ -284,6 +305,9 @@ export class WorldDO extends DurableObject<Env> {
 		this.save();
 		this.stopTicking();
 		this.positions.clear();
+		this.inventories.clear();
+		this.generation?.reset();
+		this.generation = null;
 		this.core = null;
 		this.codec = null;
 		this.seed = null;
@@ -317,13 +341,7 @@ export class WorldDO extends DurableObject<Env> {
 					new Date(row.expiresAt).getTime() > now
 				)) continue;
 				this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
-				if (this.sockets.delete(connection.id)) {
-					this.rememberPosition(connection.id);
-					this.users.delete(connection.id);
-					this.sessions.delete(connection.id);
-					this.packetCounts.delete(connection.id);
-					this.ensureCore().disconnect(connection.id);
-				}
+				this.releaseClient(connection.id);
 			}
 		} catch (error) {
 			console.error("access recheck failed", this.worldName, error);
@@ -353,10 +371,21 @@ export class WorldDO extends DurableObject<Env> {
 		for (let i = 0; i < due; i++) this.step();
 	}
 
+	private pumpGeneration(core: ServerCore): void {
+		this.generation?.pump(core);
+		if (this.generation?.failed && !this.generationFailed) {
+			console.warn("Generation offload disabled: request timed out");
+			this.generationFailed = true;
+		}
+		if (this.generationFailed) core.setExternalGeneration(0);
+	}
+
 	private step(): void {
 		const core = this.core;
 		if (!core) return;
+		this.pumpGeneration(core);
 		core.tick();
+		this.pumpGeneration(core);
 		const now = Date.now();
 		if (!this.accessCheckRunning && now - this.lastAccessCheck >= ACCESS_RECHECK_MS) {
 			this.lastAccessCheck = now;
@@ -371,6 +400,7 @@ export class WorldDO extends DurableObject<Env> {
 						tps: this.pacer?.measuredTps ?? 0,
 						// Workers clocks do not advance during synchronous work, so MSPT is unavailable.
 						msptMean: null, msptMax: null,
+						generation: this.generation?.stats() ?? null,
 						loadedChunks: core.loadedChunks, persistence: "sqlite", memoryBytes: core.memoryBytes,
 					} }));
 				} catch { /* Close event cleans up the socket. */ }
@@ -461,6 +491,7 @@ export class WorldDO extends DurableObject<Env> {
 		const stored = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM chunks").one().n;
 		return {
 			ticking: this.timer !== null,
+			generation: this.generation?.stats() ?? null,
 			seed: this.seed?.toString() ?? this.meta("seed"),
 			gameTime: Number(this.core?.gameTime ?? BigInt(this.meta("gameTime") ?? "0")),
 			players: this.sockets.size,

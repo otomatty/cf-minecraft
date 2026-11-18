@@ -1,3 +1,4 @@
+import type { GenerationStats } from "../shared/gen-dispatch.ts";
 // How packets reach a server. Both transports carry the same bytes, so the
 // rest of the client cannot tell single player from multiplayer.
 
@@ -7,6 +8,7 @@ import { nextDelayMs, shouldReconnect } from "./reconnect.ts";
 const WORLD_CHECK_TIMEOUT_MS = 10_000;
 
 export interface ServerStats {
+	generation?: GenerationStats | null;
 	biome: string;
 	gameTime: number;
 	tps: number;
@@ -37,7 +39,7 @@ export interface Transport {
 }
 
 export type WorkerRequest =
-	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null }
+	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null; genworkers?: boolean; gameMode?: "creative" | "survival" }
 	| { type: "packet"; data: ArrayBuffer }
 	| { type: "save" }
 	| { type: "saveNow"; id: number }
@@ -66,7 +68,7 @@ export class LocalTransport implements Transport {
 		this.pending.clear();
 	}
 
-	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers, startTime: number | null = null) {
+	constructor(wasmUrl: string, world: string, seed: string | null, generator: number, handlers: TransportHandlers, startTime: number | null = null, genworkers = true, gameMode: "creative" | "survival" = "creative") {
 		this.worker = new Worker(new URL("./sim.worker.ts", import.meta.url), { type: "module" });
 		this.worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
 			const msg = event.data;
@@ -104,7 +106,7 @@ export class LocalTransport implements Transport {
 			this.rejectPending(event.message || "sim worker failed");
 			handlers.onClose(event.message || "sim worker failed");
 		};
-		this.post({ type: "init", wasmUrl, world, seed, generator, startTime });
+		this.post({ type: "init", wasmUrl, world, seed, generator, startTime, genworkers, gameMode });
 	}
 
 	private post(msg: WorkerRequest, transfer: Transferable[] = []): void {

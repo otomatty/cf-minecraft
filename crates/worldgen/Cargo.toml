@@ -8,3 +8,6 @@ publish.workspace = true
 noise.workspace = true
 jmath.workspace = true
 world.workspace = true
+
+[dev-dependencies]
+physics.workspace = true

@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => ({
 		assets: { runWorkerFirst: ["/api/*", "/ws/*"] },
 		env: {
 			// Debug endpoints burn CPU on request; they exist in development only.
+			GEN_OFFLOAD: bindings.text("1"),
 			DEBUG: bindings.text(mode === "development" ? "1" : "0"),
 			// Operator access for production probes.
 			ACCESS_TOKEN: bindings.secret(),
@@ -25,6 +26,7 @@ export default defineConfig(({ mode }) => ({
 			WORLD_CREATORS: bindings.secret(),
 		},
 		exports: {
+			ChunkGen: exports.worker(),
 			WorldDO: exports.durableObject({ storage: "sqlite" }),
 		},
 	},

@@ -1,11 +1,43 @@
 import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
+import type { DigBounds } from "./dig.ts";
 
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
+export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null; food: number | null }
+export interface InventorySlot { item: number; count: number }
+
+export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ClientExports {
+	client_enc_dig_start(x: number, y: number, z: number): number;
+	client_enc_dig_abort(): number;
+	client_mining_ticks(block: number, held: number): number;
+	client_mining_drops(block: number, held: number): boolean;
+	client_entities(): number;
+	client_entity_light(x: number, y: number, z: number): number;
+	client_enc_drop_item(x: number, y: number, z: number): number;
+	client_game_mode(): number;
+	client_health(): number;
+	client_air(): number;
+	client_food(): number;
+	client_dead(): number;
+	client_death_cause(): number;
+	client_enc_respawn(): number;
+	client_enc_use_item(): number;
+	client_enc_stop_using_item(): number;
+	client_enc_click_slot(slot: number, button: number, shift: number): number;
+	client_enc_close_inventory(): number;
+	client_enc_use_block(x: number, y: number, z: number): number;
+	client_screen(): number;
+	client_furnace_time(index: number): number;
+	client_selected_slot(): number;
+	client_slot_item(slot: number): number;
+	client_slot_count(slot: number): number;
+	client_item_registry(): number;
+	client_enc_select_slot(slot: number): number;
+	client_enc_creative_set_slot(slot: number, item: number, count: number): number;
 	memory: WebAssembly.Memory;
 	mc_alloc(len: number): number;
 	mc_free(ptr: number, len: number): void;
@@ -48,6 +80,7 @@ export interface ClientExports {
 	client_mesh(cx: number, sy: number, cz: number): number;
 	client_take_unloaded(): number;
 	client_get_block(x: number, y: number, z: number): number;
+	client_selection_bounds(x: number, y: number, z: number): number;
 	client_raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
 	client_enc_hello(view: number): number;
 	client_player_position(axis: number): number;
@@ -63,7 +96,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -111,6 +144,30 @@ export const FACE_NORMALS: ReadonlyArray<readonly [number, number, number]> = [
 ];
 
 export class ClientCore {
+	get entities(): ItemEntity[] {
+		const bytes = this.out(this.x.client_entities());
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const result: ItemEntity[] = [];
+		// Each packed record has a seven-byte header followed by six f64 coordinates.
+		for (let offset = 0; offset < bytes.length; offset += 55) {
+			result.push({
+				id: view.getUint32(offset), item: view.getUint16(offset + 4), count: view.getUint8(offset + 6),
+				position: [view.getFloat64(offset + 7), view.getFloat64(offset + 15), view.getFloat64(offset + 23)],
+				previous: [view.getFloat64(offset + 31), view.getFloat64(offset + 39), view.getFloat64(offset + 47)],
+			});
+		}
+		return result;
+	}
+
+	entityLight(position: readonly number[]): [number, number] {
+		const value = this.x.client_entity_light(Math.floor(position[0]), Math.floor(position[1]), Math.floor(position[2]));
+		return [value >> 4, value & 15];
+	}
+
+	encodeDropItem(dir: readonly number[]): Uint8Array<ArrayBuffer> {
+		return this.out(this.x.client_enc_drop_item(dir[0], dir[1], dir[2]));
+	}
+
 	private readonly x: ClientExports;
 	private readonly decoder = new TextDecoder();
 	observeLight: ((change: LightMutation) => void) | undefined;
@@ -289,6 +346,13 @@ export class ClientCore {
 		return b === 0xffffffff ? -1 : b;
 	}
 
+	selectionBounds(x: number, y: number, z: number): DigBounds | null {
+		const len = this.x.client_selection_bounds(x, y, z);
+		if (!len) return null;
+		const v = this.out(len);
+		return { min: [v[0] / 16, v[1] / 16, v[2] / 16], max: [v[3] / 16, v[4] / 16, v[5] / 16] };
+	}
+
 	raycast(origin: readonly number[], dir: readonly number[], max: number): RayHit | null {
 		if (this.x.client_raycast(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], max) === 0) return null;
 		const v = this.outInts(10);
@@ -322,6 +386,10 @@ export class ClientCore {
 		return this.out(this.x.client_enc_teleport(x, y, z));
 	}
 
+	encodeDigStart(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_start(x,y,z)); }
+	miningDrops(block: number, held: number): boolean { return Boolean(this.x.client_mining_drops(block, held)); }
+	miningTicks(block: number, held: number): number | null { const ticks = this.x.client_mining_ticks(block, held); return ticks < 0 ? null : ticks; }
+	encodeDigAbort(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_abort()); }
 	encodeSetBlock(x: number, y: number, z: number, block: number): Uint8Array<ArrayBuffer> {
 		return this.out(this.x.client_enc_set_block(x, y, z, block));
 	}
@@ -338,6 +406,36 @@ export class ClientCore {
 	textureNames(): string[] {
 		return this.decoder.decode(this.out(this.x.client_texture_names())).split("\n");
 	}
+
+	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
+	get health(): number { return this.x.client_health(); }
+	get air(): number { return this.x.client_air(); }
+	get food(): number { return this.x.client_food(); }
+	get dead(): boolean { return this.x.client_dead() !== 0; }
+	get deathCause(): number { return this.x.client_death_cause(); }
+	encodeRespawn(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_respawn()); }
+	encodeUseItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_item()); }
+	encodeStopUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_stop_using_item()); }
+	get screen(): number { return this.x.client_screen(); }
+	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
+	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }
+	encodeUseBlock(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_block(x, y, z)); }
+	get selectedSlot(): number { return this.x.client_selected_slot(); }
+	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }
+	// Display indices 0..50 retain protocol 7 layout; 51..53 are furnace input/fuel/output.
+	get furnace(): Array<InventorySlot | null> { return this.inventorySlots.slice(51, 54); }
+	get furnaceTimes(): number[] { return [0, 1, 2].map(i => this.x.client_furnace_time(i)); }
+	get inventorySlots(): Array<InventorySlot | null> {
+		return Array.from({ length: 54 }, (_, i) => {
+			const item = this.x.client_slot_item(i);
+			return item ? { item, count: this.x.client_slot_count(i) } : null;
+		});
+	}
+	encodeClickSlot(slot: number, button: number, shift: boolean): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_click_slot(slot, button, Number(shift))); }
+	encodeCloseInventory(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_close_inventory()); }
+	itemRegistry(): ItemInfo[] { return JSON.parse(this.decoder.decode(this.out(this.x.client_item_registry()))); }
+	encodeSelectSlot(slot: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_select_slot(slot)); }
+	encodeCreativeSetSlot(slot: number, item: number, count: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_creative_set_slot(slot, item, count)); }
 
 	blockRegistry(): BlockStateInfo[] {
 		return JSON.parse(this.decoder.decode(this.out(this.x.client_block_registry())));

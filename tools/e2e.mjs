@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
+import { bounded, diagnose, shouldDiagnoseRunFailure } from "./e2e-diag.mjs";
 
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
@@ -43,6 +44,9 @@ const browser = await puppeteer.launch({
 	headless: false,
 	args: ["--no-sandbox", "--ignore-gpu-blocklist", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--window-size=1280,720"],
 	defaultViewport: { width: 1280, height: 720 },
+	// A waitForFunction can occupy one CDP call for settle's full 120s;
+	// allow that wait, but fail sooner than the default 180s on a hung renderer.
+	protocolTimeout: 150000,
 });
 
 async function open(query) {
@@ -56,6 +60,33 @@ async function open(query) {
 	// Pointer lock is only granted to the focused tab.
 	await page.bringToFront();
 	return { page, errors };
+}
+
+async function resumePointerLock(page, label) {
+	const waitFor = async (step, predicate, options) => {
+		try { return await page.waitForFunction(predicate, options); }
+		catch (error) { throw new Error(`${step}: ${error.message}`, { cause: error }); }
+	};
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+		try {
+			await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
+			await page.click("#overlay", { offset: { x: 10, y: 10 } });
+			await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
+			return;
+		} catch (error) {
+			// Lock can arrive between the visibility check and the click.
+			if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
+			if (attempt === 5) throw new Error(`${label}: resume failed after ${attempt} attempts: ${error.message}`, { cause: error });
+		}
+	}
+}
+
+async function diagnoseFailure(page, label, err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		await diagnose(browser, page, label, { edge, shots });
+		err.diagnosed = true;
+	}
 }
 
 /** Chunks the server keeps loaded around a player: a square of side 2 * view + 1. */
@@ -79,8 +110,10 @@ async function settle(page, label, chunks) {
 			chunks,
 		);
 	} catch (err) {
-		const state = await page.evaluate(() => ({ error: window.__mc?.error, stats: window.__mc?.stats?.() }));
-		throw new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify(state)}`);
+		const state = await diagnose(browser, page, label, { edge, shots });
+		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets })}`);
+		error.diagnosed = true;
+		throw error;
 	}
 	// The stats the wait accepted, not a later reading: the world keeps changing.
 	return settled.jsonValue();
@@ -127,6 +160,9 @@ async function dayNight() {
 			const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
 			measurements.push({ brightness, sky });
 			check(errors.length === 0, `sky ${time}: no page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `sky-${time}`, err);
+			throw err;
 		} finally {
 			await page.close();
 		}
@@ -171,6 +207,9 @@ async function undergroundLighting() {
 		check(dark < surface*0.5,"lighting: underground darker than surface",`${dark.toFixed(1)} / ${surface.toFixed(1)}`);
 		check(lit > dark*2,"lighting: lamp brightens underground",`${lit.toFixed(1)} / ${dark.toFixed(1)}`);
 		check(errors.length===0,"lighting: no page errors",errors.slice(0,3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "lighting", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -247,6 +286,9 @@ async function transparentMaterials() {
 			}
 		}
 		check(errors.length === 0, "materials: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "materials", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -297,6 +339,9 @@ async function playthrough(kind) {
 	const query = `server=${kind}&world=${world}&view=${view}&autopilot=1${kind === "local" ? "&seed=2026" : ""}`;
 	const { page, errors } = await open(query);
 	const stats = await settle(page, kind, chunksInView(view));
+	await page.waitForFunction(() => window.__mc.stats().server?.generation?.delivered > 0, { timeout: 15000 });
+	const generation = await page.evaluate(() => window.__mc.stats().server.generation);
+	check(generation.delivered > 0, `${kind}: external generation delivered chunks`, JSON.stringify(generation));
 	check(stats.sections > 20, `${kind}: terrain meshed`, `${stats.sections} sections, ${stats.chunks} chunks, adapter ${stats.adapter}`);
 	check(stats.chunks === chunksInView(view), `${kind}: all ${chunksInView(view)} chunks in view arrived`, `${stats.chunks}`);
 
@@ -453,22 +498,33 @@ async function inputs() {
 
 	// Stand above the spawn column and look straight down at it.
 	await page.evaluate((s) => window.__mc.setCamera(s[0], s[1] + 3, s[2], 0, 90), stats.spawn);
-	const targetLine = async () => {
-		await new Promise((r) => setTimeout(r, 400));
-		return page.evaluate(() => document.getElementById("hud").textContent.split("\n").find((l) => l.startsWith("Target")));
+	const checkTarget = async (expected, label) => {
+		try {
+			await page.waitForFunction(
+				expected => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")) === expected,
+				{ timeout: 5000 },
+				expected,
+			);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			const actual = await page.evaluate(() => document.getElementById("hud")?.textContent.split("\n").find(l => l.startsWith("Target")));
+			check(false, label, `expected ${expected}; got ${actual ?? "<missing Target line>"}`);
+			return;
+		}
+		check(true, label);
 	};
 	const top = sy - 1;
 	const [topName, underName] = await page.evaluate(([x, y, z]) => {
 		return [window.__mc.stateName(window.__mc.getBlock(x, y, z)), window.__mc.stateName(window.__mc.getBlock(x, y - 1, z))];
 	}, [sx, top, sz]);
 	check(stats.generator === 2, "input: movement and mouse placement run on Terrain");
-	check((await targetLine()) === `Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below", await targetLine());
+	await checkTarget(`Target: ${sx} ${top} ${sz}  ${topName}`, "input: crosshair targets the block below");
 
 	await page.mouse.down({ button: "left" });
 	await page.mouse.up({ button: "left" });
 	await new Promise((r) => setTimeout(r, 300));
 	check((await page.evaluate(([x, y, z]) => window.__mc.getBlock(x, y, z), [sx, top, sz])) === 0, "input: left click breaks the targeted block");
-	check((await targetLine()) === `Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next", await targetLine());
+	await checkTarget(`Target: ${sx} ${top - 1} ${sz}  ${underName}`, "input: the block underneath is targeted next");
 
 	await page.keyboard.press("Digit3");
 	await page.mouse.down({ button: "right" });
@@ -557,33 +613,31 @@ async function partialModels() {
 		const names = await page.$$eval("#block-grid [data-block]", buttons => buttons.map(b => b.dataset.block));
 		check(names.includes("red_flower") && names.filter(n => n === "oak_slab").length === 1 && !names.includes("air"), "models: E opens one entry per placeable block");
 		check(["oak_stairs", "cobblestone_stairs", "oak_fence"].every(name => names.filter(n => n === name).length === 1), "models: picker includes both stairs and fence once");
+		const toolNames = ["wooden", "stone", "copper", "iron"].flatMap(tier => ["pickaxe", "axe", "shovel"].map(kind => `${tier}_${kind}`));
+		check(toolNames.every(name => names.filter(n => n === name).length === 1), "tools: picker includes all twelve tools once");
+		for (const name of toolNames) {
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await waitFor(`authoritative tool slot ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			check(await page.$eval("#hotbar canvas.selected", (canvas, name) => {
+				const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+				return canvas.title === name && canvas.dataset.count === "1"
+					&& pixels.some((v, i) => i % 4 === 3 && v === 255)
+					&& pixels.some((v, i) => i % 4 === 3 && v === 0);
+			}, name), `tools: ${name} is selected and its transparent icon is drawn`);
+		}
 		await page.click('#block-grid [data-block="red_flower"]');
+		await waitFor("authoritative red flower slot", () => document.querySelector("#hotbar canvas.selected")?.title === "red_flower");
 		check(await page.$eval("#hotbar canvas.selected", c => c.title === "red_flower"), "models: picker replaces the selected hotbar slot");
 		await page.keyboard.press("KeyE");
 		await waitFor("picker closed with inventory key", () => document.getElementById("block-picker").hidden);
-		const resume = async label => {
-			for (let attempt = 1; attempt <= 5; attempt++) {
-				if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
-				try {
-					await waitFor(`${label}, attempt ${attempt}: overlay visible`, () => !document.getElementById("overlay").hidden, { timeout: 1500 });
-					await page.click("#overlay", { offset: { x: 10, y: 10 } });
-					await waitFor(`${label}, attempt ${attempt}: pointer lock`, () => document.pointerLockElement?.id === "view", { timeout: 1500 });
-					return;
-				} catch (error) {
-					// Lock can arrive between the visibility check and the click.
-					if (await page.evaluate(() => document.pointerLockElement?.id === "view")) return;
-					if (attempt === 5) throw new Error(`models ${label}: resume failed after ${attempt} attempts: ${error.message}`, { cause: error });
-				}
-			}
-		};
-		await resume("resume after inventory key");
+		await resumePointerLock(page, "models resume after inventory key");
 		await page.keyboard.press("KeyE");
 		await waitFor("picker reopened before Escape", () => !document.getElementById("block-picker").hidden);
 		await page.keyboard.press("Escape");
 		await waitFor("picker closed with Escape into game menu", () => document.getElementById("block-picker").hidden
 			&& !document.getElementById("overlay").hidden && !document.pointerLockElement
 			&& !document.getElementById("game-menu").hidden);
-		await resume("resume after Escape");
+		await resumePointerLock(page, "models resume after Escape");
 
 		// Break the slab, then place a flower on the supporting full cube.
 		await page.mouse.click(640, 360, { button: "left" });
@@ -622,12 +676,13 @@ async function partialModels() {
 			await page.keyboard.press("KeyE");
 			await waitFor(`picker for ${name}`, () => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 			await page.click(`#block-grid [data-block="${name}"]`);
+			await waitFor(`authoritative slot for ${name}`, name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
 			check(await page.$eval("#hotbar canvas.selected", (c, name) => c.title === name, name), `models: picker selects ${name}`);
 			// Recenter while unlocked so the next canvas click cannot rotate yaw.
 			await page.mouse.move(640, 360);
 			await page.keyboard.press("KeyE");
 			await waitFor(`picker closed after ${name}`, () => document.getElementById("block-picker").hidden);
-			await resume(`resume after selecting ${name}`);
+			await resumePointerLock(page, `models resume after selecting ${name}`);
 		};
 
 		// Replace the flower through real interaction. Looking down retains yaw:
@@ -715,10 +770,14 @@ async function partialModels() {
 			"models: jumping cannot cross the fence", JSON.stringify(fenceMotion));
 		// Preserve the existing fourth-slot persistence check after these fixtures.
 		await pickBlock("red_flower");
+		await page.evaluate(async () => { await window.__mc.exportWorld(); });
 		await page.reload({ waitUntil: "load" });
 		await settle(page, "models reload", chunksInView(view));
 		check(await page.$eval("#hotbar canvas:nth-child(4)", c => c.title === "red_flower"), "models: hotbar block survives reload");
 		check(errors.length === 0, "models: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "models", err);
+		throw err;
 	} finally { await page.close(); }
 }
 
@@ -812,6 +871,9 @@ async function biomeTints() {
 			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
 		}
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "tint-terrain", err);
+		throw err;
 	} finally { await page.close(); }
 	for (const gen of ["flat", "hills"]) {
 		const { page, errors } = await open(`server=local&world=e2e-tint-${gen}-${run}&gen=${gen}&seed=2026&view=2`);
@@ -822,6 +884,9 @@ async function biomeTints() {
 				return window.__mc.tint(p[0], p[2]) === null;
 			}), `tint: ${gen} keeps uncomputed default colors`);
 			check(errors.length === 0, `tint: no ${gen} page errors`, errors.slice(0, 3).join(" | "));
+		} catch (err) {
+			await diagnoseFailure(page, `tint-${gen}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
 }
@@ -870,8 +935,528 @@ async function sectionCulling() {
 				}, images);
 				check(fraction < 0.005, "culling: fewer than 0.5% different pixels", `${(fraction * 100).toFixed(3)}%`);
 			}
+		} catch (err) {
+			await diagnoseFailure(page, `culling-${disabled ? "off" : "on"}`, err);
+			throw err;
 		} finally { await page.close(); }
 	}
+}
+
+/** Survival uses authoritative item stacks while the existing playthroughs stay creative. */
+// Mine an original generated tree and craft through the actual DOM, with no item injection.
+async function survivalCrafting() {
+    const { page, errors } = await open(`server=local&world=e2e-crafting-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
+    try {
+        const stats = await settle(page, "survival crafting", chunksInView(3));
+        check(stats.gameMode === "survival", "crafting: Terrain survival world");
+        const target = await page.evaluate(() => {
+            const api = window.__mc;
+            const [sx,,sz] = api.stats().spawn.map(Math.floor);
+            const log = api.stateId("oak_log");
+            // Search the same spawn radius and seed as the existing tree check.
+            // A supported, clear cell east of the trunk gives a stable mining view.
+            for (let z=sz-24;z<=sz+24;z++) for (let x=sx-24;x<=sx+24;x++) {
+                for (let y=57;y<319;y++) {
+                    if (api.getBlock(x,y,z) !== log || api.getBlock(x,y-1,z) === log) continue;
+                    // Require the next two logs in this same trunk as well.
+                    if ([1,2].some(dy => api.getBlock(x,y+dy,z) !== log)) continue;
+                    const floor = api.getBlock(x+1,y-1,z);
+                    if (floor <= 0 || floor === api.stateId("water")) continue;
+                    if ([0,1,2].some(dy => api.getBlock(x+1,y+dy,z) !== 0)) continue;
+                    return [x,y,z];
+                }
+            }
+            return null;
+        });
+        check(target !== null, "crafting: finds an accessible spawn tree");
+        if (!target) return;
+        await page.mouse.click(640,360);
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,0.51)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera;
+            const pitch=c.pitch*Math.PI/180;
+            const t=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(pitch),-Math.sin(pitch),0],6);
+            return t?.x===x && t?.y===y && t?.z===z;
+        },{},target);
+        await page.mouse.down();
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z)===0,{},target);
+        await page.mouse.up();
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+0.5,y+1.62,z+0.5,0,0),target);
+        await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count===1);
+        check(await page.$eval("#hotbar canvas", c=>c.title==="oak_log"), "crafting: mines and picks up log");
+        await page.keyboard.press("KeyE");
+        await page.waitForSelector('#inventory-screen:not([hidden])');
+        await page.click('#inventory-screen [data-slot="0"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="0"] canvas').dataset.count === "0");
+        await page.click('#inventory-screen [data-slot="36"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="40"] canvas').title === "oak_planks");
+        check(await page.$eval('#inventory-screen [data-slot="40"] canvas',c=>c.dataset.count==="4"),"crafting: log previews four planks");
+        await page.click('#inventory-screen [data-slot="40"]');
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="36"] canvas').dataset.count === "0");
+        await page.click('#inventory-screen [data-slot="9"]');
+        await page.waitForFunction(() => window.__mc.stats().inventory[9]?.count===4);
+        check(await page.$eval('#inventory-screen [data-slot="9"] canvas',c=>c.title==="oak_planks" && c.dataset.count==="4"),"crafting: takes result and returns planks to inventory");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.getElementById("inventory-screen").hidden);
+        // Preserve the first-log checks above, then mine the next two trunk blocks.
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        for (const dy of [1,2]) {
+            await page.evaluate(([x,y,z,dy]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12-dy,1)*180/Math.PI),[...target,dy]);
+            await page.waitForFunction(([x,y,z,dy]) => {
+                const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+                const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+                return hit?.x===x && hit?.y===y+dy && hit?.z===z;
+            },{},[...target,dy]);
+            await page.mouse.down();
+            await page.waitForFunction(([x,y,z,dy]) => window.__mc.getBlock(x,y+dy,z)===0,{},[...target,dy]);
+            await page.mouse.up();
+            await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+0.5,y+1.62,z+0.5,0,0),target);
+            await page.waitForFunction(count => window.__mc.stats().inventory[0]?.count===count,{},dy);
+        }
+        check(await page.evaluate(() => window.__mc.stats().inventory[0]?.count===2),"crafting: collects three logs from the same trunk");
+        await page.keyboard.press("KeyE");
+        await page.waitForFunction(() => !document.getElementById("inventory-screen").hidden);
+        // Each click waits for a changed slot rendered from the server Inventory.
+        const clickSlot = async (screen, slot, count, button = "left", observedSlot = slot) => {
+            const selector = `#${screen} [data-slot="${slot}"]`;
+            await page.click(selector,{button});
+            await page.waitForFunction((selector,count) => document.querySelector(`${selector} canvas`).dataset.count===String(count),{},`#${screen} [data-slot="${observedSlot}"]`,count);
+        };
+        const inv = (slot,count,button) => clickSlot("inventory-screen",slot,count,button);
+        await inv(0,0);
+        await inv(36,2);
+        // The preview stays four planks; observe the consumed log to acknowledge the click.
+        await clickSlot("inventory-screen",40,1,"left",36);
+        await inv(40,0);
+        await inv(9,12);
+        check(await page.$eval('#inventory-screen [data-slot="9"] canvas',c=>c.dataset.count==="12"),"crafting: three logs yield twelve planks");
+        await inv(9,0);
+        await inv(36,1,"right");
+        await inv(38,1,"right");
+        await inv(9,10);
+        await inv(40,0);
+        await inv(10,4);
+        check(await page.$eval('#inventory-screen [data-slot="10"] canvas',c=>c.title==="stick"),"crafting: crafts sticks through inventory buttons");
+        await inv(9,0);
+        for (const slot of [36,37,38,39]) await inv(slot,1,"right");
+        await inv(9,6);
+        await page.waitForFunction(() => document.querySelector('#inventory-screen [data-slot="40"] canvas').title==="crafting_table");
+        await inv(40,0);
+        await inv(0,1);
+        check(await page.$eval('#inventory-screen [data-slot="0"] canvas',c=>c.title==="crafting_table"),"crafting: crafts table into hotbar");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        // Move before aiming: under pointer lock this movement rotates the camera.
+        await page.mouse.move(640, 360);
+        await page.keyboard.press("Digit1");
+        await page.waitForFunction(() => window.__mc.stats().selectedSlot===0);
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(2.12,1)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+            const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x===x && hit?.y===y-1 && hit?.z===z && hit?.face===1;
+        },{},target);
+        await page.mouse.click(640,360,{button:"right"});
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z)===window.__mc.stateId("crafting_table") && !window.__mc.stats().inventory[0],{},target);
+        check(await page.evaluate(([x,y,z])=>window.__mc.getBlock(x,y,z)===window.__mc.stateId("crafting_table"),target),"crafting: places table on the ground");
+        // No mouse movement since placement; the next right-click stays at the center.
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c=window.__mc.stats().camera, p=c.pitch*Math.PI/180;
+            const hit=window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x===x && hit?.y===y && hit?.z===z;
+        },{},target);
+        await page.mouse.click(640,360,{button:"right"});
+        await page.waitForFunction(() => !document.getElementById("crafting-table-screen").hidden);
+        check(await page.$eval("#crafting-table-screen",el=>!el.hidden),"crafting: right-click opens table screen");
+        const table = (slot,count,button) => clickSlot("crafting-table-screen",slot,count,button);
+        await table(9,0);
+        for (const slot of [41,42,43]) await table(slot,1,"right");
+        await table(9,3);
+        await table(10,0);
+        for (const slot of [45,48]) await table(slot,1,"right");
+        await table(10,2);
+        await page.waitForFunction(() => document.querySelector('#crafting-table-screen [data-slot="50"] canvas').title==="wooden_pickaxe");
+        check(await page.$eval('#crafting-table-screen [data-slot="50"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: three planks and two sticks preview wooden pickaxe");
+        await table(50,0);
+        await table(11,1);
+        check(await page.$eval('#crafting-table-screen [data-slot="11"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: takes wooden pickaxe into inventory");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.getElementById("crafting-table-screen").hidden && window.__mc.stats().screen===0);
+        check(await page.evaluate(() => window.__mc.stats().inventory[11]?.count===1 && document.querySelector('#crafting-table-screen [data-slot="11"] canvas').title==="wooden_pickaxe"),"crafting: wooden pickaxe remains in inventory after closing");
+        check(errors.length===0,"crafting: no page errors",errors.join(" | "));
+    } catch (err) {
+        await diagnoseFailure(page, "crafting", err);
+        throw err;
+    } finally { await page.close(); }
+}
+
+async function furnaceSmelting() {
+    const { page, errors } = await open(`server=local&world=e2e-furnace-${run}&mode=creative&gen=flat&seed=2026&view=3&time=6000`);
+    try {
+        const stats = await settle(page, "furnace smelting", chunksInView(3));
+        check(stats.gameMode === "creative" && stats.generatorName === "Flat", "furnace: Flat creative world");
+        await page.mouse.click(640, 360);
+        await resumePointerLock(page, "furnace initial pointer lock");
+        const pickBlock = async (name, slot) => {
+            await page.keyboard.press(`Digit${slot + 1}`);
+            await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, slot);
+            await page.keyboard.press("KeyE");
+            await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+            await page.click(`#block-grid [data-block="${name}"]`);
+            await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+            check(await page.$eval("#hotbar canvas.selected", (c, name) => c.title === name, name), `furnace: picker selects ${name}`);
+            await page.mouse.move(640, 360);
+            await page.keyboard.press("KeyE");
+            await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+            await resumePointerLock(page, `furnace resume after selecting ${name}`);
+        };
+        await pickBlock("furnace", 0);
+        await pickBlock("iron_ore", 1);
+        await pickBlock("coal", 2);
+        const target = await page.evaluate(() => {
+            const api = window.__mc;
+            const [sx, sy, sz] = api.stats().spawn.map(Math.floor);
+            for (let y = sy + 4; y >= sy - 8; y--) {
+                if (api.getBlock(sx - 1, y - 1, sz) !== 0 && api.getBlock(sx - 1, y, sz) === 0) return [sx - 1, y, sz];
+            }
+            throw new Error("furnace: no ground in front of spawn");
+        });
+        await page.keyboard.press("Digit1");
+        await page.waitForFunction(() => window.__mc.stats().selectedSlot === 0);
+        // Move before setting the camera: pointer-locked movement changes yaw.
+        await page.mouse.move(640, 360);
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(2.12,1)*180/Math.PI), target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c = window.__mc.stats().camera, p = c.pitch*Math.PI/180;
+            const hit = window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x === x && hit?.y === y-1 && hit?.z === z && hit?.face === 1;
+        }, {}, target);
+        await page.mouse.click(640, 360, { button: "right" });
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("furnace"), {}, target);
+        check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("furnace"), target), "furnace: places furnace on the ground");
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI), target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c = window.__mc.stats().camera, p = c.pitch*Math.PI/180;
+            const hit = window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(p),-Math.sin(p),0],6);
+            return hit?.x === x && hit?.y === y && hit?.z === z;
+        }, {}, target);
+        await page.mouse.click(640, 360, { button: "right" });
+        await page.waitForFunction(() => !document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 2);
+        check(await page.evaluate(() => !document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 2), "furnace: right-click opens furnace screen");
+        const clickSlot = async (slot, count) => {
+            await page.click(`#furnace-screen [data-slot="${slot}"]`);
+            await page.waitForFunction((slot, count) => document.querySelector(`#furnace-screen [data-slot="${slot}"] canvas`).dataset.count === String(count), {}, slot, count);
+        };
+        await clickSlot(1, 0);
+        await clickSlot(51, 1);
+        check(await page.$eval('#furnace-screen [data-slot="51"] canvas', c => c.title === "iron_ore"), "furnace: moves iron ore into input");
+        await clickSlot(2, 0);
+        await clickSlot(52, 0); // The server consumes the one coal as burning starts.
+        await page.waitForFunction(() => {
+            const burn = document.getElementById("furnace-burn");
+            const smelt = document.getElementById("furnace-smelt");
+            return Number(burn.getAttribute("aria-valuenow")) > 0 && Number(burn.getAttribute("aria-valuemax")) === 1600
+                && Number(smelt.getAttribute("aria-valuenow")) > 0 && Number(smelt.getAttribute("aria-valuemax")) === 160;
+        }, { timeout: 20000 });
+        const burning = await page.$eval("#furnace-burn", el => Number(el.getAttribute("aria-valuenow")));
+        await page.waitForFunction(before => {
+            const value = Number(document.getElementById("furnace-burn").getAttribute("aria-valuenow"));
+            return value > 0 && value < before;
+        }, { timeout: 20000 }, burning);
+        check(true, "furnace: burn gauge decreases and smelting gauge advances");
+        await page.waitForFunction(() => {
+            const output = document.querySelector('#furnace-screen [data-slot="53"] canvas');
+            return output.title === "iron_ingot" && output.dataset.count === "1";
+        }, { timeout: 20000 });
+        check(await page.$eval('#furnace-screen [data-slot="53"] canvas', c => c.title === "iron_ingot" && c.dataset.count === "1"), "furnace: smelts iron ingot after 160 ticks");
+        await page.keyboard.down("ShiftLeft");
+        try { await clickSlot(53, 0); }
+        finally { await page.keyboard.up("ShiftLeft"); }
+        await page.waitForFunction(() => [...document.querySelectorAll('#furnace-screen [data-slot]')].some(button => Number(button.dataset.slot) < 36 && button.querySelector("canvas").title === "iron_ingot"));
+        check(true, "furnace: shift-click takes iron ingot into inventory");
+        await page.click("#furnace-screen > button:last-child");
+        await page.waitForFunction(() => document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 0);
+        check(await page.evaluate(() => document.getElementById("furnace-screen").hidden && window.__mc.stats().screen === 0), "furnace: closes furnace screen");
+        await resumePointerLock(page, "furnace resume after closing furnace");
+        check(errors.length === 0, "furnace: no page errors", errors.join(" | "));
+    } catch (err) {
+        await diagnoseFailure(page, "furnace", err);
+        throw err;
+    } finally { await page.close(); }
+}
+
+async function survivalInventory() {
+	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const stats = await settle(page, "survival", chunksInView(2));
+		check(stats.gameMode === "survival", "survival: new-world URL sets game mode");
+		check(await page.$$eval("#hotbar canvas", slots => slots.every(c => c.title === "")), "survival: starts with an empty hotbar");
+		const [sx, sy, sz] = stats.spawn;
+		const targets = [1, 2].map(dx => [Math.floor(sx) + dx, Math.floor(sy) - 1, Math.floor(sz)]);
+		await page.mouse.click(640, 360);
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		await page.keyboard.press("KeyE");
+		check(await page.$eval("#block-picker", picker => picker.hidden), "survival: block picker stays closed");
+        check(await page.$eval("#inventory-screen", screen => !screen.hidden), "survival: E opens inventory");
+        await page.keyboard.press("KeyE");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		for (let i = 0; i < targets.length; i++) {
+			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[i]);
+			await page.mouse.down();
+			await page.waitForFunction(() => window.__mc.stats().dig !== null);
+			await page.mouse.up();
+			await new Promise(resolve => setTimeout(resolve, 200));
+			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) !== 0, targets[i]), "survival: releasing early preserves the block");
+			await page.mouse.down();
+			const stageHandle = await page.waitForFunction(() => {
+				const stage = window.__mc.stats().dig?.stage;
+				return stage > 0 ? stage : false;
+			});
+			const stage = await stageHandle.jsonValue();
+			await stageHandle.dispose();
+			check(stage > 0 && stage <= 9, "survival: held mining exposes a crack stage");
+			await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, {}, targets[i]);
+			await page.mouse.up();
+			check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0, targets[i]), "survival: holding breaks the block");
+			await page.waitForFunction(() => window.__mc.stats().entities.length > 0);
+			check(await page.evaluate(() => window.__mc.stats().entities.length > 0), "survival: breaking spawns a visible item entity");
+			await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 1.62, z + 0.5, 0, 90), targets[i]);
+			await page.waitForFunction(count => window.__mc.stats().inventory[0]?.count === count, {}, i + 1);
+		}
+		check(await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "2" && c.width === 64), "survival: breaking two blocks shows the hotbar count");
+		await page.keyboard.press("KeyQ");
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 1 && window.__mc.stats().entities.length > 0);
+		check(await page.evaluate(() => window.__mc.stats().entities.length > 0), "survival: Q removes one item and displays a dropped entity");
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 2 && window.__mc.stats().entities.length === 0);
+
+		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[1]);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(() => window.__mc.stats().inventory[0]?.count === 1);
+		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[1]), "survival: placement consumes one item (1 remaining)");
+		const savedItem = await page.evaluate(() => window.__mc.stats().inventory[0].item);
+		// Export waits for a full save, including the remaining item in player.dat.
+		await page.evaluate(async () => { await window.__mc.exportWorld(); });
+		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
+		const restored = await settle(page, "survival reload", chunksInView(2));
+		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
+		let inventoryRestored = true;
+		let inventoryDetail = "";
+		try {
+			await page.waitForFunction(item => {
+				const slot = window.__mc.stats().inventory[0];
+				return slot?.item === item && slot?.count === 1;
+			}, { timeout: 5000 }, savedItem);
+		} catch (err) {
+			if (err.name !== "TimeoutError") throw err;
+			inventoryRestored = false;
+			const slot = await page.evaluate(() => window.__mc.stats().inventory[0]);
+			inventoryDetail = `expected item ${savedItem}, count 1; inventory[0]=${JSON.stringify(slot)}`;
+		}
+		const hotbarRestored = await page.$eval("#hotbar canvas", c => c.title === "grass_block" && c.dataset.count === "1");
+		check(inventoryRestored && hotbarRestored, "survival: reload restores one grass block in the first slot", inventoryDetail);
+		await page.evaluate(([x,y,z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), targets[0]);
+		await page.mouse.click(640, 360);
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(() => window.__mc.stats().inventory[0] === null);
+		check(await page.evaluate(([x,y,z]) => window.__mc.getBlock(x,y,z) === window.__mc.stateId("grass_block"), targets[0]), "survival: placement consumes one item (0 remaining)");
+		check(await page.$eval("#hotbar canvas", c => c.title === "" && c.dataset.count === "0"), "survival: last item leaves an empty slot");
+		check(errors.length === 0, "survival: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "survival", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
+async function survivalHealth() {
+	const { page, errors } = await open(`server=local&world=e2e-health-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "survival health", chunksInView(2));
+		await resumePointerLock(page, "health: initial pointer lock");
+		await page.waitForFunction(() => window.__mc.stats().health === 20 && !document.getElementById("vitals").hidden);
+		check(await page.$eval("#health", meter => meter.getAttribute("aria-valuenow") === "20"
+			&& meter.querySelectorAll('.heart[data-state="full"]').length === 10), "health: starts with ten full hearts");
+
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => {
+			const flash = document.getElementById("damage-flash");
+			// Retain evidence of the flash even if it finishes between Puppeteer calls.
+			const observer = new MutationObserver(() => {
+				if (flash.hidden) return;
+				performance.mark("health-damage-flash");
+				observer.disconnect();
+			});
+			observer.observe(flash, { attributes: true, attributeFilter: ["hidden"] });
+			window.__mc.setCamera(x, y + 10 + 1.62, z, 0, 90);
+		}, spawn);
+		await page.waitForFunction(() => window.__mc.stats().health === 13);
+		check(await page.$eval("#health", meter => meter.getAttribute("aria-valuenow") === "13"
+			&& Array.from(meter.children, heart => heart.dataset.state).join(" ") === "full full full full full full half empty empty empty"),
+		"health: a ten-block fall leaves six full hearts and one half heart");
+		await page.waitForFunction(() => performance.getEntriesByName("health-damage-flash").length > 0);
+		await page.waitForFunction(() => document.getElementById("damage-flash").hidden);
+		check(true, "health: damage flashes red briefly");
+
+		const [sx, sy, sz] = spawn;
+		const target = [Math.floor(sx) + 1, sy - 1, Math.floor(sz)];
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 1 + 1.62, z + 0.5, 0, 90), target);
+		await page.mouse.down();
+		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, target);
+		await page.mouse.up();
+		await page.waitForFunction(() => {
+			const { inventory, entities } = window.__mc.stats();
+			return inventory[0]?.count === 1 && entities.length === 0;
+		});
+		const held = await page.evaluate(() => window.__mc.stats().inventory[0]);
+		check(held.count === 1, "health: mines and picks up a block");
+
+		const landing = [sx + 4, sy, sz];
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x, y + 40 + 1.62, z, 0, 90), landing);
+		await page.waitForFunction(() => window.__mc.stats().dead && document.getElementById("death-screen").open
+			&& document.pointerLockElement === null);
+		check(await page.$eval("#death-cause", cause => cause.textContent.includes("落下")), "health: fatal fall shows the cause of death");
+		await page.waitForFunction(([x, y, z], stack) => {
+			const { entities, inventory } = window.__mc.stats();
+			return inventory[0] === null && entities.some(({ item, count, position: [ex, ey, ez] }) =>
+				item === stack.item && count === stack.count && Math.hypot(ex - x, ey - y, ez - z) < 1);
+		}, {}, landing, held);
+		check(true, "health: carried item drops at the landing position");
+
+		await page.click("#respawn");
+		await page.waitForFunction(([sx, sy, sz]) => {
+			const { health, dead } = window.__mc.stats();
+			const [x, y, z] = window.__mc.playerPosition();
+			return !dead && health === 20 && !document.getElementById("death-screen").open
+				&& Math.hypot(x - sx, y - sy, z - sz) < 1
+				&& document.pointerLockElement?.id === "view";
+		}, {}, spawn);
+		check(true, "health: respawn restores full health, spawn position, and pointer lock");
+		check(errors.length === 0, "health: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "health", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
+async function survivalHunger() {
+	const { page, errors } = await open(`server=local&world=e2e-hunger-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
+	try {
+		const { spawn } = await settle(page, "survival hunger", chunksInView(3));
+		await resumePointerLock(page, "hunger: initial pointer lock");
+		check(await page.$eval("#food", meter => !meter.closest("#vitals").hidden
+			&& meter.getAttribute("aria-valuenow") === "20"
+			&& meter.querySelectorAll('.food[data-state="full"]').length === 10), "hunger: starts with ten full food icons");
+
+		const leaves = await page.evaluate(() => {
+			const api = window.__mc;
+			const [sx, , sz] = api.stats().spawn.map(Math.floor);
+			const leaf = api.stateId("oak_leaves");
+			const exposed = [];
+			for (let z = sz - 24; z <= sz + 24; z++) for (let x = sx - 24; x <= sx + 24; x++) {
+				for (let y = 57; y < 317; y++) {
+					if (api.getBlock(x, y, z) === leaf && [1, 2, 3].every(dy => api.getBlock(x, y + dy, z) === 0)) {
+						exposed.push([x, y, z]);
+					}
+				}
+			}
+			const distance = ([x, , z]) => (sx - x) * (sx - x) + (sz - z) * (sz - z);
+			return exposed.sort((a, b) => distance(a) - distance(b)).slice(0, 150);
+		});
+		const apple = 49;
+		let appleSlot = -1;
+		await page.mouse.move(640, 360);
+		for (const target of leaves) {
+			await resumePointerLock(page, "hunger: mining pointer lock");
+			const before = await page.evaluate(([x, y, z]) => {
+				const api = window.__mc;
+				api.setCamera(x + 0.5, y + 1 + 1.62, z + 0.5, 0, 90);
+				return api.stats().inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0);
+			}, target);
+			await page.waitForFunction(([x, y, z]) => {
+				const api = window.__mc;
+				const c = api.stats().camera;
+				const hit = api.raycast([c.x, c.y, c.z], [0, -1, 0], 5);
+				return c.pitch === 90 && hit?.x === x && hit?.y === y && hit?.z === z;
+			}, {}, target);
+			await page.mouse.down();
+			try {
+				await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, target);
+			} finally {
+				await page.mouse.up();
+			}
+			await page.waitForFunction(count => {
+				const { entities, inventory } = window.__mc.stats();
+				return entities.length > 0 || inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0) > count;
+			}, {}, before);
+			await page.evaluate(() => {
+				const api = window.__mc;
+				const drop = api.stats().entities[0];
+				if (drop) {
+					const [x, y, z] = drop.position;
+					api.setCamera(x, y + 1.62, z, 0, 0);
+				}
+			});
+			// Finish collecting this drop before mining the next leaf.
+			const pickup = await page.waitForFunction((count, item) => {
+				const { inventory } = window.__mc.stats();
+				if (inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0) <= count) return false;
+				return { slot: inventory.slice(0, 9).findIndex(stack => stack?.item === item) };
+			}, {}, before, apple);
+			({ slot: appleSlot } = await pickup.jsonValue());
+			await pickup.dispose();
+			if (appleSlot >= 0) break;
+		}
+		if (appleSlot < 0) throw new Error(`hunger: no apple in the hotbar after mining ${leaves.length} leaves`);
+		check(true, "hunger: mines oak leaves and picks up an apple");
+
+		const health = await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			// The spawn can be below a canopy. Measure from the first surface below open sky.
+			const surface = api.raycast([x, y + 32, z], [0, -1, 0], 48);
+			if (!surface) throw new Error("hunger: no landing surface near spawn");
+			api.setCamera(x, surface.y + 1 + 10 + 1.62, z, 0, 90);
+			return api.stats().health;
+		}, spawn);
+		await page.waitForFunction(previous => window.__mc.stats().health < previous, {}, health);
+		await page.waitForFunction(() => window.__mc.stats().food <= 19);
+		await page.keyboard.press(`Digit${appleSlot + 1}`);
+		await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, appleSlot);
+		const before = await page.evaluate(slot => {
+			const api = window.__mc;
+			const [x, y, z] = api.playerPosition();
+			api.setCamera(x, y + 1.62, z, 0, -90);
+			const { food, inventory } = api.stats();
+			return { food, count: inventory[slot].count };
+		}, appleSlot);
+		await page.waitForFunction(() => {
+			const api = window.__mc;
+			const c = api.stats().camera;
+			return c.pitch === -90 && !api.raycast([c.x, c.y, c.z], [0, 1, 0], 5);
+		});
+		await page.mouse.down({ button: "right" });
+		try {
+			await page.waitForSelector("#eat-progress:not([hidden])");
+			check(true, "hunger: eating in open air displays progress");
+			await page.waitForFunction((slot, before) => {
+				const { food, inventory } = window.__mc.stats();
+				return food === Math.min(20, before.food + 4) && (inventory[slot]?.count ?? 0) === before.count - 1;
+			}, {}, appleSlot, before);
+			check(true, "hunger: holding use consumes one apple and restores food");
+		} finally {
+			await page.mouse.up({ button: "right" });
+		}
+		await page.waitForSelector("#eat-progress[hidden]");
+		check(await page.$eval("#food", meter => Number(meter.getAttribute("aria-valuenow")) === window.__mc.stats().food),
+			"hunger: the food meter reflects server food");
+		check(errors.length === 0, "hunger: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "hunger", err);
+		throw err;
+	} finally { await page.close(); }
 }
 
 try {
@@ -880,9 +1465,24 @@ try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await partialModels();
+	await survivalInventory();
+	await survivalHealth();
+	await survivalHunger();
+	await survivalCrafting();
+	await furnaceSmelting();
 	await dayNight();
 	await undergroundLighting();
 	await transparentMaterials();
+	const fallback = await open(`server=local&world=e2e-gen-off-${run}&seed=2026&view=2&genworkers=0`);
+	try {
+		const stats = await settle(fallback.page, "generation disabled", chunksInView(2));
+		check(stats.chunks === chunksInView(2), "local: genworkers=0 loads chunks");
+		const generation = await fallback.page.evaluate(() => window.__mc.stats().server?.generation);
+		check(!generation || generation.requested === 0, "local: genworkers=0 disables offload");
+	} catch (err) {
+		await diagnoseFailure(fallback.page, "generation-disabled", err);
+		throw err;
+	} finally { await fallback.page.close(); }
 	const page = await playthrough("local");
 	const expected = ServerCore.fromModule(new WebAssembly.Module(readFileSync(join(root, "apps/web/src/wasm/server.wasm")))).runScenario(2026n, 600);
 	const inBrowser = await page.evaluate(() => window.__mc.runScenario("2026", 600));
@@ -890,6 +1490,17 @@ try {
 	await page.close();
 	await (await playthrough("ws")).close();
 } catch (err) {
+	if (shouldDiagnoseRunFailure(err)) {
+		// Enumerating pages can itself require CDP; keep the failure path bounded.
+		const pages = await bounded(() => browser.pages(), 5000);
+		if (Array.isArray(pages)) {
+			for (const [i, page] of pages.entries()) {
+				if (page.url() !== "about:blank") await diagnose(browser, page, `run-timeout-${i}`, { edge, shots });
+			}
+		} else {
+			console.log(`DIAG run-timeout-pages ${JSON.stringify({ error: pages })}`);
+		}
+	}
 	check(false, "run completed", err.message);
 } finally {
 	await browser.close();

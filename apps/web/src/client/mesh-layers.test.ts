@@ -300,3 +300,26 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 		for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, textures[j]);
 	}
 });
+
+
+test("twelve original tool textures have transparent backgrounds and distinct tier colors", () => {
+	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
+	const tools = core.itemRegistry().filter(item => item.block === null && item.maxStack === 1);
+	assert.equal(tools.length, 12);
+	for (const kind of ["pickaxe", "axe", "shovel"]) {
+		const images = ["wooden", "stone", "copper", "iron"].map(tier => {
+			const name = `${tier}_${kind}`;
+			const item = tools.find(item => item.name === name)!;
+			assert.equal(item.texture, name);
+			assert.equal(item.maxStack, 1);
+			assert.ok(core.textureNames().includes(name));
+			const pixels = paintTexture(name);
+			assert.equal(pixels.length, 16 * 16 * 4);
+			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 0));
+			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 255));
+			assert.deepEqual(paintTexture(name), pixels);
+			return pixels;
+		});
+		for (let a = 0; a < images.length; a++) for (let b = a + 1; b < images.length; b++) assert.notDeepEqual(images[a], images[b]);
+	}
+});
