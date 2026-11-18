@@ -1410,6 +1410,71 @@ async function waterFlow() {
 	} finally { await page.close(); }
 }
 
+async function swimming() {
+	const { page, errors } = await open(`server=local&world=e2e-swim-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
+	try {
+		const { spawn } = await settle(page, "swimming", chunksInView(3));
+		await resumePointerLock(page, "swimming: initial pointer lock");
+		const findWater = origin => page.evaluate(([sx, sy, sz]) => {
+			const api = window.__mc;
+			const source = api.stateId("water");
+			sx = Math.floor(sx);
+			sz = Math.floor(sz);
+			for (let radius = 0; radius <= 48; radius++) {
+				for (let dx = -radius; dx <= radius; dx++) for (let dz = -radius; dz <= radius; dz++) {
+					if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
+					const x = sx + dx;
+					const z = sz + dz;
+					for (let y = Math.floor(sy); y >= 0; y--) {
+						if ([0, 1, 2].every(dy => api.getBlock(x, y - dy, z) === source)
+							&& [1, 2].every(dy => api.getBlock(x, y + dy, z) === 0)) {
+							return [x + 0.5, y + 1, z + 0.5];
+						}
+					}
+				}
+			}
+			return null;
+		}, origin);
+		let water = await findWater(spawn);
+		if (!water) {
+			// Seed 2026 has open sea just north of the initial view.
+			const [x, y, z] = [spawn[0], spawn[1] + 12, spawn[2] - 48];
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x, y + 1.62, z, 0, 0), [x, y, z]);
+			await page.waitForFunction(([x, z]) => window.__mc.getBlock(x, 0, z) !== -1,
+				{ timeout: 15000 }, [Math.floor(x) - 16, Math.floor(z) - 32]);
+			await settle(page, "swimming: coast", chunksInView(3));
+			water = await findWater([x, y, z]);
+		}
+		if (!water) throw new Error("swimming: no open water at least three blocks deep near spawn");
+		const start = await page.evaluate(([x, surface, z]) => {
+			const api = window.__mc;
+			const corrections = api.stats().positionsCorrected;
+			api.setCamera(x, surface - 2 + 1.62, z, 0, 0);
+			return { corrections, feetY: api.playerPosition()[1] };
+		}, water);
+		check(Math.abs(start.feetY - (water[1] - 2)) < 0.001,
+			"swimming: starts two blocks below the water surface");
+		await page.keyboard.down("Space");
+		try {
+			await page.waitForFunction(surface => {
+				const y = window.__mc.playerPosition()[1];
+				return y + 1.62 > surface && y > surface - 0.5;
+			}, { timeout: 8000 }, water[1]);
+			check(true, "swimming: holding Space raises the player to the surface");
+		} finally {
+			await page.keyboard.up("Space");
+		}
+		const serverTime = await page.evaluate(() => window.__mc.stats().server?.gameTime ?? 0);
+		await page.waitForFunction(t => window.__mc.stats().server?.gameTime > t, { timeout: 5000 }, serverTime);
+		check(await page.evaluate(() => window.__mc.stats().positionsCorrected) === start.corrections,
+			"swimming: server sends no position corrections");
+		check(errors.length === 0, "swimming: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "swimming", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function survivalInventory() {
 	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -1688,6 +1753,7 @@ try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await waterFlow();
+	await swimming();
 	await partialModels();
 	await survivalInventory();
 	await survivalHealth();
