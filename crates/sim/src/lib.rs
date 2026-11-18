@@ -200,6 +200,7 @@ struct SavedChunk {
 
 pub struct Server {
     scheduled_blocks: BTreeSet<(i64, [i32; 3])>,
+    scheduled_block_times: BTreeMap<[i32; 3], i64>,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     entities: BTreeMap<u32, entity::Entity>,
     next_entity_id: u32,
@@ -233,6 +234,7 @@ impl Server {
         let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
             scheduled_blocks: BTreeSet::new(),
+            scheduled_block_times: BTreeMap::new(),
             furnaces: BTreeMap::new(),
             entities: BTreeMap::new(),
             next_entity_id: 1,
@@ -1515,8 +1517,9 @@ impl Server {
             })
             .collect();
         if !removed.is_empty() {
-            self.scheduled_blocks
-                .retain(|(_, [x, _, z])| removed.binary_search(&(x >> 4, z >> 4)).is_err());
+            let keep = |[x, _, z]: [i32; 3]| removed.binary_search(&(x >> 4, z >> 4)).is_err();
+            self.scheduled_blocks.retain(|&(_, pos)| keep(pos));
+            self.scheduled_block_times.retain(|&pos, _| keep(pos));
         }
         for (cx, cz) in removed {
             self.world.remove_chunk(cx, cz);
@@ -1556,11 +1559,9 @@ impl Server {
                 furnaces,
                 scheduled_blocks,
             }) => {
-                self.scheduled_blocks.extend(
-                    scheduled_blocks
-                        .into_iter()
-                        .map(|(delay, pos)| (self.game_time.saturating_add(i64::from(delay)), pos)),
-                );
+                for (delay, pos) in scheduled_blocks {
+                    self.queue_scheduled_tick(pos, self.game_time.saturating_add(i64::from(delay)));
+                }
                 self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_loaded_from_storage += 1;

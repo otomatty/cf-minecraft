@@ -13,23 +13,47 @@ fn offset(pos: [i32; 3], delta: [i32; 3]) -> [i32; 3] {
     std::array::from_fn(|axis| pos[axis].wrapping_add(delta[axis]))
 }
 
+fn neighbors(pos: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
+    [ABOVE, BELOW]
+        .into_iter()
+        .chain(HORIZONTAL)
+        .map(move |delta| offset(pos, delta))
+}
+
 impl Server {
+    pub(super) fn queue_scheduled_tick(&mut self, pos: [i32; 3], time: i64) -> bool {
+        if let Some(&previous) = self.scheduled_block_times.get(&pos) {
+            if previous <= time {
+                return false;
+            }
+            self.scheduled_blocks.remove(&(previous, pos));
+        }
+        self.scheduled_block_times.insert(pos, time);
+        self.scheduled_blocks.insert((time, pos));
+        true
+    }
+
+    fn cancel_scheduled_tick(&mut self, pos: [i32; 3]) {
+        if let Some(time) = self.scheduled_block_times.remove(&pos) {
+            self.scheduled_blocks.remove(&(time, pos));
+        }
+    }
+
     pub fn schedule_tick(&mut self, pos: [i32; 3], delay: i64) {
         let [x, y, z] = pos;
-        if !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+        let chunk_pos = (x >> 4, z >> 4);
+        if !(MIN_Y..MIN_Y + HEIGHT).contains(&y) || !self.world.chunks.contains_key(&chunk_pos) {
             return;
         }
-        if let Some(chunk) = self.world.chunks.get_mut(&(x >> 4, z >> 4)) {
-            let time = self.game_time.saturating_add(delay.max(1));
-            if self.scheduled_blocks.insert((time, pos)) {
-                chunk.dirty = true;
-            }
+        let time = self.game_time.saturating_add(delay.max(1));
+        if self.queue_scheduled_tick(pos, time) {
+            self.world.chunks.get_mut(&chunk_pos).unwrap().dirty = true;
         }
     }
 
     pub(super) fn schedule_water_neighbors(&mut self, pos: [i32; 3]) {
-        for delta in [[0; 3], ABOVE, BELOW].into_iter().chain(HORIZONTAL) {
-            let p = offset(pos, delta);
+        self.cancel_scheduled_tick(pos);
+        for p in std::iter::once(pos).chain(neighbors(pos)) {
             if self
                 .get_block(p[0], p[1], p[2])
                 .is_some_and(blocks::is_water)
@@ -40,24 +64,27 @@ impl Server {
     }
 
     pub(super) fn tick_scheduled_blocks(&mut self) {
+        let loaded = |[x, _, z]: [i32; 3]| self.world.chunks.contains_key(&(x >> 4, z >> 4));
         let due: Vec<_> = self
             .scheduled_blocks
             .iter()
+            .copied()
             .take_while(|(time, _)| *time <= self.game_time)
-            .filter_map(|&(time, [x, y, z])| {
+            .filter(|&(_, pos @ [x, _, z])| {
                 players_keep_chunk(&self.clients, x >> 4, z >> 4)
-                    .then(|| {
-                        self.get_block(x, y, z)
-                            .map(|state| (time, [x, y, z], state))
-                    })
-                    .flatten()
+                    && loaded(pos)
+                    && neighbors(pos)
+                        .filter(|[_, y, _]| (MIN_Y..MIN_Y + HEIGHT).contains(y))
+                        .all(loaded)
             })
             .collect();
-        for (time, pos @ [x, y, z], state) in due {
-            self.scheduled_blocks.remove(&(time, pos));
-            // A change earlier in this batch already scheduled a fresh update.
-            // In particular, an air cell filled this tick cannot spread yet.
-            if blocks::is_water(state) && self.get_block(x, y, z) == Some(state) {
+        for (time, pos @ [x, y, z]) in due {
+            // A change earlier in this batch may have replaced a due tick.
+            if self.scheduled_block_times.get(&pos) != Some(&time) {
+                continue;
+            }
+            self.cancel_scheduled_tick(pos);
+            if let Some(state) = self.get_block(x, y, z).filter(|&s| blocks::is_water(s)) {
                 self.tick_water(pos, state);
             }
         }
@@ -68,27 +95,22 @@ impl Server {
             let [x, y, z] = offset(pos, delta);
             self.get_block(x, y, z)
         };
-        let below = if pos[1] > MIN_Y {
-            neighbor(BELOW)
-        } else {
-            None
+        let (Some(above), Some(below), [Some(north), Some(south), Some(west), Some(east)]) =
+            (neighbor(ABOVE), neighbor(BELOW), HORIZONTAL.map(neighbor))
+        else {
+            return;
         };
-        let horizontal = HORIZONTAL.map(neighbor);
+        let horizontal = [north, south, west, east];
         if blocks::is_flowing_water(state) {
-            let target = if neighbor(ABOVE).is_some_and(blocks::is_water) {
+            let target = if blocks::is_water(above) {
                 blocks::FALLING_WATER
-            } else if horizontal
-                .iter()
-                .filter(|&&s| s == Some(blocks::WATER))
-                .count()
-                >= 2
-                && below.is_some_and(|s| s == blocks::WATER || blocks::info(s).solid)
+            } else if horizontal.iter().filter(|&&s| s == blocks::WATER).count() >= 2
+                && (below == blocks::WATER || blocks::info(below).solid)
             {
                 blocks::WATER
             } else {
                 horizontal
                     .into_iter()
-                    .flatten()
                     .filter_map(next_flow_level)
                     .min()
                     .unwrap_or(blocks::AIR)
@@ -98,17 +120,16 @@ impl Server {
                 return;
             }
         }
-        if below.is_some_and(|s| {
-            s == blocks::AIR || (blocks::FLOWING_WATER..blocks::FALLING_WATER).contains(&s)
-        }) {
+        if pos[1] > MIN_Y
+            && (below == blocks::AIR
+                || (blocks::FLOWING_WATER..blocks::FALLING_WATER).contains(&below))
+        {
             self.change_block_naturally(offset(pos, BELOW), blocks::FALLING_WATER);
             return;
         }
         if let Some(next) = next_flow_level(state) {
             for (delta, target) in HORIZONTAL.into_iter().zip(horizontal) {
-                if target.is_some_and(|s| {
-                    s == blocks::AIR || (next + 1..blocks::FALLING_WATER).contains(&s)
-                }) {
+                if target == blocks::AIR || (next + 1..blocks::FALLING_WATER).contains(&target) {
                     self.change_block_naturally(offset(pos, delta), next);
                 }
             }
@@ -180,6 +201,7 @@ mod tests {
     use worldgen::Generator;
 
     const SOURCE: [i32; 3] = [8, 80, 8];
+    const EAST_EDGE: [i32; 3] = [15, 80, 8];
 
     fn setup(mode: GameMode) -> Server {
         let mut server = Server::new(2026, Generator::Flat);
@@ -258,13 +280,191 @@ mod tests {
         assert!(!server.scheduled_blocks.contains(&(2, source)));
     }
 
+    fn flow_fed_from_the_east() -> Server {
+        let mut server = setup(GameMode::Creative);
+        server.world.insert_chunk(Chunk::empty(1, 0));
+        put(&mut server, [16, 80, 8], blocks::WATER);
+        for delta in [[0, 0, -1], [0, 0, 1], [-1, 0, 0]] {
+            put(&mut server, offset(EAST_EDGE, delta), blocks::STONE);
+        }
+        put(&mut server, EAST_EDGE, blocks::FLOWING_WATER);
+        server.schedule_tick(EAST_EDGE, WATER_FLOW_DELAY);
+        server
+    }
+
+    #[test]
+    fn boundary_flow_keeps_its_tick_until_the_only_source_is_loaded() {
+        let mut server = flow_fed_from_the_east();
+        let east = server.world.remove_chunk(1, 0).unwrap();
+
+        advance(&mut server, 2 * WATER_FLOW_DELAY);
+        assert_eq!(at(&server, EAST_EDGE), blocks::FLOWING_WATER);
+        assert_eq!(
+            server.scheduled_blocks.first(),
+            Some(&(WATER_FLOW_DELAY, EAST_EDGE))
+        );
+        assert_eq!(server.scheduled_blocks.len(), 1);
+
+        server.world.insert_chunk(east);
+        advance(&mut server, 1);
+        assert_eq!(at(&server, EAST_EDGE), blocks::FLOWING_WATER);
+        assert!(server.scheduled_blocks.is_empty());
+        assert!(server.scheduled_block_times.is_empty());
+    }
+
+    #[test]
+    fn boundary_source_keeps_its_tick_until_it_can_spread_into_the_next_chunk() {
+        let mut server = setup(GameMode::Creative);
+        put(&mut server, EAST_EDGE, blocks::WATER);
+        server.schedule_tick(EAST_EDGE, WATER_FLOW_DELAY);
+        advance(&mut server, 2 * WATER_FLOW_DELAY);
+        assert_eq!(
+            server.scheduled_blocks,
+            [(WATER_FLOW_DELAY, EAST_EDGE)].into_iter().collect()
+        );
+        assert_eq!(at(&server, [14, 80, 8]), blocks::AIR);
+
+        server.world.insert_chunk(Chunk::empty(1, 0));
+        advance(&mut server, 1);
+        assert_eq!(at(&server, [16, 80, 8]), blocks::FLOWING_WATER);
+        assert_eq!(at(&server, [14, 80, 8]), blocks::FLOWING_WATER);
+        assert!(!server
+            .scheduled_blocks
+            .contains(&(WATER_FLOW_DELAY, EAST_EDGE)));
+    }
+
+    #[test]
+    fn saved_boundary_flow_waits_when_its_chunk_is_loaded_before_its_source() {
+        let mut server = flow_fed_from_the_east();
+        let (cx, cz, flow_bytes) = server.take_dirty().unwrap();
+        let (east_cx, east_cz, source_bytes) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert_eq!((east_cx, east_cz), (1, 0));
+
+        server.clients.clear();
+        server.unload_far_chunks();
+        assert!(server.scheduled_blocks.is_empty());
+        assert!(server.scheduled_block_times.is_empty());
+        server.connect(1);
+        server.clients.get_mut(&1).unwrap().pos = [8.5, 80.0, 8.5];
+        assert!(server.load_chunk(cx, cz, &flow_bytes));
+        advance(&mut server, 2 * WATER_FLOW_DELAY);
+        assert_eq!(at(&server, EAST_EDGE), blocks::FLOWING_WATER);
+        assert_eq!(
+            server.scheduled_blocks.first(),
+            Some(&(WATER_FLOW_DELAY, EAST_EDGE))
+        );
+        assert!(server.take_dirty().is_none());
+
+        assert!(server.load_chunk(east_cx, east_cz, &source_bytes));
+        advance(&mut server, 1);
+        assert_eq!(at(&server, EAST_EDGE), blocks::FLOWING_WATER);
+        assert!(server.scheduled_blocks.is_empty());
+        assert!(server.scheduled_block_times.is_empty());
+        assert!(server.take_dirty().is_none());
+    }
+
+    #[test]
+    fn repeated_neighbor_edits_keep_the_first_deadline() {
+        let mut server = setup(GameMode::Creative);
+        put(&mut server, SOURCE, blocks::WATER);
+        let neighbor = offset(SOURCE, HORIZONTAL[0]);
+        server.change_block_naturally(neighbor, blocks::STONE);
+        advance(&mut server, 1);
+        server.change_block_naturally(neighbor, blocks::AIR);
+
+        assert_eq!(
+            server.scheduled_blocks,
+            [(WATER_FLOW_DELAY, SOURCE)].into_iter().collect()
+        );
+        assert_eq!(
+            server.scheduled_block_times.get(&SOURCE),
+            Some(&WATER_FLOW_DELAY)
+        );
+        advance(&mut server, WATER_FLOW_DELAY - 2);
+        assert_eq!(at(&server, neighbor), blocks::AIR);
+        advance(&mut server, 1);
+        assert_eq!(at(&server, neighbor), blocks::FLOWING_WATER);
+    }
+
+    #[test]
+    fn a_water_state_change_supersedes_an_old_tick_and_waits_five_more_ticks() {
+        let mut server = setup(GameMode::Creative);
+        put(&mut server, offset(SOURCE, ABOVE), blocks::WATER);
+        put(&mut server, SOURCE, blocks::FLOWING_WATER);
+        server.schedule_tick(SOURCE, WATER_FLOW_DELAY + 1);
+        server.schedule_tick(SOURCE, WATER_FLOW_DELAY);
+        assert_eq!(
+            server.scheduled_blocks,
+            [(WATER_FLOW_DELAY, SOURCE)].into_iter().collect()
+        );
+
+        let neighbor = offset(SOURCE, HORIZONTAL[0]);
+        advance(&mut server, WATER_FLOW_DELAY);
+        assert_eq!(at(&server, SOURCE), blocks::FALLING_WATER);
+        assert_eq!(
+            server.scheduled_block_times.get(&SOURCE),
+            Some(&(2 * WATER_FLOW_DELAY))
+        );
+        advance(&mut server, WATER_FLOW_DELAY - 1);
+        assert_eq!(at(&server, neighbor), blocks::AIR);
+        advance(&mut server, 1);
+        assert_eq!(at(&server, neighbor), blocks::FLOWING_WATER);
+    }
+
+    #[test]
+    fn a_tick_replaced_during_the_same_batch_waits_for_its_new_deadline() {
+        let mut server = setup(GameMode::Creative);
+        let source = [8, 80, 7];
+        put(&mut server, source, blocks::WATER);
+        put(&mut server, SOURCE, blocks::FLOWING_WATER + 1);
+        server.schedule_tick(source, WATER_FLOW_DELAY);
+        server.schedule_tick(SOURCE, WATER_FLOW_DELAY);
+
+        advance(&mut server, WATER_FLOW_DELAY);
+        assert_eq!(at(&server, SOURCE), blocks::FLOWING_WATER);
+        let neighbor = [8, 80, 9];
+        assert_eq!(at(&server, neighbor), blocks::AIR);
+        assert_eq!(
+            server.scheduled_block_times.get(&SOURCE),
+            Some(&(2 * WATER_FLOW_DELAY))
+        );
+        advance(&mut server, WATER_FLOW_DELAY - 1);
+        assert_eq!(at(&server, neighbor), blocks::AIR);
+        advance(&mut server, 1);
+        assert_eq!(at(&server, neighbor), blocks::FLOWING_WATER + 1);
+    }
+
+    #[test]
+    fn loading_legacy_duplicate_positions_keeps_the_earliest_tick() {
+        let mut server = setup(GameMode::Creative);
+        let mut saved = world::io::Writer::new();
+        saved.raw(&server.world.remove_chunk(0, 0).unwrap().to_bytes());
+        saved.varint(0); // Furnaces.
+        saved.varint(3);
+        for delay in [9, 2, 7] {
+            saved.u8(SOURCE[0] as u8);
+            saved.i32(SOURCE[1]);
+            saved.u8(SOURCE[2] as u8);
+            saved.u16(delay);
+        }
+        server.game_time = 10;
+        assert!(server.load_chunk(0, 0, &saved.finish()));
+        assert_eq!(
+            server.scheduled_blocks,
+            [(12, SOURCE)].into_iter().collect()
+        );
+        assert_eq!(server.scheduled_block_times.get(&SOURCE), Some(&12));
+        assert!(server.take_dirty().is_none());
+    }
+
     #[test]
     fn scheduled_ticks_save_delays_change_the_hash_and_leave_with_the_chunk() {
         let mut server = setup(GameMode::Creative);
         let old = server.state_hash();
         server.schedule_tick(SOURCE, 9);
         server.schedule_tick([0, 80, 15], i64::MAX);
-        server.schedule_tick([15, 80, 0], 0);
+        server.schedule_tick([14, 80, 1], 0);
         assert_ne!(server.state_hash(), old);
         server.game_time = 2;
         let (cx, cz, bytes) = server.take_dirty().unwrap();
@@ -275,7 +475,7 @@ mod tests {
         assert!(server.load_chunk(cx, cz, &bytes));
         assert_eq!(
             server.scheduled_blocks,
-            [(100, [15, 80, 0]), (107, SOURCE), (65_635, [0, 80, 15]),]
+            [(100, [14, 80, 1]), (107, SOURCE), (65_635, [0, 80, 15]),]
                 .into_iter()
                 .collect()
         );
@@ -283,7 +483,7 @@ mod tests {
         server.connect(1);
         server.clients.get_mut(&1).unwrap().pos = [8.5, 80.0, 8.5];
         advance(&mut server, 1);
-        assert!(!server.scheduled_blocks.contains(&(100, [15, 80, 0])));
+        assert!(!server.scheduled_blocks.contains(&(100, [14, 80, 1])));
         assert_eq!(server.dirty_chunks(), 0);
     }
 
@@ -379,6 +579,10 @@ mod tests {
     #[test]
     fn water_spreads_one_level_every_five_ticks_then_drains_without_a_source() {
         let mut server = setup(GameMode::Creative);
+        // The last level reaches the east and south edges of the fixture.
+        for (cx, cz) in [(1, 0), (0, 1)] {
+            server.world.insert_chunk(Chunk::empty(cx, cz));
+        }
         server.change_block_naturally(SOURCE, blocks::WATER);
         for level in 1..=7 {
             let pos = [8 - level, 80, 8];
@@ -468,7 +672,9 @@ mod tests {
             .expect("expected a generated sea column");
         let source = [x, worldgen::SEA_LEVEL, z];
         let below = offset(source, BELOW);
-        server.generate_now(x >> 4, z >> 4);
+        for p in std::iter::once(source).chain(neighbors(source)) {
+            server.generate_now(p[0] >> 4, p[2] >> 4);
+        }
         assert_eq!(at(&server, source), blocks::WATER);
         assert!(server.scheduled_blocks.is_empty());
         server.clients.get_mut(&1).unwrap().pos = source.map(|v| f64::from(v) + 0.5);
