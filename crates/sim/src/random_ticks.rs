@@ -53,7 +53,9 @@ impl Server {
             Some(blocks::GRASS_BLOCK) => self.tick_grass([x, y, z], hash),
             Some(blocks::OAK_LEAVES) if !leaf_has_support(&self.world, [x, y, z]) => {
                 self.change_block_naturally([x, y, z], blocks::AIR);
-                if self.game_mode == GameMode::Survival && self.leaf_drops_apple() {
+                if self.game_mode == GameMode::Survival
+                    && JavaRandom::new((hash >> 12) as i64).next_int_bound(10) == 0
+                {
                     self.spawn_block_drop(items::by_name("apple").unwrap(), [x, y, z], 0.5);
                 }
             }
@@ -330,15 +332,17 @@ mod tests {
 
     #[test]
     fn decay_drops_only_apples_and_only_on_a_winning_survival_roll() {
-        for (seed, mode, expected) in [
-            (5, GameMode::Survival, 1),
-            (1, GameMode::Survival, 0),
-            (5, GameMode::Creative, 0),
+        const WINNING_HASH: u64 = 0;
+        const LOSING_HASH: u64 = 1 << 12;
+        for (hash, mode, expected) in [
+            (WINNING_HASH, GameMode::Survival, 1),
+            (LOSING_HASH, GameMode::Survival, 0),
+            (WINNING_HASH, GameMode::Creative, 0),
         ] {
-            let mut server = empty_world(seed);
+            let mut server = empty_world(1);
             server.set_game_mode(mode);
             put(&mut server, [8, 70, 8], blocks::OAK_LEAVES);
-            server.random_tick_at([8, 70, 8], 0);
+            server.random_tick_at([8, 70, 8], hash);
             assert_eq!(server.get_block(8, 70, 8), Some(blocks::AIR));
             assert_eq!(server.entities.len(), expected);
             if let Some(drop) = server.entities.values().next() {
@@ -348,5 +352,39 @@ mod tests {
                 assert_eq!(drop.pickup_delay, 10);
             }
         }
+    }
+
+    #[test]
+    fn decay_can_drop_apples_after_a_miss_without_other_item_spawns() {
+        let run = || {
+            let mut server = empty_world(1);
+            server.set_game_mode(GameMode::Survival);
+            let positions: Vec<_> = (0..40).map(|i| [8, 70 + 2 * i, 8]).collect();
+            for &pos in &positions {
+                put(&mut server, pos, blocks::OAK_LEAVES);
+            }
+
+            let mut rolls = Vec::new();
+            for (i, &pos) in positions.iter().enumerate() {
+                let before = server.entities.len();
+                server.random_tick_at(pos, mix_stafford13(i as u64));
+                let dropped = server.entities.len() - before;
+                assert!(dropped <= 1);
+                rolls.push(dropped == 1);
+            }
+
+            for [x, y, z] in positions {
+                assert_eq!(server.get_block(x, y, z), Some(blocks::AIR));
+            }
+            assert!((1..40).contains(&server.entities.len()));
+            assert!(rolls.windows(2).any(|pair| pair == [false, true]));
+            let apple = items::by_name("apple").unwrap();
+            assert!(server
+                .entities
+                .values()
+                .all(|drop| drop.item == apple && drop.count == 1));
+            rolls
+        };
+        assert_eq!(run(), run());
     }
 }
