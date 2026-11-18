@@ -1289,6 +1289,7 @@ async function main(): Promise<void> {
 		if (core.gameMode === "survival" && !core.dead) {
 			const mining = leftHeld && locked() && joined && connection === "open";
 			const hit = mining && includeSources ? aimedBlock() : target;
+			if (mining) target = hit;
 			const blockState = hit ? core.getBlock(hit.x, hit.y, hit.z) : 0;
 			const selection = digSelection(selectedSlot, held);
 			const ticks = core.miningTicks(blockState, held?.item ?? 0);

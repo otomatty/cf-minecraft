@@ -373,19 +373,6 @@ impl Server {
                 )
             })
             .collect();
-        let crosses_lava = |previous: [f64; 3], current: [f64; 3]| {
-            let [from_x, from_y, from_z] = previous.map(|v| v.floor() as i32);
-            let [to_x, to_y, to_z] = current.map(|v| v.floor() as i32);
-            let first_y = from_y.min(to_y).max(MIN_Y);
-            let last_y = from_y.max(to_y).min(MIN_Y + HEIGHT - 1);
-            let column_has_lava = |x, z| {
-                (first_y..=last_y)
-                    .any(|y| self.world.get_block(x, y, z).is_some_and(blocks::is_lava))
-            };
-            // Horizontal movement per tick is small, so checking the two endpoint columns is enough.
-            column_has_lava(from_x, from_z)
-                || ((from_x, from_z) != (to_x, to_z) && column_has_lava(to_x, to_z))
-        };
         self.entities
             .extract_if(.., |_, e| {
                 let previous = e.pos;
@@ -393,7 +380,7 @@ impl Server {
                     e.tick(&self.world);
                 }
                 let active = e.age < 6000 && e.pos[1] >= health::VOID_Y;
-                !active || crosses_lava(previous, e.pos)
+                !active || crosses_lava(&self.world, previous, e.pos)
             })
             .for_each(drop);
         if (self.game_time + 1) % 10 == 0 {
@@ -1817,6 +1804,47 @@ impl Server {
     }
 }
 
+fn crosses_lava(world: &World, previous: [f64; 3], current: [f64; 3]) -> bool {
+    const MAX_CELLS: usize = 64;
+    let is_lava = |[x, y, z]: [i32; 3]| {
+        (MIN_Y..MIN_Y + HEIGHT).contains(&y)
+            && world.get_block(x, y, z).is_some_and(blocks::is_lava)
+    };
+    let mut cell = previous.map(|v| v.floor() as i32);
+    let end = current.map(|v| v.floor() as i32);
+    let step: [i32; 3] = std::array::from_fn(|axis| if end[axis] > cell[axis] { 1 } else { -1 });
+    let delta: [f64; 3] = std::array::from_fn(|axis| current[axis] - previous[axis]);
+
+    // Endpoints use floor; tied crossings step together, skipping cells only grazed at an edge or corner.
+    // Reserve the last check for the endpoint even when the traversal reaches its limit.
+    for _ in 0..MAX_CELLS - 1 {
+        if is_lava(cell) {
+            return true;
+        }
+        if cell == end {
+            return false;
+        }
+
+        let next: [f64; 3] = std::array::from_fn(|axis| {
+            if cell[axis] == end[axis] {
+                f64::INFINITY
+            } else {
+                let boundary = f64::from(cell[axis]) + f64::from(i32::from(step[axis] > 0));
+                (boundary - previous[axis]) / delta[axis]
+            }
+        });
+        let nearest = next
+            .into_iter()
+            .fold(f64::INFINITY, |best, t| if t < best { t } else { best });
+        for axis in 0..3 {
+            if next[axis] == nearest {
+                cell[axis] += step[axis];
+            }
+        }
+    }
+    is_lava(end)
+}
+
 fn valid_position(pos: [f64; 3]) -> bool {
     pos.iter().all(|v| v.is_finite() && v.abs() < 2.9999984e7)
 }
@@ -1944,6 +1972,37 @@ mod tests {
 
         s.tick_entities();
         assert!(!s.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn item_falling_diagonally_past_lava_is_not_removed() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(Chunk::empty(0, 0));
+        s.world.set_block(3, 82, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.8, 82.25, 2.5], [0.3, -2.0, 0.0], 40);
+        s.tick_entities();
+
+        assert_eq!(s.entities[&id].pos.map(|v| v.floor() as i32), [3, 80, 2]);
+    }
+
+    #[test]
+    fn lava_path_checks_endpoints_and_skips_cells_only_grazed_at_a_corner() {
+        let mut world = World::with_lighting(false);
+        world.insert_chunk(Chunk::empty(0, 0));
+        let start = [2.5, 80.5, 2.5];
+        let corner = [3.0, 81.0, 3.0];
+        let end = [3.5, 81.5, 3.5];
+        world.set_block(3, 80, 2, blocks::LAVA);
+        assert!(!crosses_lava(&world, start, end));
+        assert!(!crosses_lava(&world, end, start));
+        assert!(!crosses_lava(&world, start, start));
+
+        world.set_block(3, 81, 3, blocks::LAVA);
+        assert!(crosses_lava(&world, start, corner));
+        assert!(crosses_lava(&world, corner, start));
+        assert!(crosses_lava(&world, corner, corner));
     }
 
     #[test]
