@@ -90,6 +90,15 @@ pub fn is_solid(state: BlockState) -> bool {
     info(state).solid
 }
 
+pub fn is_full_opaque_cube(state: BlockState) -> bool {
+    let info = info(state);
+    info.solid && info.occludes && info.model == Model::Cube
+}
+
+pub fn is_oak_leaves(state: BlockState) -> bool {
+    matches!(state, OAK_LEAVES | PLACED_OAK_LEAVES)
+}
+
 /// A block owns a contiguous range; its first state is the inventory default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
@@ -339,8 +348,14 @@ mod tests {
             assert_eq!(parse_state(name), Some(14 + i as u16));
         }
         assert_eq!(
-            (OAK_STAIRS, COBBLESTONE_STAIRS, OAK_FENCE, COUNT),
-            (23, 31, 39, 51)
+            (
+                OAK_STAIRS,
+                COBBLESTONE_STAIRS,
+                OAK_FENCE,
+                PLACED_OAK_LEAVES,
+                COUNT
+            ),
+            (23, 31, 39, 51, 52)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);

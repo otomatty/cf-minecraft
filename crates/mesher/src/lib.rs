@@ -193,9 +193,11 @@ pub fn mesh_section_layers(
                         } else {
                             bounds.max[axis] == 16
                         }) && !(water_surface && f == UP);
+                        let same = state == neighbor
+                            || (blocks::is_oak_leaves(state) && blocks::is_oak_leaves(neighbor));
                         if boundary
                             && (blocks::occludes(neighbor)
-                                || (state == neighbor && info.cull_same && !water_strip))
+                                || (same && info.cull_same && !water_strip))
                         {
                             continue;
                         }
@@ -719,6 +721,13 @@ mod tests {
             (blocks::GLASS, blocks::GLASS, [0, 10, 0]),
             (blocks::WATER, blocks::WATER, [0, 0, 10]),
             (blocks::OAK_LEAVES, blocks::OAK_LEAVES, [0, 10, 0]),
+            (blocks::OAK_LEAVES, blocks::PLACED_OAK_LEAVES, [0, 10, 0]),
+            (blocks::PLACED_OAK_LEAVES, blocks::OAK_LEAVES, [0, 10, 0]),
+            (
+                blocks::PLACED_OAK_LEAVES,
+                blocks::PLACED_OAK_LEAVES,
+                [0, 10, 0],
+            ),
             (blocks::OAK_LEAVES, blocks::AIR, [0, 6, 0]),
             (blocks::OAK_LEAVES, blocks::GLASS, [0, 12, 0]),
             (blocks::GLASS, blocks::OAK_LEAVES, [0, 12, 0]),
@@ -743,7 +752,7 @@ mod tests {
             p[padded_index(15, 3, 3)] = a;
             p[padded_index(16, 3, 3)] = b;
             out.clear();
-            let count = if blocks::occludes(b) || (a == b && blocks::info(a).cull_same) {
+            let count = if blocks::occludes(b) || expected.iter().sum::<u32>() == 10 {
                 5
             } else {
                 6

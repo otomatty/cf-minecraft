@@ -20,8 +20,10 @@ pub mod entity;
 pub mod furnace;
 mod health;
 pub mod inventory;
+mod random_ticks;
 pub mod scenario;
 use inventory::{Inventory, Stack};
+pub use random_ticks::RANDOM_TICKS_PER_SECTION;
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GameMode {
@@ -707,6 +709,9 @@ impl Server {
             self.unload_far_chunks();
         }
         self.tick_furnaces();
+        self.tick_random_blocks();
+        // Natural block changes can interrupt digs after the regular flush.
+        self.flush_digs();
         self.sync_entities();
         let changed: Vec<_> = self
             .clients
@@ -948,7 +953,11 @@ impl Server {
                         }) && self.clients[&id]
                             .inventory
                             .selected_stack()
-                            .is_some_and(|stack| Some(stack.item) == items::for_block(state))
+                            .and_then(|stack| items::info(stack.item))
+                            .and_then(|item| item.block)
+                            .is_some_and(|block| {
+                                blocks::info(block).name == blocks::info(state).name
+                            })
                     };
                 if !self.can_edit(id, x, y, z, state) || !survival_ok {
                     self.stats.packets_rejected += 1;
@@ -980,41 +989,14 @@ impl Server {
                     self.furnaces.insert([x, y, z], furnace::Furnace::default());
                 }
 
-                let miners: Vec<_> = self
-                    .clients
-                    .iter()
-                    .filter(|(_, c)| c.dig.is_some_and(|dig| dig.pos == [x, y, z]))
-                    .map(|(&id, _)| id)
-                    .collect();
-                for miner in miners {
-                    self.abort_dig(miner);
-                }
+                self.abort_digs_at([x, y, z]);
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
                         if let Some(mut item) = items::mining_drop(old).filter(|_| drops) {
-                            if old == blocks::OAK_LEAVES {
-                                let mut roll = jmath::JavaRandom::new(
-                                    self.seed ^ 0x0061_7070_6c65 ^ self.next_entity_id as i64,
-                                );
-                                if roll.next_int_bound(10) == 0 {
-                                    item = items::by_name("apple").unwrap();
-                                }
+                            if old == blocks::OAK_LEAVES && self.leaf_drops_apple() {
+                                item = items::by_name("apple").unwrap();
                             }
-                            let mut random = jmath::JavaRandom::new(
-                                self.seed.wrapping_add(self.next_entity_id as i64),
-                            );
-                            let velocity = [
-                                random.next_double() * 0.1 - 0.05,
-                                0.1,
-                                random.next_double() * 0.1 - 0.05,
-                            ];
-                            self.spawn_item(
-                                item,
-                                1,
-                                [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
-                                velocity,
-                                10,
-                            );
+                            self.spawn_block_drop(item, [x, y, z], 0.25);
                         }
                     } else {
                         let client = self.clients.get_mut(&id).unwrap();
@@ -1025,6 +1007,40 @@ impl Server {
                 self.stats.blocks_changed += 1;
                 self.broadcast_block(x, y, z, state);
             }
+        }
+    }
+
+    fn leaf_drops_apple(&self) -> bool {
+        let mut roll =
+            jmath::JavaRandom::new(self.seed ^ 0x0061_7070_6c65 ^ self.next_entity_id as i64);
+        roll.next_int_bound(10) == 0
+    }
+
+    fn spawn_block_drop(&mut self, item: u16, [x, y, z]: [i32; 3], height: f64) {
+        let mut random = jmath::JavaRandom::new(self.seed.wrapping_add(self.next_entity_id as i64));
+        let velocity = [
+            random.next_double() * 0.1 - 0.05,
+            0.1,
+            random.next_double() * 0.1 - 0.05,
+        ];
+        self.spawn_item(
+            item,
+            1,
+            [x as f64 + 0.5, y as f64 + height, z as f64 + 0.5],
+            velocity,
+            10,
+        );
+    }
+
+    fn abort_digs_at(&mut self, pos: [i32; 3]) {
+        let miners: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.dig.is_some_and(|dig| dig.pos == pos))
+            .map(|(&id, _)| id)
+            .collect();
+        for miner in miners {
+            self.abort_dig(miner);
         }
     }
 
@@ -1893,6 +1909,46 @@ mod tests {
         assert!(s.clients[&1].inventory.selected_stack().is_none());
         assert_eq!(s.stats.packets_rejected, 0);
     }
+    #[test]
+    fn survival_places_persistent_leaves_and_mines_them_without_an_apple_roll() {
+        let (mut s, [x, y, z]) = survival();
+        s.seed = 5; // The first terrain-leaf drop at this seed would be an apple.
+        assert!(s.leaf_drops_apple());
+        let pos = [x + 1, y, z];
+        let leaves = items::by_name("oak_leaves").unwrap();
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(
+                0,
+                Some(Stack {
+                    item: leaves,
+                    count: 1,
+                }),
+            )
+            .unwrap();
+        edit(&mut s, pos, blocks::OAK_LEAVES);
+        s.tick();
+        assert_eq!(s.get_block(pos[0], y, z), Some(blocks::AIR));
+
+        let placed = items::info(leaves).unwrap().block.unwrap();
+        edit(&mut s, pos, placed);
+        s.tick();
+        assert_eq!(s.get_block(pos[0], y, z), Some(blocks::PLACED_OAK_LEAVES));
+        assert!(s.clients[&1].inventory.selected_stack().is_none());
+
+        dig_start(&mut s, 1, pos);
+        let ticks = items::mining(placed, None).unwrap().0;
+        for _ in 0..=ticks {
+            s.tick();
+        }
+        assert_eq!(s.get_block(pos[0], y, z), Some(blocks::AIR));
+        assert_eq!(s.entities.len(), 1);
+        let drop = s.entities.values().next().unwrap();
+        assert_eq!((drop.item, drop.count), (leaves, 1));
+    }
+
     #[test]
     fn survival_rejects_empty_wrong_items_and_unbreakable_blocks_with_correction() {
         let (mut s, pos) = survival();
@@ -3576,13 +3632,12 @@ mod tests {
             external.set_external_generation(4);
             for server in [&mut synchronous, &mut external] {
                 server.connect(1);
-                server.handle_packet(
+                server.apply(
                     1,
-                    &C2S::Hello {
+                    C2S::Hello {
                         protocol: PROTOCOL_VERSION,
                         view_distance: 2,
-                    }
-                    .encode(),
+                    },
                 );
             }
             let collect = |server: &mut Server, chunks: &mut BTreeMap<ChunkPos, Vec<u8>>| {
@@ -3594,9 +3649,11 @@ mod tests {
             };
             let mut expected = BTreeMap::new();
             let mut actual = BTreeMap::new();
+            // Compare generation and streaming before random ticks affect chunks
+            // that became available at different times on the two paths.
             for _ in 0..20 {
-                synchronous.tick();
-                external.tick();
+                synchronous.stream_chunks();
+                external.stream_chunks();
                 collect(&mut synchronous, &mut expected);
                 collect(&mut external, &mut actual);
                 for (cx, cz) in external.take_generation_requests() {

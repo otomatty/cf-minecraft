@@ -21,7 +21,7 @@ import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
-import { hotbarStates } from "./hotbar.ts";
+import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
@@ -503,14 +503,8 @@ async function main(): Promise<void> {
 			c.width = c.height = TEX_SIZE;
 			const pixels = renderer.texturePixels.get(item.texture);
 			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
-			c.title = item.name;
 		}
-	}
-	function replaceSlot(state: number): void {
-		if (core.gameMode !== "creative") return;
-		const item = items.find(item => item.block === registry[state].first);
-		if (!item) return;
-		transport.send(core.encodeCreativeSetSlot(selectedSlot, item.id, 1));
+		if (item) c.title = item.name;
 	}
 	selectSlot(0, false);
 
@@ -1059,12 +1053,11 @@ async function main(): Promise<void> {
 			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
-			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
-			if (block && block.first > 0) {
-				const slot = hotbarBlocks.indexOf(block.first);
-				if (slot >= 0) selectSlot(slot);
-				else if (core.gameMode === "creative") replaceSlot(block.first);
-			}
+			const item = pickBlockItem(registry[core.getBlock(hit.x, hit.y, hit.z)], items);
+			if (!item) return;
+			const slot = core.inventory.findIndex((stack, i) => i < 9 && stack?.item === item.id);
+			if (slot >= 0) selectSlot(slot);
+			else if (core.gameMode === "creative") transport.send(core.encodeCreativeSetSlot(selectedSlot, item.id, 1));
 		}
 	}
 	canvas.addEventListener("mousedown", (e) => {

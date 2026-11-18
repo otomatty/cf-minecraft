@@ -161,10 +161,10 @@ fn one_new_entry_adds_a_block_and_texture() {
     let data = BLOCKS.replacen("\n]", "\n  \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 51\ndig_ticks = 12\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 52\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 51;"));
-    assert!(output.contains("pub const COUNT: BlockState = 52;"));
+    assert!(output.contains("pub const TEST_CLAY: BlockState = 52;"));
+    assert!(output.contains("pub const COUNT: BlockState = 53;"));
     let new_layer = world::blocks::TEXTURES.len();
     assert!(output.contains(&format!("tex: {:?}", [new_layer; 6])));
 }
@@ -197,7 +197,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 51
+        id = 52
         dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
@@ -211,7 +211,7 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 51\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 52\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"

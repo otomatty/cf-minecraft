@@ -60,7 +60,7 @@ block = "glass"
 [[items]]
 name = "oak_leaves"
 id = 12
-block = "oak_leaves"
+block = "placed_oak_leaves"
 
 [[items]]
 name = "water"

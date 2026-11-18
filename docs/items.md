@@ -2,6 +2,8 @@
 
 `data/registry/items.toml` はこのプロジェクト独自のアイテム定義。`world/build.rs` が読み、`world::items` の表を生成する。ID は保存用の安定した `u16` で、1 から割り当て、既存 ID を変更しない。0 は空の枠を表す。ブロックの状態 ID とは別の名前空間。
 
+`oak_leaves` アイテム（ID 12）は `placed_oak_leaves`（状態 ID 51）を置く。どちらの葉も中クリックで同じアイテムを選べる。サバイバルで設置した葉を掘ると葉アイテムを 1 個落とし、地形の葉ではリンゴの抽選がある。[葉の消滅とドロップ](random-ticks.md#葉)
+
 各エントリーは `name`（snake_case）、`id`、`max_stack`（省略時64、1〜64）、任意の `block`、`texture`、`tool = { kind, tier }` を持つ。`block` と `texture` の両方が無い定義はビルドエラー。道具は `max_stack = 1` が必須。重複した名前・ID、ID 0、不明なブロック、不正なスタック上限はビルドエラー。今回は air 以外の全ブロックに同名アイテムを1つずつ定義する。水のアイテムはクリエイティブ用。ブロック以外のアイテムも `block` の省略で表現できる。
 
 `items::ITEMS` / `COUNT`、`info(id)`、`by_name(name)`、`for_block(state)` を公開する。置く状態はそのブロックの最初の状態。スラブや階段などのどの状態も同じアイテムに戻る。

@@ -102,10 +102,7 @@ impl Health {
         let eye = block_at(world, pos, physics::EYE_HEIGHT);
         if interval(
             &mut self.suffocation_ticks,
-            eye.is_some_and(|block| {
-                let info = blocks::info(block);
-                info.solid && info.occludes && info.model == blocks::Model::Cube
-            }),
+            eye.is_some_and(blocks::is_full_opaque_cube),
             SUFFOCATION_INTERVAL,
         ) {
             self.damage(SUFFOCATION_DAMAGE, DeathCause::Suffocation);

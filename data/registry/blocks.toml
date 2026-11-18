@@ -114,6 +114,7 @@ cull_same = true
 
 [[blocks]]
 name = "oak_leaves"
+drop = "oak_leaves"
 dig_ticks = 6
 id = 12
 layer = "cutout"
@@ -330,3 +331,13 @@ side = "furnace_side"
 north = "furnace_front"
 top = "furnace_top"
 bottom = "furnace_top"
+
+[[blocks]]
+name = "placed_oak_leaves"
+id = 51
+dig_ticks = 6
+layer = "cutout"
+texture = "oak_leaves"
+cull_same = true
+opacity = 1
+tint = true
