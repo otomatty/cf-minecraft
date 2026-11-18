@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
+import { Generator, ServerCore } from "../shared/server-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { blockInteraction, bucketTarget, canTill, placementState } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -54,7 +55,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 70);
+	assert.equal(registry.length, 76);
 	assert.equal(id("water"), 13);
 	for (const [i, level] of [1, 2, 3, 4, 5, 6, 7, "falling"].entries()) {
 		const state = id(`flowing_water[level=${level}]`);
@@ -305,13 +306,14 @@ test("crop states and farming items use distinct painted textures", () => {
 	}
 });
 
-test("empty bucket targets only the source hit by the water-inclusive ray", () => {
+test("empty bucket targets only the source hit by the source-inclusive ray", () => {
 	const target = hit(1);
-	for (const name of ["flowing_water", "glass", "air", undefined]) {
+	for (const name of ["flowing_water", "flowing_lava", "glass", "air", undefined]) {
 		assert.equal(bucketTarget("bucket", target, () => name, false), null);
 	}
 	assert.equal(bucketTarget("bucket", null, () => "water", false), null);
 	assert.deepEqual(bucketTarget("bucket", target, () => "water", false), [0, -2, 0]);
+	assert.deepEqual(bucketTarget("bucket", target, () => "lava", false), [0, -2, 0]);
 	assert.deepEqual([...core.encodeUseBucket(-1, -2, 3)], [15, 255, 255, 255, 255, 255, 255, 255, 254, 0, 0, 0, 3]);
 });
 
@@ -334,4 +336,40 @@ test("filled bucket targets the adjacent air or flow and respects block interact
 	assert.deepEqual(placementState(registry, id("stone"), target, 0, x => x === 0 ? id("stone") : flow.first),
 		{ x: 1, y: -2, z: 0, state: id("stone") });
 	assert.notDeepEqual(paintTexture("bucket"), paintTexture("water_bucket"));
+});
+
+test("bucket ray passes through flow to water and lava sources", () => {
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const server = ServerCore.fromModule(new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url))));
+	server.start(2026n, Generator.Flat);
+	server.connect(1, false, [4.5, 80, 4.5]);
+	server.packet(1, client.encodeHello(2));
+	server.tick();
+	for (const { data } of server.takeOutbox()) client.packet(data);
+	assert.ok(client.predictBlock(5, 80, 4, stone));
+	for (const [source, flow] of [["water", "flowing_lava"], ["lava", "flowing_water"]]) {
+		assert.ok(client.predictBlock(2, 80, 4, id(`${flow}[level=1]`)));
+		assert.ok(client.predictBlock(3, 80, 4, id(source)));
+		const cast = heldName => client.raycast([1.5, 80.5, 4.5], [1, 0, 0], 6, usesFluidSourceRay(heldName));
+		for (const held of [undefined, "iron_pickaxe", "water_bucket", "lava_bucket"]) {
+			assert.equal(cast(held)?.x, 5, held);
+		}
+		const sourceHit = cast("bucket");
+		assert.equal(sourceHit?.x, 3);
+		assert.deepEqual(bucketTarget("bucket", sourceHit, (x, y, z) => registry[client.getBlock(x, y, z)]?.name, false), [3, 80, 4]);
+	}
+});
+
+test("lava buckets place only into air or flowing lava", () => {
+	const target = hit(5);
+	for (const name of ["air", "flowing_lava", "flowing_water", "lava", "water", "obsidian"]) {
+		const blockName = x => x === 0 ? "stone" : name;
+		const allowed = name === "air" || name === "flowing_lava";
+		assert.deepEqual(bucketTarget("lava_bucket", target, blockName, false), allowed ? [1, -2, 0] : null);
+	}
+	assert.equal(bucketTarget("water_bucket", target, x => x === 0 ? "stone" : "flowing_lava", false), null);
+	const pixels = paintTexture("lava_bucket");
+	assert.notDeepEqual(pixels, paintTexture("water_bucket"));
+	assert.notDeepEqual(pixels, paintTexture("missing"));
 });

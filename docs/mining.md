@@ -2,7 +2,7 @@
 
 数値、ブロック定義、ひびの模様はこのプロジェクト独自の仕様。20 tick = 1 秒。`data/registry/blocks.toml` の各ブロックは `dig_ticks`（u16）か `unbreakable = true` のどちらか一方を必須とする。欠落、両方指定、負数、65535超はビルドエラー。`blocks::info(state).dig_ticks` は壊せない場合 `None`。スラブ・階段を含む同じブロックの全状態で値を共有する。現在の全ブロックは指定の材質表に含まれ、追加の値はない。
 
-| ブロック | 素手の dig_ticks |
+| ブロック | 基本の dig_ticks |
 | --- | --- |
 | air | 壊せない |
 | stone | 70 |
@@ -35,6 +35,15 @@
 | copper_ore | 90 |
 | iron_ore | 90 |
 | gold_ore | 90 |
+| crafting_table | 40 |
+| furnace | 70 |
+| placed_oak_leaves | 6 |
+| farmland | 12 |
+| wheat | 0 |
+| flowing_water | 壊せない |
+| lava | 壊せない |
+| flowing_lava | 壊せない |
+| obsidian | 400（鉄のつるはし未満では採掘不可） |
 
 ## コアの流れ
 
@@ -94,17 +103,18 @@ Survival の左ボタンは押している状態を毎フレーム調べ、Creat
 
 | ブロック | 適した tool | min_tier |
 | --- | --- | --- |
-| stone, cobblestone, cobblestone_slab, cobblestone_stairs, bricks, sandstone, coal_ore | pickaxe | 1 |
+| stone, cobblestone, cobblestone_slab, cobblestone_stairs, bricks, sandstone, coal_ore, furnace | pickaxe | 1 |
 | copper_ore, iron_ore | pickaxe | 2 |
 | gold_ore | pickaxe | 3 |
+| obsidian | pickaxe | 4 |
 | ice | pickaxe | 0 |
-| oak_log, oak_planks, oak_slab, oak_stairs, oak_fence | axe | 0 |
-| dirt, coarse_dirt, grass_block, sand, gravel, snow_block | shovel | 0 |
-| air, bedrock, water, lamp_block, glass, oak_leaves, red_flower, yellow_flower, short_grass | なし | 0 |
+| oak_log, oak_planks, oak_slab, oak_stairs, oak_fence, crafting_table | axe | 0 |
+| dirt, coarse_dirt, grass_block, sand, gravel, snow_block, farmland | shovel | 0 |
+| air, bedrock, water, lamp_block, glass, oak_leaves, red_flower, yellow_flower, short_grass, placed_oak_leaves, wheat, flowing_water, lava, flowing_lava | なし | 0 |
 
 表外の材質への追加割り当てはない。`min_tier` の省略値は0。1以上には `tool` が必須。種類・段階の範囲はビルド時に検証する。
 
-`world::items::mining(state, held)` が必要 tick（u32）とドロップ可否を返す唯一の計算箇所。壊せない状態は `None`。適した種類の道具なら `ceil(dig_ticks / speed)`、それ以外なら `dig_ticks`。`min_tier >= 1` で種類が合わない、または段階不足なら、その tick をさらに2倍にし、ブロックは壊れるがアイテムを生成しない。切り上げ・倍加は整数だけで行い、`dig_ticks = 0` は常に0。例: 素手の石は140 tick・ドロップなし、木のつるはしの石は35 tick・ドロップあり、石のつるはしの金鉱石は46 tick・ドロップなし。
+`world::items::mining(state, held)` が必要 tick（u32）とドロップ可否を返す唯一の計算箇所。壊せない状態は `None`。適した種類の道具なら `ceil(dig_ticks / speed)`、それ以外なら `dig_ticks`。`min_tier >= 1` で種類が合わない、または段階不足なら、その tick をさらに2倍にし、ブロックは壊れるがアイテムを生成しない。黒曜石（`obsidian`）だけはこの 2 倍の規則の例外。段階 4 のつるはしの条件を満たさないと `None` を返し、採掘を開始できない。切り上げ・倍加は整数だけで行い、`dig_ticks = 0` は常に0。例: 素手の石は140 tick・ドロップなし、木のつるはしの石は35 tick・ドロップあり、石のつるはしの金鉱石は46 tick・ドロップなし。
 
 `blocks.toml` の省略可能な `drop = "アイテム名"` で採掘時のドロップを指定できる。未知のアイテム名はビルドエラー。省略時は従来どおり同名のアイテムになり、`world::items::mining_drop(state)` が対応を返す。stone は `drop = "cobblestone"` を指定し、木のつるはしで石を掘ると丸石が落ちる。素手では段階条件を満たさず何も落ちない。配置時の対応は変わらず、stone アイテムを置くと stone ブロックになる。
 

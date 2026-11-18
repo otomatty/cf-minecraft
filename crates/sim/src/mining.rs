@@ -73,6 +73,62 @@ fn exact_duration_zero_duration_and_drops_for_every_state() {
     }
 }
 
+#[test]
+fn obsidian_requires_an_iron_pickaxe_and_drops_itself() {
+    let (mut s, pos @ [x, y, z]) = setup();
+    s.world.set_block(x, y, z, blocks::OBSIDIAN);
+    let rejected = s.stats.packets_rejected;
+    for held in [
+        None,
+        Some("wooden_pickaxe"),
+        Some("stone_pickaxe"),
+        Some("copper_pickaxe"),
+        Some("iron_axe"),
+    ] {
+        let stack = held.map(|name| Stack {
+            item: items::by_name(name).unwrap(),
+            count: 1,
+        });
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, stack)
+            .unwrap();
+        start(&mut s, pos);
+        s.tick();
+        assert!(s.clients[&1].dig.is_none(), "{held:?}");
+        assert_eq!(s.get_block(x, y, z), Some(blocks::OBSIDIAN));
+    }
+    assert_eq!(s.stats.packets_rejected, rejected + 5);
+    let pickaxe = items::by_name("iron_pickaxe").unwrap();
+    s.clients
+        .get_mut(&1)
+        .unwrap()
+        .inventory
+        .set(
+            0,
+            Some(Stack {
+                item: pickaxe,
+                count: 1,
+            }),
+        )
+        .unwrap();
+    let ticks = 400u32.div_ceil(items::info(pickaxe).unwrap().tool.unwrap().speed());
+    start(&mut s, pos);
+    s.tick();
+    for _ in 0..ticks {
+        assert_eq!(s.get_block(x, y, z), Some(blocks::OBSIDIAN));
+        s.tick();
+    }
+    assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+    assert_eq!(s.entities.len(), 1);
+    assert_eq!(
+        Some(s.entities.values().next().unwrap().item),
+        items::by_name("obsidian")
+    );
+}
+
 fn assert_grass_drop(s: &Server, pos: [i32; 3], mined_at: i64) {
     let mut same_roll = Server::new(s.seed, Generator::Flat);
     same_roll.game_time = mined_at;

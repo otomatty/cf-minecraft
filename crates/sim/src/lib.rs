@@ -373,13 +373,16 @@ impl Server {
                 )
             })
             .collect();
-        for e in self.entities.values_mut() {
-            if self.world.chunks.contains_key(&e.chunk()) {
-                e.tick(&self.world);
-            }
-        }
         self.entities
-            .retain(|_, e| e.age < 6000 && e.pos[1] >= health::VOID_Y);
+            .extract_if(.., |_, e| {
+                let previous = e.pos;
+                if self.world.chunks.contains_key(&e.chunk()) {
+                    e.tick(&self.world);
+                }
+                let active = e.age < 6000 && e.pos[1] >= health::VOID_Y;
+                !active || crosses_lava(&self.world, previous, e.pos)
+            })
+            .for_each(drop);
         if (self.game_time + 1) % 10 == 0 {
             self.merge_entities();
         }
@@ -1042,7 +1045,7 @@ impl Server {
                 }
                 self.stats.blocks_changed += 1;
                 self.broadcast_block(x, y, z, state);
-                self.schedule_water_neighbors([x, y, z]);
+                self.schedule_fluid_neighbors([x, y, z]);
                 self.check_wheat_above([x, y, z], state);
             }
         }
@@ -1801,6 +1804,47 @@ impl Server {
     }
 }
 
+fn crosses_lava(world: &World, previous: [f64; 3], current: [f64; 3]) -> bool {
+    const MAX_CELLS: usize = 64;
+    let is_lava = |[x, y, z]: [i32; 3]| {
+        (MIN_Y..MIN_Y + HEIGHT).contains(&y)
+            && world.get_block(x, y, z).is_some_and(blocks::is_lava)
+    };
+    let mut cell = previous.map(|v| v.floor() as i32);
+    let end = current.map(|v| v.floor() as i32);
+    let step: [i32; 3] = std::array::from_fn(|axis| if end[axis] > cell[axis] { 1 } else { -1 });
+    let delta: [f64; 3] = std::array::from_fn(|axis| current[axis] - previous[axis]);
+
+    // Endpoints use floor; tied crossings step together, skipping cells only grazed at an edge or corner.
+    // Reserve the last check for the endpoint even when the traversal reaches its limit.
+    for _ in 0..MAX_CELLS - 1 {
+        if is_lava(cell) {
+            return true;
+        }
+        if cell == end {
+            return false;
+        }
+
+        let next: [f64; 3] = std::array::from_fn(|axis| {
+            if cell[axis] == end[axis] {
+                f64::INFINITY
+            } else {
+                let boundary = f64::from(cell[axis]) + f64::from(i32::from(step[axis] > 0));
+                (boundary - previous[axis]) / delta[axis]
+            }
+        });
+        let nearest = next
+            .into_iter()
+            .fold(f64::INFINITY, |best, t| if t < best { t } else { best });
+        for axis in 0..3 {
+            if next[axis] == nearest {
+                cell[axis] += step[axis];
+            }
+        }
+    }
+    is_lava(end)
+}
+
 fn valid_position(pos: [f64; 3]) -> bool {
     pos.iter().all(|v| v.is_finite() && v.abs() < 2.9999984e7)
 }
@@ -1894,6 +1938,71 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    #[test]
+    fn item_spawned_in_lava_is_removed_even_if_it_moves_out_on_its_first_tick() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(world::Chunk::empty(0, 0));
+        s.world.set_block(2, 80, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.5, 80.9, 2.5], [0.0, 0.3, 0.0], 40);
+        let mut item = s.entities[&id].clone();
+        item.tick(&s.world);
+        assert!(item.pos[1] >= 81.0);
+
+        s.tick_entities();
+        assert!(!s.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn item_falling_through_lava_in_one_tick_is_removed() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(world::Chunk::empty(0, 0));
+        s.world.set_block(2, 80, 2, blocks::OAK_SLAB);
+        s.world.set_block(2, 81, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.5, 82.25, 2.5], [0.0, -2.0, 0.0], 40);
+        let mut item = s.entities[&id].clone();
+        item.tick(&s.world);
+        assert!(item.on_ground);
+        assert_eq!(item.pos[1], 80.5);
+
+        s.tick_entities();
+        assert!(!s.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn item_falling_diagonally_past_lava_is_not_removed() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(Chunk::empty(0, 0));
+        s.world.set_block(3, 82, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.8, 82.25, 2.5], [0.3, -2.0, 0.0], 40);
+        s.tick_entities();
+
+        assert_eq!(s.entities[&id].pos.map(|v| v.floor() as i32), [3, 80, 2]);
+    }
+
+    #[test]
+    fn lava_path_checks_endpoints_and_skips_cells_only_grazed_at_a_corner() {
+        let mut world = World::with_lighting(false);
+        world.insert_chunk(Chunk::empty(0, 0));
+        let start = [2.5, 80.5, 2.5];
+        let corner = [3.0, 81.0, 3.0];
+        let end = [3.5, 81.5, 3.5];
+        world.set_block(3, 80, 2, blocks::LAVA);
+        assert!(!crosses_lava(&world, start, end));
+        assert!(!crosses_lava(&world, end, start));
+        assert!(!crosses_lava(&world, start, start));
+
+        world.set_block(3, 81, 3, blocks::LAVA);
+        assert!(crosses_lava(&world, start, corner));
+        assert!(crosses_lava(&world, corner, start));
+        assert!(crosses_lava(&world, corner, corner));
     }
 
     #[test]
@@ -2770,6 +2879,41 @@ mod tests {
                 "{player:?}"
             );
         }
+    }
+
+    #[test]
+    fn survival_accepts_rising_in_lava_and_climbing_ashore() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        s.set_game_mode(GameMode::Survival);
+        for y in 64..67 {
+            s.world.set_block(0, y, 0, blocks::LAVA);
+            s.world.set_block(1, y, 0, blocks::STONE);
+            s.world.set_block(2, y, 0, blocks::STONE);
+        }
+        s.world.set_block(0, 63, 0, blocks::STONE);
+        let mut player = physics::Player::new(start);
+        let mut kicked = false;
+        for tick in 0..45 {
+            player.tick(
+                physics::Input {
+                    jump: true,
+                    strafe: -1.0,
+                    ..Default::default()
+                },
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            );
+            kicked |= player.in_water && player.velocity[1] == 0.3;
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 0, "tick {tick}, {player:?}");
+            assert_eq!(s.client_position(1), Some(player.position));
+            if player.on_ground && player.position[0] >= 1.0 && player.position[1] >= 67.0 {
+                assert!(kicked);
+                return;
+            }
+        }
+        panic!("player did not climb ashore: {player:?}");
     }
 
     #[test]

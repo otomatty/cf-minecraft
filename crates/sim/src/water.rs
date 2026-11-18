@@ -1,10 +1,11 @@
-//! Scheduled water updates and bucket interactions.
+//! Scheduled fluid updates and bucket interactions.
 
 use world::{blocks, items, HEIGHT, MIN_Y};
 
 use crate::{inventory, players_keep_chunk, GameMode, Server, Stack};
 
 pub(super) const WATER_FLOW_DELAY: i64 = 5;
+pub(super) const LAVA_FLOW_DELAY: i64 = 30;
 const HORIZONTAL: [[i32; 3]; 4] = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 const ABOVE: [i32; 3] = [0, 1, 0];
 const BELOW: [i32; 3] = [0, -1, 0];
@@ -18,6 +19,53 @@ fn neighbors(pos: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
         .into_iter()
         .chain(HORIZONTAL)
         .map(move |delta| offset(pos, delta))
+}
+
+#[derive(Clone, Copy)]
+struct Fluid {
+    source: u16,
+    first_flow: u16,
+    falling: u16,
+    delay: i64,
+}
+
+impl Fluid {
+    const WATER: Self = Self {
+        source: blocks::WATER,
+        first_flow: blocks::FLOWING_WATER,
+        falling: blocks::FALLING_WATER,
+        delay: WATER_FLOW_DELAY,
+    };
+    const LAVA: Self = Self {
+        source: blocks::LAVA,
+        first_flow: blocks::FLOWING_LAVA,
+        falling: blocks::FALLING_LAVA,
+        delay: LAVA_FLOW_DELAY,
+    };
+
+    fn for_state(state: u16) -> Option<Self> {
+        if blocks::is_water(state) {
+            Some(Self::WATER)
+        } else if blocks::is_lava(state) {
+            Some(Self::LAVA)
+        } else {
+            None
+        }
+    }
+
+    fn is_flowing(self, state: u16) -> bool {
+        (self.first_flow..=self.falling).contains(&state)
+    }
+
+    fn next_level(self, state: u16) -> Option<u16> {
+        if state == self.source || state == self.falling {
+            Some(self.first_flow)
+        } else if (self.first_flow..self.falling - 1).contains(&state) {
+            Some(state + 1)
+        } else {
+            None
+        }
+    }
 }
 
 impl Server {
@@ -51,14 +99,11 @@ impl Server {
         }
     }
 
-    pub(super) fn schedule_water_neighbors(&mut self, pos: [i32; 3]) {
+    pub(super) fn schedule_fluid_neighbors(&mut self, pos: [i32; 3]) {
         self.cancel_scheduled_tick(pos);
         for p in std::iter::once(pos).chain(neighbors(pos)) {
-            if self
-                .get_block(p[0], p[1], p[2])
-                .is_some_and(blocks::is_water)
-            {
-                self.schedule_tick(p, WATER_FLOW_DELAY);
+            if let Some(fluid) = self.get_block(p[0], p[1], p[2]).and_then(Fluid::for_state) {
+                self.schedule_tick(p, fluid.delay);
             }
         }
     }
@@ -84,13 +129,15 @@ impl Server {
                 continue;
             }
             self.cancel_scheduled_tick(pos);
-            if let Some(state) = self.get_block(x, y, z).filter(|&s| blocks::is_water(s)) {
-                self.tick_water(pos, state);
+            if let Some(state) = self.get_block(x, y, z) {
+                if let Some(fluid) = Fluid::for_state(state) {
+                    self.tick_fluid(pos, state, fluid);
+                }
             }
         }
     }
 
-    fn tick_water(&mut self, pos: [i32; 3], state: u16) {
+    fn tick_fluid(&mut self, pos: [i32; 3], state: u16, fluid: Fluid) {
         let neighbor = |delta| {
             let [x, y, z] = offset(pos, delta);
             self.get_block(x, y, z)
@@ -101,17 +148,29 @@ impl Server {
             return;
         };
         let horizontal = [north, south, west, east];
-        if blocks::is_flowing_water(state) {
-            let target = if blocks::is_water(above) {
-                blocks::FALLING_WATER
-            } else if horizontal.iter().filter(|&&s| s == blocks::WATER).count() >= 2
-                && (below == blocks::WATER || blocks::info(below).solid)
+        let water = fluid.source == blocks::WATER;
+        if !water && (blocks::is_water(above) || horizontal.into_iter().any(blocks::is_water)) {
+            let cooled = if state == fluid.source {
+                blocks::OBSIDIAN
+            } else {
+                blocks::COBBLESTONE
+            };
+            self.change_block_naturally(pos, cooled);
+            return;
+        }
+
+        if fluid.is_flowing(state) {
+            let target = if above == fluid.source || fluid.is_flowing(above) {
+                fluid.falling
+            } else if water
+                && horizontal.iter().filter(|&&s| s == fluid.source).count() >= 2
+                && (below == fluid.source || blocks::info(below).solid)
             {
-                blocks::WATER
+                fluid.source
             } else {
                 horizontal
                     .into_iter()
-                    .filter_map(next_flow_level)
+                    .filter_map(|target| fluid.next_level(target))
                     .min()
                     .unwrap_or(blocks::AIR)
             };
@@ -121,15 +180,14 @@ impl Server {
             }
         }
         if pos[1] > MIN_Y
-            && (below == blocks::AIR
-                || (blocks::FLOWING_WATER..blocks::FALLING_WATER).contains(&below))
+            && (below == blocks::AIR || (fluid.first_flow..fluid.falling).contains(&below))
         {
-            self.change_block_naturally(offset(pos, BELOW), blocks::FALLING_WATER);
+            self.change_block_naturally(offset(pos, BELOW), fluid.falling);
             return;
         }
-        if let Some(next) = next_flow_level(state) {
+        if let Some(next) = fluid.next_level(state) {
             for (delta, target) in HORIZONTAL.into_iter().zip(horizontal) {
-                if target == blocks::AIR || (next + 1..blocks::FALLING_WATER).contains(&target) {
+                if target == blocks::AIR || (next + 1..fluid.falling).contains(&target) {
                     self.change_block_naturally(offset(pos, delta), next);
                 }
             }
@@ -141,6 +199,7 @@ impl Server {
         let held = client.inventory.selected_stack();
         let bucket = items::by_name("bucket").expect("bucket item");
         let water_bucket = items::by_name("water_bucket").expect("water bucket item");
+        let lava_bucket = items::by_name("lava_bucket").expect("lava bucket item");
         let target = self.get_block(x, y, z);
         let allowed = client.joined
             && !client.health.vitals.dead
@@ -156,6 +215,15 @@ impl Server {
                     && (state == blocks::AIR || blocks::is_flowing_water(state)) =>
             {
                 Some((blocks::WATER, bucket, stack.count))
+            }
+            (Some(stack), Some(blocks::LAVA)) if stack.item == bucket => {
+                Some((blocks::AIR, lava_bucket, stack.count))
+            }
+            (Some(stack), Some(state))
+                if stack.item == lava_bucket
+                    && (state == blocks::AIR || blocks::is_flowing_lava(state)) =>
+            {
+                Some((blocks::LAVA, bucket, stack.count))
             }
             _ => None,
         };
@@ -182,14 +250,6 @@ impl Server {
                 }
             }
         }
-    }
-}
-
-fn next_flow_level(state: u16) -> Option<u16> {
-    match state {
-        blocks::WATER | blocks::FALLING_WATER => Some(blocks::FLOWING_WATER),
-        s if (blocks::FLOWING_WATER..blocks::FALLING_WATER - 1).contains(&s) => Some(s + 1),
-        _ => None,
     }
 }
 
@@ -687,6 +747,153 @@ mod tests {
         assert_eq!(at(&server, below), blocks::FALLING_WATER);
     }
 
+    #[test]
+    fn lava_spreads_one_level_per_delay_and_drains_after_removing_its_source() {
+        let mut server = setup(GameMode::Creative);
+        let [x, y, z] = SOURCE;
+        server.change_block_naturally(SOURCE, blocks::LAVA);
+        for distance in 1..=3 {
+            let pos = [x + distance, y, z];
+            advance(&mut server, LAVA_FLOW_DELAY - 1);
+            assert_eq!(at(&server, pos), blocks::AIR);
+            advance(&mut server, 1);
+            assert_eq!(at(&server, pos), blocks::FLOWING_LAVA + distance as u16 - 1);
+        }
+        advance(&mut server, LAVA_FLOW_DELAY);
+        assert_eq!(at(&server, [x + 4, y, z]), blocks::AIR);
+
+        server.change_block_naturally(SOURCE, blocks::AIR);
+        advance(&mut server, 5 * LAVA_FLOW_DELAY);
+        for dx in -3i32..=3 {
+            for dz in -3i32..=3 {
+                if dx.abs() + dz.abs() <= 3 {
+                    assert_eq!(at(&server, [x + dx, y, z + dz]), blocks::AIR);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lava_falls_before_spreading_and_does_not_create_sources() {
+        let mut server = setup(GameMode::Creative);
+        let above = offset(SOURCE, ABOVE);
+        let side = offset(SOURCE, HORIZONTAL[0]);
+        server.change_block_naturally(above, blocks::LAVA);
+        advance(&mut server, LAVA_FLOW_DELAY);
+        assert_eq!(at(&server, SOURCE), blocks::FALLING_LAVA);
+        assert_eq!(at(&server, offset(side, ABOVE)), blocks::AIR);
+        advance(&mut server, LAVA_FLOW_DELAY);
+        assert_eq!(at(&server, side), blocks::FLOWING_LAVA);
+
+        let mut server = setup(GameMode::Creative);
+        for x in [7, 9] {
+            server.change_block_naturally([x, 80, 8], blocks::LAVA);
+        }
+        advance(&mut server, 3 * LAVA_FLOW_DELAY);
+        assert_eq!(at(&server, SOURCE), blocks::FLOWING_LAVA);
+    }
+
+    #[test]
+    fn lava_cools_on_its_own_deadline_when_water_reaches_its_side_or_top() {
+        for lava in [blocks::LAVA, blocks::FLOWING_LAVA, blocks::FALLING_LAVA] {
+            for (water_pos, falling) in [
+                (offset(SOURCE, HORIZONTAL[0]), false),
+                (offset(SOURCE, HORIZONTAL[0]), true),
+                (offset(SOURCE, ABOVE), true),
+            ] {
+                let mut server = setup(GameMode::Creative);
+                put(&mut server, SOURCE, lava);
+                let water_source = if falling {
+                    offset(water_pos, ABOVE)
+                } else {
+                    water_pos
+                };
+                server.change_block_naturally(water_source, blocks::WATER);
+                if falling {
+                    advance(&mut server, WATER_FLOW_DELAY);
+                    assert_eq!(at(&server, water_pos), blocks::FALLING_WATER);
+                    assert_eq!(
+                        server.scheduled_block_times.get(&SOURCE),
+                        Some(&(WATER_FLOW_DELAY + LAVA_FLOW_DELAY))
+                    );
+                }
+                advance(&mut server, LAVA_FLOW_DELAY - 1);
+                assert_eq!(at(&server, SOURCE), lava);
+                advance(&mut server, 1);
+                let cooled = if lava == blocks::LAVA {
+                    blocks::OBSIDIAN
+                } else {
+                    blocks::COBBLESTONE
+                };
+                assert_eq!(at(&server, SOURCE), cooled);
+                assert_eq!(
+                    at(&server, water_pos),
+                    if falling {
+                        blocks::FALLING_WATER
+                    } else {
+                        blocks::WATER
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn horizontally_flowing_water_schedules_lava_cooling() {
+        let mut server = setup(GameMode::Creative);
+        put(&mut server, SOURCE, blocks::FLOWING_LAVA);
+        server.change_block_naturally([10, 80, 8], blocks::WATER);
+        advance(&mut server, WATER_FLOW_DELAY);
+        assert_eq!(at(&server, [9, 80, 8]), blocks::FLOWING_WATER);
+        assert_eq!(
+            server.scheduled_block_times.get(&SOURCE),
+            Some(&(WATER_FLOW_DELAY + LAVA_FLOW_DELAY))
+        );
+        advance(&mut server, LAVA_FLOW_DELAY);
+        assert_eq!(at(&server, SOURCE), blocks::COBBLESTONE);
+        assert_eq!(at(&server, [9, 80, 8]), blocks::FLOWING_WATER);
+    }
+
+    #[test]
+    fn liquids_do_not_flow_into_each_others_cells() {
+        for water in [blocks::WATER, blocks::FLOWING_WATER] {
+            let mut server = setup(GameMode::Creative);
+            put(&mut server, SOURCE, water);
+            server.change_block_naturally(offset(SOURCE, ABOVE), blocks::LAVA);
+            if water == blocks::FLOWING_WATER {
+                put(&mut server, [9, 80, 8], blocks::WATER);
+                put(&mut server, [9, 81, 8], blocks::STONE);
+            }
+            advance(&mut server, LAVA_FLOW_DELAY);
+            assert_eq!(at(&server, SOURCE), water);
+            assert_eq!(at(&server, offset(SOURCE, ABOVE)), blocks::LAVA);
+        }
+
+        for lava in [blocks::LAVA, blocks::FLOWING_LAVA] {
+            let mut server = setup(GameMode::Creative);
+            put(&mut server, SOURCE, lava);
+            server.change_block_naturally(offset(SOURCE, ABOVE), blocks::WATER);
+            advance(&mut server, WATER_FLOW_DELAY);
+            assert_eq!(at(&server, SOURCE), lava);
+            assert_eq!(at(&server, offset(SOURCE, ABOVE)), blocks::WATER);
+        }
+    }
+
+    #[test]
+    fn lava_ticks_wait_for_adjacent_chunks() {
+        let mut server = setup(GameMode::Creative);
+        server.change_block_naturally(EAST_EDGE, blocks::LAVA);
+        advance(&mut server, 2 * LAVA_FLOW_DELAY);
+        assert_eq!(
+            server.scheduled_blocks.first(),
+            Some(&(LAVA_FLOW_DELAY, EAST_EDGE))
+        );
+        assert_eq!(at(&server, [14, 80, 8]), blocks::AIR);
+        server.world.insert_chunk(Chunk::empty(1, 0));
+        advance(&mut server, 1);
+        assert_eq!(at(&server, [16, 80, 8]), blocks::FLOWING_LAVA);
+    }
+
     fn stack(name: &str, count: u8) -> Stack {
         Stack {
             item: items::by_name(name).unwrap(),
@@ -750,6 +957,70 @@ mod tests {
                     full
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lava_buckets_collect_and_place_in_survival_and_creative() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            for place_into in [blocks::AIR, blocks::FALLING_LAVA] {
+                let mut server = setup(mode);
+                hold(&mut server, "bucket", 1);
+                put(&mut server, SOURCE, blocks::LAVA);
+                use_at(&mut server, SOURCE);
+                assert_eq!(at(&server, SOURCE), blocks::AIR);
+                let after_collect = if mode == GameMode::Survival {
+                    "lava_bucket"
+                } else {
+                    "bucket"
+                };
+                assert_eq!(
+                    server.clients[&1].inventory.selected_stack(),
+                    Some(stack(after_collect, 1))
+                );
+
+                hold(&mut server, "lava_bucket", 1);
+                put(&mut server, SOURCE, place_into);
+                use_at(&mut server, SOURCE);
+                assert_eq!(at(&server, SOURCE), blocks::LAVA);
+                let after_place = if mode == GameMode::Survival {
+                    "bucket"
+                } else {
+                    "lava_bucket"
+                };
+                assert_eq!(
+                    server.clients[&1].inventory.selected_stack(),
+                    Some(stack(after_place, 1))
+                );
+                assert_eq!(server.stats.packets_rejected, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn buckets_reject_other_liquids_and_only_collect_sources() {
+        for (held, state) in [
+            ("lava_bucket", blocks::FLOWING_WATER),
+            ("lava_bucket", blocks::WATER),
+            ("lava_bucket", blocks::LAVA),
+            ("water_bucket", blocks::FLOWING_LAVA),
+            ("water_bucket", blocks::LAVA),
+            ("bucket", blocks::FALLING_LAVA),
+        ] {
+            let mut server = setup(GameMode::Survival);
+            hold(&mut server, held, 1);
+            put(&mut server, SOURCE, state);
+            use_at(&mut server, SOURCE);
+            let [x, y, z] = SOURCE;
+            assert_eq!(server.stats.packets_rejected, 1);
+            assert_eq!(at(&server, SOURCE), state);
+            assert_eq!(
+                server.clients[&1].inventory.selected_stack(),
+                Some(stack(held, 1))
+            );
+            assert!(server.take_outbox().iter().any(|(_, bytes)| {
+                S2C::decode(bytes) == Ok(S2C::BlockUpdate { x, y, z, state })
+            }));
         }
     }
 

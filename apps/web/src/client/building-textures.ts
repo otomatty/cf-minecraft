@@ -7,6 +7,48 @@ interface MaterialTile {
 }
 
 const materials = new Map<string, MaterialTile>([
+	["obsidian", {
+		palette: { a: 0x17131f, b: 0x201929, c: 0x2a2138, d: 0x362944, e: 0x4b395a, f: 0x665171 },
+		rows: [
+			"cdddeccbbcbacccd",
+			"ddeeccbbbaaabccd",
+			"deccbbabaaabccdd",
+			"ccbbbaaaabccddec",
+			"bbbaaabbccddeccb",
+			"baabbbccddecbbbb",
+			"abccdddeeccbbbaa",
+			"bcddefeccbbbaaab",
+			"cdeffecbbbaaabcc",
+			"defedccbaaabbccd",
+			"eeddccbbabccddde",
+			"ddccbbabbcddeecc",
+			"ccbbbaabcddeccbb",
+			"cbbaaabcddeccbbb",
+			"bbaabccdeccbbbac",
+			"baabcdeecbbabccc",
+		],
+	}],
+	["lava", {
+		palette: { a: 0x8d2514, b: 0xc33b12, c: 0xf05c16, d: 0xff8d20, e: 0xffbd39, f: 0xffe277 },
+		rows: [
+			"ccddeeddccbbccdc",
+			"cdeeffeddcbabcdd",
+			"deffeedccbabbcdd",
+			"edeeddccbabbcddd",
+			"ddcccbbaabbcdeed",
+			"ccbbbaabbccdeffd",
+			"cbaabbbccddeefec",
+			"bbabcdddeeeeedcb",
+			"babcdeeffeeddcba",
+			"bccdeeffeedcbbab",
+			"cdddeeedccbaabbc",
+			"deeddccbbbaabcdd",
+			"efedccbaabbcddee",
+			"feeddcbbccddeeff",
+			"eedddccddeeeedde",
+			"dddeeeddeeddcccd",
+		],
+	}],
 	["oak_planks", {
 		palette: { a: 0x69502d, b: 0x80653a, c: 0x937444, d: 0xa1844c, e: 0xaf8d55, f: 0xb9945c, g: 0xc39f64 },
 		rows: [

@@ -22,7 +22,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
-import { blockInteraction, bucketTarget, canTill, placementState } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { interpolateEntity } from "./entities.ts";
@@ -32,7 +32,7 @@ import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
-import { bubbleCount, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
+import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
@@ -1016,10 +1016,13 @@ async function main(): Promise<void> {
 		transport.send(core.encodeSetBlock(x, y, z, block));
 		return true;
 	};
+	function aimedBlock(includeSources = false): RayHit | null {
+		return core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, includeSources);
+	}
 	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
 		const held = button === 2 ? items.find(item => item.id === core.inventory[selectedSlot]?.item) : undefined;
-		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, held?.name === "bucket");
+		const hit = aimedBlock(usesFluidSourceRay(held?.name));
 		if (button === 2 && !repeat && !eating && core.gameMode === "survival" && !core.dead
 			&& core.food < MAX_FOOD && connection === "open"
 			&& inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) {
@@ -1052,7 +1055,7 @@ async function main(): Promise<void> {
 				}
 				return;
 			}
-			if (held?.name === "bucket" || held?.name === "water_bucket") {
+			if (held?.name === "bucket" || held?.name === "water_bucket" || held?.name === "lava_bucket") {
 				if (!repeat) {
 					heldButtons.delete(2);
 					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)]?.name, shift);
@@ -1138,7 +1141,6 @@ async function main(): Promise<void> {
 	const foodMeter = $("food");
 	const damageFlash = $("damage-flash");
 	const respawn = $<HTMLButtonElement>("respawn");
-	const deathCauses = ["", "落下してやられた", "ブロックの中で窒息した", "溺れた", "奈落に落ちた"];
 	const hearts = heartStates(core.health).map(() => document.createElement("span"));
 	for (const heart of hearts) heart.className = "heart";
 	healthMeter.append(...hearts);
@@ -1247,6 +1249,8 @@ async function main(): Promise<void> {
 		const dt = Math.min(0.1, frameDtMs / 1000);
 		last = now;
 
+		const held = joined ? core.inventory[selectedSlot] : null;
+		const includeSources = usesFluidSourceRay(items.find(item => item.id === held?.item)?.name);
 		if (joined) {
 			move(dt, now);
 
@@ -1269,7 +1273,7 @@ async function main(): Promise<void> {
 				meshPool.pump(pop, section => core.padded(...section), section => core.paddedLight(...section));
 			}
 
-			target = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
+			target = aimedBlock(includeSources);
 		}
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
@@ -1283,13 +1287,15 @@ async function main(): Promise<void> {
 			}
 		}
 		if (core.gameMode === "survival" && !core.dead) {
-			const blockState = target ? core.getBlock(target.x, target.y, target.z) : 0;
-			const held = core.inventory[selectedSlot];
+			const mining = leftHeld && locked() && joined && connection === "open";
+			const hit = mining && includeSources ? aimedBlock() : target;
+			if (mining) target = hit;
+			const blockState = hit ? core.getBlock(hit.x, hit.y, hit.z) : 0;
 			const selection = digSelection(selectedSlot, held);
 			const ticks = core.miningTicks(blockState, held?.item ?? 0);
-			const digTarget = target && ticks != null ? { x: target.x, y: target.y, z: target.z, state: blockState, ticks, selection } : null;
+			const digTarget = hit && ticks != null ? { x: hit.x, y: hit.y, z: hit.z, state: blockState, ticks, selection } : null;
 			const a = dig.active;
-			const next = advanceDig(dig, leftHeld && locked() && joined && connection === "open", digTarget,
+			const next = advanceDig(dig, mining, digTarget,
 				a ? core.getBlock(a.x, a.y, a.z) : null, now);
 			dig = next.state;
 			if (connection === "open") for (const command of next.commands) {

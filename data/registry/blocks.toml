@@ -11,7 +11,7 @@ textures = [
   "furnace_front", "furnace_side", "furnace_top",
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
-  "wheat_green", "wheat_ripe",
+  "wheat_green", "wheat_ripe", "lava", "obsidian",
 ]
 legacy_count = 14
 
@@ -396,3 +396,40 @@ states = [
   { properties = [["level", "7"]] },
   { properties = [["level", "falling"]] },
 ]
+
+[[blocks]]
+name = "lava"
+id = 70
+unbreakable = true
+texture = "lava"
+solid = false
+occludes = false
+cull_same = true
+opacity = 1
+emission = 15
+
+[[blocks]]
+name = "flowing_lava"
+id = 71
+unbreakable = true
+texture = "lava"
+solid = false
+occludes = false
+cull_same = true
+opacity = 1
+emission = 15
+states = [
+  { properties = [["level", "1"]] },
+  { properties = [["level", "2"]] },
+  { properties = [["level", "3"]] },
+  { properties = [["level", "falling"]] },
+]
+
+[[blocks]]
+name = "obsidian"
+id = 75
+texture = "obsidian"
+drop = "obsidian"
+tool = "pickaxe"
+min_tier = 4
+dig_ticks = 400

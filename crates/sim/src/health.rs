@@ -15,6 +15,8 @@ const DROWNING_DAMAGE: u8 = 2;
 pub(crate) const VOID_Y: f64 = (MIN_Y - 64) as f64;
 const VOID_INTERVAL: u8 = 10;
 const VOID_DAMAGE: u8 = 4;
+const LAVA_INTERVAL: u8 = 10;
+const LAVA_DAMAGE: u8 = 4;
 const REGEN_INTERVAL: u8 = 80;
 const REGEN_HEALTH: u8 = 1;
 const REGEN_FOOD: u8 = 18;
@@ -37,6 +39,7 @@ pub(crate) struct Health {
     suffocation_ticks: u8,
     drowning_ticks: u8,
     void_ticks: u8,
+    lava_ticks: u8,
     regen_ticks: u8,
     exhaustion: u16,
     walked: f64,
@@ -56,12 +59,12 @@ impl Health {
     /// Observe each accepted position to retain the apex and landing when
     /// several movement packets arrive before the next server tick.
     /// `prev` is the last accepted position. With no fall in progress, leaving
-    /// ground starts from that height, and leaving water starts from `pos`.
+    /// ground starts from that height, and leaving a fluid starts from `pos`.
     pub fn observe_fall(&mut self, world: &World, prev: [f64; 3], pos: [f64; 3]) {
         let Some(feet) = block_at(world, pos, 0.0) else {
             return;
         };
-        if blocks::is_water(feet) {
+        if blocks::is_fluid(feet) {
             self.fall_start_y = None;
         } else if grounded(world, pos) {
             if let Some(start) = self.fall_start_y.take() {
@@ -71,7 +74,7 @@ impl Health {
             }
         } else if let Some(start) = self.fall_start_y {
             self.fall_start_y = Some(start.max(pos[1]));
-        } else if block_at(world, prev, 0.0).is_some_and(blocks::is_water) {
+        } else if block_at(world, prev, 0.0).is_some_and(blocks::is_fluid) {
             self.fall_start_y = Some(pos[1]);
         } else {
             self.fall_start_y = Some(prev[1].max(pos[1]));
@@ -132,6 +135,15 @@ impl Health {
             }
         }
 
+        let in_lava = eye.is_some_and(blocks::is_lava)
+            || block_at(world, pos, 0.4).is_some_and(blocks::is_lava);
+        if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) {
+            self.damage(LAVA_DAMAGE, DeathCause::Lava);
+            if self.vitals.dead {
+                return;
+            }
+        }
+
         self.add_exhaustion(1);
         while self.exhaustion >= EXHAUSTION_PER_FOOD {
             self.exhaustion -= EXHAUSTION_PER_FOOD;
@@ -174,6 +186,7 @@ impl Health {
         h.u8(self.suffocation_ticks);
         h.u8(self.drowning_ticks);
         h.u8(self.void_ticks);
+        h.u8(self.lava_ticks);
         h.u8(self.regen_ticks);
         h.u8(self.vitals.food);
         h.bytes(&self.exhaustion.to_be_bytes());
@@ -1031,6 +1044,56 @@ mod tests {
         assert_eq!(statuses(updates), [vitals(&s).packet()]);
     }
 
+    #[test]
+    fn lava_hurts_survival_at_feet_or_eyes_without_drowning_and_persists_the_death_cause() {
+        for (y, state) in [(80, blocks::LAVA), (81, blocks::FLOWING_LAVA)] {
+            let mut s = joined(GameMode::Survival);
+            s.world.set_block(2, y, 2, state);
+            for health in [20, 16, 12, 8, 4] {
+                advance(&mut s, 9);
+                assert_eq!(vitals(&s).health, health);
+                s.tick();
+                assert_eq!(vitals(&s).health, health - 4);
+                assert_eq!(vitals(&s).air, MAX_AIR);
+            }
+            let dead = vitals(&s);
+            assert_eq!(dead.cause, DeathCause::Lava);
+            assert!(statuses(packets(&mut s)).contains(&dead.packet()));
+
+            let mut bytes = s.inventory_data(1).unwrap();
+            assert_eq!(bytes[0], 5);
+            assert_eq!(bytes[bytes.len() - 2], 5);
+            assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
+            let cause = bytes.len() - 2;
+            bytes[cause] = 6;
+            assert!(crate::Inventory::from_bytes(&bytes).is_err());
+            release_and_reconnect(&mut s);
+            assert_eq!(vitals(&s), dead);
+        }
+    }
+
+    #[test]
+    fn leaving_lava_resets_the_interval_and_creative_takes_no_damage() {
+        let mut s = joined(GameMode::Survival);
+        s.world.set_block(2, 80, 2, blocks::LAVA);
+        s.clients.get_mut(&1).unwrap().health.fall_start_y = Some(90.0);
+        advance(&mut s, 9);
+        assert_eq!(s.clients[&1].health.fall_start_y, None);
+        s.world.set_block(2, 80, 2, blocks::AIR);
+        s.tick();
+        s.world.set_block(2, 80, 2, blocks::LAVA);
+        advance(&mut s, 9);
+        assert_eq!(vitals(&s).health, MAX_HEALTH);
+        s.tick();
+        assert_eq!(vitals(&s).health, MAX_HEALTH - LAVA_DAMAGE);
+
+        let mut s = joined(GameMode::Creative);
+        s.world.set_block(2, 80, 2, blocks::LAVA);
+        s.world.set_block(2, 81, 2, blocks::FALLING_LAVA);
+        advance(&mut s, 50);
+        assert_eq!(vitals(&s), PlayerVitals::default());
+    }
+
     fn release_and_reconnect(s: &mut Server) {
         s.return_crafting(1);
         let position = s.client_position(1);
@@ -1042,8 +1105,8 @@ mod tests {
     #[test]
     fn state_hash_includes_vitals_fall_and_interval_counters_independently() {
         let mut s = joined(GameMode::Survival);
-        let baseline = s.state_hash();
-        let mutations: [fn(&mut Health); 15] = [
+        let joined_hash = s.state_hash();
+        let mutations: [fn(&mut Health); 16] = [
             |h| h.vitals.health -= 1,
             |h| h.vitals.air -= 1,
             |h| h.vitals.dead = true,
@@ -1053,6 +1116,7 @@ mod tests {
             |h| h.suffocation_ticks = 1,
             |h| h.drowning_ticks = 1,
             |h| h.void_ticks = 1,
+            |h| h.lava_ticks = 1,
             |h| h.regen_ticks = 1,
             |h| h.vitals.food -= 1,
             |h| h.exhaustion = 2,
@@ -1060,13 +1124,13 @@ mod tests {
             |h| h.starve_ticks = 1,
             |h| h.eating = Some(EatState { slot: 0, ticks: 0 }),
         ];
-        for mutate in mutations {
-            let record = &mut s.clients.get_mut(&1).unwrap().health;
-            let before = std::mem::take(record);
-            mutate(record);
-            assert_ne!(s.state_hash(), baseline);
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let before = std::mem::take(&mut s.clients.get_mut(&1).unwrap().health);
+            let baseline = s.state_hash();
+            mutate(&mut s.clients.get_mut(&1).unwrap().health);
+            assert_ne!(s.state_hash(), baseline, "health mutation {index}");
             s.clients.get_mut(&1).unwrap().health = before;
-            assert_eq!(s.state_hash(), baseline);
+            assert_eq!(s.state_hash(), joined_hash);
         }
     }
 }

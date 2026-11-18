@@ -156,7 +156,7 @@ impl Server {
             self.abort_digs_at([x, y, z]);
             self.stats.blocks_changed += 1;
             self.broadcast_block(x, y, z, state);
-            self.schedule_water_neighbors([x, y, z]);
+            self.schedule_fluid_neighbors([x, y, z]);
             self.check_wheat_above([x, y, z], state);
         }
     }

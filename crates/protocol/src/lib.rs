@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -21,6 +21,7 @@ pub enum DeathCause {
     Suffocation = 2,
     Drowning = 3,
     Void = 4,
+    Lava = 5,
 }
 
 /// Fields shared by the status packet and the player save.
@@ -62,6 +63,7 @@ impl PlayerVitals {
             2 => DeathCause::Suffocation,
             3 => DeathCause::Drowning,
             4 => DeathCause::Void,
+            5 => DeathCause::Lava,
             _ => return Err(DecodeError),
         };
         let food = if has_food { r.u8()? } else { MAX_FOOD };
@@ -891,7 +893,7 @@ mod tests {
             assert!(C2S::decode(&[tag, 0]).is_err());
         }
 
-        for cause in 0..=4 {
+        for cause in 0..=5 {
             let (health, air, dead) = if cause == 0 {
                 (MAX_HEALTH, MAX_AIR, false)
             } else {
@@ -902,7 +904,7 @@ mod tests {
                 air,
                 dead,
                 cause,
-                food: cause * 5,
+                food: (cause * 5).min(MAX_FOOD),
             };
             assert_eq!(S2C::decode(&packet.encode()), Ok(packet));
         }
@@ -928,6 +930,8 @@ mod tests {
         let mut no_cause = valid;
         no_cause[1] = 0;
         no_cause[4] = 1;
+        assert!(S2C::decode(&no_cause).is_err());
+        no_cause[5] = 6;
         assert!(S2C::decode(&no_cause).is_err());
     }
 
@@ -1114,8 +1118,8 @@ mod tests {
     }
 
     #[test]
-    fn use_bucket_is_packet_0f_in_protocol_11() {
-        assert_eq!(PROTOCOL_VERSION, 11);
+    fn use_bucket_is_packet_0f_in_protocol_12() {
+        assert_eq!(PROTOCOL_VERSION, 12);
         let packet = C2S::UseBucket {
             x: i32::MIN,
             y: -64,
