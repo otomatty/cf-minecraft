@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(for_block(blocks::AIR), None);
         assert_eq!(for_block(blocks::COUNT), None);
         for state in 1..blocks::COUNT {
-            if blocks::is_flowing_water(state) {
+            if blocks::is_flowing_water(state) || blocks::is_flowing_lava(state) {
                 assert_eq!(for_block(state), None);
                 assert_eq!(mining_drop(state), None);
                 continue;
@@ -151,6 +151,9 @@ pub fn mining(state: BlockState, held: Option<u16>) -> Option<(u32, bool)> {
         .and_then(|item| item.tool)
         .filter(|tool| Some(tool.kind) == block.tool);
     let drops = block.min_tier == 0 || matching.is_some_and(|tool| tool.tier >= block.min_tier);
+    if state == blocks::OBSIDIAN && !drops {
+        return None;
+    }
     let ticks = matching.map_or(base, |tool| base.div_ceil(tool.speed()));
     Some((if drops { ticks } else { ticks * 2 }, drops))
 }

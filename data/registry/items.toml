@@ -331,3 +331,19 @@ name = "water_bucket"
 id = 58
 texture = "water_bucket"
 max_stack = 1
+
+[[items]]
+name = "lava"
+id = 59
+block = "lava"
+
+[[items]]
+name = "lava_bucket"
+id = 60
+texture = "lava_bucket"
+max_stack = 1
+
+[[items]]
+name = "obsidian"
+id = 61
+block = "obsidian"

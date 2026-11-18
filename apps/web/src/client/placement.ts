@@ -71,7 +71,7 @@ export function canTill(heldName: string | undefined, blockName: string | undefi
 		&& heldName !== undefined && /^(wooden|stone|copper|iron)_hoe$/.test(heldName);
 }
 
-/** Empty buckets use a water-inclusive hit. Filled buckets use a normal hit. */
+/** Empty buckets use a fluid-source-inclusive hit. Filled buckets use a normal hit. */
 export function bucketTarget(
     heldName: string, hit: RayHit | null, blockName: (x: number, y: number, z: number) => string | undefined,
     shift: boolean,
@@ -79,10 +79,11 @@ export function bucketTarget(
     if (!hit) return null;
     const { x, y, z, face } = hit;
     const target = blockName(x, y, z);
-    if (heldName === "bucket") return target === "water" ? [x, y, z] : null;
+    if (heldName === "bucket") return target === "water" || target === "lava" ? [x, y, z] : null;
     const normal = FACE_NORMALS[face];
-    if (heldName !== "water_bucket" || !normal || blockInteraction(target, shift) === "open") return null;
+    const flow = heldName === "water_bucket" ? "flowing_water" : heldName === "lava_bucket" ? "flowing_lava" : null;
+    if (!flow || !normal || blockInteraction(target, shift) === "open") return null;
     const adjacent: [number, number, number] = [x + normal[0], y + normal[1], z + normal[2]];
     const current = blockName(...adjacent);
-    return current === "air" || current === "flowing_water" ? adjacent : null;
+    return current === "air" || current === flow ? adjacent : null;
 }

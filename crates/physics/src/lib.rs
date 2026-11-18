@@ -35,14 +35,14 @@ impl Aabb {
 pub trait CollisionWorld {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb));
 
-    fn is_water(&self, _x: i32, _y: i32, _z: i32) -> bool {
+    fn is_fluid(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 }
 
-/// Samples the block 0.4 above the center of the player's feet.
+/// Tests for a swimmable fluid 0.4 blocks above the center of the player's feet.
 pub fn in_water(world: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
-    world.is_water(x.floor() as i32, (y + 0.4).floor() as i32, z.floor() as i32)
+    world.is_fluid(x.floor() as i32, (y + 0.4).floor() as i32, z.floor() as i32)
 }
 /// Convenience adapter for simple worlds with at most one box.
 impl<F: Fn(i32, i32, i32) -> Option<Aabb>> CollisionWorld for F {
@@ -76,8 +76,8 @@ impl<F: Fn(i32, i32, i32) -> Option<u16>> CollisionWorld for BlockWorld<F> {
         }
     }
 
-    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        self.0(x, y, z).is_some_and(world::blocks::is_water)
+    fn is_fluid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0(x, y, z).is_some_and(world::blocks::is_fluid)
     }
 }
 /// Per-box escape filtering preserves overlapping-placement behaviour.
@@ -91,8 +91,8 @@ impl<W: CollisionWorld> CollisionWorld for EscapeWorld<'_, W> {
         });
     }
 
-    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        self.0.is_water(x, y, z)
+    fn is_fluid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0.is_fluid(x, y, z)
     }
 }
 

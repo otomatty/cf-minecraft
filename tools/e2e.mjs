@@ -1410,6 +1410,53 @@ async function waterFlow() {
 	} finally { await page.close(); }
 }
 
+async function lavaFlow() {
+	const { page, errors } = await open(`server=local&world=e2e-lava-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "lava flow", chunksInView(2));
+		await resumePointerLock(page, "lava flow: initial pointer lock");
+		const source = [Math.floor(spawn[0]) + 1, Math.floor(spawn[1]), Math.floor(spawn[2])];
+		const pedestal = [source[0] - 1, source[1], source[2]];
+		const place = async (name, pos) => {
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			await page.mouse.move(640, 360);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+			await resumePointerLock(page, `lava flow: resume after selecting ${name}`);
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), pos);
+			await page.mouse.click(640, 360, { button: "right" });
+		};
+		// Support a water source above the lava so water can reach the lava from the top.
+		await place("stone", pedestal);
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("stone");
+		}, { timeout: 5000 }, pedestal);
+		await place("lava_bucket", source);
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("lava")
+				&& api.getBlock(x + 1, y, z) === api.stateId("flowing_lava[level=1]");
+		}, { timeout: 5000 }, source);
+		check(true, "lava flow: a lava bucket places a source and lava spreads");
+		const water = [pedestal[0], pedestal[1] + 1, pedestal[2]];
+		await place("water_bucket", water);
+		await page.waitForFunction(({ source, water }) => {
+			const api = window.__mc;
+			return api.getBlock(...water) === api.stateId("water")
+				&& api.getBlock(...source) === api.stateId("obsidian");
+		}, { timeout: 5000 }, { source, water });
+		check(true, "lava flow: water turns the lava source into obsidian");
+		check(errors.length === 0, "lava flow: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "lava-flow", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function swimming() {
 	const { page, errors } = await open(`server=local&world=e2e-swim-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
 	try {
@@ -1753,6 +1800,7 @@ try {
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await waterFlow();
+	await lavaFlow();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

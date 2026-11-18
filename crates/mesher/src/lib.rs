@@ -7,7 +7,7 @@
 //! Vertex layout, two `u32` per vertex:
 //! ```text
 //! word 0: x:9 | y:9 | z:9 | face:3 | ao:2 (position in sixteenths, 0..=256)
-//! word 1: texture layer:12 | tint:1 | sky:4 | block:4 | u:5 | v:5 | water_top:1
+//! word 1: texture layer:12 | tint:1 | sky:4 | block:4 | u:5 | v:5 | fluid_top:1
 //! ```
 //! Four vertices per quad, counter-clockwise seen from outside. The index
 //! pattern `0 1 2, 0 2 3` is shared by all quads; when ambient occlusion asks
@@ -92,28 +92,41 @@ fn uv(face: usize, p: [i32; 3]) -> (u32, u32) {
     (u as u32, v as u32)
 }
 
-/// Water heights use the packed sixteenth coordinate and the existing 1/9 drop.
+/// Fluid heights use the packed sixteenth coordinate and the existing 1/9 drop.
 #[derive(Clone, Copy)]
-struct WaterTop {
+struct FluidTop {
     y: i32,
     lowered: bool,
 }
 
-impl WaterTop {
+fn same_fluid(state: BlockState, neighbor: BlockState) -> bool {
+    (blocks::is_water(state) && blocks::is_water(neighbor))
+        || (blocks::is_lava(state) && blocks::is_lava(neighbor))
+}
+
+impl FluidTop {
     fn at(padded: &[BlockState], x: i32, y: i32, z: i32, state: BlockState) -> Self {
-        if blocks::is_water(padded[padded_index(x, y + 1, z)]) {
+        if same_fluid(state, padded[padded_index(x, y + 1, z)]) {
             Self {
                 y: 16,
                 lowered: false,
             }
-        } else if matches!(state, blocks::WATER | blocks::FALLING_WATER) {
+        } else if matches!(
+            state,
+            blocks::WATER | blocks::FALLING_WATER | blocks::LAVA | blocks::FALLING_LAVA
+        ) {
             Self {
                 y: 16,
                 lowered: true,
             }
         } else {
+            let first = if blocks::is_lava(state) {
+                blocks::FLOWING_LAVA
+            } else {
+                blocks::FLOWING_WATER
+            };
             Self {
-                y: 14 - 2 * i32::from(state - blocks::FLOWING_WATER),
+                y: 14 - 2 * i32::from(state - first),
                 lowered: false,
             }
         }
@@ -167,8 +180,8 @@ pub fn mesh_section_layers(
                     continue;
                 }
                 let info = blocks::info(state);
-                let water_top =
-                    blocks::is_water(state).then(|| WaterTop::at(padded, x, y, z, state));
+                let fluid_top =
+                    blocks::is_fluid(state).then(|| FluidTop::at(padded, x, y, z, state));
                 let out = &mut layers[info.layer as usize];
                 if info.model == blocks::Model::Cross {
                     let idx = padded_index(x, y, z);
@@ -209,31 +222,32 @@ pub fn mesh_section_layers(
                         let n = face.normal;
                         let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
                         let neighbor = padded[padded_index(ax, ay, az)];
-                        // A taller water cell exposes a strip above a neighboring
+                        // A taller fluid cell exposes a strip above a neighboring
                         // surface. For side faces ay + 1 <= 16, including
                         // horizontal neighbors in the padding.
-                        let water_strip = water_top.and_then(|top| {
-                            if f < NORTH || !blocks::is_water(neighbor) {
+                        let joins_fluid = fluid_top.is_some() && same_fluid(state, neighbor);
+                        let fluid_strip = fluid_top.and_then(|top| {
+                            if f < NORTH || !joins_fluid {
                                 return None;
                             }
-                            let other = WaterTop::at(padded, ax, ay, az, neighbor);
+                            let other = FluidTop::at(padded, ax, ay, az, neighbor);
                             (top.height() > other.height()).then_some(other)
                         });
                         let axis = n.iter().position(|v| *v != 0).unwrap();
-                        // A lowered water top lies inside its cell, so blocks
+                        // A lowered fluid top lies inside its cell, so blocks
                         // above cannot cull it or supply its AO/light samples.
                         let boundary = (if n[axis] < 0 {
                             bounds.min[axis] == 0
                         } else {
                             bounds.max[axis] == 16
                         }) && !(f == UP
-                            && water_top.is_some_and(|top| top.height() < 144));
+                            && fluid_top.is_some_and(|top| top.height() < 144));
                         let same = state == neighbor
-                            || (water_top.is_some() && blocks::is_water(neighbor))
+                            || joins_fluid
                             || (blocks::is_oak_leaves(state) && blocks::is_oak_leaves(neighbor));
                         if boundary
                             && (blocks::occludes(neighbor)
-                                || (same && info.cull_same && water_strip.is_none()))
+                                || (same && info.cull_same && fluid_strip.is_none()))
                         {
                             continue;
                         }
@@ -277,7 +291,7 @@ pub fn mesh_section_layers(
                                 }
                             };
                             let mut p = [on(0), on(1), on(2)];
-                            let edge = if p[1] == 16 { water_top } else { water_strip };
+                            let edge = if p[1] == 16 { fluid_top } else { fluid_strip };
                             // The flag carries the shader's exact 1/9 displacement.
                             let lowered = edge.is_some_and(|top| top.lowered);
                             if let Some(top) = edge {
@@ -356,7 +370,7 @@ fn pack(
     tint: bool,
     sky: u32,
     block: u32,
-    water_top: bool,
+    fluid_top: bool,
 ) -> [u32; 2] {
     [
         p[0] as u32 | (p[1] as u32) << 9 | (p[2] as u32) << 18 | (face as u32) << 27 | ao << 30,
@@ -366,7 +380,7 @@ fn pack(
             | block << 17
             | uv.0 << 21
             | uv.1 << 26
-            | (water_top as u32) << 31,
+            | (fluid_top as u32) << 31,
     ]
 }
 
@@ -644,6 +658,34 @@ mod tests {
                 edges,
                 [(80 + height, 0), (80 + height, 0), (96, 1), (96, 1)]
             );
+        }
+    }
+
+    #[test]
+    fn lava_has_water_surface_heights_in_the_opaque_layer() {
+        let mut padded = empty();
+        for (state, height, lowered) in [
+            (blocks::LAVA, 16, 1),
+            (blocks::FLOWING_LAVA, 14, 0),
+            (blocks::FLOWING_LAVA + 1, 12, 0),
+            (blocks::FLOWING_LAVA + 2, 10, 0),
+            (blocks::FALLING_LAVA, 16, 1),
+        ] {
+            padded[padded_index(5, 5, 5)] = state;
+            padded[padded_index(6, 5, 5)] = state;
+            let mut out = Vec::new();
+            assert_eq!(mesh_section_layers(&padded, None, &mut out), [10, 0, 0]);
+            let mut tops = 0;
+            for vertex in out.as_chunks::<2>().0 {
+                assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[UP]));
+                assert_eq!((vertex[1] >> 12) & 1, 0);
+                if (vertex[0] >> 27) & 7 == UP as u32 {
+                    assert_eq!(position(vertex)[1], 80 + height);
+                    assert_eq!(vertex[1] >> 31, lowered);
+                    tops += 1;
+                }
+            }
+            assert_eq!(tops, 8);
         }
     }
 

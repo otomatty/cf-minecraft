@@ -210,6 +210,32 @@ mod tests {
         s
     }
     #[test]
+    fn item_falling_into_lava_is_removed_for_clients() {
+        let mut s = joined();
+        let [x, y, z] = s.spawn().map(|v| v.floor() as i32);
+        for state in [blocks::LAVA, blocks::FALLING_LAVA] {
+            s.world.set_block(x, y, z, state);
+            let id = item(
+                &mut s,
+                [f64::from(x) + 0.5, f64::from(y) + 1.1, f64::from(z) + 0.5],
+                [0.0; 3],
+                40,
+            );
+            s.tick();
+            assert!(s.entities.contains_key(&id));
+            assert!(s.take_outbox().iter().any(|(_, p)| {
+                matches!(S2C::decode(p), Ok(S2C::EntitySpawn { id: spawned, .. }) if spawned == id)
+            }));
+            s.tick();
+            assert!(!s.entities.contains_key(&id));
+            assert!(s
+                .take_outbox()
+                .iter()
+                .any(|(_, p)| { S2C::decode(p) == Ok(S2C::EntityRemove { id }) }));
+        }
+    }
+
+    #[test]
     fn creative_breaks_do_not_drop_and_ids_never_wrap() {
         let mut s = joined();
         let [x, y, z] = s.spawn().map(|v| v.floor() as i32);

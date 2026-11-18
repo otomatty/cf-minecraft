@@ -47,12 +47,16 @@ fn registry_matches_pre_generation_snapshot() {
             WHEAT,
             FLOWING_WATER,
             FALLING_WATER,
+            LAVA,
+            FLOWING_LAVA,
+            FALLING_LAVA,
+            OBSIDIAN,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 69, 70, 14
+            54, 62, 69, 70, 71, 74, 75, 76, 14
         ]
     );
     for state in 0..COUNT {
@@ -88,6 +92,42 @@ fn flowing_water_appends_eight_states_with_the_water_properties() {
         let item = world::items::info(id).unwrap();
         assert_eq!(item.max_stack, max_stack);
         assert_eq!(item.block, None);
+    }
+}
+
+#[test]
+fn lava_and_obsidian_are_appended_with_their_render_mining_and_item_properties() {
+    let states = ["1", "2", "3", "falling"];
+    for (i, level) in states.into_iter().enumerate() {
+        let state = FLOWING_LAVA + i as u16;
+        assert_eq!(properties(state), &[("level", level)]);
+        assert_eq!(world::items::for_block(state), None);
+    }
+    assert_eq!(block(LAVA).unwrap().count, 1);
+    assert_eq!(block(FLOWING_LAVA).unwrap().count, 4);
+    for state in LAVA..=FALLING_LAVA {
+        let lava = info(state);
+        assert!(is_fluid(state) && is_lava(state) && !is_water(state));
+        assert!(!lava.solid && !lava.occludes && lava.cull_same);
+        assert_eq!(lava.layer, RenderLayer::Opaque);
+        assert_eq!(lava.emission, info(LAMP_BLOCK).emission);
+        assert_eq!(lava.dig_ticks, None);
+        assert_eq!(lava.tint, [false; 6]);
+        assert!(lava.tex.iter().all(|&tex| TEXTURES[tex as usize] == "lava"));
+    }
+    let obsidian = info(OBSIDIAN);
+    assert!(is_full_opaque_cube(OBSIDIAN));
+    assert!(!is_fluid(OBSIDIAN));
+    assert_eq!(obsidian.tool, Some(world::items::ToolKind::Pickaxe));
+    assert_eq!((obsidian.min_tier, obsidian.dig_ticks), (4, Some(400)));
+    for (name, id, max_stack, block) in [
+        ("lava", 59, 64, Some(LAVA)),
+        ("lava_bucket", 60, 1, None),
+        ("obsidian", 61, 64, Some(OBSIDIAN)),
+    ] {
+        assert_eq!(world::items::by_name(name), Some(id));
+        let item = world::items::info(id).unwrap();
+        assert_eq!((item.max_stack, item.block), (max_stack, block));
     }
 }
 

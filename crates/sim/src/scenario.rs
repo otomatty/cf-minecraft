@@ -116,7 +116,8 @@ mod tests {
         // Random ticks changed three grass/dirt blocks since 5958269535e4ab7b.
         // No water flows in this script. Hashing the empty scheduled-tick count
         // changes the fingerprint from d36da50f11b5eb81.
-        assert_eq!(run(2026, 600), 0xff3103752025dd92);
+        // The lava damage counter is zero in this script, but now contributes to the hash.
+        assert_eq!(run(2026, 600), 0x7c46257055d8c652);
     }
 
     #[test]

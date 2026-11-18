@@ -32,7 +32,7 @@ import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
-import { bubbleCount, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
+import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
@@ -1052,7 +1052,7 @@ async function main(): Promise<void> {
 				}
 				return;
 			}
-			if (held?.name === "bucket" || held?.name === "water_bucket") {
+			if (held?.name === "bucket" || held?.name === "water_bucket" || held?.name === "lava_bucket") {
 				if (!repeat) {
 					heldButtons.delete(2);
 					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)]?.name, shift);
@@ -1138,7 +1138,6 @@ async function main(): Promise<void> {
 	const foodMeter = $("food");
 	const damageFlash = $("damage-flash");
 	const respawn = $<HTMLButtonElement>("respawn");
-	const deathCauses = ["", "落下してやられた", "ブロックの中で窒息した", "溺れた", "奈落に落ちた"];
 	const hearts = heartStates(core.health).map(() => document.createElement("span"));
 	for (const heart of hearts) heart.className = "heart";
 	healthMeter.append(...hearts);

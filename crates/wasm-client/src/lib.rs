@@ -1063,7 +1063,7 @@ pub extern "C" fn client_raycast(
 }
 
 #[no_mangle]
-pub extern "C" fn client_raycast_water(
+pub extern "C" fn client_raycast_sources(
     ox: f64,
     oy: f64,
     oz: f64,
@@ -1075,7 +1075,7 @@ pub extern "C" fn client_raycast_water(
     raycast([ox, oy, oz], [dx, dy, dz], max, true)
 }
 
-fn raycast(origin: [f64; 3], dir: [f64; 3], max: f64, include_water: bool) -> u32 {
+fn raycast(origin: [f64; 3], dir: [f64; 3], max: f64, include_sources: bool) -> u32 {
     let st = state();
     let [ox, oy, oz] = origin;
     let dy = dir[1];
@@ -1099,7 +1099,7 @@ fn raycast(origin: [f64; 3], dir: [f64; 3], max: f64, include_water: bool) -> u3
     }
     loop {
         if let Some(b) = st.world.get_block(cell[0], cell[1], cell[2]) {
-            let boxes = if include_water && blocks::is_water(b) {
+            let boxes = if include_sources && matches!(b, blocks::WATER | blocks::LAVA) {
                 vec![blocks::FULL_BOX]
             } else {
                 blocks::selection_boxes(b, |dx, dy, dz| {
@@ -1293,8 +1293,8 @@ impl physics::CollisionWorld for Collisions<'_> {
         physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).collision_boxes(x, y, z, visit);
     }
 
-    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).is_water(x, y, z)
+    fn is_fluid(&self, x: i32, y: i32, z: i32) -> bool {
+        physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).is_fluid(x, y, z)
     }
 }
 
@@ -1970,17 +1970,30 @@ mod tests {
     }
 
     #[test]
-    fn bucket_raycast_stops_at_source_or_flow_before_solid_blocks() {
+    fn bucket_raycast_stops_at_either_source_and_passes_through_flow() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         client_new();
         state().world.insert_chunk(Chunk::empty(0, 0));
         state().world.set_block(3, 80, 2, blocks::STONE);
-        for water in [blocks::WATER, blocks::FLOWING_WATER, blocks::FALLING_WATER] {
-            state().world.set_block(2, 80, 2, water);
+        for (fluid, expected_x) in [
+            (blocks::WATER, 2),
+            (blocks::LAVA, 2),
+            (blocks::FLOWING_WATER, 3),
+            (blocks::FALLING_WATER, 3),
+            (blocks::FLOWING_LAVA, 3),
+            (blocks::FALLING_LAVA, 3),
+        ] {
+            state().world.set_block(2, 80, 2, fluid);
             assert_eq!(client_raycast(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
             assert_eq!(i32::from_le_bytes(state().out[..4].try_into().unwrap()), 3);
-            assert_eq!(client_raycast_water(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
-            assert_eq!(i32::from_le_bytes(state().out[..4].try_into().unwrap()), 2);
+            assert_eq!(
+                client_raycast_sources(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0),
+                1
+            );
+            assert_eq!(
+                i32::from_le_bytes(state().out[..4].try_into().unwrap()),
+                expected_x
+            );
         }
     }
 

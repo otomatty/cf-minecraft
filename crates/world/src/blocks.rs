@@ -109,6 +109,20 @@ pub fn is_water(state: BlockState) -> bool {
     state == WATER || is_flowing_water(state)
 }
 
+pub const FALLING_LAVA: BlockState = FLOWING_LAVA + 3;
+
+pub fn is_flowing_lava(state: BlockState) -> bool {
+    (FLOWING_LAVA..=FALLING_LAVA).contains(&state)
+}
+
+pub fn is_lava(state: BlockState) -> bool {
+    state == LAVA || is_flowing_lava(state)
+}
+
+pub fn is_fluid(state: BlockState) -> bool {
+    is_water(state) || is_lava(state)
+}
+
 pub const MOIST_FARMLAND: BlockState = FARMLAND + 1;
 pub const RIPE_WHEAT: BlockState = WHEAT + 7;
 
@@ -191,7 +205,7 @@ pub fn shape_boxes(
 ) {
     if !is_valid(state)
         || state == AIR
-        || (purpose != ShapePurpose::Render && is_water(state))
+        || (purpose != ShapePurpose::Render && is_fluid(state))
         || (purpose == ShapePurpose::Collision && !is_solid(state))
     {
         return;
@@ -382,7 +396,7 @@ mod tests {
                 FLOWING_WATER,
                 COUNT
             ),
-            (23, 31, 39, 51, 52, 54, 62, 70)
+            (23, 31, 39, 51, 52, 54, 62, 76)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);

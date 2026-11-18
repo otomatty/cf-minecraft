@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bubbleCount, foodStates, heartStates } from "./vitals.ts";
+import { bubbleCount, deathCauses, foodStates, heartStates } from "./vitals.ts";
 
 test("health fills ten hearts from left to right in half-heart steps", () => {
 	assert.deepEqual(heartStates(20), Array(10).fill("full"));
@@ -22,4 +22,8 @@ test("air uses one bubble per 30 units, rounded up", () => {
 	for (const [air, count] of [[0, 0], [1, 1], [29, 1], [30, 1], [31, 2], [270, 9], [299, 10], [300, 10]]) {
 		assert.equal(bubbleCount(air), count, `air: ${air}`);
 	}
+});
+
+test("lava death uses the cause 5 message", () => {
+	assert.equal(deathCauses[5], "溶岩で焼けた");
 });

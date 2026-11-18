@@ -378,8 +378,12 @@ impl Server {
                 e.tick(&self.world);
             }
         }
-        self.entities
-            .retain(|_, e| e.age < 6000 && e.pos[1] >= health::VOID_Y);
+        self.entities.retain(|_, e| {
+            let [x, y, z] = e.pos.map(|v| v.floor() as i32);
+            e.age < 6000
+                && e.pos[1] >= health::VOID_Y
+                && !self.world.get_block(x, y, z).is_some_and(blocks::is_lava)
+        });
         if (self.game_time + 1) % 10 == 0 {
             self.merge_entities();
         }
@@ -1042,7 +1046,7 @@ impl Server {
                 }
                 self.stats.blocks_changed += 1;
                 self.broadcast_block(x, y, z, state);
-                self.schedule_water_neighbors([x, y, z]);
+                self.schedule_fluid_neighbors([x, y, z]);
                 self.check_wheat_above([x, y, z], state);
             }
         }
@@ -2770,6 +2774,41 @@ mod tests {
                 "{player:?}"
             );
         }
+    }
+
+    #[test]
+    fn survival_accepts_rising_in_lava_and_climbing_ashore() {
+        let start = [0.5, 65.0, 0.5];
+        let mut s = joined_at(start);
+        s.set_game_mode(GameMode::Survival);
+        for y in 64..67 {
+            s.world.set_block(0, y, 0, blocks::LAVA);
+            s.world.set_block(1, y, 0, blocks::STONE);
+            s.world.set_block(2, y, 0, blocks::STONE);
+        }
+        s.world.set_block(0, 63, 0, blocks::STONE);
+        let mut player = physics::Player::new(start);
+        let mut kicked = false;
+        for tick in 0..45 {
+            player.tick(
+                physics::Input {
+                    jump: true,
+                    strafe: -1.0,
+                    ..Default::default()
+                },
+                &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+            );
+            kicked |= player.in_water && player.velocity[1] == 0.3;
+            s.handle_packet(1, &position_packet(player.position));
+            s.tick();
+            assert_eq!(s.stats.positions_rejected, 0, "tick {tick}, {player:?}");
+            assert_eq!(s.client_position(1), Some(player.position));
+            if player.on_ground && player.position[0] >= 1.0 && player.position[1] >= 67.0 {
+                assert!(kicked);
+                return;
+            }
+        }
+        panic!("player did not climb ashore: {player:?}");
     }
 
     #[test]

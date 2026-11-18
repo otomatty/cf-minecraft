@@ -128,7 +128,7 @@ const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
 const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
 
 function bucketTexture(name: string): Uint8Array | undefined {
-	if (name !== "bucket" && name !== "water_bucket") return undefined;
+	if (name !== "bucket" && name !== "water_bucket" && name !== "lava_bucket") return undefined;
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	const paint = (x: number, y: number, color: Rgb) =>
 		pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
@@ -141,7 +141,8 @@ function bucketTexture(name: string): Uint8Array | undefined {
 				: x < 6 ? [183, 194, 203] : x < 10 ? [137, 150, 162] : [102, 115, 126];
 			if (y === 3) color = [203, 212, 217];
 			if ((y === 4 || y === 5) && x > left && x < right) {
-				color = name === "bucket" ? [64, 76, 85] : y === 4 ? [101, 207, 237] : [42, 148, 203];
+				if (name === "lava_bucket") color = y === 4 ? [255, 182, 55] : [221, 71, 18];
+				else color = name === "bucket" ? [64, 76, 85] : y === 4 ? [101, 207, 237] : [42, 148, 203];
 			}
 			paint(x, y, color);
 		}
