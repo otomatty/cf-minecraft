@@ -5,13 +5,27 @@ import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { blockInteraction, placementState } from "./placement.ts";
-import { hotbarStates } from "./hotbar.ts";
+import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 const registry = core.blockRegistry();
 const id = (name: string) => registry.findIndex(b => b.stateName === name || b.name === name);
 const slab = id("oak_slab");
 const air = id("air");
+
+test("pick block finds the same item for both leaves and places persistent leaves", () => {
+	const items = core.itemRegistry();
+	const natural = registry[id("oak_leaves")];
+	const placed = registry[id("placed_oak_leaves")];
+	const leaves = items.find(item => item.name === "oak_leaves");
+	assert.ok(leaves);
+	assert.equal(pickBlockItem(natural, items), leaves);
+	assert.equal(pickBlockItem(placed, items), leaves);
+	assert.equal(hotbarStates([{ item: leaves.id }], items)[0], placed.first);
+	assert.equal(pickBlockItem(registry[id("stone")], items)?.name, "stone");
+	assert.equal(pickBlockItem(registry[slab + 1], items)?.name, "oak_slab");
+	assert.equal(pickBlockItem(registry[air], items), undefined);
+});
 
 test("inventory icons use registered faces and distinguish blocks built from the same material", () => {
 	const atlas = new Map(core.textureNames().map(name => [name, paintTexture(name)]));
@@ -40,7 +54,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 51);
+	assert.equal(registry.length, 52);
 	assert.equal(id("crafting_table"), 49);
 	assert.equal(id("furnace"), 50);
 	assert.equal(slab, 14);

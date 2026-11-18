@@ -221,7 +221,58 @@ impl TerrainGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
+
+    #[test]
+    fn generated_tree_shapes_have_leaf_paths_to_logs_within_six_steps() {
+        let mut trees = 0;
+        for seed in [2026, 0, -71] {
+            let terrain = TerrainGenerator::new(seed);
+            for qz in -12..16 {
+                for qx in -12..16 {
+                    let emitted = terrain.tree_blocks(qx, qz);
+                    if emitted.is_empty() {
+                        continue;
+                    }
+                    trees += 1;
+                    // Match placement precedence where the trunk and crown overlap.
+                    let mut blocks = BTreeMap::new();
+                    let mut queue = VecDeque::new();
+                    for (x, y, z, state) in emitted {
+                        let pos = [x, y, z];
+                        if state == blocks::OAK_LOG {
+                            blocks.insert(pos, 0);
+                            queue.push_back((pos, 0));
+                        } else {
+                            blocks.entry(pos).or_insert(7);
+                        }
+                    }
+                    while let Some(([x, y, z], distance)) = queue.pop_front() {
+                        if distance == 6 {
+                            continue;
+                        }
+                        for pos in [
+                            [x - 1, y, z],
+                            [x + 1, y, z],
+                            [x, y - 1, z],
+                            [x, y + 1, z],
+                            [x, y, z - 1],
+                            [x, y, z + 1],
+                        ] {
+                            if let Some(steps @ 7) = blocks.get_mut(&pos) {
+                                *steps = distance + 1;
+                                queue.push_back((pos, *steps));
+                            }
+                        }
+                    }
+                    for (pos, steps) in blocks {
+                        assert!(steps <= 6, "seed={seed}, plot={qx},{qz}, leaf={pos:?}");
+                    }
+                }
+            }
+        }
+        assert!(trees > 100);
+    }
 
     #[test]
     fn plots_match_chunk_blocks_across_borders_and_generation_orders() {

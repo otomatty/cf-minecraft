@@ -1092,6 +1092,135 @@ async function survivalCrafting() {
     } finally { await page.close(); }
 }
 
+async function leafDecay() {
+	const { page, errors } = await open(`server=local&world=e2e-leaves-${run}&mode=creative&gen=terrain&seed=2026&view=3&time=6000`);
+	try {
+		const { spawn } = await settle(page, "leaf decay", chunksInView(3));
+		const trunk = await page.evaluate(() => {
+			const api = window.__mc;
+			const [sx, , sz] = api.stats().spawn.map(Math.floor);
+			const log = api.stateId("oak_log");
+			// Match survivalCrafting's radius and clear east-side approach.
+			for (let z = sz - 24; z <= sz + 24; z++) for (let x = sx - 24; x <= sx + 24; x++) {
+				for (let y = 57; y < 319; y++) {
+					if (api.getBlock(x, y, z) !== log || api.getBlock(x, y - 1, z) === log) continue;
+					if ([1, 2].some(dy => api.getBlock(x, y + dy, z) !== log)) continue;
+					const floor = api.getBlock(x + 1, y - 1, z);
+					if (floor <= 0 || floor === api.stateId("water")) continue;
+					if ([0, 1, 2].some(dy => api.getBlock(x + 1, y + dy, z) !== 0)) continue;
+					let top = y + 2;
+					while (api.getBlock(x, top + 1, z) === log) top++;
+					return { x, y, z, top };
+				}
+			}
+			return null;
+		});
+		check(trunk !== null, "leaves: finds an accessible spawn tree");
+		if (!trunk) return;
+		await resumePointerLock(page, "leaves initial pointer lock");
+		const aim = async (pos, view, face) => {
+			await page.waitForFunction(([x, y, z], { direction, yaw, pitch }, face) => {
+				const api = window.__mc;
+				const c = api.stats().camera;
+				if (c.yaw !== yaw || c.pitch !== pitch) return false;
+				const hit = api.raycast([c.x, c.y, c.z], direction, 6);
+				return hit?.x === x && hit?.y === y && hit?.z === z && (face === undefined || hit.face === face);
+			}, { timeout: 5000 }, pos, view, face);
+		};
+		const click = async (button = "left") => {
+			await page.mouse.down({ button });
+			await page.mouse.up({ button });
+		};
+		const waitForBlock = (pos, name) => page.waitForFunction(([x, y, z], name) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId(name);
+		}, { timeout: 5000 }, pos, name);
+
+		// Place the leaf high over spawn, then remove its temporary support.
+		const anchor = [Math.floor(spawn[0]), Math.floor(spawn[1]) + 16, Math.floor(spawn[2])];
+		const placed = [anchor[0], anchor[1] + 1, anchor[2]];
+		await page.keyboard.press("Digit7"); // Default oak leaves item.
+		await page.waitForFunction(() => window.__mc.stats().selectedSlot === 6);
+		await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			api.setCamera(x + 0.5, y + 4.5, z + 0.5, 0, 90);
+			api.setBlock(x, y, z, api.stateId("stone"));
+		}, anchor);
+		await aim(anchor, { direction: [0, -1, 0], yaw: 0, pitch: 90 }, 1);
+		await click("right");
+		await waitForBlock(placed, "placed_oak_leaves");
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 2.5, y + 0.5, z + 0.5, 90, 0), anchor);
+		await aim(anchor, { direction: [-1, 0, 0], yaw: 90, pitch: 0 });
+		await click();
+		await waitForBlock(anchor, "air");
+		check(true, "leaves: right-click places persistent leaves in the air");
+
+		for (let y = trunk.y; y <= trunk.top; y++) {
+			const pos = [trunk.x, y, trunk.z];
+			const view = await page.evaluate(([x, y, z]) => {
+				const api = window.__mc;
+				// Enclosed upper logs can be reached through the cleared trunk below.
+				for (const [dx, dy, dz, yaw, pitch] of [
+					[1, 0, 0, 90, 0], [-1, 0, 0, -90, 0], [0, 0, 1, 180, 0], [0, 0, -1, 0, 0],
+					[0, -1, 0, 0, -90],
+				]) {
+					const camera = [x + 0.5 + dx, y + 0.5 + dy, z + 0.5 + dz];
+					const direction = [-dx, -dy, -dz];
+					const hit = api.raycast(camera, direction, 6);
+					if (hit?.x === x && hit?.y === y && hit?.z === z) {
+						api.setCamera(...camera, yaw, pitch);
+						return { direction, yaw, pitch };
+					}
+				}
+				throw new Error(`leaves: no clear ray to trunk log at ${x},${y},${z}`);
+			}, pos);
+			await aim(pos, view);
+			await click();
+			await waitForBlock(pos, "air");
+		}
+
+		function countLeaves({ x, y, z, top }, atMost = Infinity) {
+			const api = window.__mc;
+			const leaves = api.stateId("oak_leaves");
+			let count = 0;
+			for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+				for (let wy = y - 1; wy <= top + 3; wy++) {
+					if (api.getBlock(x + dx, wy, z + dz) === leaves) count++;
+				}
+			}
+			return count <= atMost ? { count } : false;
+		}
+		const before = await page.evaluate(countLeaves, trunk);
+		check(before.count >= 5, "leaves: at least five terrain leaves remain after breaking the trunk", before.count);
+		if (before.count < 5) return;
+		const after = await bounded(async () => {
+			const result = await page.waitForFunction(countLeaves, { timeout: 60000, polling: 250 }, trunk, before.count - 5);
+			return result.jsonValue();
+		}, 60000);
+		if (typeof after === "string") {
+			const state = await diagnose(browser, page, "leaf-decay", { edge, shots });
+			const error = new Error(`leaf decay: ${after} ${JSON.stringify({ page: state.page, targets: state.targets })}`);
+			error.diagnosed = true;
+			throw error;
+		}
+		check(before.count - after.count >= 5, "leaves: at least five terrain leaves decay", `${before.count} → ${after.count}`);
+		check(await page.evaluate(({ x, y, z, top }) => {
+			for (let wy = y; wy <= top; wy++) {
+				if (window.__mc.getBlock(x, wy, z) !== 0) return false;
+			}
+			return true;
+		}, trunk), "leaves: all trunk logs stayed broken");
+		await waitForBlock(placed, "placed_oak_leaves");
+		check(true, "leaves: placed leaves stay after the decay wait");
+		check(errors.length === 0, "leaves: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "leaf-decay", err);
+		throw err;
+	} finally {
+		await page.close();
+	}
+}
+
 async function furnaceSmelting() {
     const { page, errors } = await open(`server=local&world=e2e-furnace-${run}&mode=creative&gen=flat&seed=2026&view=3&time=6000`);
     try {
@@ -1469,6 +1598,7 @@ try {
 	await survivalHealth();
 	await survivalHunger();
 	await survivalCrafting();
+	await leafDecay();
 	await furnaceSmelting();
 	await dayNight();
 	await undergroundLighting();

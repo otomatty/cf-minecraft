@@ -113,7 +113,8 @@ mod tests {
     #[test]
     fn creative_inventory_scenario_fingerprint() {
         // Previously 35cac1f1644e93a7. Hunger state and the PlayerStatus food byte now participate.
-        assert_eq!(run(2026, 600), 0x5958269535e4ab7b);
+        // Random ticks changed three grass/dirt blocks since 5958269535e4ab7b.
+        assert_eq!(run(2026, 600), 0xd36da50f11b5eb81);
     }
 
     #[test]

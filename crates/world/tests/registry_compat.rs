@@ -42,10 +42,14 @@ fn registry_matches_pre_generation_snapshot() {
             OAK_STAIRS,
             COBBLESTONE_STAIRS,
             OAK_FENCE,
+            PLACED_OAK_LEAVES,
             COUNT,
             LEGACY_COUNT
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 14]
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
+            14
+        ]
     );
     for state in 0..COUNT {
         assert_eq!(parse_state(&state_name(state)), Some(state));

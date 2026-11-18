@@ -44,6 +44,10 @@ pub fn for_block(state: BlockState) -> Option<u16> {
     if state >= blocks::COUNT {
         return None;
     }
+    placed_item(state).or_else(|| explicit_mining_drop(state))
+}
+
+fn placed_item(state: BlockState) -> Option<u16> {
     ITEMS
         .iter()
         .find(|item| {
@@ -57,11 +61,14 @@ pub fn mining_drop(state: BlockState) -> Option<u16> {
     if state == blocks::AIR || !blocks::is_valid(state) {
         return None;
     }
+    explicit_mining_drop(state).or_else(|| placed_item(state))
+}
+
+fn explicit_mining_drop(state: BlockState) -> Option<u16> {
     MINING_DROPS
         .iter()
         .find(|(name, _)| *name == blocks::info(state).name)
         .map(|(_, item)| *item)
-        .or_else(|| for_block(state))
 }
 
 #[cfg(test)]
@@ -94,13 +101,22 @@ mod tests {
     }
 
     #[test]
-    fn every_non_air_state_has_the_named_item() {
+    fn every_non_air_state_has_the_expected_item() {
         assert_eq!(for_block(blocks::AIR), None);
+        assert_eq!(for_block(blocks::COUNT), None);
         for state in 1..blocks::COUNT {
             let id = for_block(state).unwrap();
-            assert_eq!(info(id).unwrap().name, blocks::info(state).name);
-            assert_eq!(by_name(blocks::info(state).name), Some(id));
+            let name = match state {
+                blocks::OAK_LEAVES | blocks::PLACED_OAK_LEAVES => "oak_leaves",
+                _ => blocks::info(state).name,
+            };
+            assert_eq!(info(id).unwrap().name, name);
+            assert_eq!(by_name(name), Some(id));
         }
+        let leaves = by_name("oak_leaves").unwrap();
+        assert_eq!(info(leaves).unwrap().block, Some(blocks::PLACED_OAK_LEAVES));
+        assert_eq!(mining_drop(blocks::OAK_LEAVES), Some(leaves));
+        assert_eq!(mining_drop(blocks::PLACED_OAK_LEAVES), Some(leaves));
     }
 }
 

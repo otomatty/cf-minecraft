@@ -5,7 +5,7 @@
 描画レイヤー、完全な遮蔽 `occludes`、衝突 `solid`、同種の面の省略 `cull_same`、
 光の opacity / emission は独立した属性である。地形生成は変更しない。
 
-Cube の面では、隣が occludes、または同じ状態 ID で cull_same のとき面を省略する。
+Cube の面では、隣が occludes、または cull_same のブロックが同じ状態 ID に接するとき面を省略する。`oak_leaves` と `placed_oak_leaves`（状態 ID 51）の境界も両側の面を省略する。
 Boxes は直方体の面がセル境界にある場合だけ同じ判定を使い、内部面は残す。
 下付きハーフの上面、上付きハーフの下面は、隣が石でも消えない。
 部分形状は occludes=false のため隣の面を隠さず、double のみ完全な遮蔽になる。
