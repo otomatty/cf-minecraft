@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
+use protocol::{MobKind, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -26,7 +26,7 @@ struct ItemEntity {
     previous: [f64; 3],
 }
 struct MobEntity {
-    kind: u8,
+    kind: MobKind,
     pos: [f64; 3],
     previous: [f64; 3],
     yaw: f32,
@@ -1488,7 +1488,7 @@ pub extern "C" fn client_mobs() -> usize {
     let mut w = world::io::Writer::new();
     for (&id, mob) in &st.mobs {
         w.i32(id as i32);
-        w.u8(mob.kind);
+        w.u8(mob.kind.wire_id());
         w.f32(mob.yaw);
         for v in mob.pos.into_iter().chain(mob.previous) {
             w.f64(v);

@@ -1318,11 +1318,12 @@ async function main(): Promise<void> {
 		const renderCows = core.mobs.filter(mob => mob.kind === 0).map(mob => {
 			const elapsed = now - (entityReceivedAt.get(mob.id) ?? now);
 			const dx = mob.position[0] - mob.previous[0], dz = mob.position[2] - mob.previous[2];
+			const position = interpolateEntity(mob.previous, mob.position, elapsed);
 			return {
-				position: interpolateEntity(mob.previous, mob.position, elapsed),
+				position,
 				yaw: mob.yaw,
 				moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
-				light: core.entityLight(mob.position),
+				light: core.entityLight(position),
 			};
 		});
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {

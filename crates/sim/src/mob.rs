@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use jmath::sin_table::{cos, sin};
 use physics::{BlockWorld, CollisionWorld, Input, Player};
+pub use protocol::MobKind;
 use protocol::S2C;
 use world::{blocks, Fnv64, World, HEIGHT, MIN_Y};
 
@@ -17,12 +18,6 @@ const STOP_DISTANCE_SQUARED: f64 = 0.5 * 0.5;
 const PROBE_DISTANCE: f64 = 0.7;
 const SPAWN_INTERVAL: i64 = 400;
 const LOCAL_LIMIT: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum MobKind {
-    Cow = 0,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wander {
@@ -125,6 +120,7 @@ impl Mob {
             }
         }
 
+        let was_rising = !self.body.on_ground && self.body.velocity[1] > 0.0;
         let mut next = self.body;
         next.tick(input, &collisions);
         if input.forward != 0.0 && touches_lava(world, next.position) {
@@ -140,7 +136,10 @@ impl Mob {
             blocked,
         } = self.ai
         {
-            let blocked = if distance_squared(before, self.pos()) < 0.01 * 0.01 {
+            // Raising the feet past a step can take several ticks at the wall.
+            let jumping =
+                !self.body.on_ground && (input.jump || was_rising || self.body.velocity[1] > 0.0);
+            let blocked = if !jumping && distance_squared(before, self.pos()) < 0.01 * 0.01 {
                 blocked + 1
             } else {
                 0
@@ -162,7 +161,7 @@ impl Mob {
     }
 
     fn hash_into(&self, h: &mut Fnv64) {
-        h.u8(self.kind as u8);
+        h.u8(self.kind.wire_id());
         for v in self.pos().into_iter().chain(self.body.velocity) {
             h.bytes(&v.to_bits().to_be_bytes());
         }
@@ -214,17 +213,15 @@ fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) ->
     };
     if let Some(foot_top) = top_at(y).filter(|&top| top > pos[1]) {
         let rise = foot_top - pos[1];
-        let head = world.get_block(x, y + 1, z)?;
-        let above = world.get_block(x, y + 2, z)?;
         return Some(
             rise > physics::STEP_HEIGHT
                 && rise <= 1.0
-                && !blocks::is_solid(head)
-                && !blocks::is_solid(above),
+                && Player::with_size([pos[0], foot_top, pos[2]], COW_WIDTH, COW_HEIGHT)
+                    .is_clear(collisions),
         );
     }
     let cutoff = pos[1] - 4.0;
-    for floor in (y - 5..y).rev() {
+    for floor in (y - 5..=y).rev() {
         let state = world.get_block(x, floor, z)?;
         if blocks::is_lava(state) {
             return None;
@@ -413,7 +410,7 @@ impl Server {
                 let packet = match c.visible_mobs.get(&id) {
                     None => S2C::MobSpawn {
                         id,
-                        kind: self.mobs[&id].kind as u8,
+                        kind: self.mobs[&id].kind,
                         x,
                         y,
                         z,
@@ -550,6 +547,66 @@ mod tests {
             assert_eq!(cow.ai, Wander::Idle);
             assert!(cow.pos()[2] < 3.0 - COW_WIDTH / 2.0);
             assert_eq!(cow.pos()[1], 1.0);
+        }
+    }
+
+    #[test]
+    fn jumps_from_contact_with_a_full_block_step() {
+        let mut world = arena(16);
+        for z in 3..16 {
+            world.set_block(2, 1, z, blocks::STONE);
+        }
+        let mut cow = walking();
+        cow.body.position[2] = 2.55;
+        for tick in 1..=2 {
+            cow.tick(&world, 5, 7, tick);
+            assert_eq!(cow.pos()[2], 2.55);
+            assert!(matches!(cow.ai, Wander::Walking { blocked: 0, .. }));
+        }
+        for tick in 3..=30 {
+            cow.tick(&world, 5, 7, tick);
+        }
+        assert_eq!(cow.pos()[1], 2.0);
+        assert!(cow.pos()[2] > 3.45, "{cow:?}");
+    }
+
+    #[test]
+    fn walks_across_unsupported_bottom_slabs_at_foot_height() {
+        let mut world = arena(0);
+        for z in 1..=8 {
+            world.set_block(2, 0, z, blocks::OAK_SLAB);
+        }
+        let mut cow = walking();
+        cow.body.position[1] = 0.5;
+        for tick in 1..=30 {
+            cow.tick(&world, 5, 7, tick);
+            assert_eq!(cow.pos()[1], 0.5);
+        }
+        assert!(cow.pos()[2] > 4.0, "{cow:?}");
+    }
+
+    #[test]
+    fn jump_checks_the_collision_shape_above_the_step() {
+        for (ceiling, can_jump) in [(blocks::OAK_SLAB + 1, true), (blocks::STONE, false)] {
+            let mut world = arena(16);
+            for z in 3..16 {
+                world.set_block(2, 1, z, blocks::STONE);
+                world.set_block(2, 3, z, ceiling);
+            }
+            let mut cow = walking();
+            cow.body.position[2] = 2.55;
+            cow.tick(&world, 5, 7, 1);
+            assert_eq!(cow.pos()[1] > 1.0, can_jump, "{cow:?}");
+            for tick in 2..=30 {
+                cow.tick(&world, 5, 7, tick);
+            }
+            if can_jump {
+                assert_eq!(cow.pos()[1], 2.0);
+                assert!(cow.pos()[2] > 3.45, "{cow:?}");
+            } else {
+                assert_eq!(cow.pos(), [2.5, 1.0, 2.55]);
+                assert_eq!(cow.ai, Wander::Idle);
+            }
         }
     }
 

@@ -15,6 +15,25 @@ pub const MAX_AIR: u16 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+pub enum MobKind {
+    Cow = 0,
+}
+
+impl MobKind {
+    pub const fn wire_id(self) -> u8 {
+        self as u8
+    }
+
+    fn from_wire_id(value: u8) -> Result<Self, DecodeError> {
+        match value {
+            0 => Ok(Self::Cow),
+            _ => Err(DecodeError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DeathCause {
     None = 0,
     Fall = 1,
@@ -219,7 +238,7 @@ pub enum S2C {
     },
     MobSpawn {
         id: u32,
-        kind: u8,
+        kind: MobKind,
         x: f64,
         y: f64,
         z: f64,
@@ -571,7 +590,7 @@ impl S2C {
             } => {
                 w.u8(id::S2C_MOB_SPAWN);
                 w.i32(*entity as i32);
-                w.u8(*kind);
+                w.u8(kind.wire_id());
                 w.f64(*x);
                 w.f64(*y);
                 w.f64(*z);
@@ -724,11 +743,7 @@ impl S2C {
             tag @ (id::S2C_MOB_SPAWN | id::S2C_MOB_MOVE) => {
                 let id = entity_id(&mut r)?;
                 let kind = if tag == id::S2C_MOB_SPAWN {
-                    let kind = r.u8()?;
-                    if kind != 0 {
-                        return Err(DecodeError);
-                    }
-                    Some(kind)
+                    Some(MobKind::from_wire_id(r.u8()?)?)
                 } else {
                     None
                 };
@@ -1197,7 +1212,7 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, 13);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
-            kind: 0,
+            kind: MobKind::Cow,
             x: 12.25,
             y: -60.0,
             z: -8.75,
@@ -1227,6 +1242,7 @@ mod tests {
                 assert!(S2C::decode(&bad).is_err());
             }
             if tag == 0x0d {
+                assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
                 bad[5] = 1;
                 assert!(S2C::decode(&bad).is_err());

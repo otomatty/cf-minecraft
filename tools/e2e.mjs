@@ -1807,23 +1807,80 @@ async function mobs() {
 		const cow = await spawned.jsonValue();
 		await spawned.dispose();
 		check(cow.kind === 0, "mobs: a cow spawned", `id ${cow.id} at ${cow.position.join(", ")}`);
-		const beforeFrame = await page.evaluate(id => {
+		const cowView = async (id, placeCamera = false) => {
 			const api = window.__mc;
-			const { position: [x, y, z], yaw } = api.stats().mobs.find(mob => mob.id === id);
-			const angle = yaw * Math.PI / 180;
-			api.setCamera(x - Math.sin(angle) * 3.4, y + 1.62, z + Math.cos(angle) * 3.4, yaw + 180, 13);
-			return api.frames;
-		}, cow.id);
-		await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
-			&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2, {}, beforeFrame);
+			const inspect = () => {
+				const cows = api.stats().mobs;
+				const target = cows.find(mob => mob.id === id);
+				if (!target) return null;
+				const [x, y, z] = target.position;
+				const angle = target.yaw * Math.PI / 180;
+				const forwardX = -Math.sin(angle), forwardZ = Math.cos(angle);
+				const occluder = cows.find(other => {
+					if (other.id === id) return false;
+					const dx = other.position[0] - x, dz = other.position[2] - z;
+					const ahead = dx * forwardX + dz * forwardZ;
+					const side = dx * forwardZ - dz * forwardX;
+					return dx * dx + dz * dz <= 1.5 ** 2
+						|| (ahead > 0 && ahead < 3.9 && Math.abs(side) <= 1);
+				});
+				return {
+					position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
+					camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, 13],
+				};
+			};
+			const initial = inspect();
+			if (!placeCamera) return initial;
+			if (!initial || initial.blockedBy !== null) return false;
+			// Give a moving cow time to finish its turn and the client time to interpolate.
+			await new Promise(resolve => setTimeout(resolve, 150));
+			const settled = inspect();
+			if (!settled || settled.blockedBy !== null || settled.yaw !== initial.yaw
+				|| !settled.position.every((value, axis) => value === initial.position[axis])) return false;
+			api.setCamera(...settled.camera);
+			return { ...settled, frames: api.frames };
+		};
 		const file = join(shots, "mobs-cow.png");
-		await page.screenshot({ path: file });
+		const matches = (aim, current) => current?.blockedBy === null && current.yaw === aim.yaw
+			&& current.position.every((value, axis) => value === aim.position[axis]);
+		const captureDeadline = Date.now() + 25000;
+		let captureProblem;
+		for (let attempt = 0; attempt < 4 && Date.now() < captureDeadline; attempt++) {
+			const placement = await page.waitForFunction(
+				cowView, { timeout: Math.max(1, captureDeadline - Date.now()), polling: 100 }, cow.id, true,
+			).catch(async error => {
+				const latest = await bounded(() => page.evaluate(cowView, cow.id), 1000);
+				throw new Error(`mobs: could not aim at cow ${cow.id}; ${captureProblem ?? "waiting for a clear, still cow"}; latest view ${JSON.stringify(latest)}`, { cause: error });
+			});
+			const aim = await placement.jsonValue();
+			await placement.dispose();
+			await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
+				&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2, {}, aim.frames);
+			let current = await page.evaluate(cowView, cow.id);
+			if (matches(aim, current)) {
+				await page.screenshot({ path: file });
+				current = await page.evaluate(cowView, cow.id);
+				if (matches(aim, current)) {
+					captureProblem = null;
+					break;
+				}
+			}
+			captureProblem = `aimed at yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking cow ${current?.blockedBy ?? "none"})`;
+		}
+		if (captureProblem !== null) throw new Error(`mobs: could not photograph cow ${cow.id}; ${captureProblem ?? "capture timed out"}`);
 		const pinkPixels = await page.evaluate(async data => {
 			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 			const canvas = new OffscreenCanvas(img.width, img.height);
 			const ctx = canvas.getContext("2d");
 			ctx.drawImage(img, 0, 0);
-			const pixels = ctx.getImageData(img.width / 2 - 180, img.height / 2 - 180, 360, 360).data;
+			// At 3.4 blocks from the cow, the nose is 2.95 blocks away and 0.62–0.85 below the eye.
+			// With 13° pitch and 70° vertical FOV, it projects to roughly x ±41 and y −11…28
+			// from the center at 720 px viewport height. Allow a little margin around the nose.
+			const scale = img.height / 720;
+			const pixels = ctx.getImageData(
+				Math.floor(img.width / 2 - 58 * scale), Math.floor(img.height / 2 - 23 * scale),
+				Math.ceil(116 * scale), Math.ceil(65 * scale),
+			).data;
 			let pink = 0;
 			for (let i = 0; i < pixels.length; i += 4) {
 				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];

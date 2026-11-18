@@ -339,7 +339,7 @@ export class Renderer {
 	private readonly crackBuffer: GPUBuffer;
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
-	private readonly cowBuffer: GPUBuffer;
+	private cowBuffer: GPUBuffer | null = null;
 	private readonly cowTextures: { hide: number; face: number; leg: number };
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
@@ -531,7 +531,6 @@ override renderLayer`);
 		this.cracks = itemPipeline(true);
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-		this.cowBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * COW_VERTEX_COUNT * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -713,8 +712,18 @@ override renderLayer`);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
-		const cowData = cowVertices(cows.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], now, this.cowTextures);
-		if (cowData.length) this.device.queue.writeBuffer(this.cowBuffer, 0, cowData);
+		const visibleCows = cows.slice(0, MAX_RENDER_ITEMS);
+		const cowData = cowVertices(visibleCows, [camera.x, camera.y, camera.z], now, this.cowTextures);
+		if (cowData.length) {
+			if (!this.cowBuffer || this.cowBuffer.size < cowData.byteLength) {
+				this.cowBuffer?.destroy();
+				this.cowBuffer = this.device.createBuffer({
+					size: cowData.byteLength,
+					usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+				});
+			}
+			this.device.queue.writeBuffer(this.cowBuffer, 0, cowData);
+		}
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({
 			colorAttachments: [
@@ -762,9 +771,9 @@ override renderLayer`);
 						pass.setVertexBuffer(0, this.itemBuffer);
 						pass.draw(itemData.length / 9);
 					}
-					if (cowData.length) {
+					if (this.cowBuffer && cowData.length) {
 						pass.setVertexBuffer(0, this.cowBuffer);
-						pass.draw(cowData.length / 9);
+						pass.draw(visibleCows.length * COW_VERTEX_COUNT);
 					}
 				}
 				if (cloudsFirst) drawClouds();
