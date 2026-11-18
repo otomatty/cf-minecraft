@@ -88,12 +88,22 @@ struct SurvivalMovement {
 impl SurvivalMovement {
     fn advance(self, world: &World, from: [f64; 3], to: [f64; 3], tick: i64) -> Option<Self> {
         let y = to[1];
-        let jump_base_y = if health::grounded(world, from) {
+        let blocks = physics::BlockWorld(|x, y, z| world.get_block(x, y, z));
+        if physics::in_water(&blocks, to) {
+            return Some(Self {
+                jump_base_y: Some(y),
+                airborne_progress: None,
+            });
+        }
+        let from_water = physics::in_water(&blocks, from);
+        let jump_base_y = if from_water || health::grounded(world, from) {
             Some(from[1])
         } else {
             self.jump_base_y
         };
-        let grounded = health::grounded(world, to);
+        // The Y sweep can land before the horizontal sweep moves off the edge.
+        let grounded = health::grounded(world, to)
+            || (y <= from[1] && health::grounded(world, [from[0], y, from[2]]));
         if y > from[1]
             && !(grounded && y - from[1] <= physics::STEP_HEIGHT
                 || jump_base_y.is_some_and(|base| y <= base + MAX_SURVIVAL_RISE))
@@ -102,7 +112,7 @@ impl SurvivalMovement {
         }
         let airborne_progress = if grounded {
             None
-        } else if let Some((last_tick, height)) = self.airborne_progress {
+        } else if let Some((last_tick, height)) = self.airborne_progress.filter(|_| !from_water) {
             if y <= height - MIN_AIRBORNE_DESCENT {
                 Some((tick, y))
             } else if tick - last_tick >= AIRBORNE_GRACE_TICKS && y > from[1] - MIN_AIRBORNE_DESCENT
@@ -115,7 +125,11 @@ impl SurvivalMovement {
             Some((tick, from[1].min(y)))
         };
         Some(Self {
-            jump_base_y: jump_base_y.filter(|&base| y >= base),
+            jump_base_y: if grounded {
+                Some(y)
+            } else {
+                jump_base_y.filter(|&base| y >= base)
+            },
             airborne_progress,
         })
     }
@@ -2708,6 +2722,145 @@ mod tests {
                 assert_eq!(s.client_position(1), Some(player.position));
             }
         }
+    }
+
+    #[test]
+    fn survival_accepts_swimming_and_climbing_ashore_with_batched_or_individual_reports() {
+        let start = [0.5, 64.0, 0.5];
+        for batch_size in [1, 4] {
+            let mut s = joined_at(start);
+            s.set_game_mode(GameMode::Survival);
+            for x in 0..8 {
+                for y in 64..67 {
+                    let state = if x >= 2 || (x == 1 && y < 66) {
+                        blocks::STONE
+                    } else {
+                        blocks::WATER
+                    };
+                    s.world.set_block(x, y, 0, state);
+                }
+                s.world.set_block(x, 63, 0, blocks::STONE);
+            }
+            let mut player = physics::Player::new(start);
+            let mut bobbed = false;
+            let mut kicked = false;
+            for tick in 0..132 {
+                let before = player.position;
+                player.tick(
+                    physics::Input {
+                        jump: tick < 120,
+                        strafe: if (80..120).contains(&tick) { -1.0 } else { 0.0 },
+                        ..Default::default()
+                    },
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                bobbed |= tick < 80 && before[1] > 66.6 && player.position[1] < 66.6;
+                kicked |= player.in_water && player.velocity[1] == 0.3;
+                s.handle_packet(1, &position_packet(player.position));
+                if (tick + 1) % batch_size == 0 {
+                    s.tick();
+                    assert_eq!(s.stats.packets_rejected, 0, "tick {tick}, {player:?}");
+                    assert_eq!(s.stats.positions_rejected, 0, "tick {tick}");
+                    assert_eq!(s.client_position(1), Some(player.position));
+                }
+            }
+            assert!(bobbed && kicked);
+            assert!(
+                player.position[0] > 2.0 && player.position[1] >= 67.0,
+                "{player:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn survival_checks_water_exit_rise_with_batched_or_individual_reports() {
+        let from = [0.5, 66.25, 0.5];
+        for batched in [false, true] {
+            let start = if batched { [0.5, 66.5, 0.5] } else { from };
+            let mut s = joined_at(start);
+            s.set_game_mode(GameMode::Survival);
+            s.world.set_block(0, 66, 0, blocks::WATER);
+            let too_high = [0.5, from[1] + MAX_SURVIVAL_RISE + 0.125, 0.5];
+            assert!(movement_clear(&s.world, from, too_high));
+
+            if batched {
+                // Descend in water before immediately reporting the exit.
+                s.handle_packet(1, &position_packet(from));
+            }
+            s.handle_packet(1, &position_packet(too_high));
+            s.tick();
+            assert_eq!(s.client_position(1), Some(from));
+            assert_eq!(s.stats.packets_rejected, 1);
+            assert_eq!(s.stats.positions_rejected, 1);
+            if batched {
+                let movement = s.clients[&1].survival_movement;
+                assert_eq!(movement.jump_base_y, Some(from[1]));
+                assert!(movement.airborne_progress.is_none());
+            }
+
+            let exit = [0.5, from[1] + MAX_SURVIVAL_RISE, 0.5];
+            s.handle_packet(1, &position_packet(exit));
+            s.tick();
+            assert_eq!(s.client_position(1), Some(exit));
+            assert_eq!(s.stats.packets_rejected, 1);
+            assert_eq!(s.stats.positions_rejected, 1);
+            let movement = s.clients[&1].survival_movement;
+            assert_eq!(movement.jump_base_y, Some(from[1]));
+            assert!(movement.airborne_progress.is_some());
+        }
+    }
+
+    #[test]
+    fn survival_rejects_excessive_dry_rise_after_leaving_water() {
+        let start = [0.5, 66.5, 0.5];
+        let mut s = joined_at(start);
+        s.set_game_mode(GameMode::Survival);
+        s.world.set_block(0, 66, 0, blocks::WATER);
+        let exit = [0.5, 66.7, 0.5];
+        s.handle_packet(1, &position_packet(exit));
+        s.tick();
+        assert_eq!(s.client_position(1), Some(exit));
+        assert_eq!(s.stats.positions_rejected, 0);
+
+        s.handle_packet(1, &position_packet([0.5, 68.3, 0.5]));
+        s.tick();
+        assert_eq!(s.client_position(1), Some(exit));
+        assert_eq!(s.stats.packets_rejected, 1);
+        assert_eq!(s.stats.positions_rejected, 1);
+    }
+
+    #[test]
+    fn survival_accepts_jumping_after_landing_and_moving_off_the_edge() {
+        let start = [1.2, 65.1, 0.5];
+        let mut s = joined_at(start);
+        s.set_game_mode(GameMode::Survival);
+        s.world.set_block(0, 64, 0, blocks::STONE);
+        let mut player = physics::Player::new(start);
+        player.velocity = [0.2, -0.2, 0.0];
+        player.tick(
+            physics::Input::default(),
+            &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+        );
+        assert!(player.on_ground);
+        assert_eq!(player.position, [1.4, 65.0, 0.5]);
+        assert!(!health::grounded(&s.world, player.position));
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.client_position(1), Some(player.position));
+
+        player.tick(
+            physics::Input {
+                jump: true,
+                ..Default::default()
+            },
+            &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+        );
+        assert_eq!(player.position[1], 65.0 + 0.42_f32 as f64);
+        s.handle_packet(1, &position_packet(player.position));
+        s.tick();
+        assert_eq!(s.client_position(1), Some(player.position));
+        assert_eq!(s.stats.packets_rejected, 0);
+        assert_eq!(s.stats.positions_rejected, 0);
     }
 
     #[test]

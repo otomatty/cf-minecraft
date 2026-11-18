@@ -1292,6 +1292,10 @@ impl physics::CollisionWorld for Collisions<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(physics::Aabb)) {
         physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).collision_boxes(x, y, z, visit);
     }
+
+    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+        physics::BlockWorld(|x, y, z| self.0.get_block(x, y, z)).is_water(x, y, z)
+    }
 }
 
 /// Toggle only when the player can safely start walking. A debug teleport or

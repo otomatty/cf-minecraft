@@ -34,6 +34,15 @@ impl Aabb {
 /// Enumerate boxes owned by one cell; fences can extend 0.5 blocks above it.
 pub trait CollisionWorld {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, visit: &mut dyn FnMut(Aabb));
+
+    fn is_water(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+}
+
+/// Samples the block 0.4 above the center of the player's feet.
+pub fn in_water(world: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
+    world.is_water(x.floor() as i32, (y + 0.4).floor() as i32, z.floor() as i32)
 }
 /// Convenience adapter for simple worlds with at most one box.
 impl<F: Fn(i32, i32, i32) -> Option<Aabb>> CollisionWorld for F {
@@ -66,6 +75,10 @@ impl<F: Fn(i32, i32, i32) -> Option<u16>> CollisionWorld for BlockWorld<F> {
             }
         }
     }
+
+    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0(x, y, z).is_some_and(world::blocks::is_water)
+    }
 }
 /// Per-box escape filtering preserves overlapping-placement behaviour.
 pub struct EscapeWorld<'a, W>(pub &'a W, pub Aabb);
@@ -76,6 +89,10 @@ impl<W: CollisionWorld> CollisionWorld for EscapeWorld<'_, W> {
                 visit(b);
             }
         });
+    }
+
+    fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0.is_water(x, y, z)
     }
 }
 
@@ -134,6 +151,8 @@ pub struct Player {
     pub position: [f64; 3],
     pub velocity: [f64; 3],
     pub on_ground: bool,
+    /// Water contact sampled at the start of the most recent tick.
+    pub in_water: bool,
     jump_cooldown: u8,
 }
 impl Player {
@@ -168,6 +187,8 @@ impl Player {
         grounded
     }
     pub fn tick(&mut self, input: Input, world: &impl CollisionWorld) {
+        self.in_water = in_water(world, self.position);
+        let swimming = self.in_water && !input.flying;
         let grounded = self.on_ground;
         let sprint = input.sprint && (input.flying || !input.sneak);
         let friction = if grounded && !input.flying {
@@ -188,6 +209,10 @@ impl Player {
         if input.flying {
             let vertical = i32::from(input.jump) - i32::from(input.sneak);
             self.velocity[1] += (vertical as f32 * 0.05_f32 * 3.0_f32) as f64;
+        } else if swimming {
+            if input.jump {
+                self.velocity[1] += 0.04;
+            }
         } else if input.jump && grounded && self.jump_cooldown == 0 {
             self.velocity[1] = 0.42_f32 as f64;
             if sprint {
@@ -202,7 +227,7 @@ impl Player {
             } else {
                 0.05_f32
             }
-        } else if grounded {
+        } else if grounded && !swimming {
             let movement = if sprint {
                 (0.1_f64 * 1.3) as f32
             } else {
@@ -278,12 +303,25 @@ impl Player {
                 self.velocity[axis] = 0.0;
             }
         }
-        self.velocity[0] *= friction as f64;
-        self.velocity[2] *= friction as f64;
-        if input.flying {
-            self.velocity[1] *= 0.6_f64;
+        if swimming {
+            for v in &mut self.velocity {
+                *v *= 0.8;
+            }
+            self.velocity[1] -= 0.02;
+            if input.jump
+                && (actual[0] != desired[0] || actual[2] != desired[2])
+                && !occupied(world, self.bounds().translated([0.0, 0.6, 0.0]))
+            {
+                self.velocity[1] = 0.3;
+            }
         } else {
-            self.velocity[1] = (self.velocity[1] - 0.08_f64) * 0.98_f32 as f64;
+            self.velocity[0] *= friction as f64;
+            self.velocity[2] *= friction as f64;
+            if input.flying {
+                self.velocity[1] *= 0.6_f64;
+            } else {
+                self.velocity[1] = (self.velocity[1] - 0.08_f64) * 0.98_f32 as f64;
+            }
         }
     }
 }

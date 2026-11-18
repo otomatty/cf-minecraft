@@ -1,4 +1,5 @@
-use physics::{Aabb, Input, Player, HEIGHT, WIDTH};
+use physics::{Aabb, BlockWorld, Input, Player, HEIGHT, WIDTH};
+use world::blocks;
 
 fn flat(x: i32, y: i32, z: i32) -> Option<Aabb> {
     (y < 0).then(|| Aabb::block(x, y, z))
@@ -9,6 +10,117 @@ fn grounded() -> Player {
     p.tick(Input::default(), &flat);
     assert!(p.on_ground);
     p
+}
+
+#[test]
+fn swimming_sinks_to_the_bottom_and_bobs_at_the_surface() {
+    let mut source_swimmer = Player::default();
+    for water in [blocks::WATER, blocks::FLOWING_WATER] {
+        let pool = BlockWorld(|_, y, _| {
+            Some(match y {
+                ..0 => blocks::STONE,
+                0..=2 => water,
+                _ => blocks::AIR,
+            })
+        });
+        let mut p = Player::new([0.5, 2.0, 0.5]);
+        p.tick(Input::default(), &pool);
+        assert!(p.in_water);
+        assert_eq!(p.position[1], 2.0);
+        p.tick(Input::default(), &pool);
+        assert_eq!(p.position[1], 1.98);
+        for _ in 0..40 {
+            p.tick(Input::default(), &pool);
+            assert!(p.position[1] >= 0.0);
+        }
+        assert_eq!(p.position[1], 0.0);
+        assert!(p.on_ground);
+
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        p.tick(jump, &pool);
+        assert_eq!(p.position[1], 0.02);
+        for _ in 0..60 {
+            p.tick(jump, &pool);
+        }
+        let mut low = p.position[1];
+        let mut high = low;
+        for _ in 0..80 {
+            let was_in_water = p.position[1] < 2.6;
+            p.tick(jump, &pool);
+            assert_eq!(p.in_water, was_in_water);
+            low = low.min(p.position[1]);
+            high = high.max(p.position[1]);
+        }
+        assert!(low > 2.1 && low < 2.6, "{low}");
+        assert!(high > 2.6 && high < 2.9, "{high}");
+        if water == blocks::WATER {
+            source_swimmer = p;
+        } else {
+            assert_eq!(p, source_swimmer);
+        }
+    }
+}
+
+#[test]
+fn swimming_is_slower_than_walking_and_flight_takes_precedence() {
+    let pool = BlockWorld(|_, y, _| Some(if y < 0 { blocks::STONE } else { blocks::WATER }));
+    let mut swimmer = Player::new([0.5, 0.0, 0.5]);
+    let mut walker = swimmer;
+    let forward = Input {
+        forward: 1.0,
+        ..Input::default()
+    };
+    for _ in 0..60 {
+        swimmer.tick(forward, &pool);
+        walker.tick(forward, &flat);
+    }
+    assert!(swimmer.on_ground && swimmer.in_water);
+    assert!(swimmer.position[2] > 0.5 && swimmer.position[2] < walker.position[2]);
+
+    let mut dry = Player::new([0.5, 1.0, 0.5]);
+    let mut wet = dry;
+    let flying = Input {
+        forward: 1.0,
+        jump: true,
+        flying: true,
+        ..Input::default()
+    };
+    wet.tick(flying, &pool);
+    dry.tick(flying, &flat);
+    assert!(wet.in_water);
+    assert_eq!(wet.position, dry.position);
+    assert_eq!(wet.velocity, dry.velocity);
+}
+
+#[test]
+fn swimming_jumps_up_a_one_block_bank() {
+    let bank = BlockWorld(|x, y, _| {
+        Some(match (x, y) {
+            (_, ..2) | (1.., 2) => blocks::STONE,
+            (_, 2) => blocks::WATER,
+            _ => blocks::AIR,
+        })
+    });
+    let mut p = Player::new([0.5, 2.0, 0.5]);
+    let input = Input {
+        strafe: -1.0,
+        jump: true,
+        ..Input::default()
+    };
+    let mut kicked = false;
+    for _ in 0..20 {
+        p.tick(input, &bank);
+        kicked |= p.in_water && p.velocity[1] == 0.3;
+        if p.position[0] > 1.3 {
+            assert!(kicked);
+            assert!(p.position[1] >= 3.0);
+            return;
+        }
+    }
+    panic!("swimmer failed to reach the bank: {p:?}");
 }
 #[test]
 fn jump_apex_and_landing() {
