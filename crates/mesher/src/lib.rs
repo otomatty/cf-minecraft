@@ -764,9 +764,9 @@ mod tests {
             .chunks(48)
             .zip([blocks::STONE, blocks::OAK_LEAVES, blocks::WATER])
         {
-            for vertex in quads.chunks_exact(2) {
-                let face = ((vertex[0] >> 27) & 7) as usize;
-                assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[face]));
+            for &[position, material] in quads.as_chunks::<2>().0 {
+                let face = ((position >> 27) & 7) as usize;
+                assert_eq!(material & 4095, u32::from(blocks::info(state).tex[face]));
             }
         }
     }
