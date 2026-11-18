@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -165,6 +165,9 @@ pub enum C2S {
         z: i32,
     },
     DigAbort,
+    Attack {
+        id: u32,
+    },
     DropItem {
         dir: [f32; 3],
     },
@@ -251,6 +254,9 @@ pub enum S2C {
         z: f64,
         yaw: f32,
     },
+    MobHurt {
+        id: u32,
+    },
     EntityRemove {
         id: u32,
     },
@@ -307,6 +313,7 @@ pub mod id {
     pub const S2C_PLAYER_STATUS: u8 = 0x0c;
     pub const C2S_USE_BLOCK: u8 = 0x0b;
     pub const C2S_USE_BUCKET: u8 = 0x0f;
+    pub const C2S_ATTACK: u8 = 0x10;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -318,6 +325,7 @@ pub mod id {
     pub const S2C_ENTITY_COUNT: u8 = 0x09;
     pub const S2C_MOB_SPAWN: u8 = 0x0d;
     pub const S2C_MOB_MOVE: u8 = 0x0e;
+    pub const S2C_MOB_HURT: u8 = 0x0f;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -372,6 +380,10 @@ impl C2S {
                 w.i32(z);
             }
             C2S::DigAbort => w.u8(id::C2S_DIG_ABORT),
+            C2S::Attack { id: entity } => {
+                w.u8(id::C2S_ATTACK);
+                w.i32(entity as i32);
+            }
             C2S::DropItem { dir } => {
                 w.u8(id::C2S_DROP_ITEM);
                 for v in dir {
@@ -462,6 +474,9 @@ impl C2S {
                 z: r.i32()?,
             },
             id::C2S_DIG_ABORT => C2S::DigAbort,
+            id::C2S_ATTACK => C2S::Attack {
+                id: r.i32()? as u32,
+            },
             id::C2S_DROP_ITEM => {
                 let dir = [r.f32()?, r.f32()?, r.f32()?];
                 if !dir.iter().all(|v| v.is_finite()) {
@@ -609,6 +624,10 @@ impl S2C {
                 w.f64(*y);
                 w.f64(*z);
                 w.f32(*yaw);
+            }
+            S2C::MobHurt { id: entity } => {
+                w.u8(id::S2C_MOB_HURT);
+                w.i32(*entity as i32);
             }
             S2C::EntityRemove { id: entity } => {
                 w.u8(id::S2C_ENTITY_REMOVE);
@@ -787,6 +806,9 @@ impl S2C {
                     stage,
                 }
             }
+            id::S2C_MOB_HURT => S2C::MobHurt {
+                id: entity_id(&mut r)?,
+            },
             id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
                 id: entity_id(&mut r)?,
             },
@@ -1208,8 +1230,28 @@ mod tests {
     }
 
     #[test]
+    fn protocol_14_attack_and_mob_hurt_round_trip() {
+        let id = 0x8123_4567;
+        let attack = C2S::Attack { id };
+        let hurt = S2C::MobHurt { id };
+        let attack_bytes = attack.encode();
+        let hurt_bytes = hurt.encode();
+        assert_eq!(attack_bytes, [0x10, 0x81, 0x23, 0x45, 0x67]);
+        assert_eq!(hurt_bytes, [0x0f, 0x81, 0x23, 0x45, 0x67]);
+        assert_eq!(C2S::decode(&attack_bytes), Ok(attack));
+        assert_eq!(S2C::decode(&hurt_bytes), Ok(hurt));
+        for len in 0..5 {
+            assert!(C2S::decode(&attack_bytes[..len]).is_err());
+            assert!(S2C::decode(&hurt_bytes[..len]).is_err());
+        }
+        assert!(C2S::decode(&[0x10, 0, 0, 0, 1, 0]).is_err());
+        assert!(S2C::decode(&[0x0f, 0, 0, 0, 1, 0]).is_err());
+        assert!(S2C::decode(&[0x0f, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 13);
+        assert_eq!(PROTOCOL_VERSION, 14);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,

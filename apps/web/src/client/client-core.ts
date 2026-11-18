@@ -10,8 +10,9 @@ export interface ItemInfo { id: number; name: string; maxStack: number; block: n
 export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
-export interface MobEntity { id: number; kind: number; position: [number, number, number]; previous: [number, number, number]; yaw: number }
+export interface MobEntity { id: number; kind: number; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number }
 export interface ClientExports {
+	client_enc_attack(id: number): number;
 	client_enc_dig_start(x: number, y: number, z: number): number;
 	client_enc_dig_abort(): number;
 	client_mining_ticks(block: number, held: number): number;
@@ -100,7 +101,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -167,12 +168,13 @@ export class ClientCore {
 		const bytes = this.out(this.x.client_mobs());
 		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		const result: MobEntity[] = [];
-		// Nine bytes for ID, kind and yaw followed by six f64 coordinates.
-		for (let offset = 0; offset < bytes.length; offset += 57) {
+		// Nine bytes for ID, kind and yaw, six f64 coordinates and a u32 hurt sequence.
+		for (let offset = 0; offset < bytes.length; offset += 61) {
 			result.push({
 				id: view.getUint32(offset), kind: view.getUint8(offset + 4), yaw: view.getFloat32(offset + 5),
 				position: [view.getFloat64(offset + 9), view.getFloat64(offset + 17), view.getFloat64(offset + 25)],
 				previous: [view.getFloat64(offset + 33), view.getFloat64(offset + 41), view.getFloat64(offset + 49)],
+				hurt: view.getUint32(offset + 57),
 			});
 		}
 		return result;
@@ -406,6 +408,7 @@ export class ClientCore {
 		return this.out(this.x.client_enc_teleport(x, y, z));
 	}
 
+	encodeAttack(id: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_attack(id)); }
 	encodeDigStart(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_dig_start(x,y,z)); }
 	miningDrops(block: number, held: number): boolean { return Boolean(this.x.client_mining_drops(block, held)); }
 	miningTicks(block: number, held: number): number | null { const ticks = this.x.client_mining_ticks(block, held); return ticks < 0 ? null : ticks; }

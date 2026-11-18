@@ -347,3 +347,15 @@ max_stack = 1
 name = "obsidian"
 id = 61
 block = "obsidian"
+
+[[items]]
+name = "raw_beef"
+id = 62
+texture = "raw_beef"
+food = 3
+
+[[items]]
+name = "cooked_beef"
+id = 63
+texture = "cooked_beef"
+food = 8

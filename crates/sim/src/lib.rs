@@ -155,6 +155,7 @@ struct Client {
     joined: bool,
     view: i32,
     pos: [f64; 3],
+    yaw: f32,
     sent: BTreeSet<ChunkPos>,
     allow_teleport: bool,
     accepted_tick: i64,
@@ -647,6 +648,7 @@ impl Server {
                 joined: false,
                 view: DEFAULT_VIEW_DISTANCE,
                 pos,
+                yaw: 0.0,
                 sent: BTreeSet::new(),
                 allow_teleport,
                 accepted_tick: self.game_time,
@@ -716,6 +718,10 @@ impl Server {
     }
 
     pub fn tick(&mut self) {
+        // Expire immunity before processing attacks, so a new hit keeps all ten ticks.
+        for mob in self.mobs.values_mut() {
+            mob.hurt_ticks = mob.hurt_ticks.saturating_sub(1);
+        }
         let pending = std::mem::take(&mut self.pending);
         for (id, packet) in pending {
             self.apply(id, packet);
@@ -771,7 +777,7 @@ impl Server {
         if self.clients[&id].health.vitals.dead
             && !matches!(
                 packet,
-                C2S::Hello { .. } | C2S::Respawn | C2S::UseBucket { .. }
+                C2S::Hello { .. } | C2S::Respawn | C2S::UseBucket { .. } | C2S::Attack { .. }
             )
         {
             self.stats.packets_rejected += 1;
@@ -802,6 +808,7 @@ impl Server {
             C2S::Respawn => self.respawn(id),
             C2S::UseItem => self.use_item(id),
             C2S::StopUsingItem => self.stop_using_item(id),
+            C2S::Attack { id: target } => self.attack(id, target),
             C2S::DigAbort => {
                 if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
                     self.stats.packets_rejected += 1;
@@ -990,11 +997,11 @@ impl Server {
                 }
                 client.inventory_dirty |= before != client.inventory;
             }
-            C2S::PlayerPos { x, y, z, .. } => {
-                self.move_player(id, [x, y, z], false);
+            C2S::PlayerPos { x, y, z, yaw, .. } => {
+                self.move_player(id, [x, y, z], Some(yaw));
             }
             C2S::Teleport { x, y, z } => {
-                self.move_player(id, [x, y, z], true);
+                self.move_player(id, [x, y, z], None);
             }
             C2S::SetBlock { x, y, z, state } => {
                 let old = self.world.get_block(x, y, z);
@@ -1134,6 +1141,47 @@ impl Server {
         }
     }
 
+    fn attack(&mut self, attacker: u32, id: u32) {
+        let client = self.clients.get_mut(&attacker).unwrap();
+        if !client.joined || client.health.vitals.dead {
+            return;
+        }
+        let Some(mob) = self.mobs.get_mut(&id) else {
+            return;
+        };
+        if mob.hurt_ticks != 0 || !mob.within_attack_reach(client.pos) {
+            return;
+        }
+
+        let tool = client
+            .inventory
+            .selected_stack()
+            .and_then(|stack| items::info(stack.item)?.tool);
+        let damage = tool.map_or(1, |tool| {
+            tool.tier
+                + match tool.kind {
+                    items::ToolKind::Axe => 2,
+                    items::ToolKind::Pickaxe => 1,
+                    items::ToolKind::Shovel | items::ToolKind::Hoe => 0,
+                }
+        });
+        mob.hurt(&self.world, damage, client.pos, client.yaw);
+        if self.game_mode == GameMode::Survival {
+            client.health.add_exhaustion(40);
+        }
+        if mob.health == 0 {
+            let mob = self.mobs.remove(&id).unwrap();
+            self.drop_mob_loot(id, mob);
+        } else {
+            let packet = S2C::MobHurt { id }.encode();
+            for (&viewer, client) in &self.clients {
+                if client.visible_mobs.contains_key(&id) {
+                    self.outbox.push((viewer, packet.clone()));
+                }
+            }
+        }
+    }
+
     fn add_mining_exhaustion(&mut self, id: u32) {
         let health = &mut self.clients.get_mut(&id).unwrap().health;
         if self.game_mode == GameMode::Survival && !health.vitals.dead {
@@ -1214,7 +1262,7 @@ impl Server {
             .push((id, S2C::PlayerCorrect { x, y, z }.encode()));
     }
 
-    fn move_player(&mut self, id: u32, pos: [f64; 3], teleport: bool) {
+    fn move_player(&mut self, id: u32, pos: [f64; 3], yaw: Option<f32>) {
         let Some(client) = self.clients.get_mut(&id) else {
             return;
         };
@@ -1234,15 +1282,13 @@ impl Server {
         // Bound Y too: collision cell iteration must remain finite and bounded.
         let finite = valid_position(pos);
         let survival = self.game_mode == GameMode::Survival;
-        if finite && teleport && client.allow_teleport {
+        if finite && yaw.is_none() && client.allow_teleport {
             client.relocate(pos, self.game_time);
             return;
         }
-        if finite
-            && !teleport
-            && horizontal <= client.horizontal_budget
-            && vertical <= client.vertical_budget
-        {
+        if let Some(yaw) = yaw.filter(|_| {
+            finite && horizontal <= client.horizontal_budget && vertical <= client.vertical_budget
+        }) {
             let movement = if survival {
                 client
                     .survival_movement
@@ -1255,6 +1301,9 @@ impl Server {
             {
                 let prev = client.pos;
                 client.pos = pos;
+                if yaw.is_finite() {
+                    client.yaw = yaw;
+                }
                 client.accepted_tick = self.game_time;
                 client.horizontal_budget -= horizontal;
                 client.vertical_budget -= vertical;
@@ -1769,6 +1818,9 @@ impl Server {
                 for v in pos {
                     h.bytes(&v.to_be_bytes());
                 }
+            }
+            if !self.mobs.is_empty() {
+                h.bytes(&client.yaw.to_bits().to_be_bytes());
             }
             client.health.hash_into(&mut h);
             client.survival_movement.hash_into(&mut h);

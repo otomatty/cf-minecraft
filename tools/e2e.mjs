@@ -1929,6 +1929,111 @@ async function mobs() {
 	} finally { await page.close(); }
 }
 
+async function mobCombat() {
+	const { page, errors } = await open(`server=local&world=e2e-mob-combat-${run}&mode=survival&gen=flat&seed=2026&view=4&time=6000`);
+	try {
+		const stats = await settle(page, "mobCombat", chunksInView(4));
+		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "mobCombat: starts in survival Flat");
+		await resumePointerLock(page, "mobCombat: initial pointer lock");
+		await page.mouse.move(640, 360);
+		const spawned = await page.waitForFunction(
+			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 0),
+			{ timeout: 60000, polling: 100 },
+		);
+		const { id, hurt } = await spawned.jsonValue();
+		await spawned.dispose();
+		check(hurt === 0, "mobCombat: cow starts unhurt", `id ${id}`);
+
+		const blocks = new Map();
+		let lastPosition;
+		let clicks = 0;
+		let removed = false;
+		const deadline = Date.now() + 30000;
+		while (Date.now() < deadline) {
+			const aim = await page.evaluate(id => {
+				const api = window.__mc;
+				const { mobs } = api.stats();
+				const cow = mobs.find(mob => mob.id === id);
+				if (!cow) return null;
+				const [x, y, z] = cow.position;
+				// At this distance the grass behind the cow is also within the ray's reach.
+				const distance = 2.25, eye = 1.62, body = 0.785;
+				const length = Math.hypot(distance, eye - body);
+				for (const [dx, dz, yaw] of [[-1, 0, 90], [0, 1, 0], [1, 0, 270], [0, -1, 180]]) {
+					const blocked = mobs.some(other => {
+						if (other.id === id) return false;
+						const ox = other.position[0] - x, oz = other.position[2] - z;
+						const towardCamera = -(ox * dx + oz * dz);
+						return towardCamera > -0.45 && towardCamera < distance + 0.45 && Math.abs(ox * dz - oz * dx) < 0.65;
+					});
+					if (blocked) continue;
+					const origin = [x - dx * distance, y + eye, z - dz * distance];
+					const direction = [dx * distance / length, (body - eye) / length, dz * distance / length];
+					const hit = api.raycast(origin, direction, 5);
+					if (!hit) continue;
+					const block = [hit.x, hit.y, hit.z];
+					const state = api.getBlock(...block);
+					if (state !== api.stateId("grass_block")) continue;
+					// The local dev server permits setCamera teleports, including in survival.
+					api.setCamera(...origin, yaw, Math.atan2(eye - body, distance) * 180 / Math.PI);
+					return { position: cow.position, block, state };
+				}
+				return false;
+			}, id);
+			if (aim === null) {
+				removed = true;
+				break;
+			}
+			if (aim) {
+				lastPosition = aim.position;
+				const key = aim.block.join(",");
+				if (!blocks.has(key)) blocks.set(key, { block: aim.block, state: aim.state });
+				await page.mouse.down();
+				try {
+					if (clicks === 0) {
+						await new Promise(resolve => setTimeout(resolve, 100));
+						check(await page.evaluate(() => window.__mc.stats().dig === null), "mobCombat: the first attack does not start mining");
+					}
+				} finally {
+					await page.mouse.up();
+				}
+				clicks++;
+				if (clicks === 1) {
+					await page.waitForFunction(id => window.__mc.stats().mobs.some(mob => mob.id === id && mob.hurt > 0),
+						{ timeout: 3000, polling: 50 }, id);
+					check(true, "mobCombat: the first click increases hurt");
+				}
+			}
+			await new Promise(resolve => setTimeout(resolve, 600));
+		}
+		check(removed && clicks > 1, "mobCombat: repeated attacks remove the same cow", `id ${id}, ${clicks} clicks`);
+		check(blocks.size > 0 && await page.evaluate(blocks => blocks.every(({ block, state }) => window.__mc.getBlock(...block) === state), [...blocks.values()]),
+			"mobCombat: the grass blocks behind the cow are still intact");
+		if (!removed || !lastPosition) throw new Error(`mobCombat: cow ${id} was not defeated within 30 seconds`);
+
+		const beef = 62;
+		const dropped = await page.waitForFunction((item, position) => window.__mc.stats().entities.find(entity =>
+			entity.item === item && Math.hypot(...entity.position.map((value, axis) => value - position[axis])) < 2),
+		{ timeout: 5000, polling: 50 }, beef, lastPosition);
+		const drop = await dropped.jsonValue();
+		await dropped.dispose();
+		check(drop.count >= 1 && drop.count <= 3, "mobCombat: cow drops 1–3 raw beef nearby", `${drop.count} raw beef`);
+		await page.evaluate(({ drop, feetY }) => {
+			window.__mc.setCamera(drop.position[0], feetY + 1.62, drop.position[2], 0, 0);
+		}, { drop, feetY: lastPosition[1] });
+		await page.waitForFunction(({ id, item, count }) => {
+			const { entities, inventory } = window.__mc.stats();
+			return !entities.some(entity => entity.id === id)
+				&& inventory.reduce((sum, stack) => sum + (stack?.item === item ? stack.count : 0), 0) === count;
+		}, { timeout: 5000, polling: 50 }, drop);
+		check(true, "mobCombat: the dropped raw beef is picked up into the inventory");
+		check(errors.length === 0, "mobCombat: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "mobCombat", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -1937,6 +2042,7 @@ try {
 	await waterFlow();
 	await lavaFlow();
 	await mobs();
+	await mobCombat();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

@@ -1,7 +1,49 @@
+import type { RayHit } from "./client-core.ts";
+
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
 export function interpolateEntity(previous: readonly number[], current: readonly number[], elapsedMs: number): [number, number, number] {
 	const t = Math.max(0, Math.min(1, elapsedMs / 50));
 	return [0, 1, 2].map(axis => previous[axis] + (current[axis] - previous[axis]) * t) as [number, number, number];
+}
+
+interface CowPosition {
+	id: number;
+	position: readonly [number, number, number];
+}
+
+/** Find the first cow hit by a unit ray, using the server's foot-centered hitbox. */
+export function aimedMob(origin: readonly number[], dir: readonly number[], cows: readonly CowPosition[], reach: number): { id: number; distance: number } | null {
+	let closest: { id: number; distance: number } | null = null;
+	for (const { id, position: [x, y, z] } of cows) {
+		const min = [x - 0.45, y, z - 0.45];
+		const max = [x + 0.45, y + 1.3, z + 0.45];
+		let near = 0;
+		let far = reach;
+		for (let axis = 0; axis < 3; axis++) {
+			if (dir[axis] === 0) {
+				if (origin[axis] < min[axis] || origin[axis] > max[axis]) far = -1;
+			} else {
+				const a = (min[axis] - origin[axis]) / dir[axis];
+				const b = (max[axis] - origin[axis]) / dir[axis];
+				near = Math.max(near, Math.min(a, b));
+				far = Math.min(far, Math.max(a, b));
+			}
+			if (near > far) break;
+		}
+		if (near <= far && (!closest || near < closest.distance)) closest = { id, distance: near };
+	}
+	return closest;
+}
+
+export function mobBeforeBlock(origin: readonly number[], dir: readonly number[], cows: readonly CowPosition[], reach: number, block: RayHit | null): number | null {
+	const mob = aimedMob(origin, dir, cows, reach);
+	if (!mob || !block) return mob?.id ?? null;
+	// Recover the ray distance from the face of the selection box hit by Wasm.
+	const axis = [1, 2, 0][block.face >> 1];
+	const cell = [block.x, block.y, block.z];
+	const face = (block.face & 1 ? block.max : block.min)[axis];
+	const distance = (cell[axis] + face - origin[axis]) / dir[axis];
+	return mob.distance < distance ? mob.id : null;
 }
 
 export interface RenderItem {
@@ -51,6 +93,7 @@ export interface RenderCow {
 	position: [number, number, number];
 	yaw: number;
 	moving: boolean;
+	hurt: boolean;
 	light: RenderItem["light"];
 }
 
@@ -93,10 +136,12 @@ export function cowVertices(
 			});
 			for (const [face, indices] of faces.entries()) {
 				const texture = legSwing ? textures.leg : boxIndex === 1 && face === 3 ? textures.face : textures.hide;
+				// The item shader reads the sign as the hurt flag and the magnitude as face shading.
+				const shade = [0.5, 1, 0.8, 0.8, 0.6, 0.6][face] * (cow.hurt ? -1 : 1);
 				for (const i of [0, 1, 2, 0, 2, 3]) {
 					vertices.push(
 						...points[indices[i]], [0, 1, 1, 0][i], [1, 1, 0, 0][i],
-						[0.5, 1, 0.8, 0.8, 0.6, 0.6][face], texture,
+						shade, texture,
 						(cow.light[1] + 0.5) / 16, (cow.light[0] + 0.5) / 16,
 					);
 				}

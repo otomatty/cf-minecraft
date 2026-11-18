@@ -6,6 +6,7 @@ use std::{
 
 const BLOCKS: &str = include_str!("../../../data/registry/blocks.toml");
 const BIOMES: &str = include_str!("../../../data/registry/biomes.toml");
+const LOOT: &str = include_str!("../../../data/registry/loot.toml");
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // Exercise the exact build pipeline without changing checked-in data.
@@ -46,6 +47,17 @@ fn generate_smelting_fixture(
     recipes: &str,
     smelting: &str,
 ) -> Result<String, String> {
+    generate_loot_fixture(blocks, biomes, items, recipes, smelting, LOOT)
+}
+
+fn generate_loot_fixture(
+    blocks: &str,
+    biomes: &str,
+    items: &str,
+    recipes: &str,
+    smelting: &str,
+    loot: &str,
+) -> Result<String, String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/registry-test-{}-{}",
         std::process::id(),
@@ -57,6 +69,7 @@ fn generate_smelting_fixture(
     fs::write(dir.join("items.toml"), items).unwrap();
     fs::write(dir.join("recipes.toml"), recipes).unwrap();
     fs::write(dir.join("smelting.toml"), smelting).unwrap();
+    fs::write(dir.join("loot.toml"), loot).unwrap();
     let output = std::process::Command::new(env!("REGISTRY_BUILD_SCRIPT"))
         .arg("--registry-fixture")
         .arg(&dir)
@@ -577,5 +590,26 @@ fn smelting_and_fuel_validation() {
             &items.replacen("fuel = 320", &format!("fuel = {value}"), 1)
         )
         .is_err());
+    }
+}
+
+#[test]
+fn loot_requires_known_mobs_and_items_and_an_ordered_range() {
+    for (from, to, message) in [
+        ("cow", "unknown", "unknown mob unknown"),
+        ("raw_beef", "unknown", "unknown item unknown"),
+        ("max = 3", "max = 0", "min must be <= max"),
+    ] {
+        let error = generate_loot_fixture(
+            BLOCKS,
+            BIOMES,
+            include_str!("../../../data/registry/items.toml"),
+            include_str!("../../../data/registry/recipes.toml"),
+            include_str!("../../../data/registry/smelting.toml"),
+            &LOOT.replacen(from, to, 1),
+        )
+        .unwrap_err();
+        assert!(error.contains("loot.toml:"), "{error}");
+        assert!(error.contains(message), "{error}");
     }
 }

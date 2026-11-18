@@ -216,6 +216,17 @@ const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter
 		if (y < 8 && (x + y === 12 || x + y === 16)) return [251, 211, 139];
 		return shade([222, 147, 67], 1.1 - y * .018);
 	},
+	raw_beef: () => (x, y) => {
+		if (x + y <= 12 || (x === 7 && y >= 7 && y <= 9)) return [255, 234, 219];
+		if (y >= 11 || x + y >= 22) return [143, 38, 55];
+		if (x - y === 2 || x - y === 3) return [230, 116, 131];
+		return [194, 60, 80];
+	},
+	cooked_beef: () => (x, y) => {
+		if (y >= 11 || x + y >= 22) return [92, 45, 30];
+		if (x + y === 15 || x + y === 19) return [122, 58, 34];
+		return y <= 6 ? [198, 130, 78] : [163, 90, 52];
+	},
 	apple: () => (x, y) => {
 		if (y <= 4 && x >= 9) return [85, 157, 58];
 		if (y <= 4) return [111, 67, 39];
@@ -255,6 +266,11 @@ function equipmentTexture(name: string): Uint8Array | undefined {
 				case "bread":
 					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12 && x + y >= 8 && x - y <= 7
 						&& x + y <= 24;
+					break;
+				case "raw_beef":
+				case "cooked_beef":
+					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12
+						&& x + y >= 10 && x + y <= 24 && x - y <= 7 && y - x <= 7;
 					break;
 				case "apple":
 					visible = (x === 8 && y >= 2 && y <= 4)

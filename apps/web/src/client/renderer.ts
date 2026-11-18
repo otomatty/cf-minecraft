@@ -508,8 +508,11 @@ export class Renderer {
 }
 override renderLayer`);
 		if (itemVertexShader === terrainSource) throw new Error("Item shader vertex replacement did not match terrain shader");
-		const itemShader = itemVertexShader.replace("pixel.a < 0.5", "pixel.a <= 0.0");
-		if (itemShader === itemVertexShader) throw new Error("Item shader alpha replacement did not match terrain shader");
+		const itemAlphaShader = itemVertexShader.replace("pixel.a < 0.5", "pixel.a <= 0.0");
+		if (itemAlphaShader === itemVertexShader) throw new Error("Item shader alpha replacement did not match terrain shader");
+		const itemShader = itemAlphaShader.replace("color = color * in.shade", `if (in.shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
+	color = color * abs(in.shade)`);
+		if (itemShader === itemAlphaShader) throw new Error("Item shader hurt tint replacement did not match terrain shader");
 		const itemModule = device.createShaderModule({ code: itemShader });
 		const itemPipeline = (cracks: boolean): GPURenderPipeline => device.createRenderPipeline({
 			layout: pipelineLayout,

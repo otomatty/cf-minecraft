@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cowVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderCow, type RenderItem } from "./entities.ts";
+import { aimedMob, cowVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, type RenderCow, type RenderItem } from "./entities.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -15,6 +15,31 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 	const a=[29999998,2,-29999998],b=[29999998.25,3,-29999998.5];
 	assert.deepEqual(interpolateEntity(a,b,-5),a); assert.deepEqual(interpolateEntity(a,b,100),b);
 	assert.deepEqual(interpolateEntity(a,b,25),[29999998.125,2.5,-29999998.25]);
+});
+
+test("cow targeting uses the nearest forward hitbox within reach", () => {
+	const origin = [0, 1.62, 0];
+	const dir = [0, 0, 1];
+	const near = { id: 1, position: [0, 0.5, 2] } as const;
+	const far = { id: 2, position: [0, 0.5, 4] } as const;
+	assert.deepEqual(aimedMob(origin, dir, [near], 5), { id: 1, distance: 1.55 });
+	assert.equal(aimedMob(origin, dir, [far, near], 5)?.id, near.id);
+	assert.equal(aimedMob(origin, dir, [
+		{ id: 3, position: [0, 0.5, -2] },
+		{ id: 4, position: [0, 0.5, 5.5] },
+		{ id: 5, position: [0.5, 0.5, 2] },
+		{ id: 6, position: [0, 0, 2] },
+	], 5), null);
+});
+
+test("cow targeting gives the block priority at or before its hitbox", () => {
+	const cow = { id: 1, position: [0.5, 0, 3.5] } as const;
+	const origin = [0.5, 1, 6], dir = [0, 0, -1];
+	const block = { x: 0, y: 0, z: 4, face: 3, hitY: 1, min: [0, 0, 0], max: [1, 1, 1] } as const;
+	assert.equal(mobBeforeBlock(origin, dir, [cow], 5, block), null);
+	assert.equal(mobBeforeBlock(origin, dir, [cow], 5, { ...block, z: 2 }), cow.id);
+	const tiedCow = { id: 2, position: [0.5, 0, 1.55] } as const;
+	assert.equal(mobBeforeBlock(origin, dir, [tiedCow], 5, { ...block, z: 1 }), null);
 });
 test("cube vertices remain camera relative, bounded, and use lightmap coordinates", () => {
 	const vertices=itemVertices([{position:[29999998,1,-29999998],texture:7,light:[15,3]}],[29999998,1,-29999998],0);
@@ -85,7 +110,7 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 });
 
 test("cow mesh has six boxes, turns with yaw, and swings diagonal legs together", () => {
-	const cow: RenderCow = { position: [29999998.25, 1, 0], yaw: 0, moving: false, light: [15, 3] };
+	const cow: RenderCow = { position: [29999998.25, 1, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 	const camera = [29999998, 1, 0];
 	const textures = { hide: 5, face: 6, leg: 7 };
 	const quarterStride = Math.PI * 50;
@@ -109,7 +134,7 @@ test("cow mesh has six boxes, turns with yaw, and swings diagonal legs together"
 	assert.deepEqual(cowVertices([{ ...cow, moving: true }], camera, 0, textures), still);
 });
 
-test("WASM mob records track yaw and previous position and clear on removal and reset", async () => {
+test("WASM mob records track hurt, yaw and previous position and clear on removal and reset", async () => {
 	const { readFileSync } = await import("node:fs");
 	const { ClientCore, S2C } = await import("./client-core.ts");
 	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
@@ -128,13 +153,16 @@ test("WASM mob records track yaw and previous position and clear on removal and 
 	const position = [29999998.25, 1, -3.5], moved = [29999998.5, 1, -3.5];
 	const spawn = packet(S2C.MobSpawn, position, 0, 0);
 	assert.equal(core.packet(spawn), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0 }]);
+	const entityPacket = new Uint8Array(5);
+	new DataView(entityPacket.buffer).setUint32(1, id);
+	entityPacket[0] = S2C.MobHurt;
+	assert.equal(core.packet(entityPacket), S2C.MobHurt);
 	assert.equal(core.packet(packet(S2C.MobMove, moved, 270)), S2C.MobMove);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270 }]);
-	const remove = new Uint8Array(5);
-	remove[0] = S2C.EntityRemove;
-	new DataView(remove.buffer).setUint32(1, id);
-	core.packet(remove);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1 }]);
+	assert.deepEqual([...core.encodeAttack(id)], [0x10, 0x80, 0, 0, 2]);
+	entityPacket[0] = S2C.EntityRemove;
+	core.packet(entityPacket);
 	assert.deepEqual(core.mobs, []);
 	core.packet(spawn);
 	core.resetWorld();

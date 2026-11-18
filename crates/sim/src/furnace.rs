@@ -151,6 +151,21 @@ mod tests {
         assert_eq!(f.slots[2], stack("iron_ingot", 4));
     }
     #[test]
+    fn smelts_raw_beef_into_cooked_beef() {
+        let mut f = Furnace {
+            slots: [stack("raw_beef", 1), stack("coal", 1), None],
+            ..Furnace::default()
+        };
+        for _ in 1..smelting::SMELT_TICKS {
+            f.tick();
+            assert_eq!(f.slots[2], None);
+        }
+        f.tick();
+        assert_eq!(f.slots[0], None);
+        assert_eq!(f.slots[2], stack("cooked_beef", 1));
+    }
+
+    #[test]
     fn short_fuel_resets_progress_and_blocked_output_does_not_consume_fuel() {
         let mut f = Furnace {
             slots: [stack("iron_ore", 3), stack("stick", 1), None],

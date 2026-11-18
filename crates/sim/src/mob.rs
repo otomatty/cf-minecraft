@@ -5,12 +5,15 @@ use jmath::sin_table::{cos, sin};
 use physics::{BlockWorld, CollisionWorld, Input, Player};
 pub use protocol::MobKind;
 use protocol::S2C;
-use world::{blocks, Fnv64, World, HEIGHT, MIN_Y};
+use world::{blocks, items, Fnv64, World, HEIGHT, MIN_Y};
 
-use crate::{health::VOID_Y, Server};
+use crate::{health::VOID_Y, Server, MAX_REACH};
 
 const COW_WIDTH: f64 = 0.9;
 const COW_HEIGHT: f64 = 1.3;
+const COW_HEALTH: u8 = 10;
+const HURT_TICKS: u8 = 10;
+const LOOT_SALT: u64 = 7;
 const WALK_FORWARD: f32 = 0.5;
 const WALK_CHANCE: u64 = 120;
 const WALK_TICKS: u8 = 100;
@@ -34,6 +37,8 @@ pub struct Mob {
     pub kind: MobKind,
     pub yaw: f32,
     pub age: u32,
+    pub health: u8,
+    pub hurt_ticks: u8,
     body: Player,
     ai: Wander,
 }
@@ -44,6 +49,8 @@ impl Mob {
             kind: MobKind::Cow,
             yaw: 0.0,
             age: 0,
+            health: COW_HEALTH,
+            hurt_ticks: 0,
             body: Player::with_size(pos, COW_WIDTH, COW_HEIGHT),
             ai: Wander::Idle,
         }
@@ -58,6 +65,42 @@ impl Mob {
         (x >> 4, z >> 4)
     }
 
+    pub(crate) fn within_attack_reach(&self, mut eye: [f64; 3]) -> bool {
+        eye[1] += physics::EYE_HEIGHT;
+        let bounds = self.body.bounds();
+        let [dx, dy, dz] = std::array::from_fn(|axis| {
+            eye[axis] - eye[axis].clamp(bounds.min[axis], bounds.max[axis])
+        });
+        dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
+    }
+
+    pub(crate) fn hurt(&mut self, world: &World, damage: u8, attacker: [f64; 3], yaw: f32) {
+        self.health = self.health.saturating_sub(damage);
+        self.hurt_ticks = HURT_TICKS;
+        self.ai = Wander::Idle;
+
+        let [x, _, z] = self.pos();
+        let (dx, dz) = (x - attacker[0], z - attacker[2]);
+        let (dx, dz) = if dx == 0.0 && dz == 0.0 {
+            // Reduce oversized reported angles before indexing the sine table.
+            let yaw = f64::from(yaw);
+            let degrees = (yaw - (yaw / 360.0).floor() * 360.0).clamp(0.0, 360.0);
+            let radians = degrees as f32 * (std::f32::consts::PI / 180.0);
+            (-f64::from(sin(radians)), f64::from(cos(radians)))
+        } else {
+            (dx, dz)
+        };
+        // Scale the components first so that very small offsets do not underflow.
+        let largest = dx.abs().max(dz.abs());
+        let (dx, dz) = (dx / largest, dz / largest);
+        let scale = 0.4 / (dx * dx + dz * dz).sqrt();
+        self.body.velocity[0] = dx * scale;
+        self.body.velocity[2] = dz * scale;
+        if self.body.is_grounded(&cow_collisions(world)) {
+            self.body.velocity[1] = 0.36;
+        }
+    }
+
     fn stop(&mut self) {
         self.ai = Wander::Idle;
         self.body.velocity[0] = 0.0;
@@ -68,25 +111,12 @@ impl Mob {
         self.age = self.age.saturating_add(1);
         let before = self.pos();
         let [x, y, z] = before;
-        let collisions = BlockWorld(|x, y, z| {
-            if (MIN_Y..MIN_Y + HEIGHT).contains(&y) {
-                // The shared physics treats fluids as swimmable. For cows only water is swimmable.
-                world.get_block(x, y, z).map(|state| {
-                    if blocks::is_lava(state) {
-                        blocks::AIR
-                    } else {
-                        state
-                    }
-                })
-            } else {
-                Some(blocks::AIR)
-            }
-        });
+        let collisions = cow_collisions(world);
         let mut input = Input {
             jump: physics::in_water(&collisions, before),
             ..Input::default()
         };
-        if self.ai == Wander::Idle {
+        if self.ai == Wander::Idle && self.hurt_ticks == 0 {
             let random = sample(seed, id, time, 0);
             if random.is_multiple_of(WALK_CHANCE) {
                 let [dx, dz] = direction(sample(seed, id, time, 1));
@@ -166,6 +196,8 @@ impl Mob {
 
     fn hash_into(&self, h: &mut Fnv64) {
         h.u8(self.kind.wire_id());
+        h.u8(self.health);
+        h.u8(self.hurt_ticks);
         for v in self.pos().into_iter().chain(self.body.velocity) {
             h.bytes(&v.to_bits().to_be_bytes());
         }
@@ -190,6 +222,23 @@ impl Mob {
             }
         }
     }
+}
+
+fn cow_collisions(world: &World) -> impl CollisionWorld + '_ {
+    BlockWorld(|x, y, z| {
+        if (MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+            // The shared physics treats fluids as swimmable. For cows only water is swimmable.
+            world.get_block(x, y, z).map(|state| {
+                if blocks::is_lava(state) {
+                    blocks::AIR
+                } else {
+                    state
+                }
+            })
+        } else {
+            Some(blocks::AIR)
+        }
+    })
 }
 
 /// None means stop. A solid block at foot level can ask physics to jump.
@@ -326,7 +375,31 @@ impl Server {
         &self.mobs
     }
 
-    fn spawn_cow(&mut self, pos: [f64; 3]) {
+    pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob) {
+        let loot = match mob.kind {
+            MobKind::Cow => items::COW_LOOT,
+        };
+        let [x, y, z] = mob.pos();
+        for (index, &(item, min, max)) in loot.iter().enumerate() {
+            let range = u64::from(max) - u64::from(min) + 1;
+            let roll = sample(self.seed, id, self.game_time, LOOT_SALT + index as u64);
+            let mut count = min + (roll % range) as u8;
+            let max_stack = items::info(item).unwrap().max_stack;
+            while count != 0 {
+                let stack = count.min(max_stack);
+                self.spawn_item(
+                    item,
+                    stack,
+                    [x, y + COW_HEIGHT / 2.0, z],
+                    [0.0, 0.1, 0.0],
+                    10,
+                );
+                count -= stack;
+            }
+        }
+    }
+
+    pub(super) fn spawn_cow(&mut self, pos: [f64; 3]) {
         if let Some(id) = self.allocate_entity_id() {
             self.mobs.insert(id, Mob::cow(pos));
         }
@@ -699,6 +772,251 @@ mod tests {
         server
     }
 
+    fn combat(mode: GameMode) -> (Server, u32) {
+        let pos = [5.5, 1.0, 5.5];
+        let mut server = Server::new(2026, Generator::Flat);
+        server.game_mode = mode;
+        server.world = arena(16);
+        server.connect_at(1, false, Some(pos), None);
+        server.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        server.tick();
+        let id = server.next_entity_id;
+        server.spawn_cow([pos[0] + 2.0, pos[1], pos[2]]);
+        server.tick();
+        server.take_outbox();
+        (server, id)
+    }
+
+    fn attack(server: &mut Server, id: u32) {
+        server.handle_packet(1, &C2S::Attack { id }.encode());
+    }
+
+    fn hold(server: &mut Server, item: &str) {
+        server
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(
+                0,
+                Some(crate::Stack {
+                    item: items::by_name(item).unwrap(),
+                    count: 1,
+                }),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn bare_hand_hits_once_per_ten_ticks_and_notifies_spawned_viewers() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.connect(2);
+        let viewer = server.clients.get_mut(&2).unwrap();
+        viewer.joined = true;
+        viewer.sent.insert((0, 0));
+        server.sync_mobs();
+        server.take_outbox();
+        server.connect(3);
+        server.clients.get_mut(&3).unwrap().joined = true;
+        assert!(!server.clients[&3].visible_mobs.contains_key(&id));
+
+        attack(&mut server, id);
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(
+            (server.mobs[&id].health, server.mobs[&id].hurt_ticks),
+            (9, 10)
+        );
+        let hurts: Vec<_> = server
+            .take_outbox()
+            .into_iter()
+            .filter_map(|(client, bytes)| match S2C::decode(&bytes).unwrap() {
+                S2C::MobHurt { id } => Some((client, id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hurts, [(1, id), (2, id)]);
+
+        for remaining in (1..HURT_TICKS).rev() {
+            attack(&mut server, id);
+            server.tick();
+            assert_eq!(
+                (server.mobs[&id].health, server.mobs[&id].hurt_ticks),
+                (9, remaining)
+            );
+        }
+        assert!(server
+            .take_outbox()
+            .iter()
+            .all(|(_, bytes)| { !matches!(S2C::decode(bytes), Ok(S2C::MobHurt { .. })) }));
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(
+            (server.mobs[&id].health, server.mobs[&id].hurt_ticks),
+            (8, 10)
+        );
+    }
+
+    #[test]
+    fn attack_damage_uses_the_selected_item_in_packet_order_in_both_modes() {
+        let tiers = ["wooden", "stone", "copper", "iron"];
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut server, id) = combat(mode);
+            for (kind, damages) in [
+                ("axe", [3, 4, 5, 6]),
+                ("pickaxe", [2, 3, 4, 5]),
+                ("shovel", [1, 2, 3, 4]),
+                ("hoe", [1, 2, 3, 4]),
+            ] {
+                for (tier, damage) in tiers.into_iter().zip(damages) {
+                    let pos = [7.5, 1.0, 5.5];
+                    server.mobs.insert(id, Mob::cow(pos));
+                    let item = items::by_name(&format!("{tier}_{kind}")).unwrap();
+                    server
+                        .clients
+                        .get_mut(&1)
+                        .unwrap()
+                        .inventory
+                        .set(1, Some(crate::Stack { item, count: 1 }))
+                        .unwrap();
+                    server.handle_packet(1, &C2S::SelectSlot { slot: 1 }.encode());
+                    attack(&mut server, id);
+                    server.handle_packet(1, &C2S::SelectSlot { slot: 0 }.encode());
+                    server.tick();
+                    assert_eq!(server.mobs[&id].health, 10 - damage, "{tier}_{kind}");
+                }
+            }
+            hold(&mut server, "raw_beef");
+            server.mobs.insert(id, Mob::cow([7.5, 1.0, 5.5]));
+            attack(&mut server, id);
+            server.tick();
+            assert_eq!(server.mobs[&id].health, 9);
+        }
+    }
+
+    #[test]
+    fn attack_checks_eye_to_box_reach_and_ignores_invalid_targets_or_players() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let rejected = server.stats.packets_rejected;
+        server.mobs.insert(id, Mob::cow([14.0, 1.0, 5.5]));
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(server.mobs[&id].health, 10);
+
+        // The center is outside reach, but the nearest point on the box is inside.
+        server.mobs.insert(id, Mob::cow([13.75, 1.0, 5.5]));
+        attack(&mut server, 0);
+        attack(&mut server, id + 1);
+        server.connect(2);
+        server.handle_packet(2, &C2S::Attack { id }.encode());
+        server.clients.get_mut(&1).unwrap().health.vitals.dead = true;
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(server.mobs[&id].health, 10);
+        assert_eq!(server.stats.packets_rejected, rejected);
+
+        server.clients.get_mut(&1).unwrap().health.vitals.dead = false;
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(server.mobs[&id].health, 9);
+    }
+
+    #[test]
+    fn knockback_replaces_horizontal_velocity_and_lifts_only_grounded_cows() {
+        let world = arena(16);
+        let mut cow = walking();
+        cow.body.on_ground = false; // A newly spawned cow can be supported before its first landing.
+        cow.body.velocity = [-0.1, -0.2, -0.3];
+        cow.hurt(&world, 1, [-0.5, 1.0, -2.0], 0.0);
+        assert_eq!(cow.ai, Wander::Idle);
+        let [vx, vy, vz] = cow.body.velocity;
+        assert!((vx - 0.24).abs() < 1e-12);
+        assert!((vz - 0.32).abs() < 1e-12);
+        assert_eq!(vy, 0.36);
+
+        let (mut server, id) = combat(GameMode::Creative);
+        let [x, y, z] = server.clients[&1].pos;
+        let mut cow = Mob::cow([x, y + 1.0, z]);
+        cow.body.velocity[1] = 0.2;
+        server.mobs.insert(id, cow);
+        server.handle_packet(
+            1,
+            &C2S::PlayerPos {
+                x,
+                y,
+                z,
+                yaw: 90.0,
+                pitch: 0.0,
+            }
+            .encode(),
+        );
+        server.tick();
+        // Apply directly to inspect the impulse before movement and friction.
+        let upward = server.mobs[&id].body.velocity[1];
+        server.apply(1, C2S::Attack { id });
+        let [vx, vy, vz] = server.mobs[&id].body.velocity;
+        assert!((vx + 0.4).abs() < 1e-12);
+        assert!(vz.abs() < 1e-12);
+        assert_eq!(vy, upward);
+        let cow = server.mobs[&id].clone();
+        server.apply(1, C2S::Attack { id });
+        assert_eq!(server.mobs[&id], cow);
+
+        let mut cow = Mob::cow([0.0; 3]);
+        cow.hurt(&world, 1, [0.0; 3], f32::MIN);
+        let [vx, _, vz] = cow.body.velocity;
+        assert!((vx * vx + vz * vz - 0.16).abs() < 1e-12);
+        cow.hurt(&world, 1, [-f64::MIN_POSITIVE, 0.0, 0.0], 0.0);
+        assert_eq!(cow.body.velocity[0], 0.4);
+    }
+
+    #[test]
+    fn killing_a_cow_removes_it_and_drops_deterministic_beef() {
+        let run = |mode, next_id| {
+            let (mut server, id) = combat(mode);
+            server.next_entity_id = next_id;
+            hold(&mut server, "iron_axe");
+            attack(&mut server, id);
+            server.tick();
+            assert_eq!(server.mobs[&id].health, 4);
+            for _ in 1..HURT_TICKS {
+                server.tick();
+            }
+            server.take_outbox();
+
+            let [x, y, z] = server.mobs[&id].pos();
+            attack(&mut server, id);
+            server.tick();
+            assert!(!server.mobs.contains_key(&id));
+            let packets: Vec<_> = server
+                .take_outbox()
+                .into_iter()
+                .map(|(client, bytes)| (client, S2C::decode(&bytes).unwrap()))
+                .collect();
+            assert!(packets.contains(&(1, S2C::EntityRemove { id })));
+            assert!(!packets.contains(&(1, S2C::MobHurt { id })));
+            assert_eq!(server.entities.len(), 1);
+            let drop = &server.entities[&next_id];
+            assert_eq!(drop.item, items::by_name("raw_beef").unwrap());
+            assert!((1..=3).contains(&drop.count));
+            // The drop advances once with gravity during the tick that spawns it.
+            assert_eq!(drop.pos, [x, y + 0.65 + (0.1 - 0.04), z]);
+            assert_eq!(drop.pickup_delay, 9);
+            drop.count
+        };
+        let count = run(GameMode::Survival, 2);
+        assert_eq!(run(GameMode::Creative, 2), count);
+        assert_eq!(run(GameMode::Survival, 2), count);
+        assert_eq!(run(GameMode::Survival, 50), count);
+    }
+
     #[test]
     fn herds_spawn_on_the_400th_tick_in_both_modes_and_repeat() {
         let expected = [[45.5, -60.0, 2.5], [46.5, -60.0, 1.5], [46.5, -60.0, 2.5]];
@@ -850,6 +1168,12 @@ mod tests {
 
         let hash = server.state_hash();
         server.mobs.get_mut(&id).unwrap().body.velocity[0] = 0.25;
+        assert_ne!(server.state_hash(), hash);
+        let hash = server.state_hash();
+        server.mobs.get_mut(&id).unwrap().health -= 1;
+        assert_ne!(server.state_hash(), hash);
+        let hash = server.state_hash();
+        server.mobs.get_mut(&id).unwrap().hurt_ticks = 10;
         assert_ne!(server.state_hash(), hash);
         let hash = server.state_hash();
         server.mobs.get_mut(&id).unwrap().ai = walking().ai;
