@@ -373,9 +373,18 @@ impl Server {
                 )
             })
             .collect();
-        let is_lava_at = |pos: [f64; 3]| {
-            let [x, y, z] = pos.map(|v| v.floor() as i32);
-            self.world.get_block(x, y, z).is_some_and(blocks::is_lava)
+        let crosses_lava = |previous: [f64; 3], current: [f64; 3]| {
+            let [from_x, from_y, from_z] = previous.map(|v| v.floor() as i32);
+            let [to_x, to_y, to_z] = current.map(|v| v.floor() as i32);
+            let first_y = from_y.min(to_y).max(MIN_Y);
+            let last_y = from_y.max(to_y).min(MIN_Y + HEIGHT - 1);
+            let column_has_lava = |x, z| {
+                (first_y..=last_y)
+                    .any(|y| self.world.get_block(x, y, z).is_some_and(blocks::is_lava))
+            };
+            // Horizontal movement per tick is small, so checking the two endpoint columns is enough.
+            column_has_lava(from_x, from_z)
+                || ((from_x, from_z) != (to_x, to_z) && column_has_lava(to_x, to_z))
         };
         self.entities
             .extract_if(.., |_, e| {
@@ -384,7 +393,7 @@ impl Server {
                     e.tick(&self.world);
                 }
                 let active = e.age < 6000 && e.pos[1] >= health::VOID_Y;
-                !active || is_lava_at(previous) || is_lava_at(e.pos)
+                !active || crosses_lava(previous, e.pos)
             })
             .for_each(drop);
         if (self.game_time + 1) % 10 == 0 {
@@ -1914,6 +1923,24 @@ mod tests {
         let mut item = s.entities[&id].clone();
         item.tick(&s.world);
         assert!(item.pos[1] >= 81.0);
+
+        s.tick_entities();
+        assert!(!s.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn item_falling_through_lava_in_one_tick_is_removed() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(world::Chunk::empty(0, 0));
+        s.world.set_block(2, 80, 2, blocks::OAK_SLAB);
+        s.world.set_block(2, 81, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.5, 82.25, 2.5], [0.0, -2.0, 0.0], 40);
+        let mut item = s.entities[&id].clone();
+        item.tick(&s.world);
+        assert!(item.on_ground);
+        assert_eq!(item.pos[1], 80.5);
 
         s.tick_entities();
         assert!(!s.entities.contains_key(&id));
