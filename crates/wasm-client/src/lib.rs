@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{C2S, PROTOCOL_VERSION, S2C};
+use protocol::{C2S, MAX_AIR, MAX_HEALTH, PROTOCOL_VERSION, S2C};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -47,6 +47,10 @@ struct State {
     light_generations: BTreeMap<(i32, i32), (u32, u32)>,
     light_exports: Option<BTreeSet<(i32, usize, i32)>>,
     game_mode: u8,
+    health: u8,
+    air: u16,
+    dead: bool,
+    death_cause: u8,
     selected: u8,
     slots: Vec<Option<(u16, u8)>>,
     screen: u8,
@@ -194,6 +198,10 @@ pub extern "C" fn client_new() {
         light_generations: BTreeMap::new(),
         light_exports: None,
         game_mode: 0,
+        health: MAX_HEALTH,
+        air: MAX_AIR,
+        dead: false,
+        death_cause: 0,
         selected: 0,
         slots: vec![None; 54],
         screen: 0,
@@ -338,10 +346,24 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             game_mode,
         } => {
             st.game_mode = game_mode;
+            if game_mode == 1 {
+                st.flying = false;
+            }
             st.seed = seed;
             st.game_time = game_time;
             st.spawn = spawn;
             st.view_distance = view_distance as u32;
+        }
+        S2C::PlayerStatus {
+            health,
+            air,
+            dead,
+            cause,
+        } => {
+            st.health = health;
+            st.air = air;
+            st.dead = dead;
+            st.death_cause = cause;
         }
         S2C::PlayerCorrect { x, y, z } => {
             st.player = physics::Player::new([x, y, z]);
@@ -1136,6 +1158,11 @@ pub extern "C" fn client_enc_teleport(x: f64, y: f64, z: f64) -> usize {
     emit(state(), C2S::Teleport { x, y, z }.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_respawn() -> usize {
+    emit(state(), C2S::Respawn.encode())
+}
+
 /// Authoritative feet position, including the most recent correction.
 #[no_mangle]
 pub extern "C" fn client_player_position(axis: usize) -> f64 {
@@ -1209,7 +1236,7 @@ pub extern "C" fn client_block_registry() -> usize {
 pub extern "C" fn client_player_reset(x: f64, y: f64, z: f64) {
     let st = state();
     st.player = physics::Player::new([x, y, z]);
-    st.flying = true;
+    st.flying = st.game_mode == 0;
 }
 
 struct Collisions<'a>(&'a World);
@@ -1224,7 +1251,7 @@ impl physics::CollisionWorld for Collisions<'_> {
 #[no_mangle]
 pub extern "C" fn client_player_toggle_flight() -> u32 {
     let st = state();
-    if !st.flying || st.player.is_clear(&Collisions(&st.world)) {
+    if st.game_mode == 0 && (!st.flying || st.player.is_clear(&Collisions(&st.world))) {
         st.flying = !st.flying;
     }
     u32::from(st.flying)
@@ -1253,6 +1280,26 @@ pub extern "C" fn client_player_tick(forward: f32, strafe: f32, yaw: f32, flags:
     }
     st.out.push(u8::from(st.player.on_ground));
     st.out.push(u8::from(st.flying));
+}
+
+#[no_mangle]
+pub extern "C" fn client_health() -> u32 {
+    u32::from(state().health)
+}
+
+#[no_mangle]
+pub extern "C" fn client_air() -> u32 {
+    u32::from(state().air)
+}
+
+#[no_mangle]
+pub extern "C" fn client_dead() -> u32 {
+    u32::from(state().dead)
+}
+
+#[no_mangle]
+pub extern "C" fn client_death_cause() -> u32 {
+    u32::from(state().death_cause)
 }
 
 #[no_mangle]

@@ -19,6 +19,11 @@ export interface ClientExports {
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
 	client_game_mode(): number;
+	client_health(): number;
+	client_air(): number;
+	client_dead(): number;
+	client_death_cause(): number;
+	client_enc_respawn(): number;
 	client_enc_click_slot(slot: number, button: number, shift: number): number;
 	client_enc_close_inventory(): number;
 	client_enc_use_block(x: number, y: number, z: number): number;
@@ -88,7 +93,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -400,6 +405,11 @@ export class ClientCore {
 	}
 
 	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
+	get health(): number { return this.x.client_health(); }
+	get air(): number { return this.x.client_air(); }
+	get dead(): boolean { return this.x.client_dead() !== 0; }
+	get deathCause(): number { return this.x.client_death_cause(); }
+	encodeRespawn(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_respawn()); }
 	get screen(): number { return this.x.client_screen(); }
 	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
 	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }

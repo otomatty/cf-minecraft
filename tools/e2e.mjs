@@ -1270,6 +1270,78 @@ async function survivalInventory() {
 	} finally { await page.close(); }
 }
 
+async function survivalHealth() {
+	const { page, errors } = await open(`server=local&world=e2e-health-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "survival health", chunksInView(2));
+		await resumePointerLock(page, "health: initial pointer lock");
+		await page.waitForFunction(() => window.__mc.stats().health === 20 && !document.getElementById("vitals").hidden);
+		check(await page.$eval("#health", meter => meter.getAttribute("aria-valuenow") === "20"
+			&& meter.querySelectorAll('.heart[data-state="full"]').length === 10), "health: starts with ten full hearts");
+
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => {
+			const flash = document.getElementById("damage-flash");
+			// Retain evidence of the flash even if it finishes between Puppeteer calls.
+			const observer = new MutationObserver(() => {
+				if (flash.hidden) return;
+				performance.mark("health-damage-flash");
+				observer.disconnect();
+			});
+			observer.observe(flash, { attributes: true, attributeFilter: ["hidden"] });
+			window.__mc.setCamera(x, y + 10 + 1.62, z, 0, 90);
+		}, spawn);
+		await page.waitForFunction(() => window.__mc.stats().health === 13);
+		check(await page.$eval("#health", meter => meter.getAttribute("aria-valuenow") === "13"
+			&& Array.from(meter.children, heart => heart.dataset.state).join(" ") === "full full full full full full half empty empty empty"),
+		"health: a ten-block fall leaves six full hearts and one half heart");
+		await page.waitForFunction(() => performance.getEntriesByName("health-damage-flash").length > 0);
+		await page.waitForFunction(() => document.getElementById("damage-flash").hidden);
+		check(true, "health: damage flashes red briefly");
+
+		const [sx, sy, sz] = spawn;
+		const target = [Math.floor(sx) + 1, sy - 1, Math.floor(sz)];
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 1 + 1.62, z + 0.5, 0, 90), target);
+		await page.mouse.down();
+		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, target);
+		await page.mouse.up();
+		await page.waitForFunction(() => {
+			const { inventory, entities } = window.__mc.stats();
+			return inventory[0]?.count === 1 && entities.length === 0;
+		});
+		const held = await page.evaluate(() => window.__mc.stats().inventory[0]);
+		check(held.count === 1, "health: mines and picks up a block");
+
+		const landing = [sx + 4, sy, sz];
+		await page.mouse.move(640, 360);
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x, y + 40 + 1.62, z, 0, 90), landing);
+		await page.waitForFunction(() => window.__mc.stats().dead && document.getElementById("death-screen").open
+			&& document.pointerLockElement === null);
+		check(await page.$eval("#death-cause", cause => cause.textContent.includes("落下")), "health: fatal fall shows the cause of death");
+		await page.waitForFunction(([x, y, z], stack) => {
+			const { entities, inventory } = window.__mc.stats();
+			return inventory[0] === null && entities.some(({ item, count, position: [ex, ey, ez] }) =>
+				item === stack.item && count === stack.count && Math.hypot(ex - x, ey - y, ez - z) < 1);
+		}, {}, landing, held);
+		check(true, "health: carried item drops at the landing position");
+
+		await page.click("#respawn");
+		await page.waitForFunction(([sx, sy, sz]) => {
+			const { health, dead } = window.__mc.stats();
+			const [x, y, z] = window.__mc.playerPosition();
+			return !dead && health === 20 && !document.getElementById("death-screen").open
+				&& Math.hypot(x - sx, y - sy, z - sz) < 1
+				&& document.pointerLockElement?.id === "view";
+		}, {}, spawn);
+		check(true, "health: respawn restores full health, spawn position, and pointer lock");
+		check(errors.length === 0, "health: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "health", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -1277,6 +1349,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await partialModels();
 	await survivalInventory();
+	await survivalHealth();
 	await survivalCrafting();
 	await furnaceSmelting();
 	await dayNight();
