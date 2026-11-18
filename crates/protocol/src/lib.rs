@@ -8,10 +8,29 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MobKind {
+    Cow = 0,
+}
+
+impl MobKind {
+    pub const fn wire_id(self) -> u8 {
+        self as u8
+    }
+
+    fn from_wire_id(value: u8) -> Result<Self, DecodeError> {
+        match value {
+            0 => Ok(Self::Cow),
+            _ => Err(DecodeError),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -217,6 +236,21 @@ pub enum S2C {
         id: u32,
         count: u8,
     },
+    MobSpawn {
+        id: u32,
+        kind: MobKind,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+    },
+    MobMove {
+        id: u32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+    },
     EntityRemove {
         id: u32,
     },
@@ -282,6 +316,8 @@ pub mod id {
     pub const S2C_ENTITY_SPAWN: u8 = 0x07;
     pub const S2C_ENTITY_MOVE: u8 = 0x08;
     pub const S2C_ENTITY_COUNT: u8 = 0x09;
+    pub const S2C_MOB_SPAWN: u8 = 0x0d;
+    pub const S2C_MOB_MOVE: u8 = 0x0e;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -544,6 +580,36 @@ impl S2C {
                 w.i32(*entity as i32);
                 w.u8(*count);
             }
+            S2C::MobSpawn {
+                id: entity,
+                kind,
+                x,
+                y,
+                z,
+                yaw,
+            } => {
+                w.u8(id::S2C_MOB_SPAWN);
+                w.i32(*entity as i32);
+                w.u8(kind.wire_id());
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+                w.f32(*yaw);
+            }
+            S2C::MobMove {
+                id: entity,
+                x,
+                y,
+                z,
+                yaw,
+            } => {
+                w.u8(id::S2C_MOB_MOVE);
+                w.i32(*entity as i32);
+                w.f64(*x);
+                w.f64(*y);
+                w.f64(*z);
+                w.f32(*yaw);
+            }
             S2C::EntityRemove { id: entity } => {
                 w.u8(id::S2C_ENTITY_REMOVE);
                 w.i32(*entity as i32);
@@ -673,6 +739,30 @@ impl S2C {
                 let id = entity_id(&mut r)?;
                 let [x, y, z] = entity_pos(&mut r)?;
                 S2C::EntityMove { id, x, y, z }
+            }
+            tag @ (id::S2C_MOB_SPAWN | id::S2C_MOB_MOVE) => {
+                let id = entity_id(&mut r)?;
+                let kind = if tag == id::S2C_MOB_SPAWN {
+                    Some(MobKind::from_wire_id(r.u8()?)?)
+                } else {
+                    None
+                };
+                let [x, y, z] = entity_pos(&mut r)?;
+                let yaw = r.f32()?;
+                if !yaw.is_finite() {
+                    return Err(DecodeError);
+                }
+                match kind {
+                    Some(kind) => S2C::MobSpawn {
+                        id,
+                        kind,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                    },
+                    None => S2C::MobMove { id, x, y, z, yaw },
+                }
             }
             id::S2C_ENTITY_COUNT => {
                 let id = entity_id(&mut r)?;
@@ -1118,8 +1208,53 @@ mod tests {
     }
 
     #[test]
-    fn use_bucket_is_packet_0f_in_protocol_12() {
-        assert_eq!(PROTOCOL_VERSION, 12);
+    fn protocol_13_mob_packets_round_trip_and_validate_fields() {
+        assert_eq!(PROTOCOL_VERSION, 13);
+        let spawn = S2C::MobSpawn {
+            id: u32::MAX,
+            kind: MobKind::Cow,
+            x: 12.25,
+            y: -60.0,
+            z: -8.75,
+            yaw: 90.0,
+        };
+        let movement = S2C::MobMove {
+            id: u32::MAX,
+            x: 12.375,
+            y: -60.0,
+            z: -8.75,
+            yaw: 270.5,
+        };
+        for (packet, tag, len) in [(spawn, 0x0d, 34), (movement, 0x0e, 33)] {
+            let bytes = packet.encode();
+            assert_eq!((bytes[0], bytes.len()), (tag, len));
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+            for end in 0..len {
+                assert!(S2C::decode(&bytes[..end]).is_err());
+            }
+            for (offset, invalid) in [
+                (1, &[0; 4][..]),
+                (len - 28, &f64::INFINITY.to_be_bytes()),
+                (len - 4, &f32::NAN.to_be_bytes()),
+            ] {
+                let mut bad = bytes.clone();
+                bad[offset..offset + invalid.len()].copy_from_slice(invalid);
+                assert!(S2C::decode(&bad).is_err());
+            }
+            if tag == 0x0d {
+                assert_eq!(bytes[5], 0);
+                let mut bad = bytes.clone();
+                bad[5] = 1;
+                assert!(S2C::decode(&bad).is_err());
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(S2C::decode(&trailing).is_err());
+        }
+    }
+
+    #[test]
+    fn use_bucket_keeps_packet_0f() {
         let packet = C2S::UseBucket {
             x: i32::MIN,
             y: -64,

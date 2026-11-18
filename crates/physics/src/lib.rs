@@ -146,7 +146,7 @@ pub struct Input {
     pub yaw: f32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Player {
     pub position: [f64; 3],
     pub velocity: [f64; 3],
@@ -154,6 +154,13 @@ pub struct Player {
     /// Water contact sampled at the start of the most recent tick.
     pub in_water: bool,
     jump_cooldown: u8,
+    width: f64,
+    height: f64,
+}
+impl Default for Player {
+    fn default() -> Self {
+        Self::with_size([0.0; 3], WIDTH, HEIGHT)
+    }
 }
 impl Player {
     pub fn new(position: [f64; 3]) -> Self {
@@ -162,11 +169,25 @@ impl Player {
             ..Self::default()
         }
     }
+    pub fn with_size(position: [f64; 3], width: f64, height: f64) -> Self {
+        Self {
+            position,
+            velocity: [0.0; 3],
+            on_ground: false,
+            in_water: false,
+            jump_cooldown: 0,
+            width,
+            height,
+        }
+    }
+    pub fn jump_cooldown(&self) -> u8 {
+        self.jump_cooldown
+    }
     pub fn bounds(&self) -> Aabb {
         let [x, y, z] = self.position;
         Aabb {
-            min: [x - WIDTH / 2.0, y, z - WIDTH / 2.0],
-            max: [x + WIDTH / 2.0, y + HEIGHT, z + WIDTH / 2.0],
+            min: [x - self.width / 2.0, y, z - self.width / 2.0],
+            max: [x + self.width / 2.0, y + self.height, z + self.width / 2.0],
         }
     }
     pub fn is_clear(&self, world: &impl CollisionWorld) -> bool {

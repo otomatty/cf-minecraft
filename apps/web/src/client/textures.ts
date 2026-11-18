@@ -28,7 +28,7 @@ export function paintTexture(name: string): Uint8Array {
 	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.exec(name);
 	if (tool) return paintTool(tool[1], tool[2]);
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name);
+		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name) ?? cowTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -126,6 +126,34 @@ function hashName(name: string): number {
 
 const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
 const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
+
+function cowTexture(name: string): Uint8Array | undefined {
+	if (name !== "cow_hide" && name !== "cow_face" && name !== "cow_leg") return undefined;
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	const bounds = (v: number, lo: number, hi: number) => lo <= v && v <= hi;
+	for (let y = 0; y < TEX_SIZE; y++) {
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const grain = (x * 5 + y * 3 + x * y) % 7;
+			let color: Rgb = [244 - grain, 239 - grain, 225 - grain];
+			if (name === "cow_hide") {
+				const patch = (x - 3) ** 2 + (y - 4) ** 2 < 22 + grain
+					|| (x - 13) ** 2 + 2 * (y - 12) ** 2 < 17 + grain;
+				if (patch) color = [35 + grain, 31 + grain, 33 + grain];
+			} else if (name === "cow_face") {
+				if (y >= 9 && bounds(x, 1, 14)) {
+					color = y === 9 ? [231, 146, 161] : [215 + grain, 112 + grain, 134 + grain];
+					if (bounds(y, 11, 12) && (bounds(x, 3, 4) || bounds(x, 11, 12))) color = [124, 60, 73];
+				} else if (bounds(y, 4, 6) && (bounds(x, 2, 4) || bounds(x, 11, 13))) {
+					color = [30, 25, 30];
+				}
+			} else if (y >= 10) {
+				color = [48 + grain, 39 + grain, 43 + grain];
+			}
+			pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
+		}
+	}
+	return pixels;
+}
 
 function bucketTexture(name: string): Uint8Array | undefined {
 	if (name !== "bucket" && name !== "water_bucket" && name !== "lava_bucket") return undefined;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderItem } from "./entities.ts";
+import { cowVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderCow, type RenderItem } from "./entities.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -82,4 +82,61 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 	}
 	const rotated = itemVertices([item], [0, 0, 0], Math.PI * 1000);
 	assert.notEqual(rotated[2], vertices[2]);
+});
+
+test("cow mesh has six boxes, turns with yaw, and swings diagonal legs together", () => {
+	const cow: RenderCow = { position: [29999998.25, 1, 0], yaw: 0, moving: false, light: [15, 3] };
+	const camera = [29999998, 1, 0];
+	const textures = { hide: 5, face: 6, leg: 7 };
+	const quarterStride = Math.PI * 50;
+	const still = cowVertices([cow], camera, quarterStride, textures);
+	const turned = cowVertices([{ ...cow, yaw: 90 }], camera, quarterStride, textures);
+	const moving = cowVertices([{ ...cow, moving: true }], camera, quarterStride, textures);
+	assert.equal(still.length, 6 * 36 * 9);
+	for (let i = 0; i < still.length; i += 9) {
+		assert.ok(Math.abs(turned[i] - (0.25 - still[i + 2])) < 1e-6);
+		assert.ok(Math.abs(turned[i + 2] - (still[i] - 0.25)) < 1e-6);
+		assert.equal(still[i + 7], 3.5 / 16);
+		assert.equal(still[i + 8], 15.5 / 16);
+	}
+	const box = 36 * 9;
+	assert.equal(still[box + 3 * 6 * 9 + 6], textures.face);
+	assert.deepEqual(moving.slice(0, 2 * box), still.slice(0, 2 * box));
+	for (const [leg, sign] of [-1, 1, 1, -1].entries()) {
+		const z = (leg + 2) * box + 2;
+		assert.equal(Math.sign(moving[z] - still[z]), sign);
+	}
+	assert.deepEqual(cowVertices([{ ...cow, moving: true }], camera, 0, textures), still);
+});
+
+test("WASM mob records track yaw and previous position and clear on removal and reset", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { ClientCore, S2C } = await import("./client-core.ts");
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const id = 0x80000002;
+	const packet = (tag: number, position: number[], yaw: number, kind?: number) => {
+		const offset = kind === undefined ? 5 : 6;
+		const bytes = new Uint8Array(offset + 28), view = new DataView(bytes.buffer);
+		bytes[0] = tag;
+		view.setUint32(1, id);
+		if (kind !== undefined) view.setUint8(5, kind);
+		position.forEach((v, axis) => view.setFloat64(offset + axis * 8, v));
+		view.setFloat32(offset + 24, yaw);
+		return bytes;
+	};
+	const position = [29999998.25, 1, -3.5], moved = [29999998.5, 1, -3.5];
+	const spawn = packet(S2C.MobSpawn, position, 0, 0);
+	assert.equal(core.packet(spawn), S2C.MobSpawn);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0 }]);
+	assert.equal(core.packet(packet(S2C.MobMove, moved, 270)), S2C.MobMove);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270 }]);
+	const remove = new Uint8Array(5);
+	remove[0] = S2C.EntityRemove;
+	new DataView(remove.buffer).setUint32(1, id);
+	core.packet(remove);
+	assert.deepEqual(core.mobs, []);
+	core.packet(spawn);
+	core.resetWorld();
+	assert.deepEqual(core.mobs, []);
 });

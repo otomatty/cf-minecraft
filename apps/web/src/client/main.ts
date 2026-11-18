@@ -255,7 +255,7 @@ async function main(): Promise<void> {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
 			}
-			if (id === S2C.EntitySpawn || id === S2C.EntityMove) {
+			if (id === S2C.EntitySpawn || id === S2C.EntityMove || id === S2C.MobSpawn || id === S2C.MobMove) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
@@ -1315,11 +1315,22 @@ async function main(): Promise<void> {
 				light: core.entityLight(entity.position),
 			};
 		});
+		const renderCows = core.mobs.filter(mob => mob.kind === 0).map(mob => {
+			const elapsed = now - (entityReceivedAt.get(mob.id) ?? now);
+			const dx = mob.position[0] - mob.previous[0], dz = mob.position[2] - mob.previous[2];
+			const position = interpolateEntity(mob.previous, mob.position, elapsed);
+			return {
+				position,
+				yaw: mob.yaw,
+				moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
+				light: core.entityLight(position),
+			};
+		});
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];
 		});
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs);
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs, renderCows);
 		window.__mc.frames++;
 
 		frames++;
@@ -1347,6 +1358,7 @@ async function main(): Promise<void> {
 			dead: core.dead,
 			screen: core.screen,
 			entities: core.entities,
+			mobs: core.mobs,
 			dig: dig.active,
 			inventory: core.inventory,
 			selectedSlot: core.selectedSlot,
