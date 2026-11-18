@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
-import { paintTexture, downsample, textureIconPixels, LEAVES_TINT, WATER_TINT } from "./textures.ts";
+import { paintTexture, downsample, textureIconPixels } from "./textures.ts";
+import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
+import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
+import { grassSideAtlasPixels } from "./flora-textures.ts";
 import { ClientCore } from "./client-core.ts";
 import { filterVisibleSections, outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
@@ -15,8 +18,9 @@ test("clouds draw before translucent terrain only below the cloud plane", () => 
 	assert.equal(cloudsBeforeTranslucent(97, 96), false);
 });
 
-test("leaf and water icons use terrain tints without changing alpha or shared texture pixels", () => {
-	for (const [name, tint] of [["oak_leaves", LEAVES_TINT], ["water", WATER_TINT]]) {
+test("icons use carried colours without changing alpha or shared terrain pixels", () => {
+	for (const [name, tint] of [["oak_leaves", CARRIED_LEAVES_TINT], ["grass_block_top", CARRIED_GRASS_TOP_TINT],
+		["short_grass", CARRIED_SHORT_GRASS_TINT], ["water", WATER_TINT], ["water_flow", WATER_TINT]]) {
 		const pixels = paintTexture(name);
 		const original = pixels.slice();
 		const icon = textureIconPixels(name, pixels);
@@ -33,10 +37,11 @@ test("leaf and water icons use terrain tints without changing alpha or shared te
 });
 
 test("terrain tint layers follow texture names when the texture array is reordered", () => {
-	for (const names of [["water", "stone", "oak_leaves"], ["oak_leaves", "water", "stone"]]) {
+	for (const names of [["water", "grass_block_side", "oak_leaves", "water_flow"], ["water_flow", "oak_leaves", "water", "grass_block_side"]]) {
 		const shader = terrainShader(names);
 		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("oak_leaves")}u) { tintLayer =`));
-		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("water")}u) { tintLayer =`));
+		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("water")}u || out.layer == ${names.indexOf("water_flow")}u)`));
+		assert.ok(shader.includes(`if (in.layer == ${names.indexOf("grass_block_side")}u)`));
 		assert.ok(!shader.includes("__LEAVES_LAYER__") && !shader.includes("__WATER_LAYER__"));
 	}
 	const shader = terrainShader(["water", "oak_leaves"]);
@@ -48,7 +53,47 @@ test("terrain tint layers follow texture names when the texture array is reorder
 	assert.ok(shader.includes("color = color * in.tintColor"));
 	assert.ok(!shader.includes("g.grassTint"));
 	const absent = terrainShader(["stone"]);
-	assert.equal(absent.match(/if \(out.layer == 4294967295u\)/g)?.length, 2);
+	assert.ok(absent.includes("if (out.layer == 4294967295u || out.layer == 4294967295u)"));
+	assert.doesNotMatch(absent, /__[A-Z_]+__/);
+});
+
+test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
+	let packed = grassSideAtlasPixels();
+	let icon = paintTexture("grass_block_side");
+	const dirt = paintTexture("dirt");
+	for (let i = 0; i < packed.length; i += 4) {
+		if (packed[i + 3] === 0) assert.deepEqual(packed.subarray(i, i + 3), dirt.subarray(i, i + 3));
+		else assert.deepEqual([...packed.subarray(i, i + 3)], [0, 0, 0]);
+	}
+	assert.ok(packed[3] > 0 && packed.at(-1) === 0);
+	for (let size = 16; size >= 1; size >>= 1) {
+		for (let i = 0; i < packed.length; i += 4) for (let c = 0; c < 3; c++) {
+			const tinted = packed[i + c] + packed[i + 3] * CARRIED_GRASS_SIDE_TINT[c] / 255;
+			assert.ok(Math.abs(icon[i + c] - tinted) <= 2);
+		}
+		if (size > 1) {
+			packed = downsample(packed, size);
+			icon = downsample(icon, size);
+		}
+	}
+});
+
+test("water has separate, looping animation frames for its surface and sides", () => {
+	assert.equal(WATER_FRAME_COUNT, 32);
+	for (const [name, flowing] of [["water", false], ["water_flow", true]]) {
+		const first = paintTexture(name);
+		assert.deepEqual(first, waterTextureFrame(0, flowing));
+		assert.deepEqual(first, waterTextureFrame(WATER_FRAME_COUNT, flowing));
+		const frames = new Set();
+		for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) {
+			const pixels = waterTextureFrame(frame, flowing);
+			assert.equal(pixels.length, 16 * 16 * 4);
+			assert.ok(pixels[3] > 0 && pixels[3] < 255);
+			frames.add(Buffer.from(pixels).toString("base64"));
+		}
+		assert.equal(frames.size, WATER_FRAME_COUNT);
+	}
+	assert.notDeepEqual(paintTexture("water"), paintTexture("water_flow"));
 });
 
 function quad(x, y, z, rotated = false) {
@@ -239,6 +284,7 @@ test("section visibility filters every layer before frustum tests and translucen
 test("four original ore textures are opaque stone with distinct mineral grains", () => {
 	const names = ["coal_ore", "copper_ore", "iron_ore", "gold_ore"];
 	const textures = names.map(paintTexture);
+	const plainStone = paintTexture("stone");
 	const unknown = paintTexture("unknown_ore");
 	for (const [i, pixels] of textures.entries()) {
 		assert.equal(pixels.length, 16 * 16 * 4);
@@ -247,7 +293,7 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 		let stone = 0, mineral = 0;
 		for (let p = 0; p < pixels.length; p += 4) {
 			assert.equal(pixels[p + 3], 255);
-			if (pixels[p] === pixels[p + 1] && pixels[p + 1] === pixels[p + 2]) stone++;
+			if (pixels[p] === plainStone[p] && pixels[p + 1] === plainStone[p + 1] && pixels[p + 2] === plainStone[p + 2]) stone++;
 			else mineral++;
 		}
 		assert.ok(stone > 128 && mineral > 0, names[i]);

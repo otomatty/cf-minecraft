@@ -9,6 +9,7 @@ textures = [
   "coal_ore", "copper_ore", "iron_ore", "gold_ore",
   "crafting_table_top", "crafting_table_side", "crafting_table_bottom",
   "furnace_front", "furnace_side", "furnace_top",
+  "sandstone_top", "sandstone_bottom", "water_flow",
 ]
 legacy_count = 14
 
@@ -38,7 +39,7 @@ id = 2
 top = "grass_block_top"
 bottom = "dirt"
 side = "grass_block_side"
-tint = ["top"]
+tint = ["top", "side"]
 
 [[blocks]]
 name = "dirt"
@@ -127,6 +128,7 @@ unbreakable = true
 id = 13
 layer = "translucent"
 texture = "water"
+side = "water_flow"
 solid = false
 opacity = 1
 tint = true
@@ -243,7 +245,9 @@ tool = "pickaxe"
 min_tier = 1
 dig_ticks = 50
 id = 41
-texture = "sandstone"
+side = "sandstone"
+top = "sandstone_top"
+bottom = "sandstone_bottom"
 
 [[blocks]]
 name = "gravel"

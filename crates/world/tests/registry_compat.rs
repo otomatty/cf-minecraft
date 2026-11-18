@@ -3,10 +3,18 @@ use world::blocks::*;
 // Captured from the handwritten registry before introducing code generation.
 #[test]
 fn registry_matches_pre_generation_snapshot() {
-    // Preserve the historical snapshot; only leaf internal-face culling changed.
+    // Preserve the historical snapshot except for intentional render changes.
     let expected = include_str!("registry-v1.txt").replacen(
         "12: oak_leaves Cube Cutout false true false 1 0",
         "12: oak_leaves Cube Cutout false true true 1 0",
+        1,
+    ).replacen(
+        "2: grass_block Cube Opaque true true false 15 0 [3, 1, 2, 2, 2, 2] [false, true, false, false, false, false]",
+        "2: grass_block Cube Opaque true true false 15 0 [3, 1, 2, 2, 2, 2] [false, true, true, true, true, true]",
+        1,
+    ).replacen(
+        "13: water Cube Translucent false false true 1 0 [14, 14, 14, 14, 14, 14]",
+        "13: water Cube Translucent false false true 1 0 [14, 14, 35, 35, 35, 35]",
         1,
     );
     assert_eq!(snapshot(), expected);

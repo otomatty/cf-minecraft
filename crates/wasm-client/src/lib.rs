@@ -1238,9 +1238,22 @@ pub extern "C" fn client_block_registry() -> usize {
             blocks::Model::Stairs => "stairs",
             blocks::Model::Fence => "fence",
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}"}}"#,
+        let faces = info.tex.map(|id| blocks::TEXTURES[id as usize]);
+        let boxes = if info.model == blocks::Model::Fence {
+            // The inventory view fits two posts and their connecting rails in one cell.
+            vec![
+                [[0, 0, 6], [4, 16, 10]], [[12, 0, 6], [16, 16, 10]],
+                [[4, 6, 7], [12, 9, 9]], [[4, 12, 7], [12, 15, 9]],
+            ]
+        } else {
+            let mut boxes = Vec::new();
+            blocks::shape_boxes(state, |_, _, _| blocks::AIR, blocks::ShapePurpose::Render,
+                |b| boxes.push([b.min, b.max]));
+            boxes
+        };
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), blocks::TEXTURES[info.tex[1] as usize])
+            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }

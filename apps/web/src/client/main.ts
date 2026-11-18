@@ -30,6 +30,7 @@ import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
+import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
 import { bubbleCount, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
@@ -409,6 +410,7 @@ async function main(): Promise<void> {
 	const slots: HTMLCanvasElement[] = [];
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
+	const icons = new Map<number, ImageData>();
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
 	let eating: { item: number; count: number; startedAt: number } | null = null;
@@ -421,12 +423,16 @@ async function main(): Promise<void> {
 	let dig = newDigState();
 	let heldInventory = "";
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
-		c.width = c.height = TEX_SIZE;
+		c.width = c.height = ICON_SIZE;
 		c.title = "";
 		if (!state) return;
 		const info = registry[state];
-		const pixels = renderer.texturePixels.get(info.texture);
-		if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(info.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+		let icon = icons.get(state);
+		if (!icon) {
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels), ICON_SIZE, ICON_SIZE);
+			icons.set(state, icon);
+		}
+		c.getContext("2d")!.putImageData(icon, 0, 0);
 		c.title = info.name;
 	}
 	for (const block of hotbarBlocks) {
@@ -459,7 +465,8 @@ async function main(): Promise<void> {
 			c.dataset.count = String(count);
 			if (count >= 2) {
 				const icon = document.createElement("canvas");
-				icon.width = icon.height = TEX_SIZE;
+				icon.width = c.width;
+				icon.height = c.height;
 				icon.getContext("2d")!.drawImage(c, 0, 0);
 				c.width = c.height = 64;
 				const ctx = c.getContext("2d")!;
@@ -493,6 +500,7 @@ async function main(): Promise<void> {
 		const item = items.find(item => item.id === id);
 		paintIcon(c, item?.block ?? 0);
 		if (item?.block == null && item?.texture) {
+			c.width = c.height = TEX_SIZE;
 			const pixels = renderer.texturePixels.get(item.texture);
 			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
 			c.title = item.name;
