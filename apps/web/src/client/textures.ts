@@ -163,6 +163,12 @@ function ore(colors: readonly Rgb[], count: number): (rand: () => number) => Pai
 }
 
 const PAINTERS: Record<string, (rand: () => number) => Painter> = {
+	apple: () => (x, y) => {
+		if (y <= 4 && x >= 9) return [85, 157, 58];
+		if (y <= 4) return [111, 67, 39];
+		if (x >= 4 && x <= 6 && y <= 8) return [248, 111, 99];
+		return shade([211, 43, 54], 1.15 - (x + y) * .016);
+	},
     coal: () => (x,y,r) => shade([47, 48, 55], .7 + r()*.6 + (x+y)%3*.08),
     copper_ingot: () => (x,y) => shade([204, 113, 70], y < 7 ? 1.2 : .8 + x*.012),
     iron_ingot: () => (x,y) => shade([179, 190, 202], y < 7 ? 1.2 : .8 + x*.012),
@@ -229,7 +235,10 @@ export function paintTexture(name: string): Uint8Array {
 			px[i] = clamp(r);
 			px[i + 1] = clamp(g);
 			px[i + 2] = clamp(b);
-			px[i + 3] = name === "coal" ? (x >= 3 && x <= 12 && y >= 3 && y <= 12 && x+y >= 8 && x+y <= 23 ? 255 : 0) : name.endsWith("_ingot") ? (x >= 2 && x <= 13 && y >= 5 && y <= 11 && x+y >= 8 ? 255 : 0) : name === "stick" ? (y >= 2 && y <= 13 && (x === 7 || x === 8) ? 255 : 0) : plant ? (visible ? 255 : 0) : name === "glass"
+			const apple = (x === 8 && y >= 2 && y <= 4)
+				|| (x >= 9 && x <= 12 && y >= 2 && y <= 4 && x + y <= 14)
+				|| ((x - 7.5) * (x - 7.5) + (y - 9) * (y - 9) <= 30 && y >= 5 && y <= 13);
+			px[i + 3] = name === "apple" ? (apple ? 255 : 0) : name === "coal" ? (x >= 3 && x <= 12 && y >= 3 && y <= 12 && x+y >= 8 && x+y <= 23 ? 255 : 0) : name.endsWith("_ingot") ? (x >= 2 && x <= 13 && y >= 5 && y <= 11 && x+y >= 8 ? 255 : 0) : name === "stick" ? (y >= 2 && y <= 13 && (x === 7 || x === 8) ? 255 : 0) : plant ? (visible ? 255 : 0) : name === "glass"
 				? (x === 0 || y === 0 || x === 15 || y === 15 || (x === y + 3 && y > 3 && y < 9) ? 255 : 0)
 				: name === "oak_leaves" ? ((x * 7 + y * 11 + (x >> 1) * (y >> 1)) % 17 < 5 ? 0 : 255)
 				: name === "ice" ? 150 + (x + y) % 24

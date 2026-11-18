@@ -1342,6 +1342,123 @@ async function survivalHealth() {
 	} finally { await page.close(); }
 }
 
+async function survivalHunger() {
+	const { page, errors } = await open(`server=local&world=e2e-hunger-${run}&mode=survival&gen=terrain&seed=2026&view=3&time=6000`);
+	try {
+		const { spawn } = await settle(page, "survival hunger", chunksInView(3));
+		await resumePointerLock(page, "hunger: initial pointer lock");
+		check(await page.$eval("#food", meter => !meter.closest("#vitals").hidden
+			&& meter.getAttribute("aria-valuenow") === "20"
+			&& meter.querySelectorAll('.food[data-state="full"]').length === 10), "hunger: starts with ten full food icons");
+
+		const leaves = await page.evaluate(() => {
+			const api = window.__mc;
+			const [sx, , sz] = api.stats().spawn.map(Math.floor);
+			const leaf = api.stateId("oak_leaves");
+			const exposed = [];
+			for (let z = sz - 24; z <= sz + 24; z++) for (let x = sx - 24; x <= sx + 24; x++) {
+				for (let y = 57; y < 317; y++) {
+					if (api.getBlock(x, y, z) === leaf && [1, 2, 3].every(dy => api.getBlock(x, y + dy, z) === 0)) {
+						exposed.push([x, y, z]);
+					}
+				}
+			}
+			const distance = ([x, , z]) => (sx - x) * (sx - x) + (sz - z) * (sz - z);
+			return exposed.sort((a, b) => distance(a) - distance(b)).slice(0, 150);
+		});
+		const apple = 49;
+		let appleSlot = -1;
+		await page.mouse.move(640, 360);
+		for (const target of leaves) {
+			await resumePointerLock(page, "hunger: mining pointer lock");
+			const before = await page.evaluate(([x, y, z]) => {
+				const api = window.__mc;
+				api.setCamera(x + 0.5, y + 1 + 1.62, z + 0.5, 0, 90);
+				return api.stats().inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0);
+			}, target);
+			await page.waitForFunction(([x, y, z]) => {
+				const api = window.__mc;
+				const c = api.stats().camera;
+				const hit = api.raycast([c.x, c.y, c.z], [0, -1, 0], 5);
+				return c.pitch === 90 && hit?.x === x && hit?.y === y && hit?.z === z;
+			}, {}, target);
+			await page.mouse.down();
+			try {
+				await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, {}, target);
+			} finally {
+				await page.mouse.up();
+			}
+			await page.waitForFunction(count => {
+				const { entities, inventory } = window.__mc.stats();
+				return entities.length > 0 || inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0) > count;
+			}, {}, before);
+			await page.evaluate(() => {
+				const api = window.__mc;
+				const drop = api.stats().entities[0];
+				if (drop) {
+					const [x, y, z] = drop.position;
+					api.setCamera(x, y + 1.62, z, 0, 0);
+				}
+			});
+			// Finish collecting this drop before mining the next leaf.
+			const pickup = await page.waitForFunction((count, item) => {
+				const { inventory } = window.__mc.stats();
+				if (inventory.reduce((sum, stack) => sum + (stack?.count ?? 0), 0) <= count) return false;
+				return { slot: inventory.slice(0, 9).findIndex(stack => stack?.item === item) };
+			}, {}, before, apple);
+			({ slot: appleSlot } = await pickup.jsonValue());
+			await pickup.dispose();
+			if (appleSlot >= 0) break;
+		}
+		if (appleSlot < 0) throw new Error(`hunger: no apple in the hotbar after mining ${leaves.length} leaves`);
+		check(true, "hunger: mines oak leaves and picks up an apple");
+
+		const health = await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			// The spawn can be below a canopy. Measure from the first surface below open sky.
+			const surface = api.raycast([x, y + 32, z], [0, -1, 0], 48);
+			if (!surface) throw new Error("hunger: no landing surface near spawn");
+			api.setCamera(x, surface.y + 1 + 10 + 1.62, z, 0, 90);
+			return api.stats().health;
+		}, spawn);
+		await page.waitForFunction(previous => window.__mc.stats().health < previous, {}, health);
+		await page.waitForFunction(() => window.__mc.stats().food <= 19);
+		await page.keyboard.press(`Digit${appleSlot + 1}`);
+		await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, appleSlot);
+		const before = await page.evaluate(slot => {
+			const api = window.__mc;
+			const [x, y, z] = api.playerPosition();
+			api.setCamera(x, y + 1.62, z, 0, -90);
+			const { food, inventory } = api.stats();
+			return { food, count: inventory[slot].count };
+		}, appleSlot);
+		await page.waitForFunction(() => {
+			const api = window.__mc;
+			const c = api.stats().camera;
+			return c.pitch === -90 && !api.raycast([c.x, c.y, c.z], [0, 1, 0], 5);
+		});
+		await page.mouse.down({ button: "right" });
+		try {
+			await page.waitForSelector("#eat-progress:not([hidden])");
+			check(true, "hunger: eating in open air displays progress");
+			await page.waitForFunction((slot, before) => {
+				const { food, inventory } = window.__mc.stats();
+				return food === Math.min(20, before.food + 4) && (inventory[slot]?.count ?? 0) === before.count - 1;
+			}, {}, appleSlot, before);
+			check(true, "hunger: holding use consumes one apple and restores food");
+		} finally {
+			await page.mouse.up({ button: "right" });
+		}
+		await page.waitForSelector("#eat-progress[hidden]");
+		check(await page.$eval("#food", meter => Number(meter.getAttribute("aria-valuenow")) === window.__mc.stats().food),
+			"hunger: the food meter reflects server food");
+		check(errors.length === 0, "hunger: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "hunger", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -1350,6 +1467,7 @@ try {
 	await partialModels();
 	await survivalInventory();
 	await survivalHealth();
+	await survivalHunger();
 	await survivalCrafting();
 	await furnaceSmelting();
 	await dayNight();

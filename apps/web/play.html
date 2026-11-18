@@ -64,6 +64,16 @@
 				width: 18px;
 				height: 2px;
 			}
+			#eat-progress {
+				position: fixed;
+				top: calc(50% + 18px);
+				left: 50%;
+				width: 64px;
+				height: 5px;
+				transform: translateX(-50%);
+				accent-color: #f1b657;
+				pointer-events: none;
+			}
 			#hotbar {
 				position: fixed;
 				left: 50%;
@@ -94,7 +104,31 @@
 			}
 			.vital-row { display: flex; gap: 4px; }
 			.vital-row[hidden], .vital-row span[hidden] { display: none; }
-			#air { margin-bottom: 4px; }
+			#air { width: 216px; margin: 0 auto 4px; }
+			#vital-meters { display: flex; gap: 12px; }
+			#food { flex-direction: row-reverse; }
+			.food {
+				position: relative;
+				width: 18px;
+				height: 18px;
+				filter: drop-shadow(0 1px 1px #000);
+			}
+			.food::before, .food::after {
+				content: "";
+				position: absolute;
+			}
+			.food::before {
+				inset: 8px 1px 1px 7px;
+				background: #f6dcaa;
+				clip-path: polygon(0 0, 70% 44%, 92% 32%, 100% 51%, 90% 70%, 93% 88%, 74% 100%, 48% 78%, 0 40%);
+			}
+			.food::after {
+				inset: 1px 4px 4px 0;
+				background: #353042;
+				clip-path: polygon(18% 5%, 59% 0, 83% 18%, 100% 48%, 86% 83%, 53% 100%, 20% 83%, 0 53%, 0 27%);
+			}
+			.food[data-state="full"]::after { background: #db783d; }
+			.food[data-state="half"]::after { background: linear-gradient(270deg, #db783d 50%, #353042 50%); }
 			.heart { filter: drop-shadow(0 1px 1px #000); }
 			.heart::before {
 				content: "";
@@ -201,10 +235,14 @@
 		<canvas id="view"></canvas>
 		<pre id="hud">読み込み中…</pre>
 		<div id="crosshair"></div>
+		<progress id="eat-progress" role="progressbar" aria-label="食事" max="1600" value="0" hidden></progress>
 		<div id="hotbar"></div>
 		<div id="vitals" hidden>
 			<div id="air" class="vital-row" role="meter" aria-label="空気" aria-valuenow="300" aria-valuemin="0" aria-valuemax="300" hidden></div>
-			<div id="health" class="vital-row" role="meter" aria-label="体力" aria-valuenow="20" aria-valuemin="0" aria-valuemax="20"></div>
+			<div id="vital-meters">
+				<div id="health" class="vital-row" role="meter" aria-label="体力" aria-valuenow="20" aria-valuemin="0" aria-valuemax="20"></div>
+				<div id="food" class="vital-row" role="meter" aria-label="満腹度" aria-valuenow="20" aria-valuemin="0" aria-valuemax="20"></div>
+			</div>
 		</div>
 		<div id="damage-flash" aria-hidden="true" hidden></div>
 		<dialog id="death-screen" class="menu-panel" role="dialog" aria-modal="true" aria-labelledby="death-title" aria-describedby="death-cause">

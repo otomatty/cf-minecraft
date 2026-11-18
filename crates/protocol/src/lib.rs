@@ -8,8 +8,9 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 pub const MAX_HEALTH: u8 = 20;
+pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +30,7 @@ pub struct PlayerVitals {
     pub air: u16,
     pub dead: bool,
     pub cause: DeathCause,
+    pub food: u8,
 }
 
 impl Default for PlayerVitals {
@@ -38,12 +40,21 @@ impl Default for PlayerVitals {
             air: MAX_AIR,
             dead: false,
             cause: DeathCause::None,
+            food: MAX_FOOD,
         }
     }
 }
 
 impl PlayerVitals {
     pub fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Self::read_fields(r, true)
+    }
+
+    pub fn read_v4(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Self::read_fields(r, false)
+    }
+
+    fn read_fields(r: &mut Reader<'_>, has_food: bool) -> Result<Self, DecodeError> {
         let (health, air, dead) = (r.u8()?, r.u16()?, r.u8()?);
         let cause = match r.u8()? {
             0 => DeathCause::None,
@@ -53,7 +64,9 @@ impl PlayerVitals {
             4 => DeathCause::Void,
             _ => return Err(DecodeError),
         };
+        let food = if has_food { r.u8()? } else { MAX_FOOD };
         if health > MAX_HEALTH
+            || food > MAX_FOOD
             || air > MAX_AIR
             || dead > 1
             || (health == 0) != (dead == 1)
@@ -66,11 +79,19 @@ impl PlayerVitals {
             air,
             dead: dead == 1,
             cause,
+            food,
         })
     }
 
     pub fn write(self, w: &mut Writer) {
-        write_vitals(w, self.health, self.air, self.dead, self.cause as u8);
+        write_vitals(
+            w,
+            self.health,
+            self.air,
+            self.dead,
+            self.cause as u8,
+            self.food,
+        );
     }
 
     pub fn packet(self) -> S2C {
@@ -79,15 +100,17 @@ impl PlayerVitals {
             air: self.air,
             dead: self.dead,
             cause: self.cause as u8,
+            food: self.food,
         }
     }
 }
 
-fn write_vitals(w: &mut Writer, health: u8, air: u16, dead: bool, cause: u8) {
+fn write_vitals(w: &mut Writer, health: u8, air: u16, dead: bool, cause: u8, food: u8) {
     w.u8(health);
     w.u16(air);
     w.u8(u8::from(dead));
     w.u8(cause);
+    w.u8(food);
 }
 
 /// Senders clamp furnace display timers to this value, and decoding rejects larger values.
@@ -97,6 +120,8 @@ pub const MAX_FURNACE_DISPLAY_TICKS: u16 = 1600;
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
     Respawn,
+    UseItem,
+    StopUsingItem,
     ClickSlot {
         slot: u8,
         button: u8,
@@ -157,6 +182,7 @@ pub enum S2C {
         air: u16,
         dead: bool,
         cause: u8,
+        food: u8,
     },
     DigProgress {
         player: u32,
@@ -235,6 +261,8 @@ pub enum S2C {
 
 pub mod id {
     pub const C2S_RESPAWN: u8 = 0x0c;
+    pub const C2S_USE_ITEM: u8 = 0x0d;
+    pub const C2S_STOP_USING_ITEM: u8 = 0x0e;
     pub const S2C_PLAYER_STATUS: u8 = 0x0c;
     pub const C2S_USE_BLOCK: u8 = 0x0b;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
@@ -268,6 +296,8 @@ impl C2S {
         let mut w = Writer::new();
         match *self {
             C2S::Respawn => w.u8(id::C2S_RESPAWN),
+            C2S::UseItem => w.u8(id::C2S_USE_ITEM),
+            C2S::StopUsingItem => w.u8(id::C2S_STOP_USING_ITEM),
             C2S::ClickSlot {
                 slot,
                 button,
@@ -368,6 +398,8 @@ impl C2S {
                 z: r.i32()?,
             },
             id::C2S_RESPAWN => C2S::Respawn,
+            id::C2S_USE_ITEM => C2S::UseItem,
+            id::C2S_STOP_USING_ITEM => C2S::StopUsingItem,
             id::C2S_CLOSE_INVENTORY => C2S::CloseInventory,
             id::C2S_DIG_START => C2S::DigStart {
                 x: r.i32()?,
@@ -571,9 +603,10 @@ impl S2C {
                 air,
                 dead,
                 cause,
+                food,
             } => {
                 w.u8(id::S2C_PLAYER_STATUS);
-                write_vitals(&mut w, *health, *air, *dead, *cause);
+                write_vitals(&mut w, *health, *air, *dead, *cause, *food);
             }
             S2C::PlayerCorrect { x, y, z } => {
                 w.u8(id::S2C_PLAYER_CORRECT);
@@ -835,6 +868,11 @@ mod tests {
         assert_eq!(C2S::Respawn.encode(), [id::C2S_RESPAWN]);
         assert_eq!(C2S::decode(&[id::C2S_RESPAWN]), Ok(C2S::Respawn));
         assert!(C2S::decode(&[id::C2S_RESPAWN, 0]).is_err());
+        for (packet, tag) in [(C2S::UseItem, 0x0d), (C2S::StopUsingItem, 0x0e)] {
+            assert_eq!(packet.encode(), [tag]);
+            assert_eq!(C2S::decode(&[tag]), Ok(packet));
+            assert!(C2S::decode(&[tag, 0]).is_err());
+        }
 
         for cause in 0..=4 {
             let (health, air, dead) = if cause == 0 {
@@ -847,15 +885,25 @@ mod tests {
                 air,
                 dead,
                 cause,
+                food: cause * 5,
             };
             assert_eq!(S2C::decode(&packet.encode()), Ok(packet));
         }
         let valid = PlayerVitals::default().packet().encode();
-        assert_eq!(valid, [id::S2C_PLAYER_STATUS, 20, 1, 44, 0, 0]);
+        assert_eq!(valid, [id::S2C_PLAYER_STATUS, 20, 1, 44, 0, 0, 20]);
         for len in 0..valid.len() {
             assert!(S2C::decode(&valid[..len]).is_err());
         }
-        for (index, value) in [(1, 21), (1, 0), (3, 45), (4, 2), (4, 1), (5, 1), (5, 5)] {
+        for (index, value) in [
+            (1, 21),
+            (1, 0),
+            (3, 45),
+            (4, 2),
+            (4, 1),
+            (5, 1),
+            (5, 5),
+            (6, 21),
+        ] {
             let mut invalid = valid.clone();
             invalid[index] = value;
             assert!(S2C::decode(&invalid).is_err(), "{index} = {value}");

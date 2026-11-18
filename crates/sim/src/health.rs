@@ -1,9 +1,9 @@
 //! Survival health and the per-tick state that drives it.
 
-use protocol::{DeathCause, PlayerVitals, MAX_AIR, MAX_HEALTH};
-use world::{blocks, Fnv64, World, MIN_Y};
+use protocol::{DeathCause, PlayerVitals, MAX_AIR, MAX_FOOD, MAX_HEALTH};
+use world::{blocks, items, Fnv64, World, MIN_Y};
 
-use crate::{GameMode, Server};
+use crate::{inventory::Screen, Client, GameMode, Server};
 
 const FALL_DAMAGE_OFFSET: f64 = 3.0;
 const SUFFOCATION_INTERVAL: u8 = 10;
@@ -17,6 +17,16 @@ const VOID_INTERVAL: u8 = 10;
 const VOID_DAMAGE: u8 = 4;
 const REGEN_INTERVAL: u8 = 80;
 const REGEN_HEALTH: u8 = 1;
+const REGEN_FOOD: u8 = 18;
+const STARVE_INTERVAL: u8 = 80;
+const EXHAUSTION_PER_FOOD: u16 = 1200;
+const EAT_TICKS: u8 = 32;
+
+#[derive(Clone, Copy)]
+struct EatState {
+    slot: u8,
+    ticks: u8,
+}
 
 #[derive(Default)]
 pub(crate) struct Health {
@@ -28,6 +38,10 @@ pub(crate) struct Health {
     drowning_ticks: u8,
     void_ticks: u8,
     regen_ticks: u8,
+    exhaustion: u16,
+    walked: f64,
+    starve_ticks: u8,
+    eating: Option<EatState>,
 }
 
 impl Health {
@@ -61,6 +75,18 @@ impl Health {
             self.fall_start_y = Some(pos[1]);
         } else {
             self.fall_start_y = Some(prev[1].max(pos[1]));
+        }
+    }
+
+    pub fn add_exhaustion(&mut self, amount: u16) {
+        self.exhaustion = self.exhaustion.saturating_add(amount);
+    }
+
+    pub fn walk(&mut self, distance: f64) {
+        self.walked += distance;
+        while self.walked >= 1.0 {
+            self.walked -= 1.0;
+            self.add_exhaustion(4);
         }
     }
 
@@ -109,14 +135,33 @@ impl Health {
             }
         }
 
-        if interval(&mut self.regen_ticks, was_injured, REGEN_INTERVAL) {
+        self.add_exhaustion(1);
+        while self.exhaustion >= EXHAUSTION_PER_FOOD {
+            self.exhaustion -= EXHAUSTION_PER_FOOD;
+            self.vitals.food = self.vitals.food.saturating_sub(1);
+        }
+
+        if interval(
+            &mut self.regen_ticks,
+            was_injured && self.vitals.food >= REGEN_FOOD,
+            REGEN_INTERVAL,
+        ) {
             self.vitals.health += REGEN_HEALTH;
+            self.add_exhaustion(600);
+        }
+        if interval(
+            &mut self.starve_ticks,
+            self.vitals.food == 0 && self.vitals.health >= 2,
+            STARVE_INTERVAL,
+        ) {
+            self.vitals.health -= 1;
         }
     }
 
     fn damage(&mut self, amount: u8, cause: DeathCause) {
         self.vitals.health = self.vitals.health.saturating_sub(amount);
         if self.vitals.health == 0 {
+            self.eating = None;
             self.vitals.dead = true;
             self.vitals.cause = cause;
         }
@@ -133,6 +178,15 @@ impl Health {
         h.u8(self.drowning_ticks);
         h.u8(self.void_ticks);
         h.u8(self.regen_ticks);
+        h.u8(self.vitals.food);
+        h.bytes(&self.exhaustion.to_be_bytes());
+        h.bytes(&self.walked.to_bits().to_be_bytes());
+        h.u8(self.starve_ticks);
+        h.u8(u8::from(self.eating.is_some()));
+        if let Some(eating) = self.eating {
+            h.u8(eating.slot);
+            h.u8(eating.ticks);
+        }
     }
 }
 
@@ -168,17 +222,72 @@ pub(crate) fn hash_height(h: &mut Fnv64, height: Option<f64>) {
     }
 }
 
+impl Client {
+    fn selected_food(&self) -> Option<u8> {
+        if self.health.vitals.food == MAX_FOOD || self.inventory.screen != Screen::None {
+            return None;
+        }
+        self.inventory
+            .selected_stack()
+            .and_then(|stack| items::food(stack.item))
+    }
+
+    fn tick_eating(&mut self) {
+        let Some(mut eating) = self.health.eating.take() else {
+            return;
+        };
+        if eating.slot != self.inventory.selected() {
+            return;
+        }
+        let Some(food) = self.selected_food() else {
+            return;
+        };
+        eating.ticks += 1;
+        if eating.ticks == EAT_TICKS {
+            self.inventory.take_selected();
+            self.inventory_dirty = true;
+            self.health.vitals.food = (self.health.vitals.food + food).min(MAX_FOOD);
+            eating.ticks = 0;
+        }
+        self.health.eating = Some(eating);
+    }
+}
+
 impl Server {
+    pub(crate) fn use_item(&mut self, id: u32) {
+        let client = self.clients.get_mut(&id).unwrap();
+        if client.health.eating.is_some() {
+            return;
+        }
+        if self.game_mode != GameMode::Survival
+            || !client.joined
+            || client.selected_food().is_none()
+        {
+            self.stats.packets_rejected += 1;
+            return;
+        }
+        client.health.eating = Some(EatState {
+            slot: client.inventory.selected(),
+            ticks: 0,
+        });
+    }
+
+    pub(crate) fn stop_using_item(&mut self, id: u32) {
+        self.clients.get_mut(&id).unwrap().health.eating = None;
+    }
+
     pub(crate) fn tick_health(&mut self) {
         let mut deaths = Vec::new();
         for (&id, client) in self.clients.iter_mut().filter(|(_, c)| c.joined) {
-            let health = &mut client.health;
-            if self.game_mode == GameMode::Survival && !health.vitals.dead {
-                health.tick(&self.world, client.pos);
-                if health.vitals.dead {
+            if self.game_mode == GameMode::Survival && !client.health.vitals.dead {
+                client.health.tick(&self.world, client.pos);
+                if client.health.vitals.dead {
                     deaths.push(id);
+                } else {
+                    client.tick_eating();
                 }
             }
+            let health = &mut client.health;
             if health.last_sent != Some(health.vitals) {
                 health.last_sent = Some(health.vitals);
                 self.outbox.push((id, health.vitals.packet().encode()));
@@ -479,6 +588,262 @@ mod tests {
     }
 
     #[test]
+    fn standing_still_drains_food_every_1200_ticks_only_in_survival() {
+        for (mode, expected) in [(GameMode::Survival, 19), (GameMode::Creative, 20)] {
+            let mut s = joined(mode);
+            // Joining already processed the first tick.
+            advance(&mut s, 1198);
+            assert_eq!(vitals(&s).food, 20);
+            assert!(statuses(packets(&mut s)).is_empty());
+            s.tick();
+            assert_eq!(vitals(&s).food, expected);
+            let updates = statuses(packets(&mut s));
+            if mode == GameMode::Survival {
+                assert_eq!(updates, [vitals(&s).packet()]);
+                advance(&mut s, 1199);
+                assert_eq!(vitals(&s).food, 19);
+                s.tick();
+                assert_eq!(vitals(&s).food, 18);
+            } else {
+                assert!(updates.is_empty());
+                assert_eq!(s.clients[&1].health.exhaustion, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_horizontal_movement_adds_fatigue_but_teleport_does_not() {
+        let mut s = joined(GameMode::Survival);
+        let [x, y, z] = FEET;
+        for floor_x in 2..=7 {
+            s.world.set_block(floor_x, 79, 2, blocks::STONE);
+        }
+        for step in 0..600 {
+            if step > 0 && step % 20 == 0 {
+                teleport(&mut s, FEET);
+            }
+            send(
+                &mut s,
+                movement([x + f64::from(step % 20 + 1) * 0.25, y, z]),
+            );
+            s.tick();
+            match step {
+                399 => {
+                    assert_eq!(s.clients[&1].health.exhaustion, 801);
+                    assert_eq!(vitals(&s).food, 20);
+                }
+                598 => {
+                    assert_eq!(s.clients[&1].health.exhaustion, 1196);
+                    assert_eq!(s.clients[&1].health.walked, 0.75);
+                    assert_eq!(vitals(&s).food, 20);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(s.stats.packets_rejected, 0);
+        assert_eq!(vitals(&s).food, 19);
+        assert_eq!(s.clients[&1].health.exhaustion, 1);
+        assert_eq!(s.clients[&1].health.walked, 0.0);
+    }
+
+    #[test]
+    fn completed_dig_adds_twenty_exhaustion() {
+        let mut s = joined(GameMode::Survival);
+        s.world.set_block(3, 80, 2, blocks::DIRT);
+        send(&mut s, C2S::DigStart { x: 3, y: 80, z: 2 });
+        advance(&mut s, 12);
+        assert_eq!(s.get_block(3, 80, 2), Some(blocks::DIRT));
+        assert_eq!(s.clients[&1].health.exhaustion, 13);
+        s.tick();
+        assert_eq!(s.get_block(3, 80, 2), Some(blocks::AIR));
+        assert_eq!(s.clients[&1].health.exhaustion, 34);
+    }
+
+    #[test]
+    fn regeneration_requires_enough_food_and_uses_exhaustion_on_the_next_tick() {
+        let mut s = joined(GameMode::Survival);
+        s.clients.get_mut(&1).unwrap().health.vitals.health = 13;
+        advance(&mut s, 79);
+        assert_eq!(vitals(&s).health, 13);
+        s.tick();
+        assert_eq!(vitals(&s).health, 14);
+        advance(&mut s, 79);
+        assert_eq!(vitals(&s).health, 14);
+        s.tick();
+        assert_eq!(vitals(&s).health, 15);
+        assert_eq!(vitals(&s).food, 20);
+        s.tick();
+        assert_eq!(vitals(&s).food, 19);
+
+        s.clients.get_mut(&1).unwrap().health.vitals.food = 17;
+        advance(&mut s, 80);
+        assert_eq!(vitals(&s).health, 15);
+        s.clients.get_mut(&1).unwrap().health.vitals.food = 18;
+        advance(&mut s, 79);
+        assert_eq!(vitals(&s).health, 15);
+        s.tick();
+        assert_eq!(vitals(&s).health, 16);
+    }
+
+    #[test]
+    fn starvation_damages_every_eighty_ticks_and_stops_at_one_health() {
+        let mut s = joined(GameMode::Survival);
+        let status = &mut s.clients.get_mut(&1).unwrap().health.vitals;
+        status.food = 0;
+        status.health = 3;
+        advance(&mut s, 79);
+        assert_eq!(vitals(&s).health, 3);
+        s.tick();
+        assert_eq!(vitals(&s).health, 2);
+        advance(&mut s, 80);
+        assert_eq!(vitals(&s).health, 1);
+        advance(&mut s, 1200);
+        assert_eq!(vitals(&s).health, 1);
+        assert_eq!(vitals(&s).food, 0);
+        assert!(!vitals(&s).dead);
+        assert_eq!(s.clients[&1].health.exhaustion, 161);
+    }
+
+    fn with_food(mode: GameMode, food: u8, item: u16) -> Server {
+        let mut s = joined(mode);
+        let client = s.clients.get_mut(&1).unwrap();
+        client.health.vitals.food = food;
+        client
+            .inventory
+            .set(0, Some(Stack { item, count: 2 }))
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn eating_repeats_every_32_ticks_and_clamps_food() {
+        let mut s = with_food(GameMode::Survival, 15, 49);
+        send(&mut s, C2S::UseItem);
+        advance(&mut s, 31);
+        assert_eq!(vitals(&s).food, 15);
+        assert_eq!(s.clients[&1].inventory.selected_stack().unwrap().count, 2);
+        packets(&mut s);
+        send(&mut s, C2S::UseItem);
+        s.tick();
+        assert_eq!(vitals(&s).food, 19);
+        assert_eq!(s.clients[&1].inventory.selected_stack().unwrap().count, 1);
+        let updates = packets(&mut s);
+        assert_eq!(statuses(updates.clone()), [vitals(&s).packet()]);
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|p| matches!(p, S2C::Inventory { .. }))
+                .count(),
+            1
+        );
+        advance(&mut s, 31);
+        assert_eq!(vitals(&s).food, 19);
+        s.tick();
+        assert_eq!(vitals(&s).food, 20);
+        assert!(s.clients[&1].inventory.selected_stack().is_none());
+        s.tick();
+        assert!(s.clients[&1].health.eating.is_none());
+        assert_eq!(s.stats.packets_rejected, 0);
+    }
+
+    #[test]
+    fn eating_cancels_on_release_slot_change_screen_or_death() {
+        for cancel in [
+            C2S::StopUsingItem,
+            C2S::SelectSlot { slot: 1 },
+            C2S::UseBlock { x: 3, y: 80, z: 2 },
+        ] {
+            let mut s = with_food(GameMode::Survival, 15, 49);
+            s.world.set_block(3, 80, 2, blocks::CRAFTING_TABLE);
+            send(&mut s, C2S::UseItem);
+            advance(&mut s, 31);
+            send(&mut s, cancel);
+            advance(&mut s, 33);
+            assert_eq!(vitals(&s).food, 15);
+            assert!(s.clients[&1].health.eating.is_none());
+            assert_eq!(s.clients[&1].inventory.slots()[0].unwrap().count, 2);
+            assert_eq!(s.stats.packets_rejected, 0);
+        }
+        let mut s = with_food(GameMode::Survival, 15, 49);
+        send(&mut s, C2S::UseItem);
+        advance(&mut s, 31);
+        teleport(&mut s, [FEET[0], FEET[1] + 23.0, FEET[2]]);
+        send(&mut s, movement(FEET));
+        s.tick();
+        assert!(vitals(&s).dead);
+        assert_eq!(vitals(&s).food, 15);
+        assert!(s.clients[&1].health.eating.is_none());
+        assert_eq!(s.entities.values().next().unwrap().count, 2);
+        send(&mut s, C2S::Respawn);
+        s.tick();
+        assert_eq!(vitals(&s).food, 20);
+        assert_eq!(s.clients[&1].health.exhaustion, 1);
+    }
+
+    #[test]
+    fn cannot_start_eating_when_full_in_creative_with_non_food_or_with_a_screen_open() {
+        for (mode, food, item) in [
+            (GameMode::Survival, 20, 49),
+            (GameMode::Creative, 15, 49),
+            (GameMode::Survival, 15, 1),
+        ] {
+            let mut s = with_food(mode, food, item);
+            send(&mut s, C2S::UseItem);
+            send(&mut s, C2S::StopUsingItem);
+            s.tick();
+            assert!(s.clients[&1].health.eating.is_none());
+            assert_eq!(s.stats.packets_rejected, 1);
+        }
+        let mut s = with_food(GameMode::Survival, 15, 49);
+        s.world.set_block(3, 80, 2, blocks::FURNACE);
+        send(&mut s, C2S::UseBlock { x: 3, y: 80, z: 2 });
+        send(&mut s, C2S::UseItem);
+        s.tick();
+        assert!(s.clients[&1].health.eating.is_none());
+        assert_eq!(s.stats.packets_rejected, 1);
+    }
+
+    #[test]
+    fn oak_leaf_mining_drops_either_one_leaf_or_one_apple_deterministically() {
+        let harvest = || {
+            let mut s = joined(GameMode::Survival);
+            let mut results = Vec::new();
+            for _ in 0..60 {
+                s.world.set_block(3, 80, 2, blocks::OAK_LEAVES);
+                send(&mut s, C2S::DigStart { x: 3, y: 80, z: 2 });
+                advance(&mut s, 7);
+                assert_eq!(s.get_block(3, 80, 2), Some(blocks::AIR));
+                assert_eq!(s.entities.len(), 1);
+                let drop = s.entities.pop_first().unwrap().1;
+                assert_eq!(drop.count, 1);
+                results.push(drop.item);
+            }
+            results
+        };
+        let results = harvest();
+        let leaves = items::for_block(blocks::OAK_LEAVES).unwrap();
+        assert!(results.contains(&49));
+        assert!(results.contains(&leaves));
+        assert!(results.iter().all(|&item| item == 49 || item == leaves));
+        assert_eq!(results, harvest());
+
+        let mut s = joined(GameMode::Creative);
+        s.world.set_block(3, 80, 2, blocks::OAK_LEAVES);
+        send(
+            &mut s,
+            C2S::SetBlock {
+                x: 3,
+                y: 80,
+                z: 2,
+                state: blocks::AIR,
+            },
+        );
+        s.tick();
+        assert_eq!(s.get_block(3, 80, 2), Some(blocks::AIR));
+        assert!(s.entities.is_empty());
+    }
+
+    #[test]
     fn death_drops_all_carried_stacks_in_order_and_keeps_furnace_contents() {
         for screen in [
             Screen::CraftingTable { pos: [3, 80, 2] },
@@ -554,10 +919,16 @@ mod tests {
 
         s.world.set_block(2, 81, 2, blocks::WATER);
         advance(&mut s, 10);
-        s.clients.get_mut(&1).unwrap().health.vitals.health = 1;
+        let health = &mut s.clients.get_mut(&1).unwrap().health;
+        health.vitals.health = 1;
+        health.vitals.food = 6;
+        health.walk(0.75);
         release_and_reconnect(&mut s);
         assert_eq!(vitals(&s).health, 1);
         assert_eq!(vitals(&s).air, 290);
+        assert_eq!(vitals(&s).food, 6);
+        assert_eq!(s.clients[&1].health.exhaustion, 0);
+        assert_eq!(s.clients[&1].health.walked, 0.0);
         assert!(!vitals(&s).dead);
         s.world.set_block(2, 81, 2, blocks::STONE);
         hello(&mut s);
@@ -595,6 +966,8 @@ mod tests {
             },
             C2S::UseBlock { x: 2, y: 81, z: 2 },
             C2S::SelectSlot { slot: 1 },
+            C2S::UseItem,
+            C2S::StopUsingItem,
         ];
         let rejected = s.stats.packets_rejected;
         for packet in denied.iter().cloned() {
@@ -631,7 +1004,7 @@ mod tests {
     fn state_hash_includes_vitals_fall_and_interval_counters_independently() {
         let mut s = joined(GameMode::Survival);
         let baseline = s.state_hash();
-        let mutations: [fn(&mut Health); 10] = [
+        let mutations: [fn(&mut Health); 15] = [
             |h| h.vitals.health -= 1,
             |h| h.vitals.air -= 1,
             |h| h.vitals.dead = true,
@@ -642,6 +1015,11 @@ mod tests {
             |h| h.drowning_ticks = 1,
             |h| h.void_ticks = 1,
             |h| h.regen_ticks = 1,
+            |h| h.vitals.food -= 1,
+            |h| h.exhaustion = 2,
+            |h| h.walked = 0.5,
+            |h| h.starve_ticks = 1,
+            |h| h.eating = Some(EatState { slot: 0, ticks: 0 }),
         ];
         for mutate in mutations {
             let record = &mut s.clients.get_mut(&1).unwrap().health;

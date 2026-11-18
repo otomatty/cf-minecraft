@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn creative_inventory_scenario_fingerprint() {
         // Previously 88dd38b5138d405e. Health state and PlayerStatus now participate.
-        assert_eq!(run(2026, 600), 0x35cac1f1644e93a7);
+        assert_eq!(run(2026, 600), 0x5958269535e4ab7b);
     }
 
     #[test]
