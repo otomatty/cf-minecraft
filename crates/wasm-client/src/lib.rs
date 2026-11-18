@@ -30,10 +30,12 @@ struct MobEntity {
     pos: [f64; 3],
     previous: [f64; 3],
     yaw: f32,
+    hurt: u32,
 }
 struct State {
     entities: BTreeMap<u32, ItemEntity>,
     mobs: BTreeMap<u32, MobEntity>,
+    mob_hurt_sequence: u32,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -188,6 +190,7 @@ pub extern "C" fn client_new() {
     let st = State {
         entities: BTreeMap::new(),
         mobs: BTreeMap::new(),
+        mob_hurt_sequence: 0,
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -242,6 +245,7 @@ pub extern "C" fn client_reset_world() {
     }
     st.entities.clear();
     st.mobs.clear();
+    st.mob_hurt_sequence = 0;
     st.connectivity.clear();
     st.visibility_stale = true;
     st.world.chunks.clear();
@@ -337,6 +341,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                     pos: [x, y, z],
                     previous: [x, y, z],
                     yaw,
+                    hurt: 0,
                 },
             );
         }
@@ -345,6 +350,12 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.previous = mob.pos;
                 mob.pos = [x, y, z];
                 mob.yaw = yaw;
+            }
+        }
+        S2C::MobHurt { id } => {
+            if let Some(mob) = st.mobs.get_mut(&id) {
+                st.mob_hurt_sequence = st.mob_hurt_sequence.wrapping_add(1).max(1);
+                mob.hurt = st.mob_hurt_sequence;
             }
         }
         S2C::DigProgress { .. } => {}
@@ -1262,6 +1273,11 @@ pub extern "C" fn client_enc_dig_abort() -> usize {
     emit(state(), C2S::DigAbort.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_attack(id: u32) -> usize {
+    emit(state(), C2S::Attack { id }.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
@@ -1481,7 +1497,7 @@ pub extern "C" fn client_entities() -> usize {
     st.out = w.finish();
     st.out.len()
 }
-/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples.
+/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32.
 #[no_mangle]
 pub extern "C" fn client_mobs() -> usize {
     let st = state();
@@ -1493,6 +1509,7 @@ pub extern "C" fn client_mobs() -> usize {
         for v in mob.pos.into_iter().chain(mob.previous) {
             w.f64(v);
         }
+        w.i32(mob.hurt as i32);
     }
     st.out = w.finish();
     st.out.len()
@@ -1555,6 +1572,40 @@ mod tests {
     use super::*;
 
     static CLIENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn mob_hurt_updates_the_last_hit_in_the_packed_mirror() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let receive = |packet: S2C, tag| {
+            let bytes = packet.encode();
+            assert_eq!(unsafe { client_packet(bytes.as_ptr(), bytes.len()) }, tag);
+        };
+        receive(S2C::MobHurt { id: 7 }, 0x0f);
+        assert_eq!(client_mobs(), 0);
+        receive(
+            S2C::MobSpawn {
+                id: 7,
+                kind: MobKind::Cow,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                yaw: 0.0,
+            },
+            0x0d,
+        );
+        for sequence in 0_u32..=2 {
+            assert_eq!(client_mobs(), 61);
+            assert_eq!(state().out[57..61], sequence.to_be_bytes());
+            if sequence < 2 {
+                receive(S2C::MobHurt { id: 7 }, 0x0f);
+            }
+        }
+        receive(S2C::EntityRemove { id: 7 }, 0x0a);
+        assert_eq!(client_mobs(), 0);
+        assert_eq!(client_enc_attack(7), 5);
+        assert_eq!(C2S::decode(&state().out), Ok(C2S::Attack { id: 7 }));
+    }
 
     #[test]
     fn item_mirror_updates_previous_count_removal_and_reset() {

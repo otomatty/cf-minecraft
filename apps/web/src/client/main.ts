@@ -25,7 +25,7 @@ import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity } from "./entities.ts";
+import { interpolateEntity, mobBeforeBlock, type RenderCow } from "./entities.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
@@ -35,8 +35,10 @@ import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } 
 import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
-/** Block interaction range in creative mode. */
+/** Block interaction and mob attack range. */
 const REACH = 5;
+const LEFT_REPEAT_MS = 250;
+const MOB_HURT_MS = 500;
 const DOUBLE_TAP_TICKS = 7;
 const MESH_BUDGET_MS = 4;
 
@@ -204,6 +206,8 @@ async function main(): Promise<void> {
 	let timeReceivedAt = performance.now();
 	let fps = 0;
 	const entityReceivedAt = new Map<number, number>();
+	const mobHurtAt = new Map<number, number>();
+	let renderCows: Array<RenderCow & { id: number }> = [];
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
@@ -218,6 +222,8 @@ async function main(): Promise<void> {
 				meshPool.reset();
 				core.resetWorld();
 				entityReceivedAt.clear();
+				mobHurtAt.clear();
+				renderCows = [];
 				remoteDigs.clear();
 				dig = newDigState();
 				removeUnloaded();
@@ -259,7 +265,15 @@ async function main(): Promise<void> {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
-			if (id === S2C.EntityRemove) entityReceivedAt.delete(new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1));
+			if (id === S2C.MobHurt) {
+				// Each MobHurt packet advances the mirror's hurt counter for this cow.
+				mobHurtAt.set(new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1), performance.now());
+			}
+			if (id === S2C.EntityRemove) {
+				const entity = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1);
+				entityReceivedAt.delete(entity);
+				mobHurtAt.delete(entity);
+			}
 			if (id === S2C.Welcome) {
 				pendingSelectedSlot = null;
 				seedReady = true;
@@ -517,10 +531,9 @@ async function main(): Promise<void> {
 	let sprinting = false;
 	let lastForwardTap = -Infinity;
 	const heldButtons = new Map<number, number>();
-	let leftHeld = false;
+	let miningStartsAt = 0;
 	const remoteDigs = new Map<number, DigOverlay>();
 	const stopDig = () => {
-		leftHeld = false;
 		const a = dig.active;
 		const next = advanceDig(dig, false, null, a ? core.getBlock(a.x, a.y, a.z) : null, performance.now());
 		dig = next.state;
@@ -911,7 +924,7 @@ async function main(): Promise<void> {
 			if (e.code === "Escape") e.preventDefault();
 			return;
 		}
-		if (!overlay.hidden && menuView === "settings") {
+		if (!locked() && !overlay.hidden && menuView === "settings") {
 			if (capturing) {
 				e.preventDefault();
 				if (e.repeat) return;
@@ -923,7 +936,7 @@ async function main(): Promise<void> {
 				settings.keys = next;
 				capturing = null;
 				persistSettings();
-			} else if (e.code === "Escape" && !locked()) {
+			} else if (e.code === "Escape") {
 				e.preventDefault();
 				showMenuView("menu");
 			}
@@ -1019,6 +1032,22 @@ async function main(): Promise<void> {
 	function aimedBlock(includeSources = false): RayHit | null {
 		return core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, includeSources);
 	}
+	// Pointer lock can take effect before pointerlockchange hides the overlay.
+	const canInteract = () => locked() && joined && connection === "open" && !core.dead
+		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden;
+	function aimedCow(block: RayHit | null): number | null {
+		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderCows, REACH, block);
+	}
+	function interactLeft(block: RayHit | null, cow: number | null): void {
+		if (cow !== null) {
+			// Knockback can move the cow off the ray before the next repeat.
+			miningStartsAt = performance.now() + LEFT_REPEAT_MS;
+			sendPosition();
+			transport.send(core.encodeAttack(cow));
+		} else if (block && core.gameMode === "creative") {
+			setBlock(block.x, block.y, block.z, 0);
+		}
+	}
 	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
 		const held = button === 2 ? items.find(item => item.id === core.inventory[selectedSlot]?.item) : undefined;
@@ -1039,10 +1068,7 @@ async function main(): Promise<void> {
 			}
 		}
 		if (!hit) return;
-		if (button === 0) {
-			if (core.gameMode === "survival") return;
-			setBlock(hit.x, hit.y, hit.z, 0);
-		} else if (button === 2) {
+		if (button === 2) {
 			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
 			const open = blockInteraction(block?.name, shift) === "open";
 			const above = registry[core.getBlock(hit.x, hit.y + 1, hit.z)];
@@ -1078,11 +1104,19 @@ async function main(): Promise<void> {
 		}
 	}
 	canvas.addEventListener("mousedown", (e) => {
-		if (!locked() || core.dead) return;
+		if (!canInteract()) return;
 		e.preventDefault();
-		if (e.button === 0 && core.gameMode === "survival") { leftHeld = true; return; }
-		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
-		interact(e.button, false, e.shiftKey);
+		if (e.button === 0) {
+			const repeatAt = performance.now() + LEFT_REPEAT_MS;
+			heldButtons.set(0, repeatAt);
+			const hit = aimedBlock();
+			const cow = aimedCow(hit);
+			if (cow === null) miningStartsAt = 0;
+			interactLeft(hit, cow);
+		} else {
+			if (e.button === 2) heldButtons.set(2, performance.now() + 200);
+			interact(e.button, false, e.shiftKey);
+		}
 	});
 	window.addEventListener("mouseup", e => {
 		heldButtons.delete(e.button);
@@ -1251,6 +1285,10 @@ async function main(): Promise<void> {
 
 		const held = joined ? core.inventory[selectedSlot] : null;
 		const includeSources = usesFluidSourceRay(items.find(item => item.id === held?.item)?.name);
+		const interactive = canInteract();
+		const mining = interactive && core.gameMode === "survival" && heldButtons.has(0) && now >= miningStartsAt;
+		let block: RayHit | null = null;
+		let cow: number | null = null;
 		if (joined) {
 			move(dt, now);
 
@@ -1273,23 +1311,30 @@ async function main(): Promise<void> {
 				meshPool.pump(pop, section => core.padded(...section), section => core.paddedLight(...section));
 			}
 
-			target = aimedBlock(includeSources);
+			renderCows = core.mobs.flatMap(mob => {
+				if (mob.kind !== 0) return [];
+				const elapsed = now - (entityReceivedAt.get(mob.id) ?? now);
+				const dx = mob.position[0] - mob.previous[0], dz = mob.position[2] - mob.previous[2];
+				const position = interpolateEntity(mob.previous, mob.position, elapsed);
+				return [{
+					id: mob.id,
+					position,
+					yaw: mob.yaw,
+					moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
+					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
+					light: core.entityLight(position),
+				}];
+			});
+			block = aimedBlock();
+			cow = aimedCow(block);
+			target = cow !== null ? null : includeSources && !mining ? aimedBlock(true) : block;
 		}
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
 		if (eating) eatProgress.value = Math.min(eatProgress.max, now - eating.startedAt);
-		if (locked() && !core.dead) {
-			for (const [button, next] of heldButtons) {
-				if (now < next) continue;
-				interact(button, true);
-				heldButtons.set(button, now + (button === 0 ? 250 : 200));
-			}
-		}
 		if (core.gameMode === "survival" && !core.dead) {
-			const mining = leftHeld && locked() && joined && connection === "open";
-			const hit = mining && includeSources ? aimedBlock() : target;
-			if (mining) target = hit;
+			const hit = cow === null ? block : null;
 			const blockState = hit ? core.getBlock(hit.x, hit.y, hit.z) : 0;
 			const selection = digSelection(selectedSlot, held);
 			const ticks = core.miningTicks(blockState, held?.item ?? 0);
@@ -1303,6 +1348,14 @@ async function main(): Promise<void> {
 				else { const t = command.target; sendPosition(); transport.send(core.encodeDigStart(t.x,t.y,t.z)); }
 			}
 		}
+		if (interactive) {
+			for (const [button, next] of heldButtons) {
+				if (now < next) continue;
+				if (button === 0) interactLeft(block, cow);
+				else interact(button, true);
+				heldButtons.set(button, now + (button === 0 ? LEFT_REPEAT_MS : 200));
+			}
+		}
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
@@ -1313,17 +1366,6 @@ async function main(): Promise<void> {
 				texture: itemTextures.get(entity.item) ?? 0,
 				flat: item?.texture != null || item?.block == null,
 				light: core.entityLight(entity.position),
-			};
-		});
-		const renderCows = core.mobs.filter(mob => mob.kind === 0).map(mob => {
-			const elapsed = now - (entityReceivedAt.get(mob.id) ?? now);
-			const dx = mob.position[0] - mob.previous[0], dz = mob.position[2] - mob.previous[2];
-			const position = interpolateEntity(mob.previous, mob.position, elapsed);
-			return {
-				position,
-				yaw: mob.yaw,
-				moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
-				light: core.entityLight(position),
 			};
 		});
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {

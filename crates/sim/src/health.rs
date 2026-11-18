@@ -696,6 +696,32 @@ mod tests {
     }
 
     #[test]
+    fn successful_attack_adds_forty_exhaustion_only_in_survival() {
+        for (mode, baseline, attack_cost) in
+            [(GameMode::Survival, 1, 40), (GameMode::Creative, 0, 0)]
+        {
+            let mut s = joined(mode);
+            let id = s.next_entity_id;
+            s.spawn_cow(FEET);
+            let before = s.clients[&1].health.exhaustion;
+            send(&mut s, C2S::Attack { id });
+            s.tick();
+            assert_eq!(s.mobs[&id].health, 9);
+            assert_eq!(
+                s.clients[&1].health.exhaustion,
+                before + baseline + attack_cost
+            );
+            send(&mut s, C2S::Attack { id });
+            s.tick();
+            assert_eq!(s.mobs[&id].health, 9);
+            assert_eq!(
+                s.clients[&1].health.exhaustion,
+                before + 2 * baseline + attack_cost
+            );
+        }
+    }
+
+    #[test]
     fn regeneration_requires_enough_food_and_uses_exhaustion_on_the_next_tick() {
         let mut s = joined(GameMode::Survival);
         s.clients.get_mut(&1).unwrap().health.vitals.health = 13;
@@ -765,6 +791,21 @@ mod tests {
                 count: 1
             })
         );
+    }
+
+    #[test]
+    fn eating_raw_and_cooked_beef_restores_three_and_eight_food() {
+        for (name, restored) in [("raw_beef", 3), ("cooked_beef", 8)] {
+            let item = items::by_name(name).unwrap();
+            let mut s = with_food(GameMode::Survival, 10, item);
+            send(&mut s, C2S::UseItem);
+            advance(&mut s, 32);
+            assert_eq!(vitals(&s).food, 10 + restored);
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack { item, count: 1 })
+            );
+        }
     }
 
     #[test]

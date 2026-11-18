@@ -549,6 +549,7 @@ fn generate(root: &Path, dest: &Path) {
         }
     }
     out.push_str("];\n");
+    generate_loot(root, &mut out, &items.items);
     fs::write(dest.join("items.rs"), out).unwrap();
 
     generate_recipes(root, dest, &items.items);
@@ -775,4 +776,34 @@ fn generate_smelting(root: &Path, dest: &Path, items: &[Item]) {
     }
     out.push_str("];\n");
     fs::write(dest.join("smelting.rs"), out).unwrap();
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LootTable {
+    loot: Vec<LootEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LootEntry {
+    mob: String,
+    item: String,
+    min: u8,
+    max: u8,
+}
+
+fn generate_loot(root: &Path, out: &mut String, items: &[Item]) {
+    let data: LootTable = read(&root.join("loot.toml"));
+    out.push_str("pub const COW_LOOT: &[(u16, u8, u8)] = &[\n");
+    for entry in data.loot {
+        assert!(entry.mob == "cow", "loot.toml: unknown mob {}", entry.mob);
+        let item = items
+            .iter()
+            .find(|item| item.name == entry.item)
+            .unwrap_or_else(|| panic!("loot.toml: unknown item {}", entry.item));
+        assert!(entry.min <= entry.max, "loot.toml: min must be <= max");
+        writeln!(out, "({}, {}, {}),", item.id, entry.min, entry.max).unwrap();
+    }
+    out.push_str("];\n");
 }

@@ -14,3 +14,7 @@ output = "glass"
 input = "cobblestone"
 output = "stone"
 
+
+[[smelting]]
+input = "raw_beef"
+output = "cooked_beef"

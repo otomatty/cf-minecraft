@@ -76,13 +76,17 @@ fn explicit_mining_drop(state: BlockState) -> Option<u16> {
 mod tests {
     use super::*;
     #[test]
-    fn apple_and_bread_restore_food() {
+    fn food_items_restore_their_configured_amounts() {
         assert_eq!(by_name("apple"), Some(49));
         assert_eq!(by_name("bread"), Some(56));
+        assert_eq!(by_name("raw_beef"), Some(62));
+        assert_eq!(by_name("cooked_beef"), Some(63));
         for item in ITEMS {
             let expected = match item.id {
                 49 => Some(4),
                 56 => Some(5),
+                62 => Some(3),
+                63 => Some(8),
                 _ => None,
             };
             assert_eq!(food(item.id), expected);
