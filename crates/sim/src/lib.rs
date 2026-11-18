@@ -20,6 +20,7 @@ pub mod entity;
 pub mod furnace;
 mod health;
 pub mod inventory;
+pub mod mob;
 mod random_ticks;
 pub mod scenario;
 mod water;
@@ -146,6 +147,7 @@ impl SurvivalMovement {
 struct Client {
     dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
+    visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
     inventory: Inventory,
     health: health::Health,
     survival_movement: SurvivalMovement,
@@ -217,6 +219,7 @@ pub struct Server {
     scheduled_block_times: BTreeMap<[i32; 3], i64>,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     entities: BTreeMap<u32, entity::Entity>,
+    mobs: BTreeMap<u32, mob::Mob>,
     next_entity_id: u32,
     game_mode: GameMode,
     seed: i64,
@@ -251,6 +254,7 @@ impl Server {
             scheduled_block_times: BTreeMap::new(),
             furnaces: BTreeMap::new(),
             entities: BTreeMap::new(),
+            mobs: BTreeMap::new(),
             next_entity_id: 1,
             game_mode: GameMode::Creative,
             seed,
@@ -327,6 +331,16 @@ impl Server {
         &self.entities
     }
 
+    fn allocate_entity_id(&mut self) -> Option<u32> {
+        // Exhaustion never reuses an ID.
+        let id = self.next_entity_id;
+        if id == 0 {
+            return None;
+        }
+        self.next_entity_id = id.checked_add(1).unwrap_or(0);
+        Some(id)
+    }
+
     fn spawn_item(
         &mut self,
         item: u16,
@@ -335,12 +349,9 @@ impl Server {
         velocity: [f64; 3],
         pickup_delay: u32,
     ) {
-        // Exhaustion never reuses an ID.
-        if self.next_entity_id == 0 {
+        let Some(id) = self.allocate_entity_id() else {
             return;
-        }
-        let id = self.next_entity_id;
-        self.next_entity_id = id.checked_add(1).unwrap_or(0);
+        };
         if self.entities.len() >= 1024 {
             self.entities.pop_first();
         }
@@ -628,6 +639,7 @@ impl Server {
             Client {
                 dig: None,
                 visible_entities: BTreeMap::new(),
+                visible_mobs: BTreeMap::new(),
                 inventory,
                 health: health::Health::new(vitals, pos[1]),
                 survival_movement: SurvivalMovement::default(),
@@ -714,6 +726,7 @@ impl Server {
 
         self.game_time += 1;
         self.day_time += 1;
+        self.tick_mobs();
         self.tick_health();
         self.tick_screens();
         self.flush_digs();
@@ -742,6 +755,7 @@ impl Server {
         // Natural block changes can interrupt digs after the regular flush.
         self.flush_digs();
         self.sync_entities();
+        self.sync_mobs();
         let changed: Vec<_> = self
             .clients
             .iter()
@@ -1543,6 +1557,7 @@ impl Server {
             self.furnaces
                 .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
+            self.mobs.retain(|_, mob| mob.chunk() != (cx, cz));
         }
     }
 
@@ -1799,6 +1814,7 @@ impl Server {
             h.bytes(&e.pickup_delay.to_be_bytes());
             h.u8(e.on_ground as u8);
         }
+        self.hash_mobs(&mut h);
         self.world.hash_into(&mut h);
         h.finish()
     }

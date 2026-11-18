@@ -1794,6 +1794,56 @@ async function survivalHunger() {
 	} finally { await page.close(); }
 }
 
+async function mobs() {
+	const { page, errors } = await open(`server=local&world=e2e-mobs-${run}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
+	try {
+		await settle(page, "mobs", chunksInView(4));
+		await resumePointerLock(page, "mobs: initial pointer lock");
+		await page.mouse.move(640, 360);
+		const spawned = await page.waitForFunction(
+			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 0),
+			{ timeout: 60000, polling: 100 },
+		);
+		const cow = await spawned.jsonValue();
+		await spawned.dispose();
+		check(cow.kind === 0, "mobs: a cow spawned", `id ${cow.id} at ${cow.position.join(", ")}`);
+		const beforeFrame = await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z], yaw } = api.stats().mobs.find(mob => mob.id === id);
+			const angle = yaw * Math.PI / 180;
+			api.setCamera(x - Math.sin(angle) * 3.4, y + 1.62, z + Math.cos(angle) * 3.4, yaw + 180, 13);
+			return api.frames;
+		}, cow.id);
+		await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
+			&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2, {}, beforeFrame);
+		const file = join(shots, "mobs-cow.png");
+		await page.screenshot({ path: file });
+		const pinkPixels = await page.evaluate(async data => {
+			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const pixels = ctx.getImageData(img.width / 2 - 180, img.height / 2 - 180, 360, 360).data;
+			let pink = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+				if (r > 100 && r > b * 1.3 && b > g * 1.08 && b < g * 1.4) pink++;
+			}
+			return pink;
+		}, readFileSync(file).toString("base64"));
+		check(pinkPixels > 20, "mobs: cow muzzle is visibly rendered", `${pinkPixels} pink pixels`);
+		await page.waitForFunction(({ id, position }) => {
+			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
+			return mob && Math.hypot(mob.position[0] - position[0], mob.position[2] - position[2]) > 0.15;
+		}, { timeout: 25000, polling: 100 }, cow);
+		check(true, "mobs: the same cow wandered");
+		check(errors.length === 0, "mobs: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "mobs", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -1801,6 +1851,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await waterFlow();
 	await lavaFlow();
+	await mobs();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

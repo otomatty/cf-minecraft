@@ -601,3 +601,36 @@ fn fence_stops_walking_jumping_and_airborne_sweeps() {
         [3.0, 0.0, 0.0]
     );
 }
+
+#[test]
+fn custom_body_lands_steps_and_stops_at_its_wider_wall_contact() {
+    let terrain = |x, y, z| {
+        if y < 0 || (z == 5 && (0..3).contains(&y)) {
+            Some(Aabb::block(x, y, z))
+        } else if z >= 2 && y == 0 {
+            let mut slab = Aabb::block(x, y, z);
+            slab.max[1] = 0.5;
+            Some(slab)
+        } else {
+            None
+        }
+    };
+    let mut body = Player::with_size([0.5, 2.0, 0.5], 0.9, 1.3);
+    for _ in 0..20 {
+        body.tick(Input::default(), &terrain);
+    }
+    assert!(body.on_ground);
+    assert_eq!(body.position[1], 0.0);
+    assert_eq!(body.bounds().max[1], 1.3);
+    let walk = Input {
+        forward: 0.5,
+        ..Input::default()
+    };
+    for _ in 0..100 {
+        body.tick(walk, &terrain);
+    }
+    assert!(body.on_ground);
+    assert_eq!(body.position[1], 0.5);
+    assert_eq!(body.position[2], 5.0 - 0.45);
+    assert_eq!(body.velocity[2], 0.0);
+}

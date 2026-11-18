@@ -25,8 +25,15 @@ struct ItemEntity {
     pos: [f64; 3],
     previous: [f64; 3],
 }
+struct MobEntity {
+    kind: u8,
+    pos: [f64; 3],
+    previous: [f64; 3],
+    yaw: f32,
+}
 struct State {
     entities: BTreeMap<u32, ItemEntity>,
+    mobs: BTreeMap<u32, MobEntity>,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -180,6 +187,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 pub extern "C" fn client_new() {
     let st = State {
         entities: BTreeMap::new(),
+        mobs: BTreeMap::new(),
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -233,6 +241,7 @@ pub extern "C" fn client_reset_world() {
         st.unloaded.extend(st.world.chunks.keys().copied());
     }
     st.entities.clear();
+    st.mobs.clear();
     st.connectivity.clear();
     st.visibility_stale = true;
     st.world.chunks.clear();
@@ -313,9 +322,35 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 }
             }
         }
+        S2C::MobSpawn {
+            id,
+            kind,
+            x,
+            y,
+            z,
+            yaw,
+        } => {
+            st.mobs.insert(
+                id,
+                MobEntity {
+                    kind,
+                    pos: [x, y, z],
+                    previous: [x, y, z],
+                    yaw,
+                },
+            );
+        }
+        S2C::MobMove { id, x, y, z, yaw } => {
+            if let Some(mob) = st.mobs.get_mut(&id) {
+                mob.previous = mob.pos;
+                mob.pos = [x, y, z];
+                mob.yaw = yaw;
+            }
+        }
         S2C::DigProgress { .. } => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
+            st.mobs.remove(&id);
         }
 
         S2C::Inventory {
@@ -1440,6 +1475,22 @@ pub extern "C" fn client_entities() -> usize {
         w.u16(e.item);
         w.u8(e.count);
         for v in e.pos.into_iter().chain(e.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples.
+#[no_mangle]
+pub extern "C" fn client_mobs() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, mob) in &st.mobs {
+        w.i32(id as i32);
+        w.u8(mob.kind);
+        w.f32(mob.yaw);
+        for v in mob.pos.into_iter().chain(mob.previous) {
             w.f64(v);
         }
     }

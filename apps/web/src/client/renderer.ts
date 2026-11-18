@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderItem } from "./entities.ts";
+import { COW_VERTEX_COUNT, cowVertices, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderCow, type RenderItem } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -339,6 +339,8 @@ export class Renderer {
 	private readonly crackBuffer: GPUBuffer;
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
+	private readonly cowBuffer: GPUBuffer;
+	private readonly cowTextures: { hide: number; face: number; leg: number };
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
@@ -367,6 +369,8 @@ export class Renderer {
 	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
 		this.crackTextureBase = textureNames.length;
 		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
+		this.cowTextures = { hide: textureNames.length, face: textureNames.length + 1, leg: textureNames.length + 2 };
+		textureNames.push("cow_hide", "cow_face", "cow_leg");
 		this.canvas = canvas;
 		this.device = device;
 		this.adapterInfo = adapterInfo;
@@ -527,6 +531,7 @@ override renderLayer`);
 		this.cracks = itemPipeline(true);
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		this.cowBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * COW_VERTEX_COUNT * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -664,7 +669,7 @@ override renderLayer`);
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = []): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], cows: readonly RenderCow[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -708,6 +713,8 @@ override renderLayer`);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
+		const cowData = cowVertices(cows.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], now, this.cowTextures);
+		if (cowData.length) this.device.queue.writeBuffer(this.cowBuffer, 0, cowData);
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({
 			colorAttachments: [
@@ -748,11 +755,17 @@ override renderLayer`);
 		};
 		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
 			if (layer === 2) {
-				if (itemData.length) {
+				if (itemData.length || cowData.length) {
 					pass.setPipeline(this.items);
 					pass.setBindGroup(0, this.terrainBind);
-					pass.setVertexBuffer(0, this.itemBuffer);
-					pass.draw(itemData.length / 9);
+					if (itemData.length) {
+						pass.setVertexBuffer(0, this.itemBuffer);
+						pass.draw(itemData.length / 9);
+					}
+					if (cowData.length) {
+						pass.setVertexBuffer(0, this.cowBuffer);
+						pass.draw(cowData.length / 9);
+					}
 				}
 				if (cloudsFirst) drawClouds();
 			}
