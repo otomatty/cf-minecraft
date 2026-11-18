@@ -35,7 +35,15 @@
 | copper_ore | 90 |
 | iron_ore | 90 |
 | gold_ore | 90 |
-| obsidian | 400（素手では採掘不可） |
+| crafting_table | 40 |
+| furnace | 70 |
+| placed_oak_leaves | 6 |
+| farmland | 12 |
+| wheat | 0 |
+| flowing_water | 壊せない |
+| lava | 壊せない |
+| flowing_lava | 壊せない |
+| obsidian | 400（鉄のつるはし未満では採掘不可） |
 
 ## コアの流れ
 
@@ -95,14 +103,14 @@ Survival の左ボタンは押している状態を毎フレーム調べ、Creat
 
 | ブロック | 適した tool | min_tier |
 | --- | --- | --- |
-| stone, cobblestone, cobblestone_slab, cobblestone_stairs, bricks, sandstone, coal_ore | pickaxe | 1 |
+| stone, cobblestone, cobblestone_slab, cobblestone_stairs, bricks, sandstone, coal_ore, furnace | pickaxe | 1 |
 | copper_ore, iron_ore | pickaxe | 2 |
 | gold_ore | pickaxe | 3 |
 | obsidian | pickaxe | 4 |
 | ice | pickaxe | 0 |
-| oak_log, oak_planks, oak_slab, oak_stairs, oak_fence | axe | 0 |
-| dirt, coarse_dirt, grass_block, sand, gravel, snow_block | shovel | 0 |
-| air, bedrock, water, lamp_block, glass, oak_leaves, red_flower, yellow_flower, short_grass | なし | 0 |
+| oak_log, oak_planks, oak_slab, oak_stairs, oak_fence, crafting_table | axe | 0 |
+| dirt, coarse_dirt, grass_block, sand, gravel, snow_block, farmland | shovel | 0 |
+| air, bedrock, water, lamp_block, glass, oak_leaves, red_flower, yellow_flower, short_grass, placed_oak_leaves, wheat, flowing_water, lava, flowing_lava | なし | 0 |
 
 表外の材質への追加割り当てはない。`min_tier` の省略値は0。1以上には `tool` が必須。種類・段階の範囲はビルド時に検証する。
 
