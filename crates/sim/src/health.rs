@@ -41,7 +41,9 @@ impl Health {
 
     /// Observe each accepted position to retain the apex and landing when
     /// several movement packets arrive before the next server tick.
-    pub fn observe_fall(&mut self, world: &World, pos: [f64; 3]) {
+    /// `prev` is the last accepted position. With no fall in progress, leaving
+    /// ground starts from that height, and leaving water starts from `pos`.
+    pub fn observe_fall(&mut self, world: &World, prev: [f64; 3], pos: [f64; 3]) {
         let Some(feet) = block_at(world, pos, 0.0) else {
             return;
         };
@@ -53,14 +55,18 @@ impl Health {
                 let damage = (distance.floor() - FALL_DAMAGE_OFFSET).max(0.0) as u8;
                 self.fall_damage = self.fall_damage.saturating_add(damage);
             }
+        } else if let Some(start) = self.fall_start_y {
+            self.fall_start_y = Some(start.max(pos[1]));
+        } else if block_at(world, prev, 0.0) == Some(blocks::WATER) {
+            self.fall_start_y = Some(pos[1]);
         } else {
-            self.fall_start_y = Some(self.fall_start_y.map_or(pos[1], |start| start.max(pos[1])));
+            self.fall_start_y = Some(prev[1].max(pos[1]));
         }
     }
 
     fn tick(&mut self, world: &World, pos: [f64; 3]) {
         let was_injured = self.vitals.health < MAX_HEALTH;
-        self.observe_fall(world, pos);
+        self.observe_fall(world, pos, pos);
         let fall = std::mem::take(&mut self.fall_damage);
         self.damage(fall, DeathCause::Fall);
         if self.vitals.dead {
@@ -296,6 +302,67 @@ mod tests {
             s.tick();
             assert!(statuses(packets(&mut s)).is_empty());
             assert_eq!(vitals(&s).health, MAX_HEALTH - expected_damage);
+        }
+    }
+
+    #[test]
+    fn walking_off_a_ledge_or_removing_support_uses_the_last_grounded_height() {
+        for (distance, dig, damage) in [(4.0, false, 1), (10.0, false, 7), (4.0, true, 1)] {
+            let mut s = joined(GameMode::Survival);
+            let surface = FEET[1] - distance;
+            let floor_y = surface as i32 - 1;
+            for x in 0..16 {
+                for z in 0..16 {
+                    s.world.set_block(x, floor_y, z, blocks::STONE);
+                }
+            }
+            let mut player = physics::Player::new(FEET);
+            for _ in 0..2 {
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+            }
+            assert!(player.on_ground);
+            assert_eq!(player.position, FEET);
+            assert_eq!(s.client_position(1), Some(FEET));
+            if dig {
+                s.world.set_block(2, 79, 2, blocks::AIR);
+            }
+            let mut left_ground = false;
+            let mut landed = false;
+            for tick in 0..400 {
+                let input = if dig || left_ground {
+                    physics::Input::default()
+                } else {
+                    physics::Input {
+                        forward: 1.0,
+                        ..Default::default()
+                    }
+                };
+                player.tick(
+                    input,
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                if dig && tick == 0 {
+                    assert_eq!(player.position[1], FEET[1] - 0.08 * f64::from(0.98_f32));
+                }
+                if !player.on_ground {
+                    left_ground = true;
+                }
+                send(&mut s, movement(player.position));
+                s.tick();
+                assert_eq!(s.stats.packets_rejected, 0);
+                assert_eq!(s.client_position(1), Some(player.position));
+                if left_ground && player.on_ground {
+                    assert_eq!(player.position[1], surface);
+                    assert_eq!(vitals(&s).health, MAX_HEALTH - damage);
+                    landed = true;
+                    break;
+                }
+                assert_eq!(vitals(&s).health, MAX_HEALTH);
+            }
+            assert!(landed);
         }
     }
 

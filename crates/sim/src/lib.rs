@@ -90,10 +90,14 @@ impl SurvivalMovement {
         } else {
             self.jump_base_y
         };
-        if y > from[1] && !jump_base_y.is_some_and(|base| y <= base + MAX_SURVIVAL_RISE) {
+        let grounded = health::grounded(world, to);
+        if y > from[1]
+            && !(grounded && y - from[1] <= physics::STEP_HEIGHT
+                || jump_base_y.is_some_and(|base| y <= base + MAX_SURVIVAL_RISE))
+        {
             return None;
         }
-        let airborne_progress = if health::grounded(world, to) {
+        let airborne_progress = if grounded {
             None
         } else if let Some((last_tick, height)) = self.airborne_progress {
             if y <= height - MIN_AIRBORNE_DESCENT {
@@ -1130,13 +1134,14 @@ impl Server {
             if let Some(movement) =
                 movement.filter(|_| movement_clear(&self.world, client.pos, pos))
             {
+                let prev = client.pos;
                 client.pos = pos;
                 client.accepted_tick = self.game_time;
                 client.horizontal_budget -= horizontal;
                 client.vertical_budget -= vertical;
                 client.survival_movement = movement;
                 if survival {
-                    client.health.observe_fall(&self.world, pos);
+                    client.health.observe_fall(&self.world, prev, pos);
                 }
                 return;
             }
@@ -2470,6 +2475,65 @@ mod tests {
                 assert_eq!(s.client_position(1), Some(player.position));
             }
         }
+    }
+
+    #[test]
+    fn survival_accepts_upward_slab_landings_with_individual_and_batched_packets() {
+        let start = [0.69, 65.0, 0.5];
+        for batched in [false, true] {
+            let mut s = joined_at(start);
+            s.set_game_mode(GameMode::Survival);
+            for x in 0..4 {
+                for z in 0..4 {
+                    s.world.set_block(x, 63, z, blocks::STONE);
+                }
+            }
+            s.world.set_block(1, 64, 0, blocks::OAK_SLAB);
+            let mut player = physics::Player::new(start);
+            for tick in 0..6 {
+                if tick == 5 {
+                    assert!(!player.on_ground);
+                    assert!((player.position[1] - 64.23152379758702).abs() < 1e-12);
+                    player.velocity[0] = 0.15;
+                }
+                player.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| s.world.get_block(x, y, z)),
+                );
+                s.handle_packet(1, &position_packet(player.position));
+                if !batched {
+                    s.tick();
+                    assert_eq!(s.stats.packets_rejected, 0, "tick {tick}");
+                    assert_eq!(s.client_position(1), Some(player.position));
+                }
+            }
+            assert!(player.on_ground);
+            for (actual, expected) in player.position.into_iter().zip([0.84, 64.5, 0.5]) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+            if batched {
+                s.tick();
+                assert_eq!(s.stats.packets_rejected, 0);
+                assert_eq!(s.client_position(1), Some(player.position));
+            }
+        }
+    }
+
+    #[test]
+    fn survival_rejects_unsupported_rise_within_step_height() {
+        let from = [0.69, 64.23152379758702, 0.5];
+        let to = [0.69, 64.5, 0.5];
+        let mut s = joined_at(from);
+        s.set_game_mode(GameMode::Survival);
+        s.world.set_block(0, 63, 0, blocks::STONE);
+        s.world.set_block(1, 64, 0, blocks::OAK_SLAB);
+        assert!(!health::grounded(&s.world, from));
+        assert!(!health::grounded(&s.world, to));
+        assert!(movement_clear(&s.world, from, to));
+        s.handle_packet(1, &position_packet(to));
+        s.tick();
+        assert_eq!(s.stats.packets_rejected, 1);
+        assert_eq!(s.client_position(1), Some(from));
     }
 
     #[test]
