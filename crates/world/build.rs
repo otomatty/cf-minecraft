@@ -17,6 +17,7 @@ struct Item {
     texture: Option<String>,
     tool: Option<Tool>,
     fuel: Option<u32>,
+    food: Option<u8>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -470,6 +471,10 @@ fn generate(root: &Path, dest: &Path) {
             "items.toml: fuel must be positive"
         );
         assert!(
+            item.food.is_none_or(|value| (1..=20).contains(&value)),
+            "items.toml: food must be 1..=20"
+        );
+        assert!(
             names.insert(item.name.clone()),
             "items.toml: duplicate item {}",
             item.name
@@ -513,8 +518,8 @@ fn generate(root: &Path, dest: &Path) {
         });
         writeln!(
             out,
-            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?} }},",
-            item.id, item.name, item.max_stack, block, item.fuel
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?}, food: {:?} }},",
+            item.id, item.name, item.max_stack, block, item.fuel, item.food
         )
         .unwrap();
     }

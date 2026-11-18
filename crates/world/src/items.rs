@@ -19,6 +19,7 @@ impl Tool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemInfo {
     pub fuel: Option<u32>,
+    pub food: Option<u8>,
     pub texture: Option<&'static str>,
     pub tool: Option<Tool>,
     pub id: u16,
@@ -29,6 +30,9 @@ pub struct ItemInfo {
 include!(concat!(env!("OUT_DIR"), "/items.rs"));
 pub fn info(id: u16) -> Option<&'static ItemInfo> {
     ITEMS.iter().find(|item| item.id == id)
+}
+pub fn food(item: u16) -> Option<u8> {
+    info(item).and_then(|item| item.food)
 }
 pub fn by_name(name: &str) -> Option<u16> {
     ITEMS
@@ -63,6 +67,15 @@ pub fn mining_drop(state: BlockState) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_apple_restores_food() {
+        assert_eq!(by_name("apple"), Some(49));
+        for item in ITEMS {
+            assert_eq!(food(item.id), (item.id == 49).then_some(4));
+        }
+        assert_eq!(food(0), None);
+    }
+
     #[test]
     fn mining_drop_overrides_only_the_harvested_item() {
         for (state, name) in [

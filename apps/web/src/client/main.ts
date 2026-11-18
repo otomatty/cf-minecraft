@@ -31,7 +31,7 @@ import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
-import { bubbleCount, heartStates, MAX_AIR } from "./vitals.ts";
+import { bubbleCount, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
@@ -308,6 +308,7 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
+			stopEating();
 			picker.hidden = true;
 			hideInventoryScreens();
 			deathScreen.close();
@@ -321,6 +322,7 @@ async function main(): Promise<void> {
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
+			stopEating();
 			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
@@ -408,6 +410,14 @@ async function main(): Promise<void> {
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
 	let pendingSelectedSlot: number | null = null;
+	const eatProgress = $<HTMLProgressElement>("eat-progress");
+	let eating: { item: number; count: number; startedAt: number } | null = null;
+	function stopEating(): void {
+		if (!eating) return;
+		eating = null;
+		eatProgress.hidden = true;
+		if (connection === "open") transport.send(core.encodeStopUsingItem());
+	}
 	let dig = newDigState();
 	let heldInventory = "";
 	function paintIcon(c: HTMLCanvasElement, state: number): void {
@@ -426,6 +436,7 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	function selectSlot(slot: number, send = true): void {
+		if (slot !== selectedSlot) stopEating();
 		const next = updateDigSelection(dig, heldInventory, slot, core.inventory[slot]);
 		dig = next.state;
 		heldInventory = next.selection;
@@ -465,6 +476,18 @@ async function main(): Promise<void> {
 		}
 		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
 		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
+		if (eating) {
+			const stack = inventory[selectedSlot];
+			if (stack?.item !== eating.item) {
+				stopEating();
+			} else {
+				if (stack.count < eating.count) {
+					eating.startedAt = performance.now();
+					eatProgress.value = 0;
+				}
+				eating.count = stack.count;
+			}
+		}
 	}
 	function paintItemIcon(c: HTMLCanvasElement, id?: number): void {
 		const item = items.find(item => item.id === id);
@@ -510,6 +533,7 @@ async function main(): Promise<void> {
 		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
 		stopDig();
+		stopEating();
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
@@ -993,6 +1017,21 @@ async function main(): Promise<void> {
 	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
 		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
+		if (button === 2 && !repeat && !eating && core.gameMode === "survival" && !core.dead
+			&& core.food < MAX_FOOD && connection === "open"
+			&& inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) {
+			const stack = core.inventory[selectedSlot];
+			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
+			if (stack && items.find(item => item.id === stack.item)?.food
+				&& blockInteraction(targetBlock?.name, false) !== "open") {
+				heldButtons.delete(2);
+				transport.send(core.encodeUseItem());
+				eating = { item: stack.item, count: stack.count, startedAt: performance.now() };
+				eatProgress.value = 0;
+				eatProgress.hidden = false;
+				return;
+			}
+		}
 		if (!hit) return;
 		if (button === 0) {
 			if (core.gameMode === "survival") return;
@@ -1027,7 +1066,11 @@ async function main(): Promise<void> {
 		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
 		interact(e.button, false, e.shiftKey);
 	});
-	window.addEventListener("mouseup", e => { heldButtons.delete(e.button); if (e.button === 0) stopDig(); });
+	window.addEventListener("mouseup", e => {
+		heldButtons.delete(e.button);
+		if (e.button === 0) stopDig();
+		if (e.button === 2) stopEating();
+	});
 	window.addEventListener("pagehide", () => transport.flush());
 	window.addEventListener("pageshow", (event) => {
 		if (event.persisted) transport.resume?.();
@@ -1060,7 +1103,8 @@ async function main(): Promise<void> {
 			pendingFlightToggle = false;
 			const fwd = (pressed(settings.keys.forward) ? 1 : 0) - (pressed(settings.keys.backward) ? 1 : 0);
 			const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
-			const sprint = sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement));
+			const sprint = (core.gameMode !== "survival" || core.food > 6)
+				&& (sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)));
 			const state = core.tickPlayer(fwd, strafe, camera.yaw, pendingJump || pressed(settings.keys.up), sprint, pressed(settings.keys.down));
 			pendingJump = false;
 			position = state.position;
@@ -1076,12 +1120,16 @@ async function main(): Promise<void> {
 	const vitals = $("vitals");
 	const healthMeter = $("health");
 	const airMeter = $("air");
+	const foodMeter = $("food");
 	const damageFlash = $("damage-flash");
 	const respawn = $<HTMLButtonElement>("respawn");
 	const deathCauses = ["", "落下してやられた", "ブロックの中で窒息した", "溺れた", "奈落に落ちた"];
 	const hearts = heartStates(core.health).map(() => document.createElement("span"));
 	for (const heart of hearts) heart.className = "heart";
 	healthMeter.append(...hearts);
+	const foodIcons = foodStates(core.food).map(() => document.createElement("span"));
+	for (const icon of foodIcons) icon.className = "food";
+	foodMeter.append(...foodIcons);
 	const bubbles = Array.from({ length: bubbleCount(MAX_AIR) }, () => document.createElement("span"));
 	for (const bubble of bubbles) bubble.className = "bubble";
 	airMeter.append(...bubbles);
@@ -1095,11 +1143,14 @@ async function main(): Promise<void> {
 	deathScreen.addEventListener("cancel", event => event.preventDefault());
 
 	function syncVitals(): void {
-		const { health, air, dead, deathCause, gameMode } = core;
+		const { health, air, food, dead, deathCause, gameMode } = core;
+		if (food === MAX_FOOD || dead || gameMode !== "survival") stopEating();
 		vitals.hidden = gameMode !== "survival";
 		if (!vitals.hidden) {
 			healthMeter.setAttribute("aria-valuenow", String(health));
 			heartStates(health).forEach((state, i) => { hearts[i].dataset.state = state; });
+			foodMeter.setAttribute("aria-valuenow", String(food));
+			foodStates(food).forEach((state, i) => { foodIcons[i].dataset.state = state; });
 			airMeter.setAttribute("aria-valuenow", String(air));
 			airMeter.hidden = air === MAX_AIR;
 			const count = bubbleCount(air);
@@ -1208,6 +1259,7 @@ async function main(): Promise<void> {
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
+		if (eating) eatProgress.value = Math.min(eatProgress.max, now - eating.startedAt);
 		if (locked() && !core.dead) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
@@ -1267,6 +1319,7 @@ async function main(): Promise<void> {
 		stats: () => ({
 			gameMode: core.gameMode,
 			health: core.health,
+			food: core.food,
 			dead: core.dead,
 			screen: core.screen,
 			entities: core.entities,

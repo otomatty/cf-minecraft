@@ -6,7 +6,7 @@ import type { DigBounds } from "./dig.ts";
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
-export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null }
+export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null; food: number | null }
 export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
@@ -21,9 +21,12 @@ export interface ClientExports {
 	client_game_mode(): number;
 	client_health(): number;
 	client_air(): number;
+	client_food(): number;
 	client_dead(): number;
 	client_death_cause(): number;
 	client_enc_respawn(): number;
+	client_enc_use_item(): number;
+	client_enc_stop_using_item(): number;
 	client_enc_click_slot(slot: number, button: number, shift: number): number;
 	client_enc_close_inventory(): number;
 	client_enc_use_block(x: number, y: number, z: number): number;
@@ -407,9 +410,12 @@ export class ClientCore {
 	get gameMode(): "creative" | "survival" { return this.x.client_game_mode() === 1 ? "survival" : "creative"; }
 	get health(): number { return this.x.client_health(); }
 	get air(): number { return this.x.client_air(); }
+	get food(): number { return this.x.client_food(); }
 	get dead(): boolean { return this.x.client_dead() !== 0; }
 	get deathCause(): number { return this.x.client_death_cause(); }
 	encodeRespawn(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_respawn()); }
+	encodeUseItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_item()); }
+	encodeStopUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_stop_using_item()); }
 	get screen(): number { return this.x.client_screen(); }
 	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
 	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }

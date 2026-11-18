@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{C2S, MAX_AIR, MAX_HEALTH, PROTOCOL_VERSION, S2C};
+use protocol::{C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -49,6 +49,7 @@ struct State {
     game_mode: u8,
     health: u8,
     air: u16,
+    food: u8,
     dead: bool,
     death_cause: u8,
     selected: u8,
@@ -200,6 +201,7 @@ pub extern "C" fn client_new() {
         game_mode: 0,
         health: MAX_HEALTH,
         air: MAX_AIR,
+        food: MAX_FOOD,
         dead: false,
         death_cause: 0,
         selected: 0,
@@ -359,9 +361,11 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             air,
             dead,
             cause,
+            food,
         } => {
             st.health = health;
             st.air = air;
+            st.food = food;
             st.dead = dead;
             st.death_cause = cause;
         }
@@ -1163,6 +1167,16 @@ pub extern "C" fn client_enc_respawn() -> usize {
     emit(state(), C2S::Respawn.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_use_item() -> usize {
+    emit(state(), C2S::UseItem.encode())
+}
+
+#[no_mangle]
+pub extern "C" fn client_enc_stop_using_item() -> usize {
+    emit(state(), C2S::StopUsingItem.encode())
+}
+
 /// Authoritative feet position, including the most recent correction.
 #[no_mangle]
 pub extern "C" fn client_player_position(axis: usize) -> f64 {
@@ -1288,6 +1302,11 @@ pub extern "C" fn client_health() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn client_food() -> u32 {
+    u32::from(state().food)
+}
+
+#[no_mangle]
 pub extern "C" fn client_air() -> u32 {
     u32::from(state().air)
 }
@@ -1358,12 +1377,13 @@ pub extern "C" fn client_item_registry() -> usize {
         }
         write!(
             out,
-            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{}}}",
+            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{},\"food\":{}}}",
             item.id,
             item.name,
             item.max_stack,
             item.block.map_or("null".into(), |b| b.to_string()),
-            item.texture.map_or("null".into(), |t| format!("{t:?}"))
+            item.texture.map_or("null".into(), |t| format!("{t:?}")),
+            item.food.map_or("null".into(), |value| value.to_string())
         )
         .unwrap();
     }

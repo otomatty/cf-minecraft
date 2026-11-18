@@ -268,3 +268,9 @@ texture = "iron_ingot"
 name = "furnace"
 id = 48
 block = "furnace"
+
+[[items]]
+id = 49
+name = "apple"
+texture = "apple"
+food = 4
