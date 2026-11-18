@@ -1040,6 +1040,8 @@ async function main(): Promise<void> {
 	}
 	function interactLeft(block: RayHit | null, cow: number | null): void {
 		if (cow !== null) {
+			// Knockback can move the cow off the ray before the next repeat.
+			miningStartsAt = performance.now() + LEFT_REPEAT_MS;
 			sendPosition();
 			transport.send(core.encodeAttack(cow));
 		} else if (block && core.gameMode === "creative") {
@@ -1109,8 +1111,7 @@ async function main(): Promise<void> {
 			heldButtons.set(0, repeatAt);
 			const hit = aimedBlock();
 			const cow = aimedCow(hit);
-			// Knockback can move the cow off the ray before this click is released.
-			miningStartsAt = cow === null ? 0 : repeatAt;
+			if (cow === null) miningStartsAt = 0;
 			interactLeft(hit, cow);
 		} else {
 			if (e.button === 2) heldButtons.set(2, performance.now() + 200);
