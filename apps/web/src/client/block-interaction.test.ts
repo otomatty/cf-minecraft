@@ -5,7 +5,7 @@ import { ClientCore, type RayHit } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { blockInteraction, bucketTarget, canTill, placementState } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -351,10 +351,13 @@ test("bucket ray passes through flow to water and lava sources", () => {
 	for (const [source, flow] of [["water", "flowing_lava"], ["lava", "flowing_water"]]) {
 		assert.ok(client.predictBlock(2, 80, 4, id(`${flow}[level=1]`)));
 		assert.ok(client.predictBlock(3, 80, 4, id(source)));
-		const cast = includeSources => client.raycast([1.5, 80.5, 4.5], [1, 0, 0], 6, includeSources);
-		assert.equal(cast(false)?.x, 5);
-		assert.equal(cast(true)?.x, 3);
-		assert.deepEqual(bucketTarget("bucket", cast(true), (x, y, z) => registry[client.getBlock(x, y, z)]?.name, false), [3, 80, 4]);
+		const cast = heldName => client.raycast([1.5, 80.5, 4.5], [1, 0, 0], 6, usesFluidSourceRay(heldName));
+		for (const held of [undefined, "iron_pickaxe", "water_bucket", "lava_bucket"]) {
+			assert.equal(cast(held)?.x, 5, held);
+		}
+		const sourceHit = cast("bucket");
+		assert.equal(sourceHit?.x, 3);
+		assert.deepEqual(bucketTarget("bucket", sourceHit, (x, y, z) => registry[client.getBlock(x, y, z)]?.name, false), [3, 80, 4]);
 	}
 });
 
@@ -366,5 +369,7 @@ test("lava buckets place only into air or flowing lava", () => {
 		assert.deepEqual(bucketTarget("lava_bucket", target, blockName, false), allowed ? [1, -2, 0] : null);
 	}
 	assert.equal(bucketTarget("water_bucket", target, x => x === 0 ? "stone" : "flowing_lava", false), null);
-	assert.notDeepEqual(paintTexture("lava_bucket"), paintTexture("water_bucket"));
+	const pixels = paintTexture("lava_bucket");
+	assert.notDeepEqual(pixels, paintTexture("water_bucket"));
+	assert.notDeepEqual(pixels, paintTexture("missing"));
 });

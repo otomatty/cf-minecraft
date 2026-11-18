@@ -373,17 +373,20 @@ impl Server {
                 )
             })
             .collect();
-        for e in self.entities.values_mut() {
-            if self.world.chunks.contains_key(&e.chunk()) {
-                e.tick(&self.world);
-            }
-        }
-        self.entities.retain(|_, e| {
-            let [x, y, z] = e.pos.map(|v| v.floor() as i32);
-            e.age < 6000
-                && e.pos[1] >= health::VOID_Y
-                && !self.world.get_block(x, y, z).is_some_and(blocks::is_lava)
-        });
+        let is_lava_at = |pos: [f64; 3]| {
+            let [x, y, z] = pos.map(|v| v.floor() as i32);
+            self.world.get_block(x, y, z).is_some_and(blocks::is_lava)
+        };
+        self.entities
+            .extract_if(.., |_, e| {
+                let previous = e.pos;
+                if self.world.chunks.contains_key(&e.chunk()) {
+                    e.tick(&self.world);
+                }
+                let active = e.age < 6000 && e.pos[1] >= health::VOID_Y;
+                !active || is_lava_at(previous) || is_lava_at(e.pos)
+            })
+            .for_each(drop);
         if (self.game_time + 1) % 10 == 0 {
             self.merge_entities();
         }
@@ -1898,6 +1901,22 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    #[test]
+    fn item_spawned_in_lava_is_removed_even_if_it_moves_out_on_its_first_tick() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.world.insert_chunk(world::Chunk::empty(0, 0));
+        s.world.set_block(2, 80, 2, blocks::LAVA);
+
+        let id = s.next_entity_id;
+        s.spawn_item(1, 1, [2.5, 80.9, 2.5], [0.0, 0.3, 0.0], 40);
+        let mut item = s.entities[&id].clone();
+        item.tick(&s.world);
+        assert!(item.pos[1] >= 81.0);
+
+        s.tick_entities();
+        assert!(!s.entities.contains_key(&id));
     }
 
     #[test]

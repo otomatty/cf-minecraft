@@ -71,6 +71,10 @@ export function canTill(heldName: string | undefined, blockName: string | undefi
 		&& heldName !== undefined && /^(wooden|stone|copper|iron)_hoe$/.test(heldName);
 }
 
+export function usesFluidSourceRay(heldName: string | undefined): boolean {
+	return heldName === "bucket";
+}
+
 /** Empty buckets use a fluid-source-inclusive hit. Filled buckets use a normal hit. */
 export function bucketTarget(
     heldName: string, hit: RayHit | null, blockName: (x: number, y: number, z: number) => string | undefined,

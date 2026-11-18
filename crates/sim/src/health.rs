@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn state_hash_includes_vitals_fall_and_interval_counters_independently() {
         let mut s = joined(GameMode::Survival);
-        let baseline = s.state_hash();
+        let joined_hash = s.state_hash();
         let mutations: [fn(&mut Health); 16] = [
             |h| h.vitals.health -= 1,
             |h| h.vitals.air -= 1,
@@ -1124,13 +1124,13 @@ mod tests {
             |h| h.starve_ticks = 1,
             |h| h.eating = Some(EatState { slot: 0, ticks: 0 }),
         ];
-        for mutate in mutations {
-            let record = &mut s.clients.get_mut(&1).unwrap().health;
-            let before = std::mem::take(record);
-            mutate(record);
-            assert_ne!(s.state_hash(), baseline);
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let before = std::mem::take(&mut s.clients.get_mut(&1).unwrap().health);
+            let baseline = s.state_hash();
+            mutate(&mut s.clients.get_mut(&1).unwrap().health);
+            assert_ne!(s.state_hash(), baseline, "health mutation {index}");
             s.clients.get_mut(&1).unwrap().health = before;
-            assert_eq!(s.state_hash(), baseline);
+            assert_eq!(s.state_hash(), joined_hash);
         }
     }
 }
