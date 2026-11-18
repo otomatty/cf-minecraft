@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { blockInteraction, placementState } from "./placement.ts";
+import { blockInteraction, canTill, placementState } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -54,7 +54,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 52);
+	assert.equal(registry.length, 62);
 	assert.equal(id("crafting_table"), 49);
 	assert.equal(id("furnace"), 50);
 	assert.equal(slab, 14);
@@ -247,4 +247,52 @@ test("right-click opens a crafting table unless Shift requests placement", () =>
 test("right-click opens a furnace unless Shift requests placement", () => {
     assert.equal(blockInteraction("furnace", false), "open");
     assert.equal(blockInteraction("furnace", true), "place");
+});
+
+test("wheat seeds require air above either farmland state and plant at age zero", () => {
+	const seed = core.itemRegistry().find(item => item.name === "wheat_seeds");
+	const wheat = id("wheat[age=0]");
+	assert.equal(seed?.block, wheat);
+	for (const moist of ["false", "true"]) {
+		const farmland = id(`farmland[moist=${moist}]`);
+		for (const current of [id("water"), id("short_grass"), wheat, -1]) {
+			assert.equal(placementState(registry, wheat, hit(1), 0, world(farmland, current)), null);
+		}
+		assert.deepEqual(placementState(registry, wheat, hit(1), 0, world(farmland)), { x: 0, y: -1, z: 0, state: wheat });
+		assert.equal(placementState(registry, wheat + 7, hit(1), 0, world(farmland))?.state, wheat);
+	}
+	for (const below of [stone, id("grass_block"), id("dirt"), air, -1]) {
+		assert.equal(placementState(registry, wheat, hit(1), 0, world(below)), null);
+	}
+});
+
+test("right-click tills uncovered grass or dirt with any hoe", () => {
+	for (const tier of ["wooden", "stone", "copper", "iron"]) {
+		for (const ground of ["grass_block", "dirt"]) {
+			assert.equal(canTill(`${tier}_hoe`, ground, "air"), true);
+			for (const cover of ["stone", "glass", "water", undefined]) {
+				assert.equal(canTill(`${tier}_hoe`, ground, cover), false);
+			}
+		}
+	}
+	for (const item of [undefined, "wooden_shovel", "wheat_seeds"]) assert.equal(canTill(item, "dirt", "air"), false);
+	for (const ground of ["stone", "farmland", "crafting_table", "furnace", undefined]) {
+		assert.equal(canTill("iron_hoe", ground, "air"), false);
+	}
+});
+
+test("crop states and farming items use distinct painted textures", () => {
+	const crops = registry.filter(block => block.name === "wheat");
+	assert.deepEqual(crops.map(block => block.stateName), Array.from({ length: 8 }, (_, age) => `wheat[age=${age}]`));
+	assert.deepEqual(crops.map(block => block.texture), [
+		"wheat_sprout", "wheat_sprout", "wheat_shoot", "wheat_shoot",
+		"wheat_green", "wheat_green", "wheat_green", "wheat_ripe",
+	]);
+	assert.notDeepEqual(paintTexture("farmland_dry"), paintTexture("farmland_moist"));
+	for (const name of ["wooden_hoe", "stone_hoe", "copper_hoe", "iron_hoe", "wheat_seeds", "wheat", "bread"]) {
+		assert.equal(core.itemRegistry().find(item => item.name === name)?.texture, name);
+		const pixels = paintTexture(name);
+		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 0), name);
+		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 255), name);
+	}
 });

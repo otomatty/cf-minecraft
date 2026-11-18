@@ -79,8 +79,12 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 40 | iron_pickaxe | pickaxe | 4 |
 | 41 | iron_axe | axe | 4 |
 | 42 | iron_shovel | shovel | 4 |
+| 50 | wooden_hoe | hoe | 1 |
+| 51 | stone_hoe | hoe | 2 |
+| 52 | copper_hoe | hoe | 3 |
+| 53 | iron_hoe | hoe | 4 |
 
-12種類すべて `block = None`、`max_stack = 1`。`items::info` から `tool.kind`、`tool.tier`、`tool.speed()` と `texture` を取得できる。Creative の選択画面で選んでホットバーへ入れ、Qで捨てられる。採掘速度とドロップ条件は [mining.md](mining.md#道具とドロップ条件) を参照。耐久値は未実装。Survival の入手用クラフトは次の PR で追加する。
+道具はすべて `block = None`、`max_stack = 1`。`items::info` から `tool.kind`、`tool.tier`、`tool.speed()` と `texture` を取得できる。Creative の選択画面で選んでホットバーへ入れ、Qで捨てられる。採掘速度とドロップ条件は [mining.md](mining.md#道具とドロップ条件) を参照。耐久値は未実装。鍬の使い方とレシピは [farming.md](farming.md) を参照。
 
 
 ## 2×2 クラフトで追加したアイテム
@@ -92,10 +96,18 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 
 棒と作業台の絵は `textures.ts` の独自のコード生成。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0` で、今回は配置のみ。サバイバルの E はインベントリ画面を開く。2×2導入時のプロトコル6でクラフト枠・結果・カーソルを追加した。操作、追加レシピ、保存形式と接続時の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
 
+## 作物
+
+| アイテムID | 名前 | ブロック状態 ID | texture | max_stack |
+| --- | --- | --- | --- | --- |
+| 54 | wheat_seeds（小麦の種） | 54（小麦の段階 0） | wheat_seeds | 64 |
+| 55 | wheat（小麦） | なし | wheat | 64 |
+
 ## 食べ物
 
 | アイテムID | 名前 | texture | max_stack | food |
 | --- | --- | --- | --- | --- |
 | 49 | apple（リンゴ） | apple | 64 | 4 |
+| 56 | bread（パン） | bread | 64 | 5 |
 
 `items.toml` の任意キー `food` は、1個を食べたときに回復する満腹度を1〜20の整数で指定する。`items::food(id)` で取得できる。リンゴに対応するブロックはなく、採掘したオークの葉の代わりに落ちることがある。入手と食事の規則は [health.md](health.md#空腹と食べ物) を参照。

@@ -160,11 +160,12 @@ fn one_new_entry_adds_a_block_and_texture() {
     // Append to the atlas rather than inserting, keeping previous layer indices stable.
     let data = BLOCKS.replacen("\n]", "\n  \"test_clay\",\n]", 1);
     assert_ne!(data, BLOCKS);
+    let id = world::blocks::COUNT;
     let data =
-        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = 52\ndig_ticks = 12\ntexture = \"test_clay\"\n");
+        format!("{data}\n[[blocks]]\nname = \"test_clay\"\nid = {id}\ndig_ticks = 12\ntexture = \"test_clay\"\n");
     let output = generate_fixture(&data, BIOMES).unwrap();
-    assert!(output.contains("pub const TEST_CLAY: BlockState = 52;"));
-    assert!(output.contains("pub const COUNT: BlockState = 53;"));
+    assert!(output.contains(&format!("pub const TEST_CLAY: BlockState = {id};")));
+    assert!(output.contains(&format!("pub const COUNT: BlockState = {};", id + 1)));
     let new_layer = world::blocks::TEXTURES.len();
     assert!(output.contains(&format!("tex: {:?}", [new_layer; 6])));
 }
@@ -193,11 +194,12 @@ fn toml_syntax_and_unicode_are_checked() {
 
 #[test]
 fn texture_and_tint_shorthands_resolve_in_face_order() {
+    let id = world::blocks::COUNT;
     let data = format!(
         r#"{BLOCKS}
         [[blocks]]
         name = "test"
-        id = 52
+        id = {id}
         dig_ticks = 12
         texture = "stone"
         top = "grass_block_top"
@@ -211,11 +213,100 @@ fn texture_and_tint_shorthands_resolve_in_face_order() {
     assert!(output.contains(
         "name: \"test\", tex: [0, 1, 3, 2, 2, 8], tint: [false, true, true, true, true, true]"
     ));
-    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = 52\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
+    let data = format!("{BLOCKS}\n[[blocks]]\nname = 'test'\nid = {id}\ndig_ticks = 12\ntop = 'stone'\nbottom = 'dirt'\nside = 'sand'\ntint = true");
     let output = generate_fixture(&data, BIOMES).unwrap();
     assert!(output.contains(
         "name: \"test\", tex: [3, 0, 7, 7, 7, 7], tint: [true, true, true, true, true, true]"
     ));
+}
+
+#[test]
+fn crop_states_resolve_their_overrides_and_hoes_build_as_tools() {
+    use world::{blocks, items};
+    let faces = |state| {
+        blocks::info(state)
+            .tex
+            .map(|i| blocks::TEXTURES[i as usize])
+    };
+    for (state, top) in [
+        (blocks::FARMLAND, "farmland_dry"),
+        (blocks::MOIST_FARMLAND, "farmland_moist"),
+    ] {
+        assert_eq!(faces(state), ["dirt", top, "dirt", "dirt", "dirt", "dirt"]);
+    }
+    for (age, texture) in [
+        "wheat_sprout",
+        "wheat_sprout",
+        "wheat_shoot",
+        "wheat_shoot",
+        "wheat_green",
+        "wheat_green",
+        "wheat_green",
+        "wheat_ripe",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(faces(blocks::WHEAT + age as u16), [texture; 6]);
+    }
+    for (tier, name) in ["wooden_hoe", "stone_hoe", "copper_hoe", "iron_hoe"]
+        .into_iter()
+        .enumerate()
+    {
+        let item = items::info(items::by_name(name).unwrap()).unwrap();
+        assert_eq!(item.id, 50 + tier as u16);
+        assert_eq!(item.max_stack, 1);
+        assert_eq!(
+            item.tool,
+            Some(items::Tool {
+                kind: items::ToolKind::Hoe,
+                tier: tier as u8 + 1
+            })
+        );
+    }
+    let invalid = BLOCKS.replace("top = \"farmland_moist\"", "top = \"missing\"");
+    assert!(generate_fixture(&invalid, BIOMES)
+        .unwrap_err()
+        .contains("unknown texture missing"));
+    let invalid = BLOCKS.replace("texture = \"wheat_ripe\"", "texture = \"missing\"");
+    assert!(generate_fixture(&invalid, BIOMES)
+        .unwrap_err()
+        .contains("unknown texture missing"));
+}
+
+#[test]
+fn farming_preserves_existing_generated_block_entries() {
+    let output = generate_fixture(BLOCKS, BIOMES).unwrap();
+    let mut lines = output.lines();
+    let mut hash = world::Fnv64::new();
+    let mut add = |line: &str| {
+        hash.bytes(line.as_bytes());
+        hash.bytes(b"\n");
+    };
+    add(lines.next().unwrap());
+    let textures = lines.next().unwrap().split_once(" = &[").unwrap().1;
+    add(&textures.split(", ").take(36).collect::<Vec<_>>().join(", "));
+    for line in lines.take(34) {
+        add(line);
+    }
+    for (section, opener, count) in [
+        ("static INFO: ", " = [", 52),
+        ("static BLOCKS: ", " = &[", 34),
+        ("static PROPERTIES: ", " = &[", 52),
+    ] {
+        let entries = output
+            .split_once(section)
+            .unwrap()
+            .1
+            .split_once(opener)
+            .unwrap()
+            .1;
+        for line in entries.lines().take(count) {
+            add(line);
+        }
+    }
+    // Fingerprint of the original atlas prefix, state constants, metadata and properties.
+    assert_eq!(hash.finish(), 0xbb0d_4edd_803d_f4fa);
 }
 
 #[test]

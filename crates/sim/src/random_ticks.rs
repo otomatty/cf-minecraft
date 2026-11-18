@@ -56,10 +56,66 @@ impl Server {
                 if self.game_mode == GameMode::Survival
                     && JavaRandom::new((hash >> 12) as i64).next_int_bound(10) == 0
                 {
-                    self.spawn_block_drop(items::by_name("apple").unwrap(), [x, y, z], 0.5);
+                    self.spawn_block_drop(items::by_name("apple").unwrap(), 1, [x, y, z], 0.5);
                 }
             }
+            Some(state) if blocks::is_farmland(state) => self.tick_farmland([x, y, z], state),
+            Some(state) if blocks::is_wheat(state) => self.tick_wheat([x, y, z], state, hash),
             _ => {}
+        }
+    }
+
+    fn tick_farmland(&mut self, [x, y, z]: [i32; 3], state: u16) {
+        let above = self.world.get_block(x, y + 1, z);
+        let next = if above.is_some_and(blocks::is_full_opaque_cube) {
+            blocks::DIRT
+        } else if (-4..=4).any(|dx| {
+            (-4..=4).any(|dz| {
+                (0..=1)
+                    .any(|dy| self.world.get_block(x + dx, y + dy, z + dz) == Some(blocks::WATER))
+            })
+        }) {
+            blocks::MOIST_FARMLAND
+        } else if state == blocks::MOIST_FARMLAND {
+            blocks::FARMLAND
+        } else if !above.is_some_and(blocks::is_wheat) {
+            blocks::DIRT
+        } else {
+            state
+        };
+        if next != state {
+            self.change_block_naturally([x, y, z], next);
+        }
+    }
+
+    fn tick_wheat(&mut self, [x, y, z]: [i32; 3], state: u16, hash: u64) {
+        let below = self.world.get_block(x, y - 1, z).unwrap_or(blocks::AIR);
+        if !blocks::is_farmland(below) {
+            self.break_unsupported_wheat([x, y, z], state);
+        } else if state < blocks::RIPE_WHEAT
+            && (below == blocks::MOIST_FARMLAND
+                || JavaRandom::new((hash >> 12) as i64).next_int_bound(3) == 0)
+        {
+            self.change_block_naturally([x, y, z], state + 1);
+        }
+    }
+
+    pub(super) fn check_wheat_above(&mut self, [x, y, z]: [i32; 3], state: u16) {
+        if !blocks::is_farmland(state) {
+            if let Some(wheat) = self
+                .world
+                .get_block(x, y + 1, z)
+                .filter(|&s| blocks::is_wheat(s))
+            {
+                self.break_unsupported_wheat([x, y + 1, z], wheat);
+            }
+        }
+    }
+
+    fn break_unsupported_wheat(&mut self, pos: [i32; 3], state: u16) {
+        self.change_block_naturally(pos, blocks::AIR);
+        if self.game_mode == GameMode::Survival {
+            self.spawn_mining_drops(pos, state);
         }
     }
 
@@ -88,7 +144,7 @@ impl Server {
         }
     }
 
-    fn change_block_naturally(&mut self, [x, y, z]: [i32; 3], state: u16) {
+    pub(super) fn change_block_naturally(&mut self, [x, y, z]: [i32; 3], state: u16) {
         if self
             .world
             .set_block(x, y, z, state)
@@ -97,6 +153,7 @@ impl Server {
             self.abort_digs_at([x, y, z]);
             self.stats.blocks_changed += 1;
             self.broadcast_block(x, y, z, state);
+            self.check_wheat_above([x, y, z], state);
         }
     }
 }
@@ -146,6 +203,114 @@ mod tests {
 
     fn put(server: &mut Server, [x, y, z]: [i32; 3], state: u16) {
         server.world.set_block(x, y, z, state).unwrap();
+    }
+
+    #[test]
+    fn farmland_hydrates_from_both_heights_within_four_blocks_on_both_axes() {
+        let pos = [8, 70, 8];
+        for dy in [0, 1] {
+            let mut server = empty_world(1);
+            put(&mut server, pos, blocks::FARMLAND);
+            put(&mut server, [12, 70 + dy, 4], blocks::WATER);
+            server.random_tick_at(pos, 0);
+            assert_eq!(server.get_block(8, 70, 8), Some(blocks::MOIST_FARMLAND));
+            server.random_tick_at(pos, 0);
+            assert_eq!(server.stats.blocks_changed, 1);
+        }
+    }
+
+    #[test]
+    fn farmland_drains_then_reverts_unless_planted_and_opaque_cover_has_priority() {
+        let pos = [15, 70, 8];
+        let mut server = empty_world(1);
+        assert_eq!(server.get_block(16, 70, 8), None);
+        put(&mut server, pos, blocks::MOIST_FARMLAND);
+        for water in [[10, 70, 8], [15, 69, 8], [15, 72, 8], [15, 70, 13]] {
+            put(&mut server, water, blocks::WATER);
+        }
+        server.random_tick_at(pos, 0);
+        assert_eq!(server.get_block(15, 70, 8), Some(blocks::FARMLAND));
+        put(&mut server, [15, 71, 8], blocks::WHEAT);
+        server.random_tick_at(pos, 0);
+        assert_eq!(server.get_block(15, 70, 8), Some(blocks::FARMLAND));
+        put(&mut server, [15, 71, 8], blocks::GLASS);
+        server.random_tick_at(pos, 0);
+        assert_eq!(server.get_block(15, 70, 8), Some(blocks::DIRT));
+
+        put(&mut server, pos, blocks::MOIST_FARMLAND);
+        put(&mut server, [15, 71, 8], blocks::STONE);
+        put(&mut server, [14, 70, 8], blocks::WATER);
+        server.random_tick_at(pos, 0);
+        assert_eq!(server.get_block(15, 70, 8), Some(blocks::DIRT));
+    }
+
+    #[test]
+    fn wheat_grows_each_moist_tick_and_stops_when_ripe() {
+        let pos = [8, 71, 8];
+        let mut server = empty_world(1);
+        put(&mut server, [8, 70, 8], blocks::MOIST_FARMLAND);
+        put(&mut server, pos, blocks::WHEAT);
+        for next in blocks::WHEAT + 1..=blocks::RIPE_WHEAT {
+            server.random_tick_at(pos, 0);
+            assert_eq!(server.get_block(8, 71, 8), Some(next));
+        }
+        server.random_tick_at(pos, 0);
+        assert_eq!(server.get_block(8, 71, 8), Some(blocks::RIPE_WHEAT));
+        assert_eq!(server.stats.blocks_changed, 7);
+    }
+
+    #[test]
+    fn dry_wheat_grows_only_on_reproducible_winning_rolls() {
+        let pos = [8, 71, 8];
+        let run = || {
+            let mut server = empty_world(1);
+            put(&mut server, [8, 70, 8], blocks::FARMLAND);
+            (0..64)
+                .map(|sample| {
+                    put(&mut server, pos, blocks::WHEAT);
+                    let hash = mix_stafford13(sample);
+                    server.random_tick_at(pos, hash);
+                    let grew = server.get_block(8, 71, 8) == Some(blocks::WHEAT + 1);
+                    assert_eq!(
+                        grew,
+                        JavaRandom::new((hash >> 12) as i64).next_int_bound(3) == 0
+                    );
+                    grew
+                })
+                .collect::<Vec<_>>()
+        };
+        let rolls = run();
+        assert_eq!(rolls, run());
+        assert!(rolls.windows(2).any(|pair| pair == [false, true]));
+    }
+
+    #[test]
+    fn wheat_without_farmland_breaks_on_random_tick_or_natural_support_change() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            for support_changed in [false, true] {
+                let mut server = empty_world(1);
+                server.set_game_mode(mode);
+                put(&mut server, [8, 71, 8], blocks::WHEAT);
+                if support_changed {
+                    put(&mut server, [8, 70, 8], blocks::FARMLAND);
+                    server.change_block_naturally([8, 70, 8], blocks::MOIST_FARMLAND);
+                    assert_eq!(server.get_block(8, 71, 8), Some(blocks::WHEAT));
+                    server.change_block_naturally([8, 70, 8], blocks::DIRT);
+                } else {
+                    put(&mut server, [8, 70, 8], blocks::DIRT);
+                    server.random_tick_at([8, 71, 8], 0);
+                }
+                assert_eq!(server.get_block(8, 71, 8), Some(blocks::AIR));
+                assert_eq!(
+                    server.entities.len(),
+                    usize::from(mode == GameMode::Survival)
+                );
+                if let Some(entity) = server.entities.values().next() {
+                    assert_eq!(Some(entity.item), items::by_name("wheat_seeds"));
+                    assert_eq!(entity.count, 1);
+                }
+            }
+        }
     }
 
     #[test]

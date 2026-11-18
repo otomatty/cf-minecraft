@@ -721,6 +721,35 @@ mod crafting_tests {
         }
     }
     #[test]
+    fn table_crafts_hoes_and_bread_from_their_ingredients() {
+        let stick = stack(items::by_name("stick").unwrap(), 1);
+        for (material, hoe) in [
+            ("oak_planks", "wooden_hoe"),
+            ("cobblestone", "stone_hoe"),
+            ("copper_ingot", "copper_hoe"),
+            ("iron_ingot", "iron_hoe"),
+        ] {
+            let head = stack(items::by_name(material).unwrap(), 1);
+            let mut inv = Inventory {
+                screen: Screen::CraftingTable { pos: [0; 3] },
+                table: [head, head, None, None, stick, None, None, stick, None],
+                ..Inventory::default()
+            };
+            inv.click(50, 0, false).unwrap();
+            assert_eq!(inv.cursor, stack(items::by_name(hoe).unwrap(), 1));
+            assert_eq!(inv.table, [None; 9]);
+        }
+        let mut inv = Inventory {
+            screen: Screen::CraftingTable { pos: [0; 3] },
+            ..Inventory::default()
+        };
+        inv.table[0..3].fill(stack(items::by_name("wheat").unwrap(), 1));
+        inv.click(50, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(items::by_name("bread").unwrap(), 1));
+        assert_eq!(inv.table, [None; 9]);
+    }
+
+    #[test]
     fn table_clicks_share_atomic_result_shift_and_return_order() {
         let mut inv = Inventory::default();
         for slot in 41..=51 {

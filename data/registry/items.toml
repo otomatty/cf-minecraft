@@ -274,3 +274,48 @@ id = 49
 name = "apple"
 texture = "apple"
 food = 4
+
+[[items]]
+name = "wooden_hoe"
+id = 50
+max_stack = 1
+texture = "wooden_hoe"
+tool = { kind = "hoe", tier = 1 }
+
+[[items]]
+name = "stone_hoe"
+id = 51
+max_stack = 1
+texture = "stone_hoe"
+tool = { kind = "hoe", tier = 2 }
+
+[[items]]
+name = "copper_hoe"
+id = 52
+max_stack = 1
+texture = "copper_hoe"
+tool = { kind = "hoe", tier = 3 }
+
+[[items]]
+name = "iron_hoe"
+id = 53
+max_stack = 1
+texture = "iron_hoe"
+tool = { kind = "hoe", tier = 4 }
+
+[[items]]
+name = "wheat_seeds"
+id = 54
+block = "wheat"
+texture = "wheat_seeds"
+
+[[items]]
+name = "wheat"
+id = 55
+texture = "wheat"
+
+[[items]]
+name = "bread"
+id = 56
+texture = "bread"
+food = 5
