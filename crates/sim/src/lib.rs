@@ -782,6 +782,7 @@ impl Server {
                 let (ticks, drops) = mining.unwrap();
                 if ticks == 0 {
                     self.change_block(id, [x, y, z], blocks::AIR, drops);
+                    self.add_mining_exhaustion(id);
                     self.dig_updates.insert((id, [x, y, z]), 255);
                     return;
                 }
@@ -1033,6 +1034,13 @@ impl Server {
         }
     }
 
+    fn add_mining_exhaustion(&mut self, id: u32) {
+        let health = &mut self.clients.get_mut(&id).unwrap().health;
+        if self.game_mode == GameMode::Survival && !health.vitals.dead {
+            health.add_exhaustion(20);
+        }
+    }
+
     fn tick_digs(&mut self) {
         let digs: Vec<_> = self
             .clients
@@ -1050,10 +1058,7 @@ impl Server {
             let elapsed = self.game_time - dig.start;
             if elapsed >= i64::from(dig.ticks) {
                 self.change_block(id, [x, y, z], blocks::AIR, dig.drops);
-                let health = &mut self.clients.get_mut(&id).unwrap().health;
-                if self.game_mode == GameMode::Survival && !health.vitals.dead {
-                    health.add_exhaustion(20);
-                }
+                self.add_mining_exhaustion(id);
                 self.abort_dig(id);
             } else {
                 let stage = ((elapsed * 10 / i64::from(dig.ticks)).min(9)) as u8;

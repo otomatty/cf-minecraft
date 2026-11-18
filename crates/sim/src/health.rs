@@ -660,6 +660,18 @@ mod tests {
     }
 
     #[test]
+    fn instant_dig_adds_twenty_exhaustion() {
+        let mut s = joined(GameMode::Survival);
+        s.world.set_block(3, 79, 2, blocks::DIRT);
+        s.world.set_block(3, 80, 2, blocks::RED_FLOWER);
+        assert_eq!(s.clients[&1].health.exhaustion, 1);
+        send(&mut s, C2S::DigStart { x: 3, y: 80, z: 2 });
+        s.tick();
+        assert_eq!(s.get_block(3, 80, 2), Some(blocks::AIR));
+        assert_eq!(s.clients[&1].health.exhaustion, 22);
+    }
+
+    #[test]
     fn regeneration_requires_enough_food_and_uses_exhaustion_on_the_next_tick() {
         let mut s = joined(GameMode::Survival);
         s.clients.get_mut(&1).unwrap().health.vitals.health = 13;
