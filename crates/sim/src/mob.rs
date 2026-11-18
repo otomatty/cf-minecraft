@@ -100,6 +100,7 @@ impl Mob {
         }
 
         let idle_input = input;
+        let mut step_jump = false;
         if let Wander::Walking { target, .. } = self.ai {
             let dx = target[0] - x;
             let dz = target[1] - z;
@@ -113,6 +114,7 @@ impl Mob {
                     self.yaw = heading(dx, dz);
                     input.yaw = self.yaw;
                     input.forward = WALK_FORWARD;
+                    step_jump = jump;
                     input.jump |= jump;
                 } else {
                     self.stop();
@@ -136,9 +138,11 @@ impl Mob {
             blocked,
         } = self.ai
         {
-            // Raising the feet past a step can take several ticks at the wall.
-            let jumping =
-                !self.body.on_ground && (input.jump || was_rising || self.body.velocity[1] > 0.0);
+            // A step jump can take several ticks at the wall.
+            // Check horizontal progress every tick while swimming.
+            let jumping = !self.body.in_water
+                && !self.body.on_ground
+                && (step_jump || was_rising || self.body.velocity[1] > 0.0);
             let blocked = if !jumping && distance_squared(before, self.pos()) < 0.01 * 0.01 {
                 blocked + 1
             } else {
@@ -568,6 +572,30 @@ mod tests {
         }
         assert_eq!(cow.pos()[1], 2.0);
         assert!(cow.pos()[2] > 3.45, "{cow:?}");
+    }
+
+    #[test]
+    fn underwater_wall_and_ceiling_stops_a_walk_within_two_ticks() {
+        let mut world = arena(16);
+        world.set_block(2, 1, 2, blocks::WATER);
+        world.set_block(2, 2, 2, blocks::WATER);
+        world.set_block(2, 3, 2, blocks::STONE);
+        for y in 1..=3 {
+            world.set_block(2, y, 3, blocks::STONE);
+        }
+        let mut cow = walking();
+        cow.body.on_ground = false;
+        cow.body.position[1] = 1.6;
+        cow.body.position[2] = 3.0 - COW_WIDTH / 2.0;
+
+        cow.tick(&world, 5, 7, 1);
+        assert!(
+            matches!(cow.ai, Wander::Walking { blocked: 1, .. }),
+            "{cow:?}"
+        );
+        cow.tick(&world, 5, 7, 2);
+        assert_eq!(cow.ai, Wander::Idle);
+        assert!(cow.pos()[2] < 3.0);
     }
 
     #[test]

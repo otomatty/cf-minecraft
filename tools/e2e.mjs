@@ -1809,15 +1809,13 @@ async function mobs() {
 		check(cow.kind === 0, "mobs: a cow spawned", `id ${cow.id} at ${cow.position.join(", ")}`);
 		const cowView = async (id, placeCamera = false) => {
 			const api = window.__mc;
-			const inspect = () => {
-				const cows = api.stats().mobs;
-				const target = cows.find(mob => mob.id === id);
+			const inspect = (target, mobs) => {
 				if (!target) return null;
 				const [x, y, z] = target.position;
 				const angle = target.yaw * Math.PI / 180;
 				const forwardX = -Math.sin(angle), forwardZ = Math.cos(angle);
-				const occluder = cows.find(other => {
-					if (other.id === id) return false;
+				const occluder = mobs.find(other => {
+					if (other.id === target.id) return false;
 					const dx = other.position[0] - x, dz = other.position[2] - z;
 					const ahead = dx * forwardX + dz * forwardZ;
 					const side = dx * forwardZ - dz * forwardX;
@@ -1825,49 +1823,79 @@ async function mobs() {
 						|| (ahead > 0 && ahead < 3.9 && Math.abs(side) <= 1);
 				});
 				return {
+					id: target.id,
 					position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
 					camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, 13],
 				};
 			};
-			const initial = inspect();
-			if (!placeCamera) return initial;
-			if (!initial || initial.blockedBy !== null) return false;
-			// Give a moving cow time to finish its turn and the client time to interpolate.
-			await new Promise(resolve => setTimeout(resolve, 150));
-			const settled = inspect();
-			if (!settled || settled.blockedBy !== null || settled.yaw !== initial.yaw
-				|| !settled.position.every((value, axis) => value === initial.position[axis])) return false;
-			api.setCamera(...settled.camera);
-			return { ...settled, frames: api.frames };
+			let mobs = api.stats().mobs;
+			const findCow = cowId => mobs.find(mob => mob.kind === 0 && mob.id === cowId);
+			if (!placeCamera) {
+				const target = id == null ? mobs.findLast(mob => mob.kind === 0) : findCow(id);
+				return inspect(target, mobs);
+			}
+			globalThis.__mcLastCowAttempt = null;
+			for (const candidate of mobs) {
+				if (candidate.kind !== 0) continue;
+				const initial = inspect(findCow(candidate.id), mobs);
+				globalThis.__mcLastCowAttempt = initial ?? { id: candidate.id, missing: true };
+				if (!initial || initial.blockedBy !== null) continue;
+				// Give a moving cow time to finish its turn and the client time to interpolate.
+				await new Promise(resolve => setTimeout(resolve, 150));
+				mobs = api.stats().mobs;
+				const settled = inspect(findCow(candidate.id), mobs);
+				globalThis.__mcLastCowAttempt = settled ?? { id: candidate.id, missing: true };
+				if (!settled || settled.blockedBy !== null || settled.yaw !== initial.yaw
+					|| !settled.position.every((value, axis) => value === initial.position[axis])) continue;
+				api.setCamera(...settled.camera);
+				return { ...settled, frames: api.frames };
+			}
+			return false;
 		};
 		const file = join(shots, "mobs-cow.png");
-		const matches = (aim, current) => current?.blockedBy === null && current.yaw === aim.yaw
+		const matches = (aim, current) => current?.id === aim.id && current.blockedBy === null && current.yaw === aim.yaw
 			&& current.position.every((value, axis) => value === aim.position[axis]);
 		const captureDeadline = Date.now() + 25000;
 		let captureProblem;
+		let lastCowId = "none";
+		let photographedId;
 		for (let attempt = 0; attempt < 4 && Date.now() < captureDeadline; attempt++) {
 			const placement = await page.waitForFunction(
-				cowView, { timeout: Math.max(1, captureDeadline - Date.now()), polling: 100 }, cow.id, true,
+				cowView, { timeout: Math.max(1, captureDeadline - Date.now()), polling: 100 }, null, true,
 			).catch(async error => {
-				const latest = await bounded(() => page.evaluate(cowView, cow.id), 1000);
-				throw new Error(`mobs: could not aim at cow ${cow.id}; ${captureProblem ?? "waiting for a clear, still cow"}; latest view ${JSON.stringify(latest)}`, { cause: error });
+				const latest = await bounded(() => page.evaluate(() => globalThis.__mcLastCowAttempt ?? null), 1000);
+				const id = typeof latest === "object" ? latest?.id ?? "none" : "none";
+				throw new Error(`mobs: could not aim at a clear, still cow; last tried cow ${id} state ${JSON.stringify(latest)}; ${captureProblem ?? error.message}`, { cause: error });
 			});
 			const aim = await placement.jsonValue();
 			await placement.dispose();
-			await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
-				&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2, {}, aim.frames);
-			let current = await page.evaluate(cowView, cow.id);
+			lastCowId = aim.id;
+			try {
+				await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
+					&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2,
+				{ timeout: Math.max(1, captureDeadline - Date.now()) }, aim.frames);
+			} catch (error) {
+				if (error?.name !== "TimeoutError" && !/Waiting failed: \d+ms exceeded/.test(error?.message)) throw error;
+				captureProblem = `capture deadline expired waiting for two frames for cow ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")} (blocking cow ${aim.blockedBy ?? "none"}): ${error.message}`;
+				continue;
+			}
+			let current = await page.evaluate(cowView, aim.id);
 			if (matches(aim, current)) {
+				if (Date.now() >= captureDeadline) {
+					captureProblem = `capture deadline expired before screenshot of cow ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}`;
+					continue;
+				}
 				await page.screenshot({ path: file });
-				current = await page.evaluate(cowView, cow.id);
+				current = await page.evaluate(cowView, aim.id);
 				if (matches(aim, current)) {
+					photographedId = aim.id;
 					captureProblem = null;
 					break;
 				}
 			}
-			captureProblem = `aimed at yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking cow ${current?.blockedBy ?? "none"})`;
+			captureProblem = `aimed at cow ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking cow ${current?.blockedBy ?? "none"})`;
 		}
-		if (captureProblem !== null) throw new Error(`mobs: could not photograph cow ${cow.id}; ${captureProblem ?? "capture timed out"}`);
+		if (captureProblem !== null) throw new Error(`mobs: could not photograph cow ${lastCowId}; ${captureProblem ?? "capture timed out"}`);
 		const pinkPixels = await page.evaluate(async data => {
 			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 			const canvas = new OffscreenCanvas(img.width, img.height);
@@ -1888,7 +1916,7 @@ async function mobs() {
 			}
 			return pink;
 		}, readFileSync(file).toString("base64"));
-		check(pinkPixels > 20, "mobs: cow muzzle is visibly rendered", `${pinkPixels} pink pixels`);
+		check(pinkPixels > 20, "mobs: cow muzzle is visibly rendered", `${pinkPixels} pink pixels, cow ${photographedId}`);
 		await page.waitForFunction(({ id, position }) => {
 			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
 			return mob && Math.hypot(mob.position[0] - position[0], mob.position[2] - position[2]) > 0.15;
