@@ -49,7 +49,7 @@ export function placementState(
 	const current = getBlock(x, y, z);
 	if (slab && registry[current]?.first === block.first && current < block.first + 2 && current !== state) {
 		state = block.first + 2;
-	} else if (registry[current]?.name !== "air" && registry[current]?.name !== "water") {
+	} else if (!["air", "water", "flowing_water"].includes(registry[current]?.name)) {
 		return null;
 	}
 	if (block.model === "cross") {
@@ -69,4 +69,20 @@ export function blockInteraction(blockName: string | undefined, shift: boolean):
 export function canTill(heldName: string | undefined, blockName: string | undefined, aboveName: string | undefined): boolean {
 	return (blockName === "grass_block" || blockName === "dirt") && aboveName === "air"
 		&& heldName !== undefined && /^(wooden|stone|copper|iron)_hoe$/.test(heldName);
+}
+
+/** Empty buckets use a water-inclusive hit. Filled buckets use a normal hit. */
+export function bucketTarget(
+    heldName: string, hit: RayHit | null, blockName: (x: number, y: number, z: number) => string | undefined,
+    shift: boolean,
+): [number, number, number] | null {
+    if (!hit) return null;
+    const { x, y, z, face } = hit;
+    const target = blockName(x, y, z);
+    if (heldName === "bucket") return target === "water" ? [x, y, z] : null;
+    const normal = FACE_NORMALS[face];
+    if (heldName !== "water_bucket" || !normal || blockInteraction(target, shift) === "open") return null;
+    const adjacent: [number, number, number] = [x + normal[0], y + normal[1], z + normal[2]];
+    const current = blockName(...adjacent);
+    return current === "air" || current === "flowing_water" ? adjacent : null;
 }

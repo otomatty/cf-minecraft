@@ -1362,6 +1362,54 @@ async function farming() {
 	} finally { await page.close(); }
 }
 
+async function waterFlow() {
+	const { page, errors } = await open(`server=local&world=e2e-water-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "water flow", chunksInView(2));
+		await resumePointerLock(page, "water flow: initial pointer lock");
+		const source = [Math.floor(spawn[0]) + 1, Math.floor(spawn[1]), Math.floor(spawn[2])];
+		const selectBucket = async name => {
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			await page.mouse.move(640, 360);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+			await resumePointerLock(page, `water flow: resume after selecting ${name}`);
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), source);
+		};
+		await selectBucket("water_bucket");
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y - 1, z) === api.stateId("grass_block") && api.getBlock(x, y, z) === 0;
+		}, { timeout: 5000 }, source);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("water")
+				&& api.getBlock(x + 1, y, z) === api.stateId("flowing_water[level=1]");
+		}, { timeout: 5000 }, source);
+		check(true, "water flow: a filled bucket places a source and water spreads");
+		await selectBucket("bucket");
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, { timeout: 5000 }, source);
+		check(true, "water flow: an empty bucket collects the source");
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			for (let dx = -7; dx <= 7; dx++) for (let dz = -7; dz <= 7; dz++) {
+				if (Math.abs(dx) + Math.abs(dz) <= 7 && api.getBlock(x + dx, y, z + dz) !== 0) return false;
+			}
+			return true;
+		}, { timeout: 5000 }, source);
+		check(true, "water flow: the surrounding water drains");
+		check(errors.length === 0, "water flow: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "water-flow", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function survivalInventory() {
 	const { page, errors } = await open(`server=local&world=e2e-survival-${run}&mode=survival&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -1639,6 +1687,7 @@ try {
 	await biomeTints();
 	await inputs();
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
+	await waterFlow();
 	await partialModels();
 	await survivalInventory();
 	await survivalHealth();

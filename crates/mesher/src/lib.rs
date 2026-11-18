@@ -92,6 +92,38 @@ fn uv(face: usize, p: [i32; 3]) -> (u32, u32) {
     (u as u32, v as u32)
 }
 
+/// Water heights use the packed sixteenth coordinate and the existing 1/9 drop.
+#[derive(Clone, Copy)]
+struct WaterTop {
+    y: i32,
+    lowered: bool,
+}
+
+impl WaterTop {
+    fn at(padded: &[BlockState], x: i32, y: i32, z: i32, state: BlockState) -> Self {
+        if blocks::is_water(padded[padded_index(x, y + 1, z)]) {
+            Self {
+                y: 16,
+                lowered: false,
+            }
+        } else if matches!(state, blocks::WATER | blocks::FALLING_WATER) {
+            Self {
+                y: 16,
+                lowered: true,
+            }
+        } else {
+            Self {
+                y: 14 - 2 * i32::from(state - blocks::FLOWING_WATER),
+                lowered: false,
+            }
+        }
+    }
+
+    fn height(self) -> i32 {
+        self.y * 9 - i32::from(self.lowered) * 16
+    }
+}
+
 /// Meshes a section from its padded block array and appends vertex words to
 /// `out`. Returns the number of quads.
 ///
@@ -135,8 +167,8 @@ pub fn mesh_section_layers(
                     continue;
                 }
                 let info = blocks::info(state);
-                let water_surface =
-                    state == blocks::WATER && padded[padded_index(x, y + 1, z)] != blocks::WATER;
+                let water_top =
+                    blocks::is_water(state).then(|| WaterTop::at(padded, x, y, z, state));
                 let out = &mut layers[info.layer as usize];
                 if info.model == blocks::Model::Cross {
                     let idx = padded_index(x, y, z);
@@ -177,14 +209,16 @@ pub fn mesh_section_layers(
                         let n = face.normal;
                         let (ax, ay, az) = (x + n[0], y + n[1], z + n[2]);
                         let neighbor = padded[padded_index(ax, ay, az)];
-                        // A full-height water cell exposes a narrow strip above a
-                        // neighboring surface. For side faces ay + 1 <= 16,
-                        // including horizontal neighbors in the padding.
-                        let water_strip = state == blocks::WATER
-                            && f >= NORTH
-                            && neighbor == blocks::WATER
-                            && !water_surface
-                            && padded[padded_index(ax, ay + 1, az)] != blocks::WATER;
+                        // A taller water cell exposes a strip above a neighboring
+                        // surface. For side faces ay + 1 <= 16, including
+                        // horizontal neighbors in the padding.
+                        let water_strip = water_top.and_then(|top| {
+                            if f < NORTH || !blocks::is_water(neighbor) {
+                                return None;
+                            }
+                            let other = WaterTop::at(padded, ax, ay, az, neighbor);
+                            (top.height() > other.height()).then_some(other)
+                        });
                         let axis = n.iter().position(|v| *v != 0).unwrap();
                         // A lowered water top lies inside its cell, so blocks
                         // above cannot cull it or supply its AO/light samples.
@@ -192,12 +226,14 @@ pub fn mesh_section_layers(
                             bounds.min[axis] == 0
                         } else {
                             bounds.max[axis] == 16
-                        }) && !(water_surface && f == UP);
+                        }) && !(f == UP
+                            && water_top.is_some_and(|top| top.height() < 144));
                         let same = state == neighbor
+                            || (water_top.is_some() && blocks::is_water(neighbor))
                             || (blocks::is_oak_leaves(state) && blocks::is_oak_leaves(neighbor));
                         if boundary
                             && (blocks::occludes(neighbor)
-                                || (same && info.cull_same && !water_strip))
+                                || (same && info.cull_same && water_strip.is_none()))
                         {
                             continue;
                         }
@@ -241,11 +277,11 @@ pub fn mesh_section_layers(
                                 }
                             };
                             let mut p = [on(0), on(1), on(2)];
-                            let lower_strip_edge = water_strip && p[1] == 0;
-                            if water_strip {
-                                // Both edges encode y=16; only the lower one
-                                // carries the shader's exact 1/9 displacement.
-                                p[1] = 16;
+                            let edge = if p[1] == 16 { water_top } else { water_strip };
+                            // The flag carries the shader's exact 1/9 displacement.
+                            let lowered = edge.is_some_and(|top| top.lowered);
+                            if let Some(top) = edge {
+                                p[1] = top.y;
                             }
                             let (u, v) = uv(f, p);
                             let mut sums = [0u32; 2];
@@ -277,7 +313,6 @@ pub fn mesh_section_layers(
                             debug_assert!(count > 0);
                             let sky = (sums[0] + count / 2) / count;
                             let block = (sums[1] + count / 2) / count;
-                            let water_top = lower_strip_edge || (water_surface && p[1] == 16);
                             words[k] = pack(
                                 [x * 16 + p[0], y * 16 + p[1], z * 16 + p[2]],
                                 f,
@@ -287,7 +322,7 @@ pub fn mesh_section_layers(
                                 info.tint[f],
                                 sky,
                                 block,
-                                water_top,
+                                lowered,
                             );
                         }
 
@@ -561,6 +596,54 @@ mod tests {
                 }
             }
             assert_eq!(lowered, 12); // Four top corners and two upper corners on each side.
+        }
+    }
+
+    #[test]
+    fn flowing_water_culls_equal_neighbors_and_emits_only_the_exposed_step() {
+        for (state, height) in
+            (blocks::FLOWING_WATER..blocks::FALLING_WATER).zip((2..=14).rev().step_by(2))
+        {
+            let mut p = empty();
+            p[padded_index(5, 5, 5)] = state;
+            p[padded_index(6, 5, 5)] = state;
+            let mut out = Vec::new();
+            assert_eq!(mesh_section(&p, &mut out), 10);
+            let top = out
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .filter(|v| (v[0] >> 27) & 7 == UP as u32);
+            for vertex in top {
+                assert_eq!(position(vertex)[1], 80 + height);
+                assert_eq!(vertex[1] >> 31, 0);
+            }
+            p[padded_index(5, 5, 5)] = blocks::FALLING_WATER;
+            out.clear();
+            assert_eq!(mesh_section(&p, &mut out), 11);
+            let steps: Vec<_> = out
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .filter(|q| {
+                    q.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .all(|v| position(v)[0] == 96 && (v[0] >> 27) & 7 == EAST as u32)
+                })
+                .collect();
+            assert_eq!(steps.len(), 1);
+            let mut edges: Vec<_> = steps[0]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|v| (position(v)[1], v[1] >> 31))
+                .collect();
+            edges.sort_unstable();
+            assert_eq!(
+                edges,
+                [(80 + height, 0), (80 + height, 0), (96, 1), (96, 1)]
+            );
         }
     }
 

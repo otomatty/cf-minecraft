@@ -22,7 +22,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
-import { blockInteraction, canTill, placementState } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { interpolateEntity } from "./entities.ts";
@@ -1018,7 +1018,8 @@ async function main(): Promise<void> {
 	};
 	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
-		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH);
+		const held = button === 2 ? items.find(item => item.id === core.inventory[selectedSlot]?.item) : undefined;
+		const hit = core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, held?.name === "bucket");
 		if (button === 2 && !repeat && !eating && core.gameMode === "survival" && !core.dead
 			&& core.food < MAX_FOOD && connection === "open"
 			&& inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) {
@@ -1041,7 +1042,6 @@ async function main(): Promise<void> {
 		} else if (button === 2) {
 			const block = registry[core.getBlock(hit.x, hit.y, hit.z)];
 			const open = blockInteraction(block?.name, shift) === "open";
-			const held = items.find(item => item.id === core.inventory[selectedSlot]?.item);
 			const above = registry[core.getBlock(hit.x, hit.y + 1, hit.z)];
 			if (open || canTill(held?.name, block?.name, above?.name)) {
 				if (!repeat) {
@@ -1049,6 +1049,17 @@ async function main(): Promise<void> {
 					sendPosition();
 					if (open) closePending = updateClosePending(closePending, { type: "use" });
 					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
+				}
+				return;
+			}
+			if (held?.name === "bucket" || held?.name === "water_bucket") {
+				if (!repeat) {
+					heldButtons.delete(2);
+					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)]?.name, shift);
+					if (target) {
+						sendPosition();
+						transport.send(core.encodeUseBucket(...target));
+					}
 				}
 				return;
 			}

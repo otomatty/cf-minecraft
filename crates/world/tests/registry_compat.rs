@@ -45,16 +45,49 @@ fn registry_matches_pre_generation_snapshot() {
             PLACED_OAK_LEAVES,
             FARMLAND,
             WHEAT,
+            FLOWING_WATER,
+            FALLING_WATER,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 14
+            54, 62, 69, 70, 14
         ]
     );
     for state in 0..COUNT {
         assert_eq!(parse_state(&state_name(state)), Some(state));
+    }
+}
+
+#[test]
+fn flowing_water_appends_eight_states_with_the_water_properties() {
+    let water = info(WATER);
+    for (i, level) in ["1", "2", "3", "4", "5", "6", "7", "falling"]
+        .into_iter()
+        .enumerate()
+    {
+        let state = FLOWING_WATER + i as u16;
+        assert_eq!(state_name(state), format!("flowing_water[level={level}]"));
+        assert_eq!(properties(state), &[("level", level)]);
+        assert!(is_water(state));
+        let flow = info(state);
+        assert_eq!(
+            (flow.solid, flow.layer, flow.cull_same),
+            (water.solid, water.layer, water.cull_same)
+        );
+        assert_eq!(
+            (flow.dig_ticks, flow.opacity, flow.emission),
+            (water.dig_ticks, water.opacity, water.emission)
+        );
+        assert_eq!((flow.tex, flow.tint), (water.tex, water.tint));
+        assert_eq!(world::items::for_block(state), None);
+    }
+    for (name, id, max_stack) in [("bucket", 57, 16), ("water_bucket", 58, 1)] {
+        assert_eq!(world::items::by_name(name), Some(id));
+        let item = world::items::info(id).unwrap();
+        assert_eq!(item.max_stack, max_stack);
+        assert_eq!(item.block, None);
     }
 }
 

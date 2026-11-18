@@ -159,6 +159,8 @@ mod tests {
             blocks::GLASS,
             blocks::OAK_LEAVES,
             blocks::WATER,
+            blocks::FLOWING_WATER,
+            blocks::FALLING_WATER,
             blocks::OAK_SLAB,
             blocks::OAK_STAIRS,
             blocks::OAK_FENCE,

@@ -102,3 +102,8 @@ result = { item = "iron_hoe", count = 1 }
 pattern = ["###"]
 key = { "#" = "wheat" }
 result = { item = "bread", count = 1 }
+
+[[recipes]]
+pattern = ["# #", " # "]
+key = { "#" = "iron_ingot" }
+result = { item = "bucket", count = 1 }
