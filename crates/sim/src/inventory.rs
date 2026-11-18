@@ -1,4 +1,5 @@
 //! Deterministic player inventory. Slot order is also insertion order.
+use protocol::PlayerVitals;
 use world::{
     io::{DecodeError, Reader, Writer},
     items,
@@ -347,9 +348,20 @@ impl Inventory {
         }
         overflow
     }
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Empty the carried slots in inventory, 2×2, 3×3, then cursor order.
+    pub(crate) fn take_all(&mut self) -> impl Iterator<Item = Stack> {
+        self.screen = Screen::None;
+        std::mem::replace(&mut self.slots, [None; SLOT_COUNT])
+            .into_iter()
+            .chain(std::mem::take(&mut self.crafting))
+            .chain(std::mem::take(&mut self.table))
+            .chain([self.cursor.take()])
+            .flatten()
+    }
+
+    pub fn to_bytes(&self, vitals: PlayerVitals) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(3);
+        w.u8(4);
         w.u8(self.selected);
         for slot in self
             .slots
@@ -361,18 +373,19 @@ impl Inventory {
             w.u16(slot.map_or(0, |s| s.item));
             w.u8(slot.map_or(0, |s| s.count));
         }
+        vitals.write(&mut w);
         w.finish()
     }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, PlayerVitals), DecodeError> {
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 1..=3) {
+        if !matches!(version, 1..=4) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
         result.select(r.u8()?)?;
         let count =
-            SLOT_COUNT + if version >= 2 { 5 } else { 0 } + if version == 3 { 9 } else { 0 };
+            SLOT_COUNT + if version >= 2 { 5 } else { 0 } + if version >= 3 { 9 } else { 0 };
         for slot in result
             .slots
             .iter_mut()
@@ -392,10 +405,15 @@ impl Inventory {
             }
             *slot = stack;
         }
+        let vitals = if version == 4 {
+            PlayerVitals::read(&mut r)?
+        } else {
+            PlayerVitals::default()
+        };
         if r.remaining() != 0 {
             return Err(DecodeError);
         }
-        Ok(result)
+        Ok((result, vitals))
     }
 }
 pub(crate) fn valid(s: Stack) -> bool {
@@ -416,7 +434,7 @@ mod tests {
         assert_eq!(inv.add(u16::MAX, 3), 3);
     }
     #[test]
-    fn persistence_v2_preserves_transient_slots_and_reads_v1() {
+    fn persistence_preserves_transient_slots_and_reads_v1_through_v3() {
         let mut inv = Inventory::creative();
         inv.select(7).unwrap();
         inv.crafting = [
@@ -427,23 +445,27 @@ mod tests {
         ];
         inv.cursor = Some(Stack { item: 43, count: 5 });
         inv.table[8] = Some(Stack { item: 5, count: 7 });
-        let bytes = inv.to_bytes();
-        assert_eq!(bytes.len(), 152);
-        assert_eq!(bytes[0], 3);
-        assert_eq!(Inventory::from_bytes(&bytes), Ok(inv.clone()));
+        let vitals = PlayerVitals::default();
+        let bytes = inv.to_bytes(vitals);
+        assert_eq!(bytes.len(), 157);
+        assert_eq!(bytes[0], 4);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv.clone(), vitals)));
+        let mut v3 = bytes[..152].to_vec();
+        v3[0] = 3;
+        assert_eq!(Inventory::from_bytes(&v3), Ok((inv.clone(), vitals)));
         let mut v2 = bytes[..125].to_vec();
         v2[0] = 2;
         let mut expected_v2 = inv.clone();
         expected_v2.table = [None; 9];
-        assert_eq!(Inventory::from_bytes(&v2), Ok(expected_v2));
+        assert_eq!(Inventory::from_bytes(&v2), Ok((expected_v2, vitals)));
         let mut legacy = bytes[..110].to_vec();
         legacy[0] = 1;
         let mut expected = inv.clone();
         expected.crafting = [None; 4];
         expected.cursor = None;
         expected.table = [None; 9];
-        assert_eq!(Inventory::from_bytes(&legacy), Ok(expected));
-        for data in [&bytes, &v2, &legacy] {
+        assert_eq!(Inventory::from_bytes(&legacy), Ok((expected, vitals)));
+        for data in [&bytes, &v3, &v2, &legacy] {
             for length in 0..data.len() {
                 assert!(Inventory::from_bytes(&data[..length]).is_err());
             }
@@ -464,12 +486,41 @@ mod tests {
         }
     }
     #[test]
+    fn persistence_v4_stores_vitals_and_rejects_invalid_status() {
+        use protocol::DeathCause;
+
+        let inv = Inventory::default();
+        let vitals = PlayerVitals {
+            health: 0,
+            air: 42,
+            dead: true,
+            cause: DeathCause::Void,
+        };
+        let save = inv.to_bytes(vitals);
+        assert_eq!(&save[152..], &[0, 0, 42, 1, 4]);
+        assert_eq!(Inventory::from_bytes(&save), Ok((inv, vitals)));
+        for (offset, value) in [
+            (152, 1),
+            (152, 21),
+            (153, 2),
+            (155, 0),
+            (155, 2),
+            (156, 0),
+            (156, 5),
+        ] {
+            let mut bad = save.clone();
+            bad[offset] = value;
+            assert!(Inventory::from_bytes(&bad).is_err(), "{offset} = {value}");
+        }
+    }
+    #[test]
     fn persistence_is_strict_and_round_trips() {
         let mut inv = Inventory::creative();
         inv.select(8).unwrap();
-        let bytes = inv.to_bytes();
-        assert_eq!(Inventory::from_bytes(&bytes), Ok(inv));
-        for (at, value) in [(0, 4), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        let vitals = PlayerVitals::default();
+        let bytes = inv.to_bytes(vitals);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv, vitals)));
+        for (at, value) in [(0, 5), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
@@ -670,7 +721,7 @@ mod crafting_tests {
         }
         assert!(inv.click(51, 0, false).is_err());
         inv.table[8] = stack(8, 3);
-        let restored = Inventory::from_bytes(&inv.to_bytes()).unwrap();
+        let (restored, _) = Inventory::from_bytes(&inv.to_bytes(PlayerVitals::default())).unwrap();
         assert_eq!(restored.screen, Screen::None);
         assert_eq!(restored.table, inv.table);
         inv.slots = [stack(1, 64); 36];

@@ -31,6 +31,7 @@ import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
+import { bubbleCount, heartStates, MAX_AIR } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
 /** Block interaction range in creative mode. */
@@ -53,6 +54,7 @@ const hud = $<HTMLPreElement>("hud");
 const overlay = $<HTMLDivElement>("overlay");
 const statusLine = $<HTMLParagraphElement>("status");
 const hotbar = $<HTMLDivElement>("hotbar");
+const deathScreen = $<HTMLDialogElement>("death-screen");
 
 type MenuView = "start" | "menu" | "controls" | "settings";
 let failed = false;
@@ -76,6 +78,7 @@ function fail(message: string): void {
 	statusLine.className = "error";
 	$("start-to-title").hidden = false;
 	$("block-picker").hidden = true;
+	deathScreen.close();
 	if (document.pointerLockElement !== null) document.exitPointerLock();
 	showMenuView("start");
 	hud.textContent = message;
@@ -207,6 +210,7 @@ async function main(): Promise<void> {
 		onOpen: () => {
 			closePending = false;
 			seedReady = false;
+			previousHealth = null;
 			if (transport.kind !== "local") generator = null;
 			tintMap.setWorld(null, null);
 			if (opened) {
@@ -226,7 +230,7 @@ async function main(): Promise<void> {
 			if (id === S2C.Inventory) {
 				syncInventory();
 				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
-				const kind = ([1, 2] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
+				const kind = !core.dead && ([1, 2] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
 				if (kind) {
 					const view = kind === 1 ? tableView : furnaceView;
 					if (view.screen.hidden) openInventoryScreen(kind);
@@ -283,6 +287,8 @@ async function main(): Promise<void> {
 				}
 				if (!locked()) showMenuView(wasJoined ? "menu" : "start");
 				if (autopilot) overlay.hidden = true;
+			} else if (id === S2C.PlayerStatus) {
+				syncVitals();
 			} else if (id === S2C.PlayerCorrect) {
 				positionsCorrected++;
 				position = core.playerPosition;
@@ -303,10 +309,8 @@ async function main(): Promise<void> {
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
 			picker.hidden = true;
-			inventoryScreen.hidden = true;
-			tableScreen.hidden = true;
-			furnaceScreen.hidden = true;
-			cursorIcon.hidden = true;
+			hideInventoryScreens();
+			deathScreen.close();
 			$("start-to-title").hidden = false;
 			showMenuView("start");
 			timeSamples.length = 0;
@@ -321,10 +325,7 @@ async function main(): Promise<void> {
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
 			picker.hidden = true;
-			inventoryScreen.hidden = true;
-			tableScreen.hidden = true;
-			furnaceScreen.hidden = true;
-			cursorIcon.hidden = true;
+			hideInventoryScreens();
 			if (locked()) document.exitPointerLock();
 			fail(`サーバーとの接続が切れました: ${reason}`);
 		},
@@ -498,7 +499,7 @@ async function main(): Promise<void> {
 		const a = dig.active;
 		const next = advanceDig(dig, false, null, a ? core.getBlock(a.x, a.y, a.z) : null, performance.now());
 		dig = next.state;
-		if (connection === "open" && next.commands.length) transport.send(core.encodeDigAbort());
+		if (!core.dead && connection === "open" && next.commands.length) transport.send(core.encodeDigAbort());
 	};
 	const locked = () => document.pointerLockElement === canvas;
 	const clearInput = () => {
@@ -760,11 +761,14 @@ async function main(): Promise<void> {
 		paintInventoryScreen();
 		if (locked()) document.exitPointerLock();
 	}
-	function closeInventoryScreen(send = true): void {
+	function hideInventoryScreens(): void {
 		inventoryScreen.hidden = true;
 		tableScreen.hidden = true;
 		furnaceScreen.hidden = true;
 		cursorIcon.hidden = true;
+	}
+	function closeInventoryScreen(send = true): void {
+		hideInventoryScreens();
 		if (send) {
 			closePending = updateClosePending(closePending, { type: "close" });
 			transport.send(core.encodeCloseInventory());
@@ -837,11 +841,11 @@ async function main(): Promise<void> {
 		}
 	}
 	async function requestPointerLock(): Promise<void> {
-		if (failed) return;
+		if (failed || core.dead) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
-			if (failed) return;
+			if (failed || core.dead) return;
 			try { await canvas.requestPointerLock(); }
 			catch { pointerLockFailed(); }
 		}
@@ -861,18 +865,26 @@ async function main(): Promise<void> {
 			showMenuView("start");
 			return;
 		}
+		if (deathScreen.open) {
+			if (locked()) document.exitPointerLock();
+			return;
+		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
 		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		const degrees = mouseDegrees(settings.sensitivity);
 		camera.yaw = (camera.yaw + e.movementX * degrees) % 360;
 		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
 	});
 	window.addEventListener("keydown", (e) => {
+		if (core.dead && connection === "open" && !failed) {
+			if (e.code === "Escape") e.preventDefault();
+			return;
+		}
 		if (!overlay.hidden && menuView === "settings") {
 			if (capturing) {
 				e.preventDefault();
@@ -956,19 +968,19 @@ async function main(): Promise<void> {
 	});
 	window.addEventListener("blur", clearInput);
 	canvas.addEventListener("wheel", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		e.preventDefault();
 		selectSlot((selectedSlot + Math.sign(e.deltaY) + slots.length) % slots.length);
 	}, { passive: false });
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 	const sendPosition = () => {
-		if (autopilot) return;
+		if (autopilot || core.dead) return;
 		// Rendering may interpolate through a corner; report only resolved physics feet.
 		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
-		if (connection !== "open") return false;
+		if (connection !== "open" || core.dead) return false;
 		if (core.gameMode === "survival") {
 			if (block === 0 || !hotbarBlocks[selectedSlot]) return false;
 		}
@@ -1009,7 +1021,7 @@ async function main(): Promise<void> {
 		}
 	}
 	canvas.addEventListener("mousedown", (e) => {
-		if (!locked()) return;
+		if (!locked() || core.dead) return;
 		e.preventDefault();
 		if (e.button === 0 && core.gameMode === "survival") { leftHeld = true; return; }
 		if (e.button === 0 || e.button === 2) heldButtons.set(e.button, performance.now() + (e.button === 0 ? 250 : 200));
@@ -1027,6 +1039,7 @@ async function main(): Promise<void> {
 	// ---- simulation of the camera ---------------------------------------
 	const spawnForAutopilot = () => core.spawn;
 	function move(dt: number, timeMs: number): void {
+		if (core.dead) return;
 		if (autopilot) {
 			const [sx, sy, sz] = spawnForAutopilot();
 			if (joined && autopilotStartedAt === null && core.chunkCount >= (2 * core.viewDistance + 1) ** 2 && core.dirtyCount === 0) {
@@ -1060,6 +1073,62 @@ async function main(): Promise<void> {
 	}
 
 	// ---- HUD ---------------------------------------------------------------
+	const vitals = $("vitals");
+	const healthMeter = $("health");
+	const airMeter = $("air");
+	const damageFlash = $("damage-flash");
+	const respawn = $<HTMLButtonElement>("respawn");
+	const deathCauses = ["", "落下してやられた", "ブロックの中で窒息した", "溺れた", "奈落に落ちた"];
+	const hearts = heartStates(core.health).map(() => document.createElement("span"));
+	for (const heart of hearts) heart.className = "heart";
+	healthMeter.append(...hearts);
+	const bubbles = Array.from({ length: bubbleCount(MAX_AIR) }, () => document.createElement("span"));
+	for (const bubble of bubbles) bubble.className = "bubble";
+	airMeter.append(...bubbles);
+	let previousHealth: number | null = null;
+
+	respawn.addEventListener("click", () => {
+		if (!core.dead || connection !== "open") return;
+		respawn.disabled = true;
+		transport.send(core.encodeRespawn());
+	});
+	deathScreen.addEventListener("cancel", event => event.preventDefault());
+
+	function syncVitals(): void {
+		const { health, air, dead, deathCause, gameMode } = core;
+		vitals.hidden = gameMode !== "survival";
+		if (!vitals.hidden) {
+			healthMeter.setAttribute("aria-valuenow", String(health));
+			heartStates(health).forEach((state, i) => { hearts[i].dataset.state = state; });
+			airMeter.setAttribute("aria-valuenow", String(air));
+			airMeter.hidden = air === MAX_AIR;
+			const count = bubbleCount(air);
+			bubbles.forEach((bubble, i) => { bubble.hidden = i >= count; });
+			if (previousHealth !== null && health < previousHealth) {
+				damageFlash.getAnimations().forEach(animation => animation.cancel());
+				damageFlash.hidden = false;
+				damageFlash.animate([{ opacity: 1 }, { opacity: 0 }], 300).onfinish = () => { damageFlash.hidden = true; };
+			}
+		}
+		previousHealth = health;
+
+		if (failed) return;
+		if (dead && !deathScreen.open) {
+			clearInput();
+			hideInventoryScreens();
+			picker.hidden = true;
+			overlay.hidden = true;
+			if (locked()) document.exitPointerLock();
+			$("death-cause").textContent = deathCauses[deathCause];
+			respawn.disabled = false;
+			deathScreen.showModal();
+		} else if (!dead && deathScreen.open) {
+			deathScreen.close();
+			showMenuView("menu");
+			if (!autopilot) void requestPointerLock();
+		}
+	}
+
 	const FACING = ["south (+Z)", "west (-X)", "north (-Z)", "east (+X)"];
 	function measuredTps(): number {
 		if (serverStats) return serverStats.tps;
@@ -1139,14 +1208,14 @@ async function main(): Promise<void> {
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
-		if (locked()) {
+		if (locked() && !core.dead) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
 				interact(button, true);
 				heldButtons.set(button, now + (button === 0 ? 250 : 200));
 			}
 		}
-		if (core.gameMode === "survival") {
+		if (core.gameMode === "survival" && !core.dead) {
 			const blockState = target ? core.getBlock(target.x, target.y, target.z) : 0;
 			const held = core.inventory[selectedSlot];
 			const selection = digSelection(selectedSlot, held);
@@ -1197,6 +1266,8 @@ async function main(): Promise<void> {
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
 			gameMode: core.gameMode,
+			health: core.health,
+			dead: core.dead,
 			screen: core.screen,
 			entities: core.entities,
 			dig: dig.active,

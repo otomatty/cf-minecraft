@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn creative_inventory_scenario_fingerprint() {
-        // Previously 612c9952de3a956b; furnace state and protocol 8 Inventory now participate.
-        assert_eq!(run(2026, 600), 0x88dd38b5138d405e);
+        // Previously 88dd38b5138d405e. Health state and PlayerStatus now participate.
+        assert_eq!(run(2026, 600), 0x35cac1f1644e93a7);
     }
 
     #[test]
