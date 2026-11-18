@@ -71,8 +71,11 @@ impl Server {
             blocks::DIRT
         } else if (-4..=4).any(|dx| {
             (-4..=4).any(|dz| {
-                (0..=1)
-                    .any(|dy| self.world.get_block(x + dx, y + dy, z + dz) == Some(blocks::WATER))
+                (0..=1).any(|dy| {
+                    self.world
+                        .get_block(x + dx, y + dy, z + dz)
+                        .is_some_and(blocks::is_water)
+                })
             })
         }) {
             blocks::MOIST_FARMLAND
@@ -136,7 +139,7 @@ impl Server {
             let [x, y, z] = [x + dx, y + dy, z + dz];
             if self.world.get_block(x, y, z) == Some(blocks::DIRT)
                 && self.world.get_block(x, y + 1, z).is_some_and(|above| {
-                    above != blocks::WATER && !blocks::is_full_opaque_cube(above)
+                    !blocks::is_water(above) && !blocks::is_full_opaque_cube(above)
                 })
             {
                 self.change_block_naturally([x, y, z], blocks::GRASS_BLOCK);
@@ -153,6 +156,7 @@ impl Server {
             self.abort_digs_at([x, y, z]);
             self.stats.blocks_changed += 1;
             self.broadcast_block(x, y, z, state);
+            self.schedule_water_neighbors([x, y, z]);
             self.check_wheat_above([x, y, z], state);
         }
     }
@@ -216,6 +220,18 @@ mod tests {
             assert_eq!(server.get_block(8, 70, 8), Some(blocks::MOIST_FARMLAND));
             server.random_tick_at(pos, 0);
             assert_eq!(server.stats.blocks_changed, 1);
+        }
+    }
+
+    #[test]
+    fn flowing_water_and_falling_water_hydrate_farmland() {
+        for water in [blocks::FLOWING_WATER + 6, blocks::FALLING_WATER] {
+            let mut server = empty_world(1);
+            let pos = [8, 70, 8];
+            put(&mut server, pos, blocks::FARMLAND);
+            put(&mut server, [12, 71, 4], water);
+            server.random_tick_at(pos, 0);
+            assert_eq!(server.get_block(8, 70, 8), Some(blocks::MOIST_FARMLAND));
         }
     }
 
@@ -443,6 +459,8 @@ mod tests {
                 ([7, 70, 8], blocks::DIRT, blocks::GLASS),
                 ([8, 70, 9], blocks::DIRT, blocks::STONE),
                 ([8, 70, 7], blocks::DIRT, blocks::WATER),
+                ([7, 70, 7], blocks::DIRT, blocks::FLOWING_WATER + 2),
+                ([7, 70, 9], blocks::DIRT, blocks::FALLING_WATER),
                 ([9, 70, 9], blocks::COARSE_DIRT, blocks::AIR),
             ] {
                 put(&mut server, target, state);
@@ -456,6 +474,8 @@ mod tests {
             assert_eq!(server.get_block(7, 70, 8), Some(blocks::GRASS_BLOCK));
             assert_eq!(server.get_block(8, 70, 9), Some(blocks::DIRT));
             assert_eq!(server.get_block(8, 70, 7), Some(blocks::DIRT));
+            assert_eq!(server.get_block(7, 70, 7), Some(blocks::DIRT));
+            assert_eq!(server.get_block(7, 70, 9), Some(blocks::DIRT));
             assert_eq!(server.get_block(9, 70, 9), Some(blocks::COARSE_DIRT));
         }
     }

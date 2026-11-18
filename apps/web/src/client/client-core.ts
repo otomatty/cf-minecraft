@@ -30,6 +30,7 @@ export interface ClientExports {
 	client_enc_click_slot(slot: number, button: number, shift: number): number;
 	client_enc_close_inventory(): number;
 	client_enc_use_block(x: number, y: number, z: number): number;
+	client_enc_use_bucket(x: number, y: number, z: number): number;
 	client_screen(): number;
 	client_furnace_time(index: number): number;
 	client_selected_slot(): number;
@@ -82,6 +83,7 @@ export interface ClientExports {
 	client_get_block(x: number, y: number, z: number): number;
 	client_selection_bounds(x: number, y: number, z: number): number;
 	client_raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
+	client_raycast_water(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number): number;
 	client_enc_hello(view: number): number;
 	client_player_position(axis: number): number;
 	client_enc_teleport(x: number, y: number, z: number): number;
@@ -353,8 +355,9 @@ export class ClientCore {
 		return { min: [v[0] / 16, v[1] / 16, v[2] / 16], max: [v[3] / 16, v[4] / 16, v[5] / 16] };
 	}
 
-	raycast(origin: readonly number[], dir: readonly number[], max: number): RayHit | null {
-		if (this.x.client_raycast(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], max) === 0) return null;
+	raycast(origin: readonly number[], dir: readonly number[], max: number, includeWater = false): RayHit | null {
+		const cast = includeWater ? this.x.client_raycast_water : this.x.client_raycast;
+		if (cast(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], max) === 0) return null;
 		const v = this.outInts(10);
 		return { x: v[0], y: v[1], z: v[2], face: v[3], hitY: new DataView(this.out(48).buffer).getFloat64(40, true), min: [v[4] / 16, v[5] / 16, v[6] / 16], max: [v[7] / 16, v[8] / 16, v[9] / 16] };
 	}
@@ -419,6 +422,7 @@ export class ClientCore {
 	get screen(): number { return this.x.client_screen(); }
 	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
 	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }
+	encodeUseBucket(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_bucket(x, y, z)); }
 	encodeUseBlock(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_block(x, y, z)); }
 	get selectedSlot(): number { return this.x.client_selected_slot(); }
 	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }

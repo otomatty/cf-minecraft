@@ -607,7 +607,13 @@ mod tests {
 
     #[test]
     fn glass_passes_direct_sun_and_leaves_and_water_filter_each_layer() {
-        for material in [blocks::GLASS, blocks::OAK_LEAVES, blocks::WATER] {
+        for material in [
+            blocks::GLASS,
+            blocks::OAK_LEAVES,
+            blocks::WATER,
+            blocks::FLOWING_WATER,
+            blocks::FALLING_WATER,
+        ] {
             let mut c = solid(0, 0);
             for y in 0..MIN_Y + HEIGHT {
                 c.set(8, y, 8, if y < 5 { material } else { blocks::AIR });

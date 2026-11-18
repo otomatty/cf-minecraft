@@ -304,7 +304,8 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 
 test("sixteen original tool textures have transparent backgrounds and distinct tier colors", () => {
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
-	const tools = core.itemRegistry().filter(item => item.block === null && item.maxStack === 1);
+	const tools = core.itemRegistry().filter(item => /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.test(item.name));
+	assert.ok(tools.every(item => item.block === null && item.maxStack === 1));
 	assert.equal(tools.length, 16);
 	for (const kind of ["pickaxe", "axe", "shovel", "hoe"]) {
 		const images = ["wooden", "stone", "copper", "iron"].map(tier => {

@@ -28,7 +28,7 @@ export function paintTexture(name: string): Uint8Array {
 	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.exec(name);
 	if (tool) return paintTool(tool[1], tool[2]);
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? equipmentTexture(name);
+		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -126,6 +126,28 @@ function hashName(name: string): number {
 
 const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
 const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
+
+function bucketTexture(name: string): Uint8Array | undefined {
+	if (name !== "bucket" && name !== "water_bucket") return undefined;
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	const paint = (x: number, y: number, color: Rgb) =>
+		pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
+	for (let y = 3; y <= 13; y++) {
+		const inset = y === 3 || y >= 11 ? 1 + Math.floor((y - 3) / 6) : 0;
+		const left = 2 + inset;
+		const right = 13 - inset;
+		for (let x = left; x <= right; x++) {
+			let color: Rgb = x === left || x === right || y === 13 ? [55, 63, 72]
+				: x < 6 ? [183, 194, 203] : x < 10 ? [137, 150, 162] : [102, 115, 126];
+			if (y === 3) color = [203, 212, 217];
+			if ((y === 4 || y === 5) && x > left && x < right) {
+				color = name === "bucket" ? [64, 76, 85] : y === 4 ? [101, 207, 237] : [42, 148, 203];
+			}
+			paint(x, y, color);
+		}
+	}
+	return pixels;
+}
 
 function cropTexture(name: string): Uint8Array | undefined {
 	const stage = ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].indexOf(name);

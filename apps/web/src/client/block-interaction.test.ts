@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { blockInteraction, canTill, placementState } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -54,7 +54,15 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 62);
+	assert.equal(registry.length, 70);
+	assert.equal(id("water"), 13);
+	for (const [i, level] of [1, 2, 3, 4, 5, 6, 7, "falling"].entries()) {
+		const state = id(`flowing_water[level=${level}]`);
+		assert.equal(state, 62 + i);
+		assert.equal(registry[state].first, 62);
+		assert.equal(registry[state].count, 8);
+		assert.equal(registry[state].occludes, false);
+	}
 	assert.equal(id("crafting_table"), 49);
 	assert.equal(id("furnace"), 50);
 	assert.equal(slab, 14);
@@ -295,4 +303,35 @@ test("crop states and farming items use distinct painted textures", () => {
 		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 0), name);
 		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 255), name);
 	}
+});
+
+test("empty bucket targets only the source hit by the water-inclusive ray", () => {
+	const target = hit(1);
+	for (const name of ["flowing_water", "glass", "air", undefined]) {
+		assert.equal(bucketTarget("bucket", target, () => name, false), null);
+	}
+	assert.equal(bucketTarget("bucket", null, () => "water", false), null);
+	assert.deepEqual(bucketTarget("bucket", target, () => "water", false), [0, -2, 0]);
+	assert.deepEqual([...core.encodeUseBucket(-1, -2, 3)], [15, 255, 255, 255, 255, 255, 255, 255, 254, 0, 0, 0, 3]);
+});
+
+test("filled bucket targets the adjacent air or flow and respects block interaction", () => {
+	const target = hit(5);
+	for (const name of ["air", "flowing_water"]) {
+		assert.deepEqual(bucketTarget("water_bucket", target, x => x === 0 ? "stone" : name, false), [1, -2, 0]);
+	}
+	for (const name of ["water", "glass", "short_grass", undefined]) {
+		assert.equal(bucketTarget("water_bucket", target, x => x === 0 ? "stone" : name, false), null);
+	}
+	for (const name of ["crafting_table", "furnace"]) {
+		const blockName = x => x === 0 ? name : "air";
+		assert.equal(bucketTarget("water_bucket", target, blockName, false), null);
+		assert.deepEqual(bucketTarget("water_bucket", target, blockName, true), [1, -2, 0]);
+	}
+	assert.equal(bucketTarget("water_bucket", null, () => "air", false), null);
+	const flow = registry[id("flowing_water[level=1]")];
+	assert.equal(pickBlockItem(flow, core.itemRegistry()), undefined);
+	assert.deepEqual(placementState(registry, id("stone"), target, 0, x => x === 0 ? id("stone") : flow.first),
+		{ x: 1, y: -2, z: 0, state: id("stone") });
+	assert.notDeepEqual(paintTexture("bucket"), paintTexture("water_bucket"));
 });

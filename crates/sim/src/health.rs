@@ -61,7 +61,7 @@ impl Health {
         let Some(feet) = block_at(world, pos, 0.0) else {
             return;
         };
-        if feet == blocks::WATER {
+        if blocks::is_water(feet) {
             self.fall_start_y = None;
         } else if grounded(world, pos) {
             if let Some(start) = self.fall_start_y.take() {
@@ -71,7 +71,7 @@ impl Health {
             }
         } else if let Some(start) = self.fall_start_y {
             self.fall_start_y = Some(start.max(pos[1]));
-        } else if block_at(world, prev, 0.0) == Some(blocks::WATER) {
+        } else if block_at(world, prev, 0.0).is_some_and(blocks::is_water) {
             self.fall_start_y = Some(pos[1]);
         } else {
             self.fall_start_y = Some(prev[1].max(pos[1]));
@@ -111,7 +111,7 @@ impl Health {
             }
         }
 
-        let submerged = eye == Some(blocks::WATER);
+        let submerged = eye.is_some_and(blocks::is_water);
         let out_of_air = submerged && self.vitals.air == 0;
         if submerged {
             self.vitals.air = self.vitals.air.saturating_sub(AIR_DRAIN);
@@ -526,6 +526,20 @@ mod tests {
             advance(&mut s, 10);
             assert_eq!(vitals(&s).health, MAX_HEALTH - 2 * damage);
         }
+    }
+
+    #[test]
+    fn flowing_water_resets_fall_origin_and_consumes_air() {
+        let mut s = joined(GameMode::Survival);
+        s.world.set_block(2, 80, 2, blocks::FLOWING_WATER + 3);
+        s.world.set_block(2, 81, 2, blocks::FALLING_WATER);
+        let [x, y, z] = FEET;
+        teleport(&mut s, [x, y + 10.0, z]);
+        send(&mut s, movement(FEET));
+        s.tick();
+        assert_eq!(s.client_position(1), Some(FEET));
+        assert_eq!(vitals(&s).health, MAX_HEALTH);
+        assert_eq!(vitals(&s).air, MAX_AIR - 1);
     }
 
     #[test]

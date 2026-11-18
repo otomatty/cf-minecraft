@@ -375,3 +375,24 @@ states = [
   { properties = [["age", "6"]], texture = "wheat_green" },
   { properties = [["age", "7"]], texture = "wheat_ripe" },
 ]
+
+[[blocks]]
+name = "flowing_water"
+id = 62
+unbreakable = true
+layer = "translucent"
+texture = "water"
+side = "water_flow"
+solid = false
+opacity = 1
+tint = true
+states = [
+  { properties = [["level", "1"]] },
+  { properties = [["level", "2"]] },
+  { properties = [["level", "3"]] },
+  { properties = [["level", "4"]] },
+  { properties = [["level", "5"]] },
+  { properties = [["level", "6"]] },
+  { properties = [["level", "7"]] },
+  { properties = [["level", "falling"]] },
+]

@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -129,6 +129,11 @@ pub enum C2S {
     },
     CloseInventory,
     UseBlock {
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    UseBucket {
         x: i32,
         y: i32,
         z: i32,
@@ -265,6 +270,7 @@ pub mod id {
     pub const C2S_STOP_USING_ITEM: u8 = 0x0e;
     pub const S2C_PLAYER_STATUS: u8 = 0x0c;
     pub const C2S_USE_BLOCK: u8 = 0x0b;
+    pub const C2S_USE_BUCKET: u8 = 0x0f;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -310,6 +316,12 @@ impl C2S {
             }
             C2S::UseBlock { x, y, z } => {
                 w.u8(id::C2S_USE_BLOCK);
+                w.i32(x);
+                w.i32(y);
+                w.i32(z);
+            }
+            C2S::UseBucket { x, y, z } => {
+                w.u8(id::C2S_USE_BUCKET);
                 w.i32(x);
                 w.i32(y);
                 w.i32(z);
@@ -393,6 +405,11 @@ impl C2S {
                 }
             }
             id::C2S_USE_BLOCK => C2S::UseBlock {
+                x: r.i32()?,
+                y: r.i32()?,
+                z: r.i32()?,
+            },
+            id::C2S_USE_BUCKET => C2S::UseBucket {
                 x: r.i32()?,
                 y: r.i32()?,
                 z: r.i32()?,
@@ -1094,6 +1111,25 @@ mod tests {
             bad[offset + 2] = 65;
             assert!(S2C::decode(&bad).is_err());
         }
+    }
+
+    #[test]
+    fn use_bucket_is_packet_0f_in_protocol_11() {
+        assert_eq!(PROTOCOL_VERSION, 11);
+        let packet = C2S::UseBucket {
+            x: i32::MIN,
+            y: -64,
+            z: i32::MAX,
+        };
+        let mut bytes = packet.encode();
+        assert_eq!(bytes[0], 0x0f);
+        assert_eq!(bytes.len(), 13);
+        assert_eq!(C2S::decode(&bytes), Ok(packet));
+        for end in 0..bytes.len() {
+            assert!(C2S::decode(&bytes[..end]).is_err());
+        }
+        bytes.push(0);
+        assert!(C2S::decode(&bytes).is_err());
     }
 
     #[test]

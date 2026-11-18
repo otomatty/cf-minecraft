@@ -319,3 +319,15 @@ name = "bread"
 id = 56
 texture = "bread"
 food = 5
+
+[[items]]
+name = "bucket"
+id = 57
+texture = "bucket"
+max_stack = 16
+
+[[items]]
+name = "water_bucket"
+id = 58
+texture = "water_bucket"
+max_stack = 1

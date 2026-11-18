@@ -1059,9 +1059,26 @@ pub extern "C" fn client_raycast(
     dz: f64,
     max: f64,
 ) -> u32 {
+    raycast([ox, oy, oz], [dx, dy, dz], max, false)
+}
+
+#[no_mangle]
+pub extern "C" fn client_raycast_water(
+    ox: f64,
+    oy: f64,
+    oz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    max: f64,
+) -> u32 {
+    raycast([ox, oy, oz], [dx, dy, dz], max, true)
+}
+
+fn raycast(origin: [f64; 3], dir: [f64; 3], max: f64, include_water: bool) -> u32 {
     let st = state();
-    let origin = [ox, oy, oz];
-    let dir = [dx, dy, dz];
+    let [ox, oy, oz] = origin;
+    let dy = dir[1];
     if dir.iter().all(|d| *d == 0.0) || !origin.iter().chain(dir.iter()).all(|v| v.is_finite()) {
         return 0;
     }
@@ -1082,11 +1099,15 @@ pub extern "C" fn client_raycast(
     }
     loop {
         if let Some(b) = st.world.get_block(cell[0], cell[1], cell[2]) {
-            let boxes = blocks::selection_boxes(b, |dx, dy, dz| {
-                st.world
-                    .get_block(cell[0] + dx, cell[1] + dy, cell[2] + dz)
-                    .unwrap_or(blocks::AIR)
-            });
+            let boxes = if include_water && blocks::is_water(b) {
+                vec![blocks::FULL_BOX]
+            } else {
+                blocks::selection_boxes(b, |dx, dy, dz| {
+                    st.world
+                        .get_block(cell[0] + dx, cell[1] + dy, cell[2] + dz)
+                        .unwrap_or(blocks::AIR)
+                })
+            };
             let hit = boxes
                 .iter()
                 .filter_map(|bounds| {
@@ -1451,6 +1472,11 @@ pub extern "C" fn client_screen() -> u32 {
 #[no_mangle]
 pub extern "C" fn client_enc_use_block(x: i32, y: i32, z: i32) -> usize {
     state().out = C2S::UseBlock { x, y, z }.encode();
+    state().out.len()
+}
+#[no_mangle]
+pub extern "C" fn client_enc_use_bucket(x: i32, y: i32, z: i32) -> usize {
+    state().out = C2S::UseBucket { x, y, z }.encode();
     state().out.len()
 }
 #[no_mangle]
@@ -1936,6 +1962,21 @@ mod tests {
             if obstacle == blocks::OAK_SLAB && !roof {
                 assert_eq!(highest, 64.5);
             }
+        }
+    }
+
+    #[test]
+    fn bucket_raycast_stops_at_source_or_flow_before_solid_blocks() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        state().world.insert_chunk(Chunk::empty(0, 0));
+        state().world.set_block(3, 80, 2, blocks::STONE);
+        for water in [blocks::WATER, blocks::FLOWING_WATER, blocks::FALLING_WATER] {
+            state().world.set_block(2, 80, 2, water);
+            assert_eq!(client_raycast(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
+            assert_eq!(i32::from_le_bytes(state().out[..4].try_into().unwrap()), 3);
+            assert_eq!(client_raycast_water(1.5, 80.5, 2.5, 1.0, 0.0, 0.0, 6.0), 1);
+            assert_eq!(i32::from_le_bytes(state().out[..4].try_into().unwrap()), 2);
         }
     }
 

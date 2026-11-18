@@ -99,6 +99,16 @@ pub fn is_oak_leaves(state: BlockState) -> bool {
     matches!(state, OAK_LEAVES | PLACED_OAK_LEAVES)
 }
 
+pub const FALLING_WATER: BlockState = FLOWING_WATER + 7;
+
+pub fn is_flowing_water(state: BlockState) -> bool {
+    (FLOWING_WATER..=FALLING_WATER).contains(&state)
+}
+
+pub fn is_water(state: BlockState) -> bool {
+    state == WATER || is_flowing_water(state)
+}
+
 pub const MOIST_FARMLAND: BlockState = FARMLAND + 1;
 pub const RIPE_WHEAT: BlockState = WHEAT + 7;
 
@@ -181,7 +191,7 @@ pub fn shape_boxes(
 ) {
     if !is_valid(state)
         || state == AIR
-        || (purpose != ShapePurpose::Render && state == WATER)
+        || (purpose != ShapePurpose::Render && is_water(state))
         || (purpose == ShapePurpose::Collision && !is_solid(state))
     {
         return;
@@ -369,9 +379,10 @@ mod tests {
                 PLACED_OAK_LEAVES,
                 FARMLAND,
                 WHEAT,
+                FLOWING_WATER,
                 COUNT
             ),
-            (23, 31, 39, 51, 52, 54, 62)
+            (23, 31, 39, 51, 52, 54, 62, 70)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);

@@ -116,6 +116,11 @@ mod tests {
         assert_eq!(for_block(blocks::AIR), None);
         assert_eq!(for_block(blocks::COUNT), None);
         for state in 1..blocks::COUNT {
+            if blocks::is_flowing_water(state) {
+                assert_eq!(for_block(state), None);
+                assert_eq!(mining_drop(state), None);
+                continue;
+            }
             let id = for_block(state).unwrap();
             let name = match state {
                 blocks::OAK_LEAVES | blocks::PLACED_OAK_LEAVES => "oak_leaves",

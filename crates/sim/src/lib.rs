@@ -22,6 +22,7 @@ mod health;
 pub mod inventory;
 mod random_ticks;
 pub mod scenario;
+mod water;
 use inventory::{Inventory, Stack};
 pub use random_ticks::RANDOM_TICKS_PER_SECTION;
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +192,14 @@ pub struct Stats {
     pub chunks_loaded_from_storage: u64,
 }
 
+struct SavedChunk {
+    chunk: Chunk,
+    furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
+    scheduled_blocks: Vec<(u16, [i32; 3])>,
+}
+
 pub struct Server {
+    scheduled_blocks: BTreeSet<(i64, [i32; 3])>,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     entities: BTreeMap<u32, entity::Entity>,
     next_entity_id: u32,
@@ -224,6 +232,7 @@ impl Server {
             (generator == Generator::Terrain).then(|| worldgen::TerrainGenerator::new(seed));
         let [x, y, z] = worldgen::spawn_point(generator, seed);
         Self {
+            scheduled_blocks: BTreeSet::new(),
             furnaces: BTreeMap::new(),
             entities: BTreeMap::new(),
             next_entity_id: 1,
@@ -710,6 +719,7 @@ impl Server {
         }
         self.tick_furnaces();
         self.tick_random_blocks();
+        self.tick_scheduled_blocks();
         // Natural block changes can interrupt digs after the regular flush.
         self.flush_digs();
         self.sync_entities();
@@ -726,7 +736,10 @@ impl Server {
 
     fn apply(&mut self, id: u32, packet: C2S) {
         if self.clients[&id].health.vitals.dead
-            && !matches!(packet, C2S::Hello { .. } | C2S::Respawn)
+            && !matches!(
+                packet,
+                C2S::Hello { .. } | C2S::Respawn | C2S::UseBucket { .. }
+            )
         {
             self.stats.packets_rejected += 1;
             return;
@@ -834,6 +847,7 @@ impl Server {
                 self.clients.get_mut(&id).unwrap().inventory_dirty = true;
                 self.abort_dig(id);
             }
+            C2S::UseBucket { x, y, z } => self.use_bucket(id, [x, y, z]),
             C2S::UseBlock { x, y, z } => {
                 let client = &self.clients[&id];
                 let pos = [x, y, z];
@@ -956,7 +970,8 @@ impl Server {
                         false
                     } else {
                         old.is_some_and(|old| {
-                            matches!(old, blocks::AIR | blocks::WATER | blocks::SHORT_GRASS)
+                            matches!(old, blocks::AIR | blocks::SHORT_GRASS)
+                                || blocks::is_water(old)
                                 || blocks::info(old).name == blocks::info(state).name
                         }) && self.clients[&id]
                             .inventory
@@ -1011,6 +1026,7 @@ impl Server {
                 }
                 self.stats.blocks_changed += 1;
                 self.broadcast_block(x, y, z, state);
+                self.schedule_water_neighbors([x, y, z]);
                 self.check_wheat_above([x, y, z], state);
             }
         }
@@ -1379,7 +1395,9 @@ impl Server {
             return false;
         }
         match Self::read_saved_chunk(cx, cz, bytes) {
-            Ok((chunk, furnaces)) => {
+            Ok(SavedChunk {
+                chunk, furnaces, ..
+            }) => {
                 self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_generated += 1;
@@ -1496,6 +1514,10 @@ impl Server {
                 (!keep).then_some((cx, cz))
             })
             .collect();
+        if !removed.is_empty() {
+            self.scheduled_blocks
+                .retain(|(_, [x, _, z])| removed.binary_search(&(x >> 4, z >> 4)).is_err());
+        }
         for (cx, cz) in removed {
             self.world.remove_chunk(cx, cz);
             self.furnaces
@@ -1529,7 +1551,16 @@ impl Server {
             return false;
         }
         match Self::read_saved_chunk(cx, cz, bytes) {
-            Ok((chunk, furnaces)) => {
+            Ok(SavedChunk {
+                chunk,
+                furnaces,
+                scheduled_blocks,
+            }) => {
+                self.scheduled_blocks.extend(
+                    scheduled_blocks
+                        .into_iter()
+                        .map(|(delay, pos)| (self.game_time.saturating_add(i64::from(delay)), pos)),
+                );
                 self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_loaded_from_storage += 1;
@@ -1569,6 +1600,21 @@ impl Server {
             w.u8(p[2].rem_euclid(16) as u8);
             f.write(&mut w);
         }
+        let scheduled: Vec<_> = self
+            .scheduled_blocks
+            .iter()
+            .filter(|(_, [x, _, z])| (x >> 4, z >> 4) == (cx, cz))
+            .collect();
+        w.varint(scheduled.len() as u32);
+        for (time, [x, y, z]) in scheduled {
+            w.u8((x & 15) as u8);
+            w.i32(*y);
+            w.u8((z & 15) as u8);
+            w.u16(
+                time.saturating_sub(self.game_time)
+                    .clamp(0, i64::from(u16::MAX)) as u16,
+            );
+        }
         Some((cx, cz, w.finish()))
     }
 
@@ -1576,7 +1622,7 @@ impl Server {
         cx: i32,
         cz: i32,
         bytes: &[u8],
-    ) -> Result<(Chunk, BTreeMap<[i32; 3], furnace::Furnace>), world::io::DecodeError> {
+    ) -> Result<SavedChunk, world::io::DecodeError> {
         use world::io::DecodeError;
         let mut r = Reader::new(bytes);
         // Chunk::read deliberately rejects trailing bytes. Locate its prefix here.
@@ -1589,7 +1635,7 @@ impl Server {
         let mut furnaces = BTreeMap::new();
         if r.remaining() > 0 {
             let count = r.varint()? as usize;
-            if count > 16 * 16 * HEIGHT as usize || r.remaining() != count * 25 {
+            if count > 16 * 16 * HEIGHT as usize || r.remaining() < count * 25 {
                 return Err(DecodeError);
             }
             for _ in 0..count {
@@ -1615,7 +1661,33 @@ impl Server {
                 }
             }
         }
-        Ok((chunk, furnaces))
+        let mut scheduled_blocks = Vec::new();
+        if r.remaining() > 0 {
+            let count = r.varint()? as usize;
+            if !r.remaining().is_multiple_of(8) || count != r.remaining() / 8 {
+                return Err(DecodeError);
+            }
+            for _ in 0..count {
+                let x = r.u8()?;
+                let y = r.i32()?;
+                let z = r.u8()?;
+                let delay = r.u16()?;
+                if x >= 16 || z >= 16 || !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+                    return Err(DecodeError);
+                }
+                let pos = [
+                    cx.wrapping_mul(16).wrapping_add(i32::from(x)),
+                    y,
+                    cz.wrapping_mul(16).wrapping_add(i32::from(z)),
+                ];
+                scheduled_blocks.push((delay, pos));
+            }
+        }
+        Ok(SavedChunk {
+            chunk,
+            furnaces,
+            scheduled_blocks,
+        })
     }
     pub fn dirty_chunks(&self) -> usize {
         self.world.chunks.values().filter(|c| c.dirty).count()
@@ -1687,6 +1759,13 @@ impl Server {
             let mut w = world::io::Writer::new();
             f.write(&mut w);
             h.bytes(&w.finish());
+        }
+        h.i64(self.scheduled_blocks.len() as i64);
+        for (time, pos) in &self.scheduled_blocks {
+            h.i64(*time);
+            for v in pos {
+                h.i32(*v);
+            }
         }
         h.bytes(&self.next_entity_id.to_be_bytes());
         h.i64(self.entities.len() as i64);
@@ -4788,7 +4867,11 @@ mod furnace_server_tests {
         s.furnaces.clear();
         assert!(s.load_chunk(c.0, c.1, &prefix));
         assert!(!s.furnaces.contains_key(&pos));
-        for end in prefix.len() + 1..bytes.len() {
+        let old_end = prefix.len() + 1 + 25;
+        let old = Server::read_saved_chunk(c.0, c.1, &bytes[..old_end]).unwrap();
+        assert_eq!(old.furnaces[&pos], f);
+        assert!(old.scheduled_blocks.is_empty());
+        for end in (prefix.len() + 1..old_end).chain(old_end + 1..bytes.len()) {
             assert!(Server::read_saved_chunk(c.0, c.1, &bytes[..end]).is_err());
         }
         for (offset, value) in [(0, 2), (1, 16), (6, 16), (7, 255), (9, 0)] {
