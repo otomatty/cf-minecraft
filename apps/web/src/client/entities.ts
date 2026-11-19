@@ -1,7 +1,7 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
-import { zombie } from "./mobs/hostile.ts";
+import { skeleton, zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
@@ -17,6 +17,7 @@ const mobHitboxes = [
 	{ width: 0.4, height: 0.7 },
 	{ width: 0.9, height: 1.3 },
 	{ width: 0.6, height: 1.95 },
+	{ width: 0.6, height: 1.99 },
 ] as const satisfies Record<MobKind, { width: number; height: number }>;
 
 interface MobPosition {
@@ -66,8 +67,15 @@ export interface RenderItem {
 	position: [number, number, number];
 	texture: number;
 	flat?: boolean;
+	velocity?: Vec3;
 	/** Sky light first, block light second; lightmap UVs use the reverse order. */
 	light: [sky: number, block: number];
+}
+
+export interface RenderSprite {
+	corners: readonly Vec3[];
+	texture: number;
+	light: RenderItem["light"];
 }
 
 export const MAX_RENDER_ITEMS = 1024;
@@ -81,11 +89,42 @@ const corners = [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], [0, 1, 0], [1, 1, 0
 // Down, up, north, south, west, east; counterclockwise from outside each face.
 const faces = [[0, 1, 2, 3], [7, 6, 5, 4], [1, 0, 4, 5], [3, 2, 6, 7], [0, 3, 7, 4], [2, 1, 5, 6]];
 
+function writeSprite(out: number[], { corners, texture, light }: RenderSprite): void {
+	for (const index of [0, 1, 2, 0, 2, 3, 1, 0, 3, 1, 3, 2]) {
+		out.push(...corners[index], [0, 1, 1, 0][index], [1, 1, 0, 0][index], 1, texture,
+			(light[1] + 0.5) / 16, (light[0] + 0.5) / 16);
+	}
+}
+
+function arrowCorners(position: Vec3, velocity: Vec3, camera: readonly number[]): Vec3[] {
+	const [vx, vy, vz] = velocity;
+	const length = Math.hypot(vx, vy, vz);
+	const forward: Vec3 = length ? [vx / length, vy / length, vz / length] : [0, 0, 1];
+	const origin: Vec3 = [position[0] - camera[0], position[1] - camera[1], position[2] - camera[2]];
+	const across = ([x, y, z]: Vec3): Vec3 =>
+		[forward[1] * z - forward[2] * y, forward[2] * x - forward[0] * z, forward[0] * y - forward[1] * x];
+	let side = across(origin);
+	if (Math.hypot(...side) < 1e-6) side = across(Math.abs(forward[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]);
+	const scale = 0.4 / Math.SQRT2;
+	const sideLength = Math.hypot(...side);
+	// The texture's shaft runs from bottom left to top right. Anchor the tip at the projectile.
+	return [[0, 1], [1, 1], [1, 0], [0, 0]].map(([u, v]) => {
+		const along = scale * (u - v - 0.75);
+		const offset = scale * (u + v - 1) / sideLength;
+		const coordinate = (axis: number) => origin[axis] + forward[axis] * along + side[axis] * offset;
+		return [coordinate(0), coordinate(1), coordinate(2)];
+	});
+}
+
 /** Visual animation only. Subtract the camera in f64 before writing f32 vertices. */
-export function itemVertices(items: readonly RenderItem[], camera: readonly number[], timeMs: number): Float32Array {
+export function itemVertices(items: readonly RenderItem[], camera: readonly number[], timeMs: number, sprites: readonly RenderSprite[] = []): Float32Array {
 	const out: number[] = [];
 	const angle = timeMs / 2000, c = Math.cos(angle), s = Math.sin(angle);
 	for (const item of items) {
+		if (item.velocity) {
+			writeSprite(out, { ...item, corners: arrowCorners(item.position, item.velocity, camera) });
+			continue;
+		}
 		const itemCorners = item.flat ? [[0,0,.5],[1,0,.5],[1,1,.5],[0,1,.5]] : corners;
 		const itemFaces = item.flat ? [[0,1,2,3],[1,0,3,2]] : faces;
 		for (const [face, indices] of itemFaces.entries()) {
@@ -102,6 +141,7 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 			}
 		}
 	}
+	for (const sprite of sprites.slice(0, MAX_RENDER_ITEMS - items.length)) writeSprite(out, sprite);
 	return new Float32Array(out);
 }
 
@@ -116,7 +156,7 @@ export interface RenderMob {
 
 // Protocol kinds index both this table and the GPU skin array. The 64×32 skins
 // occupy the upper half of a layer at their original texel scale.
-export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie] as const satisfies Record<MobKind, MobAsset>;
+export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie, skeleton] as const satisfies Record<MobKind, MobAsset>;
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
@@ -189,7 +229,8 @@ const mobMeshes = mobAssetsByKind.map((asset, kind) => {
 	return { bones, floats, scale, centerZ };
 });
 
-export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number): Float32Array {
+export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number,
+	sprites?: { output: RenderSprite[]; textures: ReadonlyMap<string, number> }): Float32Array {
 	const out = new Float32Array(mobs.reduce((sum, mob) => sum + mobMeshes[mob.kind].floats, 0));
 	let i = 0;
 	for (const mob of mobs) {
@@ -204,6 +245,18 @@ export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[
 		for (const { bone, parent, walkPitch, cubes } of bones) {
 			const pose = bonePose(bone, walkPitch * stride, parent < 0 ? world : poses[parent]);
 			poses.push(pose);
+			if (sprites && bone.itemSprite) {
+				const texture = sprites.textures.get(bone.itemSprite.texture);
+				if (texture !== undefined) {
+					const [x, y, z] = bone.pivot;
+					const [u, v] = bone.itemSprite.grip;
+					sprites.output.push({
+						corners: [[0, 16], [16, 16], [16, 0], [0, 0]].map(([col, row]) =>
+							pose([x, y + v - row, z + col - u])),
+						texture, light: mob.light,
+					});
+				}
+			}
 			for (const cube of cubes) {
 				const points = cube.points.map(pose);
 				for (const vertex of cube.vertices) {

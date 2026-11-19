@@ -2248,6 +2248,83 @@ async function zombies() {
 	} finally { await page.close(); }
 }
 
+async function skeletons() {
+	// Seed 2027 can spawn a skeleton early when its candidate chunk is loaded.
+	const { page, errors } = await open(`server=local&world=e2e-skeletons-${run}&mode=survival&gen=flat&seed=2027&view=4&time=18000`);
+	try {
+		const stats = await settle(page, "skeletons", chunksInView(4));
+		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "skeletons: starts in survival Flat");
+		check(stats.health === 20, "skeletons: starts at full health");
+		await resumePointerLock(page, "skeletons: initial pointer lock");
+		await page.mouse.move(640, 360);
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 5),
+			{ timeout: 100000, polling: 100 });
+		const skeleton = await spawned.jsonValue();
+		await spawned.dispose();
+		check(skeleton.kind === 5, "skeletons: a skeleton spawned at night", `id ${skeleton.id}`);
+
+		// Stand inside stopping range with the skeleton's head centered in the frame.
+		await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z], yaw } = api.stats().mobs.find(mob => mob.id === id);
+			const angle = yaw * Math.PI / 180;
+			api.setCamera(x - 6 * Math.sin(angle), y + 1.62, z + 6 * Math.cos(angle), yaw + 180, -1.15);
+		}, skeleton.id);
+
+		const shot = await page.waitForFunction(() => window.__mc.stats().arrows.find(arrow => Math.hypot(...arrow.velocity) > 0),
+			{ timeout: 30000, polling: 25 });
+		const arrow = await shot.jsonValue();
+		await shot.dispose();
+		check(arrow.id > 0, "skeletons: an arrow is in flight", `id ${arrow.id}`);
+		const damaged = await page.waitForFunction(() => {
+			const api = window.__mc;
+			const { health, mobs } = api.stats();
+			if (health >= 20) return false;
+			const [x, , z] = api.playerPosition();
+			for (const mob of mobs) {
+				if (mob.kind !== 4) continue;
+				const distance = Math.hypot(mob.position[0] - x, mob.position[2] - z);
+				if (distance <= 2) return { health, nearbyZombie: { id: mob.id, distance } };
+			}
+			return { health, nearbyZombie: null };
+		}, { timeout: 30000, polling: 50 });
+		const { health, nearbyZombie } = await damaged.jsonValue();
+		await damaged.dispose();
+		const zombieDetail = nearbyZombie ? `, zombie ${nearbyZombie.id} at ${nearbyZombie.distance.toFixed(2)} blocks horizontally` : "";
+		check(health === 17 && nearbyZombie === null, "skeletons: the arrow dealt 3 damage", `${health} health remaining${zombieDetail}`);
+		await page.waitForFunction(() => document.getElementById("damage-flash").hidden, { timeout: 3000 });
+
+		const screenshotSession = await page.createCDPSession();
+		const capture = await bounded(() => screenshotSession.send("Page.captureScreenshot", {
+			format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: false,
+		}, { timeout: 8000 }), 8000);
+		if (!capture || typeof capture === "string") throw new Error(`skeletons: screenshot failed (${capture})`);
+		writeFileSync(join(shots, "mobs-skeleton.png"), Buffer.from(capture.data, "base64"));
+		const bonePixels = await page.evaluate(async data => {
+			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+			const ctx = new OffscreenCanvas(img.width, img.height).getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const scale = img.height / 720;
+			const pixels = ctx.getImageData(
+				Math.floor(img.width / 2 - 24 * scale), Math.floor(img.height / 2 - 27 * scale),
+				Math.ceil(48 * scale), Math.ceil(44 * scale),
+			).data;
+			let bone = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+				// Moonlit bone is gray, lighter than the sky and dimmer than the crosshair.
+				if (r >= 26 && r <= 70 && Math.max(r, g, b) - Math.min(r, g, b) <= 5) bone++;
+			}
+			return bone;
+		}, capture.data);
+		check(bonePixels > 50, "skeletons: pale bone is visibly rendered", `${bonePixels} bone pixels, skeleton ${skeleton.id}`);
+		check(errors.length === 0, "skeletons: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "skeletons", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -2258,6 +2335,7 @@ try {
 	await mobs();
 	await mobCombat();
 	await zombies();
+	await skeletons();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

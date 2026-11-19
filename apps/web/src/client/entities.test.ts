@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem } from "./entities.ts";
+import { aimedMob, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderSprite } from "./entities.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -146,15 +146,15 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 
 const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
-const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95] as const;
+const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95, 1.99] as const;
 
 function component(vertices: Float32Array, index: number) {
 	return vertices.filter((_, i) => i % 9 === index);
 }
 
 test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie"]);
-	for (const kind of [0, 1, 2, 3, 4] as const) {
+	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton"]);
+	for (const kind of [0, 1, 2, 3, 4, 5] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = mobAssetsByKind[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
@@ -175,7 +175,7 @@ test("mobs stand on the ground at gameplay height and use their protocol skin la
 });
 
 test("aiming across the top of a rendered mob's head selects it from the front and the side", () => {
-	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1], [4, 1]] as const) {
+	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1], [4, 1], [5, 1]] as const) {
 		for (const yaw of [0, 45, 90]) {
 			const mob: RenderMob & { id: number } = { id: 12, kind, position: [0, 0, 0], yaw, moving: false, hurt: false, light: [15, 0] };
 			const vertices = mobVertices([mob], [0, 0, 0], 0);
@@ -341,4 +341,63 @@ test("zombie head uses the front of the 64×32 skin and the legs swing in opposi
 		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
 		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.95) ? 8 : 16);
 	}
+});
+
+test("skeleton uses the 64×32 skin, taller hitbox, and a bow parented to its moving arm", () => {
+	const skeleton: RenderMob & { id: number } = {
+		id: 7, kind: 5, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3],
+	};
+	const asset = mobAssetsByKind[5];
+	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
+	assert.equal(aimedMob([0, 1.98, 3], [0, 0, -1], [skeleton], 5)?.id, 7);
+	assert.equal(aimedMob([0, 2, 3], [0, 0, -1], [skeleton], 5), null);
+	const output: RenderSprite[] = [];
+	const textures = new Map([["bow", 123]]);
+	mobVertices([skeleton], [0, 0, 0], 0, { output, textures });
+	mobVertices([{ ...skeleton, moving: true }], [0, 0, 0], quarterStride, { output, textures });
+	assert.equal(output.length, 2);
+	assert.ok(output.every(sprite => sprite.texture === 123));
+	assert.notDeepEqual(output[0].corners, output[1].corners);
+	const vertices = itemVertices([], [0, 0, 0], 0, output);
+	assert.equal(vertices.length, 2 * 12 * 9);
+	assert.ok(component(vertices, 6).every(layer => layer === 123));
+});
+
+test("arrow sprite aligns its diagonal with velocity and stays camera relative", () => {
+	const item: RenderItem = { position: [29999998.25, 1, -29999998], velocity: [0, -1, 0], texture: 7, light: [15, 3] };
+	const vertices = itemVertices([item], [29999998, 1, -29999998], 0);
+	assert.equal(vertices.length, 12 * 9);
+	const tail = vertices.subarray(0, 3), tip = vertices.subarray(18, 21);
+	assert.equal(tail[0], 0.25);
+	assert.equal(tip[0], 0.25);
+	assert.equal(tail[2], tip[2]);
+	assert.ok(tip[1] < tail[1]);
+	assert.ok(component(vertices, 6).every(layer => layer === 7));
+});
+
+test("WASM arrow records carry velocity and interpolate from the last received position", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { ClientCore, S2C } = await import("./client-core.ts");
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const id = 0xffff_ffff;
+	const arrow = (tag: number, position: number[], velocity: number[]) => {
+		const bytes = new Uint8Array(53), view = new DataView(bytes.buffer);
+		bytes[0] = tag;
+		view.setUint32(1, id);
+		[...position, ...velocity].forEach((value, i) => view.setFloat64(5 + i * 8, value));
+		return bytes;
+	};
+	const position = [29999998.25, 1, -3.5], next = [29999998.5, 1, -3.5];
+	const velocity = [0.25, 0, 0], nextVelocity = [0.2475, -0.05, 0];
+	assert.equal(core.packet(arrow(S2C.ArrowSpawn, position, velocity)), S2C.ArrowSpawn);
+	assert.deepEqual(core.arrows, [{ id, position, previous: position, velocity }]);
+	assert.equal(core.packet(arrow(S2C.ArrowMove, next, nextVelocity)), S2C.ArrowMove);
+	assert.deepEqual(core.arrows, [{ id, position: next, previous: position, velocity: nextVelocity }]);
+	const remove = new Uint8Array([S2C.EntityRemove, 255, 255, 255, 255]);
+	assert.equal(core.packet(remove), S2C.EntityRemove);
+	assert.deepEqual(core.arrows, []);
+	core.packet(arrow(S2C.ArrowSpawn, position, velocity));
+	core.resetWorld();
+	assert.deepEqual(core.arrows, []);
 });

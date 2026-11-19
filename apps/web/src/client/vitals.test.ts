@@ -31,3 +31,7 @@ test("lava death uses the cause 5 message", () => {
 test("zombie death uses the cause 6 message", () => {
 	assert.equal(deathCauses[6], "ゾンビに倒された");
 });
+
+test("arrow death has a localized cause", () => {
+	assert.equal(deathCauses[7], "矢で射抜かれた");
+});

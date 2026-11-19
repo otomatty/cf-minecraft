@@ -32,9 +32,15 @@ struct MobEntity {
     yaw: f32,
     hurt: u32,
 }
+struct ArrowEntity {
+    pos: [f64; 3],
+    previous: [f64; 3],
+    velocity: [f64; 3],
+}
 struct State {
     entities: BTreeMap<u32, ItemEntity>,
     mobs: BTreeMap<u32, MobEntity>,
+    arrows: BTreeMap<u32, ArrowEntity>,
     mob_hurt_sequence: u32,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
@@ -190,6 +196,7 @@ pub extern "C" fn client_new() {
     let st = State {
         entities: BTreeMap::new(),
         mobs: BTreeMap::new(),
+        arrows: BTreeMap::new(),
         mob_hurt_sequence: 0,
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
@@ -245,6 +252,7 @@ pub extern "C" fn client_reset_world() {
     }
     st.entities.clear();
     st.mobs.clear();
+    st.arrows.clear();
     st.mob_hurt_sequence = 0;
     st.connectivity.clear();
     st.visibility_stale = true;
@@ -352,6 +360,23 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.yaw = yaw;
             }
         }
+        S2C::ArrowSpawn { id, pos, velocity } => {
+            st.arrows.insert(
+                id,
+                ArrowEntity {
+                    pos,
+                    previous: pos,
+                    velocity,
+                },
+            );
+        }
+        S2C::ArrowMove { id, pos, velocity } => {
+            if let Some(arrow) = st.arrows.get_mut(&id) {
+                arrow.previous = arrow.pos;
+                arrow.pos = pos;
+                arrow.velocity = velocity;
+            }
+        }
         S2C::MobHurt { id } => {
             if let Some(mob) = st.mobs.get_mut(&id) {
                 st.mob_hurt_sequence = st.mob_hurt_sequence.wrapping_add(1).max(1);
@@ -362,6 +387,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
             st.mobs.remove(&id);
+            st.arrows.remove(&id);
         }
 
         S2C::Inventory {
@@ -1514,6 +1540,26 @@ pub extern "C" fn client_mobs() -> usize {
     st.out = w.finish();
     st.out.len()
 }
+/// Sorted packed records: ID u32, current/previous position and velocity as f64 triples.
+#[no_mangle]
+pub extern "C" fn client_arrows() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, arrow) in &st.arrows {
+        w.i32(id as i32);
+        for v in arrow
+            .pos
+            .into_iter()
+            .chain(arrow.previous)
+            .chain(arrow.velocity)
+        {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+
 #[no_mangle]
 pub extern "C" fn client_entity_light(x: i32, y: i32, z: i32) -> u32 {
     let st = state();

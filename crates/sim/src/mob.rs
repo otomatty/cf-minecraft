@@ -9,6 +9,7 @@ use protocol::{DeathCause, S2C};
 use world::{blocks, items, smelting, Fnv64, World, HEIGHT, MIN_Y};
 
 use crate::{
+    arrow::{clear_sight, Arrow},
     health::{
         block_at, hash_height, interval, track_fall, LAVA_DAMAGE, LAVA_FEET_OFFSET, LAVA_INTERVAL,
         SUFFOCATION_DAMAGE, SUFFOCATION_INTERVAL, VOID_Y,
@@ -91,6 +92,18 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             takes_fall_damage: true,
             loot: items::ZOMBIE_LOOT,
         },
+        MobKind::Skeleton => &MobSpec {
+            width: 0.6,
+            height: 1.99,
+            head_offset: 1.74,
+            health: 20,
+            walk_forward: 0.5,
+            flee_forward: 0.0,
+            chase_forward: Some(0.6),
+            max_fall_speed: None,
+            takes_fall_damage: true,
+            loot: items::SKELETON_LOOT,
+        },
     }
 }
 
@@ -110,10 +123,14 @@ const LOCAL_LIMIT: usize = 8;
 const EGG_INTERVAL_SALT: u64 = 22;
 const MIN_EGG_TICKS: u16 = 6000;
 const MAX_EGG_TICKS: u16 = 12000;
-const ZOMBIE_SPAWN_INTERVAL: i64 = 200;
-const ZOMBIE_SPAWN_SALT: u64 = 23;
-const ZOMBIE_LOCAL_LIMIT: usize = 4;
-const ZOMBIE_TARGET_RANGE: f64 = 16.0;
+const HOSTILE_SPAWN_INTERVAL: i64 = 200;
+const HOSTILE_COLUMN_SALT: u64 = 23;
+const HOSTILE_KIND_SALT: u64 = 24;
+const SKELETON_STOP_RANGE: f64 = 10.0;
+const SKELETON_INITIAL_SHOT_TICKS: u8 = 20;
+const SKELETON_SHOT_INTERVAL: u8 = 40;
+const HOSTILE_LOCAL_LIMIT: usize = 4;
+const HOSTILE_TARGET_RANGE: f64 = 16.0;
 const ZOMBIE_ATTACK_RANGE: f64 = 0.8;
 const ZOMBIE_ATTACK_DAMAGE: u8 = 3;
 const ZOMBIE_ATTACK_INTERVAL: u8 = 20;
@@ -124,6 +141,7 @@ const SUNLIGHT_INTERVAL: u8 = 20;
 struct Hostile {
     attack_ticks: u8,
     sunlight_ticks: u8,
+    shot_ticks: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,7 +192,10 @@ impl Mob {
             lava_ticks: 0,
             last_dry_pos: pos,
             egg_ticks: None,
-            hostile: spec.chase_forward.map(|_| Hostile::default()),
+            hostile: spec.chase_forward.map(|_| Hostile {
+                shot_ticks: (kind == MobKind::Skeleton).then_some(SKELETON_INITIAL_SHOT_TICKS),
+                ..Hostile::default()
+            }),
         }
     }
 
@@ -275,6 +296,9 @@ impl Mob {
     ) -> Option<DeathCause> {
         if let Some(hostile) = &mut self.hostile {
             hostile.attack_ticks = hostile.attack_ticks.saturating_sub(1);
+            if let Some(ticks) = &mut hostile.shot_ticks {
+                *ticks = ticks.saturating_sub(1);
+            }
         }
         self.age = self.age.saturating_add(1);
         let before = self.pos();
@@ -316,7 +340,7 @@ impl Mob {
         let Some(hostile) = &mut self.hostile else {
             return false;
         };
-        if hostile.attack_ticks != 0 {
+        if hostile.attack_ticks != 0 || hostile.shot_ticks.is_some() {
             return false;
         }
         let player = Player::new(target).bounds();
@@ -330,6 +354,29 @@ impl Mob {
         }
         hostile.attack_ticks = ZOMBIE_ATTACK_INTERVAL;
         true
+    }
+
+    fn eye(&self) -> [f64; 3] {
+        let [x, y, z] = self.pos();
+        [x, y + spec(self.kind).head_offset, z]
+    }
+
+    fn shoot(&mut self, world: &World, mut target: [f64; 3]) -> Option<Arrow> {
+        let origin = self.eye();
+        let dy = target[1] - self.pos()[1];
+        let ticks = self.hostile.as_mut()?.shot_ticks.as_mut()?;
+        if *ticks != 0
+            || distance_squared(origin, target) + dy * dy
+                > HOSTILE_TARGET_RANGE * HOSTILE_TARGET_RANGE
+        {
+            return None;
+        }
+        target[1] += physics::EYE_HEIGHT;
+        if !clear_sight(world, origin, target) {
+            return None;
+        }
+        *ticks = SKELETON_SHOT_INTERVAL;
+        Some(Arrow::aimed(origin, target))
     }
 
     fn environment_damage(&mut self, world: &World, before: [f64; 3]) -> Option<DeathCause> {
@@ -408,8 +455,20 @@ impl Mob {
         let idle_input = input;
         let movement = if knockback {
             None
-        } else if let Some([tx, _, tz]) = chase {
-            spec.chase_forward.map(|forward| ([tx, tz], forward))
+        } else if let Some(target) = chase {
+            let [tx, ty, tz] = target;
+            if self.kind == MobKind::Skeleton
+                && distance_squared(before, target) <= SKELETON_STOP_RANGE * SKELETON_STOP_RANGE
+                && clear_sight(world, self.eye(), [tx, ty + physics::EYE_HEIGHT, tz])
+            {
+                if x != tx || z != tz {
+                    self.yaw = heading(tx - x, tz - z);
+                }
+                self.stop_horizontal();
+                None
+            } else {
+                spec.chase_forward.map(|forward| ([tx, tz], forward))
+            }
         } else {
             match self.ai {
                 Wander::Walking { target, .. } => Some((target, spec.walk_forward)),
@@ -567,6 +626,9 @@ impl Mob {
         if let Some(hostile) = &self.hostile {
             h.u8(hostile.attack_ticks);
             h.u8(hostile.sunlight_ticks);
+            if let Some(ticks) = hostile.shot_ticks {
+                h.u8(ticks);
+            }
         }
     }
 }
@@ -759,6 +821,14 @@ fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
     bits ^ (bits >> 31)
 }
 
+fn hostile_kind(seed: i64, player: u32, time: i64) -> MobKind {
+    if sample(seed, player, time, HOSTILE_KIND_SALT).is_multiple_of(2) {
+        MobKind::Zombie
+    } else {
+        MobKind::Skeleton
+    }
+}
+
 fn egg_interval(seed: i64, id: u32, time: i64) -> u16 {
     let range = u64::from(MAX_EGG_TICKS - MIN_EGG_TICKS + 1);
     MIN_EGG_TICKS + (sample(seed, id, time, EGG_INTERVAL_SALT) % range) as u16
@@ -784,7 +854,7 @@ fn grass_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     }
 }
 
-fn zombie_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
+fn hostile_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
     let get = |y| chunk.get((x & 15) as usize, y, (z & 15) as usize);
     // Reaching a fluid before the ground means the column is covered.
@@ -915,21 +985,21 @@ impl Server {
         }
     }
 
-    fn spawn_zombie(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
+    fn spawn_hostile(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
         let nearby = self
             .mobs
             .values()
             .filter(|mob| mob.hostile.is_some() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0);
-        if nearby.take(ZOMBIE_LOCAL_LIMIT).count() == ZOMBIE_LOCAL_LIMIT {
+        if nearby.take(HOSTILE_LOCAL_LIMIT).count() == HOSTILE_LOCAL_LIMIT {
             return;
         }
-        let roll = sample(self.seed, id, self.game_time, ZOMBIE_SPAWN_SALT);
+        let roll = sample(self.seed, id, self.game_time, HOSTILE_COLUMN_SALT);
         let [dx, dz] = direction(roll);
         // Allow for rounding to the center of the sampled column.
         let radius = 24.75 + ((roll >> 16) % 2251) as f64 / 100.0;
         let x = (pos[0] + dx * radius).floor() as i32;
         let z = (pos[2] + dz * radius).floor() as i32;
-        let Some(candidate) = zombie_surface(&self.world, x, z) else {
+        let Some(candidate) = hostile_surface(&self.world, x, z) else {
             return;
         };
         if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate))
@@ -939,7 +1009,7 @@ impl Server {
         {
             return;
         }
-        self.spawn_mob(MobKind::Zombie, candidate);
+        self.spawn_mob(hostile_kind(self.seed, id, self.game_time), candidate);
     }
 
     pub(crate) fn tick_mobs(&mut self) {
@@ -955,13 +1025,14 @@ impl Server {
             }
         }
         let day = self.day_time.rem_euclid(24000);
-        if (13000..23000).contains(&day) && self.game_time % ZOMBIE_SPAWN_INTERVAL == 0 {
+        if (13000..23000).contains(&day) && self.game_time % HOSTILE_SPAWN_INTERVAL == 0 {
             for &(id, pos) in &players {
-                self.spawn_zombie(id, pos, &players);
+                self.spawn_hostile(id, pos, &players);
             }
         }
         let mut hits = Vec::new();
         let mut player_deaths = Vec::new();
+        let mut shots = Vec::new();
         for (&id, mob) in &mut self.mobs {
             if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
                 continue;
@@ -974,7 +1045,7 @@ impl Server {
                     .filter_map(|(&id, client)| {
                         let dy = pos[1] - client.pos[1];
                         let distance = distance_squared(pos, client.pos) + dy * dy;
-                        (distance <= ZOMBIE_TARGET_RANGE * ZOMBIE_TARGET_RANGE)
+                        (distance <= HOSTILE_TARGET_RANGE * HOSTILE_TARGET_RANGE)
                             .then_some((distance, id, client.pos))
                     })
                     .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
@@ -994,13 +1065,23 @@ impl Server {
                 hits.push((id, damage == Some(DeathCause::Lava)));
             }
             if let Some((player, pos)) = target {
-                if mob.health != 0 && mob.pos()[1] >= VOID_Y && mob.attacks(pos) {
+                if mob.health == 0 || mob.pos()[1] < VOID_Y {
+                    continue;
+                }
+                if let Some(arrow) = mob.shoot(&self.world, pos) {
+                    shots.push(arrow);
+                } else if mob.attacks(pos) {
                     let health = &mut self.clients.get_mut(&player).unwrap().health;
                     health.damage(ZOMBIE_ATTACK_DAMAGE, DeathCause::Zombie);
                     if health.vitals.dead {
                         player_deaths.push(player);
                     }
                 }
+            }
+        }
+        for arrow in shots {
+            if let Some(id) = self.allocate_entity_id() {
+                self.arrows.insert(id, arrow);
             }
         }
         for player in player_deaths {
@@ -1321,7 +1402,11 @@ mod tests {
     }
 
     fn joined(mode: GameMode) -> Server {
-        let mut server = Server::new(2026, Generator::Flat);
+        joined_with_seed(mode, 2026)
+    }
+
+    fn joined_with_seed(mode: GameMode, seed: i64) -> Server {
+        let mut server = Server::new(seed, Generator::Flat);
         server.game_mode = mode;
         server.connect(1);
         server.handle_packet(
@@ -2487,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn zombies_spawn_only_at_night_on_their_own_interval_in_both_modes() {
+    fn hostiles_spawn_only_at_night_on_their_own_interval_in_both_modes() {
         for mode in [GameMode::Creative, GameMode::Survival] {
             let mut server = joined(mode);
             let origin = server.clients[&1].pos;
@@ -2516,7 +2601,7 @@ mod tests {
     }
 
     #[test]
-    fn zombie_and_animal_spawn_caps_are_independent() {
+    fn both_hostiles_share_a_cap_independent_of_animals() {
         let mut server = joined(GameMode::Creative);
         let pos = server.spawn();
         let players = [(1, pos)];
@@ -2525,41 +2610,47 @@ mod tests {
         }
         for time in (200..=1200).step_by(200) {
             server.game_time = time;
-            server.spawn_zombie(1, pos, &players);
+            server.spawn_hostile(1, pos, &players);
         }
-        assert_eq!(server.mobs.len(), LOCAL_LIMIT + ZOMBIE_LOCAL_LIMIT);
+        assert_eq!(server.mobs.len(), LOCAL_LIMIT + HOSTILE_LOCAL_LIMIT);
         assert_eq!(
             server
                 .mobs
                 .values()
-                .filter(|mob| mob.kind == MobKind::Zombie)
-                .count(),
-            ZOMBIE_LOCAL_LIMIT
+                .filter(|mob| mob.hostile.is_some())
+                .map(|mob| mob.kind)
+                .collect::<Vec<_>>(),
+            [
+                MobKind::Zombie,
+                MobKind::Zombie,
+                MobKind::Skeleton,
+                MobKind::Zombie
+            ]
         );
 
-        server.mobs.retain(|_, mob| mob.kind == MobKind::Zombie);
+        server.mobs.retain(|_, mob| mob.hostile.is_some());
         server.game_time = 400;
         server.spawn_herd(1, pos, &players);
         let herd = |server: &Server| {
             server
                 .mobs
                 .values()
-                .filter(|mob| mob.kind != MobKind::Zombie)
+                .filter(|mob| mob.hostile.is_none())
                 .map(|mob| (mob.kind, mob.pos()))
                 .collect::<Vec<_>>()
         };
-        let with_zombies = herd(&server);
+        let with_hostiles = herd(&server);
         server.mobs.clear();
         server.spawn_herd(1, pos, &players);
-        assert_eq!(herd(&server), with_zombies);
-        assert_eq!(with_zombies.len(), 3);
+        assert_eq!(herd(&server), with_hostiles);
+        assert_eq!(with_hostiles.len(), 3);
     }
 
     #[test]
     fn zombie_spawn_column_uses_the_highest_solid_and_requires_clearance() {
         let mut world = arena(16);
-        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
-        assert_eq!(zombie_surface(&world, 16, 5), None);
+        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
+        assert_eq!(hostile_surface(&world, 16, 5), None);
         for state in [
             blocks::OAK_LEAVES,
             blocks::OAK_SLAB,
@@ -2567,31 +2658,31 @@ mod tests {
             blocks::LAVA,
         ] {
             world.set_block(5, 1, 5, state);
-            assert_eq!(zombie_surface(&world, 5, 5), None, "state {state}");
+            assert_eq!(hostile_surface(&world, 5, 5), None, "state {state}");
         }
         world.set_block(5, 1, 5, blocks::AIR);
         world.set_block(5, 10, 5, blocks::GLASS);
-        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 11.0, 5.5]));
+        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 11.0, 5.5]));
         world.set_block(5, 12, 5, blocks::WATER);
-        assert_eq!(zombie_surface(&world, 5, 5), None);
+        assert_eq!(hostile_surface(&world, 5, 5), None);
 
         let mut server = joined(GameMode::Creative);
         let pos = server.spawn();
         server.game_time = 200;
-        server.spawn_zombie(1, pos, &[(1, pos)]);
+        server.spawn_hostile(1, pos, &[(1, pos)]);
         let candidate = server.mobs.values().next().unwrap().pos();
         server.mobs.clear();
-        server.spawn_zombie(1, pos, &[(1, pos), (2, candidate)]);
+        server.spawn_hostile(1, pos, &[(1, pos), (2, candidate)]);
         assert!(server.mobs.is_empty());
     }
 
     #[test]
     fn zombie_spawn_column_rejects_fluids_above_the_clearance() {
         let mut world = arena(16);
-        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
+        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
         for fluid in [blocks::WATER, blocks::LAVA] {
             world.set_block(5, 3, 5, fluid);
-            assert_eq!(zombie_surface(&world, 5, 5), None, "fluid {fluid}");
+            assert_eq!(hostile_surface(&world, 5, 5), None, "fluid {fluid}");
         }
     }
 
@@ -2785,6 +2876,149 @@ mod tests {
                     })
                 )
         }));
+    }
+
+    #[test]
+    fn hostile_selection_has_two_equal_parities_and_fixed_flat_spawns() {
+        let mut skeletons = 0;
+        for time in 1..=4096 {
+            let expected =
+                [MobKind::Zombie, MobKind::Skeleton][(sample(2026, 1, time, 24) & 1) as usize];
+            assert_eq!(hostile_kind(2026, 1, time), expected);
+            skeletons += usize::from(expected == MobKind::Skeleton);
+        }
+        assert_eq!(skeletons, 2107);
+        for (seed, expected) in [(2026, MobKind::Zombie), (2027, MobKind::Skeleton)] {
+            let mut server = joined_with_seed(GameMode::Survival, seed);
+            server.set_time(199, 18199);
+            server.tick();
+            assert_eq!(
+                server.mobs.values().map(|mob| mob.kind).collect::<Vec<_>>(),
+                [expected]
+            );
+        }
+    }
+
+    #[test]
+    fn skeleton_stops_and_faces_at_ten_blocks_but_chases_far_or_occluded_targets() {
+        let world = arena(16);
+        let start = [2.5, 1.0, 2.5];
+        let mut skeleton = Mob::new(MobKind::Skeleton, start);
+        skeleton.body.on_ground = true;
+        skeleton.body.velocity[0] = 0.1;
+        skeleton.tick(&world, 2027, 7, 1, Some([12.5, 1.0, 2.5]));
+        assert_eq!(skeleton.pos(), start);
+        assert_eq!(skeleton.yaw, 270.0);
+        skeleton.tick(&world, 2027, 7, 2, Some([13.5, 1.0, 2.5]));
+        assert!(skeleton.pos()[0] > start[0]);
+
+        let mut wall = world;
+        wall.set_block(4, 2, 2, blocks::STONE);
+        let before = skeleton.pos();
+        skeleton.tick(&wall, 2027, 7, 3, Some([7.5, 1.0, 2.5]));
+        assert!(skeleton.pos()[0] > before[0]);
+        skeleton.hostile.as_mut().unwrap().shot_ticks = Some(0);
+        assert!(skeleton.shoot(&wall, [7.5, 1.0, 2.5]).is_none());
+        assert_eq!(skeleton.hostile.as_ref().unwrap().shot_ticks, Some(0));
+        assert!(skeleton.shoot(&wall, [2.5, 1.0, 3.5]).is_some());
+        assert!(!skeleton.attacks(skeleton.pos()));
+    }
+
+    #[test]
+    fn skeleton_shoots_after_twenty_ticks_then_waits_forty_with_deterministic_results() {
+        let setup = || {
+            let (mut server, id) = combat(GameMode::Survival);
+            server.set_time(0, 18000);
+            server
+                .mobs
+                .insert(id, Mob::new(MobKind::Skeleton, [11.5, 1.0, 5.5]));
+            (server, id)
+        };
+        let (mut a, id) = setup();
+        let (mut b, _) = setup();
+        let first_arrow = a.next_entity_id;
+        assert_eq!(a.mobs[&id].hostile.as_ref().unwrap().shot_ticks, Some(20));
+        for tick in 1..=60 {
+            a.tick();
+            b.tick();
+            assert_eq!(a.state_hash(), b.state_hash(), "tick {tick}");
+            let packets = a.take_outbox();
+            assert_eq!(packets, b.take_outbox(), "tick {tick}");
+            let expected = match tick {
+                20 => Some(first_arrow),
+                60 => Some(first_arrow + 1),
+                _ => None,
+            };
+            assert_eq!(
+                packets
+                    .iter()
+                    .find_map(|(_, bytes)| match S2C::decode(bytes).unwrap() {
+                        S2C::ArrowSpawn { id, .. } => Some(id),
+                        _ => None,
+                    }),
+                expected,
+                "tick {tick}"
+            );
+            if expected.is_some() {
+                assert_eq!(a.mobs[&id].hostile.as_ref().unwrap().shot_ticks, Some(40));
+            }
+            if tick == 30 {
+                assert_eq!(a.clients[&1].health.vitals.health, 17);
+                assert!(!a.arrows.contains_key(&first_arrow));
+            }
+        }
+    }
+
+    #[test]
+    fn skeleton_cooldown_contributes_to_hash_and_sunlight_drops_bones_and_arrows() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Skeleton, pos));
+        let before = server.state_hash();
+        server
+            .mobs
+            .get_mut(&id)
+            .unwrap()
+            .hostile
+            .as_mut()
+            .unwrap()
+            .shot_ticks = Some(0);
+        assert_ne!(server.state_hash(), before);
+
+        server.game_mode = GameMode::Creative;
+        let bone = items::by_name("bone").unwrap();
+        let arrow = items::by_name("arrow").unwrap();
+        for name in [bone, arrow] {
+            assert_eq!(items::info(name).unwrap().food, None);
+        }
+        for bones in 0..=2 {
+            for arrows in 0..=2 {
+                let time = (21..)
+                    .find(|&t| {
+                        sample(server.seed, id, t, LOOT_SALT) % 3 == bones
+                            && sample(server.seed, id, t, LOOT_SALT + 1) % 3 == arrows
+                    })
+                    .unwrap();
+                server.set_time(time - SUNLIGHT_INTERVAL as i64, 6000);
+                let mut skeleton = Mob::new(MobKind::Skeleton, pos);
+                skeleton.health = SUNLIGHT_DAMAGE;
+                server.mobs.insert(id, skeleton);
+                server.entities.clear();
+                for _ in 1..SUNLIGHT_INTERVAL {
+                    server.tick();
+                    assert_eq!(server.mobs[&id].health, SUNLIGHT_DAMAGE);
+                }
+                server.tick();
+                assert!(!server.mobs.contains_key(&id));
+                let mut drops = BTreeMap::new();
+                for drop in server.entities.values() {
+                    *drops.entry(drop.item).or_insert(0) += u64::from(drop.count);
+                }
+                assert_eq!(drops.remove(&bone).unwrap_or(0), bones);
+                assert_eq!(drops.remove(&arrow).unwrap_or(0), arrows);
+                assert!(drops.is_empty());
+            }
+        }
     }
 
     #[test]

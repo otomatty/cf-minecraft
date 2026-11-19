@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -21,6 +21,7 @@ pub enum MobKind {
     Chicken = 2,
     Sheep = 3,
     Zombie = 4,
+    Skeleton = 5,
 }
 
 impl MobKind {
@@ -35,6 +36,7 @@ impl MobKind {
             2 => Ok(Self::Chicken),
             3 => Ok(Self::Sheep),
             4 => Ok(Self::Zombie),
+            5 => Ok(Self::Skeleton),
             _ => Err(DecodeError),
         }
     }
@@ -50,6 +52,7 @@ pub enum DeathCause {
     Void = 4,
     Lava = 5,
     Zombie = 6,
+    Arrow = 7,
 }
 
 /// Fields shared by the status packet and the player save.
@@ -93,6 +96,7 @@ impl PlayerVitals {
             4 => DeathCause::Void,
             5 => DeathCause::Lava,
             6 => DeathCause::Zombie,
+            7 => DeathCause::Arrow,
             _ => return Err(DecodeError),
         };
         let food = if has_food { r.u8()? } else { MAX_FOOD };
@@ -264,6 +268,16 @@ pub enum S2C {
         z: f64,
         yaw: f32,
     },
+    ArrowSpawn {
+        id: u32,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+    },
+    ArrowMove {
+        id: u32,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+    },
     MobHurt {
         id: u32,
     },
@@ -336,6 +350,8 @@ pub mod id {
     pub const S2C_MOB_SPAWN: u8 = 0x0d;
     pub const S2C_MOB_MOVE: u8 = 0x0e;
     pub const S2C_MOB_HURT: u8 = 0x0f;
+    pub const S2C_ARROW_SPAWN: u8 = 0x10;
+    pub const S2C_ARROW_MOVE: u8 = 0x11;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -635,6 +651,26 @@ impl S2C {
                 w.f64(*z);
                 w.f32(*yaw);
             }
+            S2C::ArrowSpawn {
+                id: entity,
+                pos,
+                velocity,
+            }
+            | S2C::ArrowMove {
+                id: entity,
+                pos,
+                velocity,
+            } => {
+                w.u8(if matches!(self, S2C::ArrowSpawn { .. }) {
+                    id::S2C_ARROW_SPAWN
+                } else {
+                    id::S2C_ARROW_MOVE
+                });
+                w.i32(*entity as i32);
+                for value in pos.iter().chain(velocity) {
+                    w.f64(*value);
+                }
+            }
             S2C::MobHurt { id: entity } => {
                 w.u8(id::S2C_MOB_HURT);
                 w.i32(*entity as i32);
@@ -791,6 +827,16 @@ impl S2C {
                         yaw,
                     },
                     None => S2C::MobMove { id, x, y, z, yaw },
+                }
+            }
+            tag @ (id::S2C_ARROW_SPAWN | id::S2C_ARROW_MOVE) => {
+                let id = entity_id(&mut r)?;
+                let pos = entity_pos(&mut r)?;
+                let velocity = entity_pos(&mut r)?;
+                if tag == id::S2C_ARROW_SPAWN {
+                    S2C::ArrowSpawn { id, pos, velocity }
+                } else {
+                    S2C::ArrowMove { id, pos, velocity }
                 }
             }
             id::S2C_ENTITY_COUNT => {
@@ -1053,7 +1099,7 @@ mod tests {
         no_cause[1] = 0;
         no_cause[4] = 1;
         assert!(S2C::decode(&no_cause).is_err());
-        no_cause[5] = 7;
+        no_cause[5] = 8;
         assert!(S2C::decode(&no_cause).is_err());
     }
 
@@ -1261,7 +1307,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 18);
+        assert_eq!(PROTOCOL_VERSION, 19);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1296,7 +1342,7 @@ mod tests {
             if tag == 0x0d {
                 assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
-                bad[5] = 5;
+                bad[5] = 6;
                 assert!(S2C::decode(&bad).is_err());
             }
             let mut trailing = bytes;
@@ -1363,8 +1409,61 @@ mod tests {
         let mut bytes = spawn.encode();
         assert_eq!((bytes.len(), bytes[5]), (34, 4));
         assert_eq!(S2C::decode(&bytes), Ok(spawn));
-        bytes[5] = 5;
+        bytes[5] = 6;
         assert!(S2C::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn protocol_19_skeleton_and_arrows_round_trip_and_validate_fields() {
+        let skeleton = S2C::MobSpawn {
+            id: 11,
+            kind: MobKind::Skeleton,
+            x: 12.25,
+            y: -60.0,
+            z: -8.75,
+            yaw: 90.0,
+        };
+        let bytes = skeleton.encode();
+        assert_eq!((bytes.len(), bytes[5]), (34, 5));
+        assert_eq!(S2C::decode(&bytes), Ok(skeleton));
+
+        let status = PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: DeathCause::Arrow,
+            ..PlayerVitals::default()
+        }
+        .packet();
+        let bytes = status.encode();
+        assert_eq!(bytes[5], 7);
+        assert_eq!(S2C::decode(&bytes), Ok(status));
+
+        let id = u32::MAX;
+        let pos = [12.25, -60.0, -8.75];
+        let velocity = [0.25, -0.5, 1.0];
+        for (tag, packet) in [
+            (0x10, S2C::ArrowSpawn { id, pos, velocity }),
+            (0x11, S2C::ArrowMove { id, pos, velocity }),
+        ] {
+            let mut bytes = packet.encode();
+            assert_eq!((bytes[0], bytes.len()), (tag, 53));
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+            for end in 0..bytes.len() {
+                assert!(S2C::decode(&bytes[..end]).is_err());
+            }
+            let mut bad = bytes.clone();
+            bad[1..5].fill(0);
+            assert!(S2C::decode(&bad).is_err());
+            for offset in (5..53).step_by(8) {
+                for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let mut bad = bytes.clone();
+                    bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+                    assert!(S2C::decode(&bad).is_err());
+                }
+            }
+            bytes.push(0);
+            assert!(S2C::decode(&bytes).is_err());
+        }
     }
 
     #[test]
