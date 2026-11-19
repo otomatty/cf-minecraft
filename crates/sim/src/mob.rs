@@ -595,18 +595,21 @@ fn sees_sunlight(world: &World, pos: [f64; 3], head_offset: f64) -> bool {
     {
         return false;
     }
-    let [x, y, z] = [pos[0], pos[1] + head_offset, pos[2]].map(|v| v.floor() as i32);
+    let head_y = pos[1] + head_offset;
+    let [x, y, z] = [pos[0], head_y, pos[2]].map(|v| v.floor() as i32);
     let Some(chunk) = world.chunks.get(&(x >> 4, z >> 4)) else {
         return false;
     };
-    (y.saturating_add(1).max(MIN_Y)..MIN_Y + HEIGHT).all(|by| {
+    (y.max(MIN_Y)..MIN_Y + HEIGHT).all(|by| {
         let state = chunk.get((x & 15) as usize, by, (z & 15) as usize);
         if blocks::is_water(state) {
             return false;
         }
         let mut blocked = false;
         if blocks::is_solid(state) {
-            collisions.collision_boxes(x, by, z, &mut |_| blocked = true);
+            collisions.collision_boxes(x, by, z, &mut |bounds| {
+                blocked |= by > y || bounds.min[1] >= head_y;
+            });
         }
         !blocked
     })
@@ -784,9 +787,11 @@ fn grass_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
 fn zombie_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
     let get = |y| chunk.get((x & 15) as usize, y, (z & 15) as usize);
-    let ground = (MIN_Y..MIN_Y + HEIGHT)
-        .rev()
-        .find(|&y| blocks::is_solid(get(y)))?;
+    // Reaching a fluid before the ground means the column is covered.
+    let ground = (MIN_Y..MIN_Y + HEIGHT).rev().find(|&y| {
+        let state = get(y);
+        blocks::is_solid(state) || blocks::is_fluid(state)
+    })?;
     let state = get(ground);
     if blocks::is_oak_leaves(state)
         || blocks::is_fluid(state)
@@ -2581,6 +2586,16 @@ mod tests {
     }
 
     #[test]
+    fn zombie_spawn_column_rejects_fluids_above_the_clearance() {
+        let mut world = arena(16);
+        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
+        for fluid in [blocks::WATER, blocks::LAVA] {
+            world.set_block(5, 3, 5, fluid);
+            assert_eq!(zombie_surface(&world, 5, 5), None, "fluid {fluid}");
+        }
+    }
+
+    #[test]
     fn zombie_sunlight_hits_every_twenty_exposed_day_ticks() {
         let (mut server, id) = combat(GameMode::Creative);
         let pos = server.mobs[&id].pos();
@@ -2625,6 +2640,24 @@ mod tests {
             }
             assert_eq!(zombie.health, 20);
             world.set_block(5, y, 5, blocks::AIR);
+        }
+    }
+
+    #[test]
+    fn zombie_sunlight_counts_only_overhead_shapes_in_the_head_cell() {
+        let pos = [5.5, 1.5, 5.5];
+        let mut world = arena(16);
+        for (state, health) in [
+            (blocks::OAK_SLAB + 1, 20),
+            (blocks::OAK_SLAB, 18),
+            (blocks::AIR, 18),
+        ] {
+            world.set_block(5, 3, 5, state);
+            let mut zombie = Mob::new(MobKind::Zombie, pos);
+            for _ in 0..SUNLIGHT_INTERVAL {
+                zombie.sunlight_hit(&world, true);
+            }
+            assert_eq!(zombie.health, health, "state {state}");
         }
     }
 
