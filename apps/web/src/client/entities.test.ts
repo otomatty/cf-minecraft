@@ -19,6 +19,7 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 
 const textures: MobTextures = {
 	cow_hide: 5, cow_face: 6, cow_leg: 7, pig_skin: 8, pig_face: 9, pig_leg: 10, pig_snout: 11,
+	chicken_plumage: 12, chicken_face: 13, chicken_beak: 14, chicken_wattle: 15, chicken_leg: 16,
 };
 
 test("cow targeting uses the nearest forward hitbox within reach", () => {
@@ -52,6 +53,17 @@ test("a ray above the pig's hitbox can still hit a cow", () => {
 	assert.equal(mobBeforeBlock([0.44, 1, 0], dir, [pig, cow], 5, null), cow.id);
 	assert.deepEqual(aimedMob([0.44, 0.9, 0], dir, [pig, cow], 5), { id: pig.id, distance: 1.55 });
 	assert.equal(aimedMob([0.46, 0.9, 0], dir, [pig, cow], 5), null);
+});
+
+test("chicken targeting uses a 0.4 by 0.7 foot-centered hitbox", () => {
+	const chicken = { id: 1, kind: 2, position: [0, 0, 2] } as const;
+	const pig = { id: 2, kind: 1, position: [0, 0, 3] } as const;
+	const dir = [0, 0, 1];
+	assert.deepEqual(aimedMob([0.2, 0.7, 0], dir, [chicken], 5), { id: chicken.id, distance: 1.8 });
+	assert.equal(mobBeforeBlock([0.201, 0.7, 0], dir, [chicken, pig], 5, null), pig.id);
+	assert.equal(aimedMob([0, 0.701, 0], dir, [chicken], 5), null);
+	assert.equal(aimedMob([0, -0.001, 0], dir, [chicken], 5), null);
+	assert.equal(aimedMob([0, 0.5, 0], dir, [chicken], 1.79), null);
 });
 
 test("cube vertices remain camera relative, bounded, and use lightmap coordinates", () => {
@@ -167,6 +179,29 @@ test("pig mesh has seven boxes, a separate snout, and shared leg motion and hurt
 		const z = (leg + 3) * box + 2;
 		assert.equal(Math.sign(moving[z] - still[z]), sign);
 	}
+});
+
+test("chicken mesh fits its hitbox and has a beak, wattle, two moving legs and two wings", () => {
+	const chicken: RenderMob = { kind: 2, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
+	const box = 36 * 9;
+	const front = 3 * 6 * 9 + 6;
+	const still = mobVertices([chicken], [0, 0, 0], 0, textures);
+	assert.equal(still.length, 8 * box);
+	for (const [axis, min, max] of [[0, -0.2, 0.2], [1, 0, 0.7], [2, -0.2, 0.2]]) {
+		const coordinates = still.filter((_, i) => i % 9 === axis);
+		assert.equal(Math.min(...coordinates), Math.fround(min));
+		assert.equal(Math.max(...coordinates), Math.fround(max));
+	}
+	assert.equal(still[box + front], textures.chicken_face);
+	assert.equal(still[2 * box + front], textures.chicken_beak);
+	assert.equal(still[3 * box + front], textures.chicken_wattle);
+	const hurt = mobVertices([{ ...chicken, hurt: true }], [0, 0, 0], 0, textures);
+	for (let i = 5; i < still.length; i += 9) assert.equal(hurt[i], -still[i]);
+	const moving = mobVertices([{ ...chicken, moving: true }], [0, 0, 0], Math.PI * 50, textures);
+	assert.deepEqual(moving.slice(0, 4 * box), still.slice(0, 4 * box));
+	assert.deepEqual(moving.slice(6 * box), still.slice(6 * box));
+	assert.ok(moving[4 * box + 2] < still[4 * box + 2]);
+	assert.ok(moving[5 * box + 2] > still[5 * box + 2]);
 });
 
 test("WASM mob records track hurt, yaw and previous position and clear on removal and reset", async () => {

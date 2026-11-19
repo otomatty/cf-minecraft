@@ -113,9 +113,21 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 63 | cooked_beef（焼いた牛肉） | cooked_beef | 64 | 8 |
 | 64 | raw_porkchop（生の豚肉） | raw_porkchop | 64 | 3 |
 | 65 | cooked_porkchop（焼いた豚肉） | cooked_porkchop | 64 | 8 |
+| 67 | raw_chicken（生の鶏肉） | raw_chicken | 64 | 2 |
+| 68 | cooked_chicken（焼いた鶏肉） | cooked_chicken | 64 | 6 |
 
 `items.toml` の任意キー `food` は、1個を食べたときに回復する満腹度を1〜20の整数で指定する。`items::food(id)` で取得できる。リンゴに対応するブロックはなく、採掘したオークの葉の代わりに落ちることがある。入手と食事の規則は [health.md](health.md#空腹と食べ物) を参照。
 
+生の鶏肉はかまどで焼いた鶏肉に精錬できる。
+
+## 卵と羽根
+
+| アイテム ID | 名前 | texture | max_stack |
+| --- | --- | --- | --- |
+| 66 | egg（卵） | egg | 16 |
+| 69 | feather（羽根） | feather | 64 |
+
+卵と羽根は食べられない。卵は鶏が産み、羽根は鶏が死んだときに落とすことがある。[鶏の仕様](mobs.md#種類)
 
 ## バケツ
 

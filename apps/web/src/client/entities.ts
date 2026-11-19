@@ -10,6 +10,7 @@ export function interpolateEntity(previous: readonly number[], current: readonly
 const mobHitboxes: Record<MobKind, { width: number; height: number }> = {
 	0: { width: 0.9, height: 1.3 },
 	1: { width: 0.9, height: 0.9 },
+	2: { width: 0.4, height: 0.7 },
 };
 
 interface MobPosition {
@@ -107,7 +108,10 @@ export interface RenderMob {
 	light: RenderItem["light"];
 }
 
-export const mobTextureNames = ["cow_hide", "cow_face", "cow_leg", "pig_skin", "pig_face", "pig_leg", "pig_snout"] as const;
+export const mobTextureNames = [
+	"cow_hide", "cow_face", "cow_leg", "pig_skin", "pig_face", "pig_leg", "pig_snout",
+	"chicken_plumage", "chicken_face", "chicken_beak", "chicken_wattle", "chicken_leg",
+] as const;
 type MobTextureName = typeof mobTextureNames[number];
 export type MobTextures = Record<MobTextureName, number>;
 
@@ -116,6 +120,7 @@ type MobBox = {
 	max: [number, number, number];
 	legSwing?: number;
 	front?: MobTextureName;
+	texture?: MobTextureName;
 };
 
 const cowBoxes: readonly MobBox[] = [
@@ -137,9 +142,21 @@ const pigBoxes: readonly MobBox[] = [
 	{ min: [0.16, 0, 0.11], max: [0.35, 0.28, 0.30], legSwing: 1 },
 ];
 
+const chickenBoxes: readonly MobBox[] = [
+	{ min: [-0.15, 0.18, -0.20], max: [0.15, 0.45, 0.12] },
+	{ min: [-0.10, 0.39, 0.02], max: [0.10, 0.70, 0.15], front: "chicken_face" },
+	{ min: [-0.07, 0.49, 0.145], max: [0.07, 0.56, 0.20], texture: "chicken_beak" },
+	{ min: [-0.035, 0.405, 0.145], max: [0.035, 0.49, 0.177], texture: "chicken_wattle" },
+	{ min: [-0.10, 0, -0.05], max: [-0.06, 0.20, 0.015], legSwing: 1 },
+	{ min: [0.06, 0, -0.05], max: [0.10, 0.20, 0.015], legSwing: -1 },
+	{ min: [-0.20, 0.235, -0.17], max: [-0.145, 0.39, 0.06] },
+	{ min: [0.145, 0.235, -0.17], max: [0.20, 0.39, 0.06] },
+];
+
 const mobModels: Record<MobKind, { boxes: readonly MobBox[]; hide: MobTextureName; leg: MobTextureName }> = {
 	0: { boxes: cowBoxes, hide: "cow_hide", leg: "cow_leg" },
 	1: { boxes: pigBoxes, hide: "pig_skin", leg: "pig_leg" },
+	2: { boxes: chickenBoxes, hide: "chicken_plumage", leg: "chicken_leg" },
 };
 
 export function mobVertices(
@@ -151,7 +168,7 @@ export function mobVertices(
 		const yaw = mob.yaw * Math.PI / 180, yawCos = Math.cos(yaw), yawSin = Math.sin(yaw);
 		const stride = mob.moving ? Math.sin(timeMs / 100) * 0.32 : 0;
 		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
-		for (const { min, max, legSwing, front } of boxes) {
+		for (const { min, max, legSwing, front, texture } of boxes) {
 			const angle = stride * (legSwing ?? 0);
 			const swingCos = Math.cos(angle), swingSin = Math.sin(angle);
 			const pivotZ = (min[2] + max[2]) / 2;
@@ -164,13 +181,13 @@ export function mobVertices(
 				return [ox + x * yawCos - legZ * yawSin, oy + legY, oz + x * yawSin + legZ * yawCos];
 			});
 			for (const [face, indices] of faces.entries()) {
-				const texture = textures[legSwing ? leg : (face === 3 ? front : undefined) ?? hide];
+				const layer = textures[legSwing ? leg : (face === 3 ? front : undefined) ?? texture ?? hide];
 				// The item shader reads the sign as the hurt flag and the magnitude as face shading.
 				const shade = [0.5, 1, 0.8, 0.8, 0.6, 0.6][face] * (mob.hurt ? -1 : 1);
 				for (const i of [0, 1, 2, 0, 2, 3]) {
 					vertices.push(
 						...points[indices[i]], [0, 1, 1, 0][i], [1, 1, 0, 0][i],
-						shade, texture,
+						shade, layer,
 						(mob.light[1] + 0.5) / 16, (mob.light[0] + 0.5) / 16,
 					);
 				}
