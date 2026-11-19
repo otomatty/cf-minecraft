@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { COW_VERTEX_COUNT, cowVertices, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, type RenderCow, type RenderItem } from "./entities.ts";
+import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobTextureNames, mobVertices, type MobTextures, type RenderItem, type RenderMob } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -339,8 +339,8 @@ export class Renderer {
 	private readonly crackBuffer: GPUBuffer;
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
-	private cowBuffer: GPUBuffer | null = null;
-	private readonly cowTextures: { hide: number; face: number; leg: number };
+	private mobBuffer: GPUBuffer | null = null;
+	private readonly mobTextures: MobTextures;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
@@ -369,8 +369,10 @@ export class Renderer {
 	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
 		this.crackTextureBase = textureNames.length;
 		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
-		this.cowTextures = { hide: textureNames.length, face: textureNames.length + 1, leg: textureNames.length + 2 };
-		textureNames.push("cow_hide", "cow_face", "cow_leg");
+		this.mobTextures = Object.fromEntries(
+			mobTextureNames.map((name, index) => [name, textureNames.length + index]),
+		) as MobTextures;
+		textureNames.push(...mobTextureNames);
 		this.canvas = canvas;
 		this.device = device;
 		this.adapterInfo = adapterInfo;
@@ -671,7 +673,7 @@ override renderLayer`);
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], cows: readonly RenderCow[] = []): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], mobs: readonly RenderMob[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -715,17 +717,17 @@ override renderLayer`);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
-		const visibleCows = cows.slice(0, MAX_RENDER_ITEMS);
-		const cowData = cowVertices(visibleCows, [camera.x, camera.y, camera.z], now, this.cowTextures);
-		if (cowData.length) {
-			if (!this.cowBuffer || this.cowBuffer.size < cowData.byteLength) {
-				this.cowBuffer?.destroy();
-				this.cowBuffer = this.device.createBuffer({
-					size: cowData.byteLength,
+		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
+		const mobData = mobVertices(visibleMobs, [camera.x, camera.y, camera.z], now, this.mobTextures);
+		if (mobData.length) {
+			if (!this.mobBuffer || this.mobBuffer.size < mobData.byteLength) {
+				this.mobBuffer?.destroy();
+				this.mobBuffer = this.device.createBuffer({
+					size: mobData.byteLength,
 					usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
 				});
 			}
-			this.device.queue.writeBuffer(this.cowBuffer, 0, cowData);
+			this.device.queue.writeBuffer(this.mobBuffer, 0, mobData);
 		}
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({
@@ -767,16 +769,16 @@ override renderLayer`);
 		};
 		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
 			if (layer === 2) {
-				if (itemData.length || cowData.length) {
+				if (itemData.length || mobData.length) {
 					pass.setPipeline(this.items);
 					pass.setBindGroup(0, this.terrainBind);
 					if (itemData.length) {
 						pass.setVertexBuffer(0, this.itemBuffer);
 						pass.draw(itemData.length / 9);
 					}
-					if (this.cowBuffer && cowData.length) {
-						pass.setVertexBuffer(0, this.cowBuffer);
-						pass.draw(visibleCows.length * COW_VERTEX_COUNT);
+					if (this.mobBuffer && mobData.length) {
+						pass.setVertexBuffer(0, this.mobBuffer);
+						pass.draw(mobData.length / 9);
 					}
 				}
 				if (cloudsFirst) drawClouds();

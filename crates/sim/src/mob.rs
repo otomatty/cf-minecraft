@@ -16,22 +16,51 @@ use crate::{
     Server, MAX_REACH,
 };
 
-const COW_WIDTH: f64 = 0.9;
-const COW_HEIGHT: f64 = 1.3;
-const COW_HEAD_OFFSET: f64 = 1.1;
-const COW_HEALTH: u8 = 10;
+struct MobSpec {
+    width: f64,
+    height: f64,
+    head_offset: f64,
+    health: u8,
+    walk_forward: f32,
+    flee_forward: f32,
+    loot: &'static [(u16, u8, u8)],
+}
+
+const fn spec(kind: MobKind) -> &'static MobSpec {
+    match kind {
+        MobKind::Cow => &MobSpec {
+            width: 0.9,
+            height: 1.3,
+            head_offset: 1.1,
+            health: 10,
+            walk_forward: 0.5,
+            flee_forward: 0.75,
+            loot: items::COW_LOOT,
+        },
+        MobKind::Pig => &MobSpec {
+            width: 0.9,
+            height: 0.9,
+            head_offset: 0.7,
+            health: 10,
+            walk_forward: 0.5,
+            flee_forward: 0.75,
+            loot: items::PIG_LOOT,
+        },
+    }
+}
+
 const HURT_TICKS: u8 = 10;
 const LOOT_SALT: u64 = 7;
-const WALK_FORWARD: f32 = 0.5;
 const WALK_CHANCE: u64 = 120;
 const WALK_TICKS: u8 = 100;
 const FLEE_TICKS: u8 = 60;
-const FLEE_FORWARD: f32 = 0.75;
 const FLEE_DISTANCE_SALT: u64 = 20;
 const FLEE_DIRECTION_SALT: u64 = 21;
 const STOP_DISTANCE_SQUARED: f64 = 0.5 * 0.5;
 const PROBE_DISTANCE: f64 = 0.7;
 const SPAWN_INTERVAL: i64 = 400;
+const HERD_KIND_SALT: u64 = 17;
+const HERD_KINDS: [MobKind; 2] = [MobKind::Cow, MobKind::Pig];
 const LOCAL_LIMIT: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,14 +94,15 @@ pub struct Mob {
 }
 
 impl Mob {
-    fn cow(pos: [f64; 3]) -> Self {
+    fn new(kind: MobKind, pos: [f64; 3]) -> Self {
+        let spec = spec(kind);
         Self {
-            kind: MobKind::Cow,
+            kind,
             yaw: 0.0,
             age: 0,
-            health: COW_HEALTH,
+            health: spec.health,
             hurt_ticks: 0,
-            body: Player::with_size(pos, COW_WIDTH, COW_HEIGHT),
+            body: Player::with_size(pos, spec.width, spec.height),
             ai: Wander::Idle,
             fall_start_y: None,
             suffocation_ticks: 0,
@@ -134,7 +164,7 @@ impl Mob {
         let scale = 0.4 / length;
         self.body.velocity[0] = dx * scale;
         self.body.velocity[2] = dz * scale;
-        if self.body.is_grounded(&cow_collisions(world)) {
+        if self.body.is_grounded(&mob_collisions(world)) {
             self.body.velocity[1] = 0.36;
         }
     }
@@ -190,7 +220,7 @@ impl Mob {
 
     fn environment_damage(&mut self, world: &World, before: [f64; 3]) -> Option<DeathCause> {
         let pos = self.pos();
-        let collisions = cow_collisions(world);
+        let collisions = mob_collisions(world);
         let grounded = self.body.is_grounded(&collisions);
         let fall = track_fall(world, before, pos, &mut self.fall_start_y, grounded);
         let mut cause = None;
@@ -201,10 +231,7 @@ impl Mob {
             }
         }
 
-        let head_offset = match self.kind {
-            MobKind::Cow => COW_HEAD_OFFSET,
-        };
-        let head = block_at(world, pos, head_offset);
+        let head = block_at(world, pos, spec(self.kind).head_offset);
         if interval(
             &mut self.suffocation_ticks,
             head.is_some_and(blocks::is_full_opaque_cube),
@@ -232,7 +259,7 @@ impl Mob {
     fn move_body(&mut self, world: &World, seed: i64, id: u32, time: i64) -> bool {
         let before = self.pos();
         let [x, y, z] = before;
-        let collisions = cow_collisions(world);
+        let collisions = mob_collisions(world);
         let mut input = Input {
             jump: physics::in_water(&collisions, before),
             ..Input::default()
@@ -250,12 +277,13 @@ impl Mob {
             }
         }
 
+        let spec = spec(self.kind);
         let idle_input = input;
         let fleeing = matches!(self.ai, Wander::Fleeing { .. });
         let knockback = fleeing && self.hurt_ticks == HURT_TICKS;
         let movement = match self.ai {
-            Wander::Walking { target, .. } => Some((target, WALK_FORWARD)),
-            Wander::Fleeing { target, .. } if !knockback => Some((target, FLEE_FORWARD)),
+            Wander::Walking { target, .. } => Some((target, spec.walk_forward)),
+            Wander::Fleeing { target, .. } if !knockback => Some((target, spec.flee_forward)),
             _ => None,
         };
         let mut turn = false;
@@ -269,7 +297,7 @@ impl Mob {
             } else {
                 let scale = PROBE_DISTANCE / distance_squared.sqrt();
                 let ahead = [x + dx * scale, y, z + dz * scale];
-                safe_ahead(world, &collisions, before, ahead)
+                safe_ahead(world, &collisions, spec, before, ahead)
             };
             if let Some(jump) = jump {
                 self.yaw = heading(dx, dz);
@@ -288,7 +316,7 @@ impl Mob {
         let was_rising = !self.body.on_ground && self.body.velocity[1] > 0.0;
         let mut next = self.body;
         next.tick(input, &collisions);
-        if input.forward != 0.0 && enters_lava(world, before, next.position) {
+        if input.forward != 0.0 && enters_lava(world, spec, before, next.position) {
             // Horizontal momentum can differ from the intended heading when turning.
             if fleeing {
                 self.stop_horizontal();
@@ -396,10 +424,10 @@ impl Mob {
     }
 }
 
-fn cow_collisions(world: &World) -> impl CollisionWorld + '_ {
+fn mob_collisions(world: &World) -> impl CollisionWorld + '_ {
     BlockWorld(|x, y, z| {
         if (MIN_Y..MIN_Y + HEIGHT).contains(&y) {
-            // The shared physics treats fluids as swimmable. For cows only water is swimmable.
+            // The shared physics treats fluids as swimmable. For mobs only water is swimmable.
             world.get_block(x, y, z).map(|state| {
                 if blocks::is_lava(state) {
                     blocks::AIR
@@ -418,7 +446,7 @@ fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: 
     if world.get_block(bx, by, bz).is_none_or(blocks::is_lava) {
         return false;
     }
-    // The cow's footprint can stay grounded while its center is over an edge.
+    // The mob's footprint can stay grounded while its center is over an edge.
     let mut supported = false;
     collisions.collision_boxes(bx, by, bz, &mut |bounds| {
         supported |= bounds.max[1] <= y
@@ -432,13 +460,14 @@ fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: 
 fn safe_ahead(
     world: &World,
     collisions: &impl CollisionWorld,
+    spec: &MobSpec,
     before: [f64; 3],
     pos: [f64; 3],
 ) -> Option<bool> {
     let [x, y, z] = pos.map(|v| v.floor() as i32);
     let foot = world.get_block(x, y, z)?;
     let below = world.get_block(x, y - 1, z)?;
-    if blocks::is_lava(below) || enters_lava(world, before, pos) {
+    if blocks::is_lava(below) || enters_lava(world, spec, before, pos) {
         return None;
     }
     if blocks::is_water(foot) || blocks::is_water(below) {
@@ -461,14 +490,14 @@ fn safe_ahead(
         return Some(
             rise > physics::STEP_HEIGHT
                 && rise <= 1.0
-                && Player::with_size([pos[0], foot_top, pos[2]], COW_WIDTH, COW_HEIGHT)
+                && Player::with_size([pos[0], foot_top, pos[2]], spec.width, spec.height)
                     .is_clear(collisions),
         );
     }
     let cutoff = pos[1] - 4.0;
     for floor in (y - 5..=y).rev() {
         let state = world.get_block(x, floor, z)?;
-        // Lava at foot level was already checked against the cow's previous bounds.
+        // Lava at foot level was already checked against the mob's previous bounds.
         if floor < y && blocks::is_lava(state) {
             return None;
         }
@@ -481,17 +510,21 @@ fn safe_ahead(
     None
 }
 
-fn body_cells([x, y, z]: [f64; 3]) -> [RangeInclusive<i32>; 3] {
-    let half = COW_WIDTH / 2.0;
+fn body_cells(spec: &MobSpec, [x, y, z]: [f64; 3]) -> [RangeInclusive<i32>; 3] {
+    let half = spec.width / 2.0;
     [
         (x - half).floor() as i32..=(x + half).floor() as i32,
-        y.floor() as i32..=(y + COW_HEIGHT).floor() as i32,
+        y.floor() as i32..=(y + spec.height).floor() as i32,
         (z - half).floor() as i32..=(z + half).floor() as i32,
     ]
 }
 
-fn lava_cells(world: &World, pos: [f64; 3]) -> impl Iterator<Item = [i32; 3]> + '_ {
-    let [xs, ys, zs] = body_cells(pos);
+fn lava_cells<'a>(
+    world: &'a World,
+    spec: &MobSpec,
+    pos: [f64; 3],
+) -> impl Iterator<Item = [i32; 3]> + 'a {
+    let [xs, ys, zs] = body_cells(spec, pos);
     xs.flat_map(move |x| {
         let ys = ys.clone();
         zs.clone()
@@ -500,9 +533,9 @@ fn lava_cells(world: &World, pos: [f64; 3]) -> impl Iterator<Item = [i32; 3]> + 
     .filter(|&[x, y, z]| world.get_block(x, y, z).is_some_and(blocks::is_lava))
 }
 
-fn enters_lava(world: &World, before: [f64; 3], after: [f64; 3]) -> bool {
-    let previous = body_cells(before);
-    lava_cells(world, after).any(|cell| {
+fn enters_lava(world: &World, spec: &MobSpec, before: [f64; 3], after: [f64; 3]) -> bool {
+    let previous = body_cells(spec, before);
+    lava_cells(world, spec, after).any(|cell| {
         !previous
             .iter()
             .zip(cell)
@@ -594,11 +627,9 @@ impl Server {
     }
 
     pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob, burned: bool) {
-        let loot = match mob.kind {
-            MobKind::Cow => items::COW_LOOT,
-        };
+        let spec = spec(mob.kind);
         let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
-        for (index, &(item, min, max)) in loot.iter().enumerate() {
+        for (index, &(item, min, max)) in spec.loot.iter().enumerate() {
             let range = u64::from(max) - u64::from(min) + 1;
             let roll = sample(self.seed, id, self.game_time, LOOT_SALT + index as u64);
             let mut count = min + (roll % range) as u8;
@@ -613,7 +644,7 @@ impl Server {
                 self.spawn_item(
                     item,
                     stack,
-                    [x, y + COW_HEIGHT / 2.0, z],
+                    [x, y + spec.height / 2.0, z],
                     [0.0, 0.1, 0.0],
                     10,
                 );
@@ -622,10 +653,15 @@ impl Server {
         }
     }
 
-    pub(super) fn spawn_cow(&mut self, pos: [f64; 3]) {
+    fn spawn_mob(&mut self, kind: MobKind, pos: [f64; 3]) {
         if let Some(id) = self.allocate_entity_id() {
-            self.mobs.insert(id, Mob::cow(pos));
+            self.mobs.insert(id, Mob::new(kind, pos));
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn spawn_cow(&mut self, pos: [f64; 3]) {
+        self.spawn_mob(MobKind::Cow, pos);
     }
 
     fn spawn_herd(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
@@ -656,13 +692,15 @@ impl Server {
         let Some(center) = valid_column(&self.world, x, z) else {
             return;
         };
-        self.spawn_cow(center);
+        let kind_roll = sample(self.seed, id, self.game_time, HERD_KIND_SALT);
+        let kind = HERD_KINDS[(kind_roll % HERD_KINDS.len() as u64) as usize];
+        self.spawn_mob(kind, center);
         let size = (1 + sample(self.seed, id, self.game_time, 5) % 3) as usize;
         let start = (sample(self.seed, id, self.game_time, 6) % HERD_OFFSETS.len() as u64) as usize;
         for offset in 0..size.min(LOCAL_LIMIT - nearby) - 1 {
             let (dx, dz) = HERD_OFFSETS[(start + offset) % HERD_OFFSETS.len()];
             if let Some(candidate) = valid_column(&self.world, x + dx, z + dz) {
-                self.spawn_cow(candidate);
+                self.spawn_mob(kind, candidate);
             }
         }
     }
@@ -756,6 +794,12 @@ mod tests {
     use world::Chunk;
     use worldgen::Generator;
 
+    impl Mob {
+        fn cow(pos: [f64; 3]) -> Self {
+            Self::new(MobKind::Cow, pos)
+        }
+    }
+
     fn arena(floor_end: i32) -> World {
         let mut world = World::default();
         world.chunks.insert((0, 0), Chunk::empty(0, 0));
@@ -829,7 +873,7 @@ mod tests {
         world.set_block(2, 1, 3, blocks::STONE);
         world.set_block(2, 2, 3, blocks::STONE);
         let mut cow = walking();
-        cow.body.position[2] = 3.0 - COW_WIDTH / 2.0;
+        cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
         cow.tick(&world, 5, 7, 1);
         assert!(matches!(cow.ai, Wander::Walking { blocked: 1, .. }));
         cow.tick(&world, 5, 7, 2);
@@ -857,7 +901,7 @@ mod tests {
                 }
             }
             assert_eq!(cow.ai, Wander::Idle);
-            assert!(cow.pos()[2] < 3.0 - COW_WIDTH / 2.0);
+            assert!(cow.pos()[2] < 3.0 - spec(MobKind::Cow).width / 2.0);
             assert_eq!(cow.pos()[1], 1.0);
         }
     }
@@ -894,7 +938,7 @@ mod tests {
         let mut cow = walking();
         cow.body.on_ground = false;
         cow.body.position[1] = 1.6;
-        cow.body.position[2] = 3.0 - COW_WIDTH / 2.0;
+        cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
 
         cow.tick(&world, 5, 7, 1);
         assert!(
@@ -1284,12 +1328,12 @@ mod tests {
                     let landed = if water {
                         block_at(world, cow.pos(), 0.0).is_some_and(blocks::is_water)
                     } else {
-                        cow.body.is_grounded(&cow_collisions(world))
+                        cow.body.is_grounded(&mob_collisions(world))
                     };
                     landed.then_some(cause)
                 })
                 .expect("cow reached the floor or water");
-            assert_eq!(cow.health, COW_HEALTH - damage);
+            assert_eq!(cow.health, spec(MobKind::Cow).health - damage);
             assert_eq!(cow.fall_start_y, None);
             if damage == 0 {
                 assert_eq!(cause, None);
@@ -1318,11 +1362,86 @@ mod tests {
         let cow = &server.mobs[&id];
         assert_eq!(cow.pos()[1], 1.0);
         assert_eq!(cow.fall_start_y, None);
-        assert_eq!(cow.health, COW_HEALTH);
+        assert_eq!(cow.health, spec(MobKind::Cow).health);
         for _ in 1..HURT_TICKS {
             server.tick();
         }
-        assert_eq!(server.mobs[&id].health, COW_HEALTH);
+        assert_eq!(server.mobs[&id].health, spec(MobKind::Cow).health);
+    }
+
+    #[test]
+    fn pig_body_uses_its_own_dimensions_and_head_height() {
+        let mut world = arena(16);
+        let pos = [2.5, 1.0, 2.5];
+        let mut pig = Mob::new(MobKind::Pig, pos);
+        let bounds = pig.body.bounds();
+        assert_eq!(bounds.min, [2.5 - 0.45, 1.0, 2.5 - 0.45]);
+        assert_eq!(bounds.max, [2.5 + 0.45, 1.0 + 0.9, 2.5 + 0.45]);
+        assert_eq!(pig.health, 10);
+
+        // At the same horizontal distance the cow is reachable from higher up.
+        let eye_base = [
+            pos[0] + MAX_REACH + 0.45,
+            pos[1] + 1.1 - physics::EYE_HEIGHT,
+            pos[2],
+        ];
+        assert!(Mob::cow(pos).within_attack_reach(eye_base));
+        assert!(!pig.within_attack_reach(eye_base));
+
+        // A block at y=2 is above the pig's head until its feet rise by 0.4.
+        world.set_block(2, 2, 2, blocks::STONE);
+        for _ in 0..SUFFOCATION_INTERVAL {
+            assert_eq!(pig.environment_damage(&world, pos), None);
+        }
+        pig.body.position[1] = 1.4;
+        for _ in 1..SUFFOCATION_INTERVAL {
+            assert_eq!(pig.environment_damage(&world, pig.pos()), None);
+        }
+        assert_eq!(
+            pig.environment_damage(&world, pig.pos()),
+            Some(DeathCause::Suffocation)
+        );
+        assert_eq!(pig.health, 9);
+    }
+
+    #[test]
+    fn killed_pigs_drop_raw_porkchops_and_lava_cooks_them() {
+        for (burned, expected_item) in [(false, 64), (true, 65)] {
+            let (mut server, id) = combat(GameMode::Creative);
+            let pos = server.mobs[&id].pos();
+            server.mobs.insert(id, Mob::new(MobKind::Pig, pos));
+            let drop_y = if burned {
+                server.world.set_block(7, 1, 5, blocks::LAVA);
+                for (x, z) in [(6, 5), (8, 5), (7, 4), (7, 6)] {
+                    for y in 1..=2 {
+                        server.world.set_block(x, y, z, blocks::STONE);
+                    }
+                }
+                for _ in 0..3 * LAVA_INTERVAL {
+                    server.tick();
+                }
+                pos[1] + 0.45
+            } else {
+                hold(&mut server, "iron_axe");
+                attack(&mut server, id);
+                server.tick();
+                assert_eq!(server.mobs[&id].health, 4);
+                for _ in 1..HURT_TICKS {
+                    server.tick();
+                }
+                let feet_y = server.mobs[&id].pos()[1];
+                attack(&mut server, id);
+                server.tick();
+                feet_y + 0.45 + (0.1 - 0.04)
+            };
+            assert!(!server.mobs.contains_key(&id));
+            assert_eq!(server.entities.len(), 1);
+            let drop = server.entities.values().next().unwrap();
+            assert_eq!(drop.item, expected_item);
+            assert!((1..=3).contains(&drop.count));
+            assert_eq!(drop.pos[1], drop_y);
+        }
+        assert_eq!(items::PIG_LOOT, [(64, 1, 3)]);
     }
 
     #[test]
@@ -1427,7 +1546,7 @@ mod tests {
         let cow = &server.mobs[&id];
         // The cow still overlaps the ledge, but loot centered here would miss it.
         assert!(cow.pos()[0] > 8.125);
-        assert!(cow.body.is_grounded(&cow_collisions(&server.world)));
+        assert!(cow.body.is_grounded(&mob_collisions(&server.world)));
         assert!((0..80).any(|_| {
             server.tick();
             !server.mobs.contains_key(&id)
@@ -1464,10 +1583,10 @@ mod tests {
             .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
             .unwrap();
         assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
-        assert_eq!(cow.health, COW_HEALTH - LAVA_DAMAGE);
+        assert_eq!(cow.health, spec(MobKind::Cow).health - LAVA_DAMAGE);
         assert_eq!(block_at(&world, cow.pos(), 0.0), Some(blocks::AIR));
         assert_eq!(
-            block_at(&world, cow.pos(), COW_HEAD_OFFSET),
+            block_at(&world, cow.pos(), spec(MobKind::Cow).head_offset),
             Some(blocks::AIR)
         );
     }
@@ -1486,7 +1605,9 @@ mod tests {
         let escaped = (time + 1..=time + i64::from(FLEE_TICKS)).any(|tick| {
             cow.hurt_ticks = cow.hurt_ticks.saturating_sub(1);
             cow.tick(&world, 5, 7, tick);
-            lava_cells(&world, cow.pos()).next().is_none()
+            lava_cells(&world, spec(MobKind::Cow), cow.pos())
+                .next()
+                .is_none()
         });
         assert!(escaped);
         assert!(cow.health > 0);
@@ -1678,8 +1799,10 @@ mod tests {
             for tick in 1..=19 {
                 cow.tick(&world, 5, 7, tick);
                 assert_eq!(cow.pos()[1], 1.0);
-                assert!(cow.body.is_grounded(&cow_collisions(&world)));
-                assert!(lava_cells(&world, cow.pos()).next().is_none());
+                assert!(cow.body.is_grounded(&mob_collisions(&world)));
+                assert!(lava_cells(&world, spec(MobKind::Cow), cow.pos())
+                    .next()
+                    .is_none());
                 let (target, left, blocked) = flee_state(&cow);
                 assert_eq!(left, 60 - tick as u8);
                 if !turned && target != first {
@@ -1718,7 +1841,7 @@ mod tests {
             cow.body.position = [2.5, 1.0, 2.5];
             cow.body.velocity[2] = velocity;
             let before = cow.pos();
-            assert!(lava_cells(&world, before).eq([[2, 1, 2]]));
+            assert!(lava_cells(&world, spec(MobKind::Cow), before).eq([[2, 1, 2]]));
             cow.tick(&world, 5, 7, 1);
             assert_eq!(cow.pos(), before);
             assert_eq!(
@@ -1735,7 +1858,7 @@ mod tests {
         world.set_block(2, 2, 3, blocks::STONE);
         let first = [2.5, 9.0];
         let mut cow = fleeing_toward(first);
-        cow.body.position[2] = 3.0 - COW_WIDTH / 2.0;
+        cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
         cow.tick(&world, 5, 7, 1);
         assert_eq!(flee_state(&cow), (first, 59, 1));
         cow.tick(&world, 5, 7, 2);
@@ -1764,18 +1887,19 @@ mod tests {
             server.tick();
             assert!(server.mobs().is_empty());
             server.tick();
-            let cows: Vec<_> = server.mobs().values().map(Mob::pos).collect();
-            assert!((1..=3).contains(&cows.len()));
-            for &[x, y, z] in &cows {
+            assert!(server.mobs().values().all(|mob| mob.kind == MobKind::Cow));
+            let herd: Vec<_> = server.mobs().values().map(Mob::pos).collect();
+            assert!((1..=3).contains(&herd.len()));
+            for &[x, y, z] in &herd {
                 let distance = distance_squared(server.spawn(), [x, y, z]);
                 assert!((24.0 * 24.0..=48.0 * 48.0).contains(&distance));
-                assert!(distance_squared(cows[0], [x, y, z]) <= 4.0);
+                assert!(distance_squared(herd[0], [x, y, z]) <= 4.0);
                 assert_eq!(
                     server.get_block(x.floor() as i32, y.floor() as i32 - 1, z.floor() as i32),
                     Some(blocks::GRASS_BLOCK)
                 );
             }
-            assert_eq!(cows, expected);
+            assert_eq!(herd, expected);
             while server.game_time() < 600 {
                 server.tick();
             }
@@ -1785,6 +1909,30 @@ mod tests {
             trajectories.push(end);
         }
         assert_eq!(trajectories[0], trajectories[1]);
+    }
+
+    #[test]
+    fn pig_herd_is_uniform_and_independent_of_entity_ids() {
+        let mut server = joined(GameMode::Creative);
+        let pos = server.spawn();
+        let players = [(1, pos)];
+        for (tick, count) in [(800, 1), (5200, 2)] {
+            server.game_time = tick;
+            let mut spawn = || {
+                server.spawn_herd(1, pos, &players);
+                let herd: Vec<_> = server
+                    .mobs
+                    .values()
+                    .map(|mob| (mob.kind, mob.pos()))
+                    .collect();
+                server.mobs.clear();
+                herd
+            };
+            let herd = spawn();
+            assert_eq!(herd.len(), count);
+            assert!(herd.iter().all(|&(kind, _)| kind == MobKind::Pig));
+            assert_eq!(spawn(), herd);
+        }
     }
 
     #[test]
@@ -1811,8 +1959,16 @@ mod tests {
             assert!(server.mobs().is_empty());
             server.world.set_block(x, height, z, old);
         }
-        for _ in 0..7 {
-            server.spawn_cow(pos);
+        for kind in [
+            MobKind::Cow,
+            MobKind::Pig,
+            MobKind::Pig,
+            MobKind::Pig,
+            MobKind::Cow,
+            MobKind::Cow,
+            MobKind::Pig,
+        ] {
+            server.spawn_mob(kind, pos);
         }
         server.spawn_herd(1, pos, &players);
         assert_eq!(server.mobs().len(), 8);

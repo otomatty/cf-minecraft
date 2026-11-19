@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, cowVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, type RenderCow, type RenderItem } from "./entities.ts";
+import { aimedMob, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, type MobTextures, type RenderMob, type RenderItem } from "./entities.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -17,30 +17,43 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 	assert.deepEqual(interpolateEntity(a,b,25),[29999998.125,2.5,-29999998.25]);
 });
 
+const textures: MobTextures = {
+	cow_hide: 5, cow_face: 6, cow_leg: 7, pig_skin: 8, pig_face: 9, pig_leg: 10, pig_snout: 11,
+};
+
 test("cow targeting uses the nearest forward hitbox within reach", () => {
 	const origin = [0, 1.62, 0];
 	const dir = [0, 0, 1];
-	const near = { id: 1, position: [0, 0.5, 2] } as const;
-	const far = { id: 2, position: [0, 0.5, 4] } as const;
+	const near = { id: 1, kind: 0, position: [0, 0.5, 2] } as const;
+	const far = { id: 2, kind: 0, position: [0, 0.5, 4] } as const;
 	assert.deepEqual(aimedMob(origin, dir, [near], 5), { id: 1, distance: 1.55 });
 	assert.equal(aimedMob(origin, dir, [far, near], 5)?.id, near.id);
 	assert.equal(aimedMob(origin, dir, [
-		{ id: 3, position: [0, 0.5, -2] },
-		{ id: 4, position: [0, 0.5, 5.5] },
-		{ id: 5, position: [0.5, 0.5, 2] },
-		{ id: 6, position: [0, 0, 2] },
+		{ id: 3, kind: 0, position: [0, 0.5, -2] },
+		{ id: 4, kind: 0, position: [0, 0.5, 5.5] },
+		{ id: 5, kind: 0, position: [0.5, 0.5, 2] },
+		{ id: 6, kind: 0, position: [0, 0, 2] },
 	], 5), null);
 });
 
 test("cow targeting gives the block priority at or before its hitbox", () => {
-	const cow = { id: 1, position: [0.5, 0, 3.5] } as const;
+	const cow = { id: 1, kind: 0, position: [0.5, 0, 3.5] } as const;
 	const origin = [0.5, 1, 6], dir = [0, 0, -1];
 	const block = { x: 0, y: 0, z: 4, face: 3, hitY: 1, min: [0, 0, 0], max: [1, 1, 1] } as const;
 	assert.equal(mobBeforeBlock(origin, dir, [cow], 5, block), null);
 	assert.equal(mobBeforeBlock(origin, dir, [cow], 5, { ...block, z: 2 }), cow.id);
-	const tiedCow = { id: 2, position: [0.5, 0, 1.55] } as const;
+	const tiedCow = { id: 2, kind: 0, position: [0.5, 0, 1.55] } as const;
 	assert.equal(mobBeforeBlock(origin, dir, [tiedCow], 5, { ...block, z: 1 }), null);
 });
+test("a ray above the pig's hitbox can still hit a cow", () => {
+	const pig = { id: 1, kind: 1, position: [0, 0, 2] } as const;
+	const cow = { id: 2, kind: 0, position: [0, 0, 3] } as const;
+	const dir = [0, 0, 1];
+	assert.equal(mobBeforeBlock([0.44, 1, 0], dir, [pig, cow], 5, null), cow.id);
+	assert.deepEqual(aimedMob([0.44, 0.9, 0], dir, [pig, cow], 5), { id: pig.id, distance: 1.55 });
+	assert.equal(aimedMob([0.46, 0.9, 0], dir, [pig, cow], 5), null);
+});
+
 test("cube vertices remain camera relative, bounded, and use lightmap coordinates", () => {
 	const vertices=itemVertices([{position:[29999998,1,-29999998],texture:7,light:[15,3]}],[29999998,1,-29999998],0);
 	assert.equal(vertices.length,36*9);
@@ -110,13 +123,12 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 });
 
 test("cow mesh has six boxes, turns with yaw, and swings diagonal legs together", () => {
-	const cow: RenderCow = { position: [29999998.25, 1, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
+	const cow: RenderMob = { kind: 0, position: [29999998.25, 1, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 	const camera = [29999998, 1, 0];
-	const textures = { hide: 5, face: 6, leg: 7 };
 	const quarterStride = Math.PI * 50;
-	const still = cowVertices([cow], camera, quarterStride, textures);
-	const turned = cowVertices([{ ...cow, yaw: 90 }], camera, quarterStride, textures);
-	const moving = cowVertices([{ ...cow, moving: true }], camera, quarterStride, textures);
+	const still = mobVertices([cow], camera, quarterStride, textures);
+	const turned = mobVertices([{ ...cow, yaw: 90 }], camera, quarterStride, textures);
+	const moving = mobVertices([{ ...cow, moving: true }], camera, quarterStride, textures);
 	assert.equal(still.length, 6 * 36 * 9);
 	for (let i = 0; i < still.length; i += 9) {
 		assert.ok(Math.abs(turned[i] - (0.25 - still[i + 2])) < 1e-6);
@@ -125,13 +137,36 @@ test("cow mesh has six boxes, turns with yaw, and swings diagonal legs together"
 		assert.equal(still[i + 8], 15.5 / 16);
 	}
 	const box = 36 * 9;
-	assert.equal(still[box + 3 * 6 * 9 + 6], textures.face);
+	assert.equal(still[box + 3 * 6 * 9 + 6], textures.cow_face);
 	assert.deepEqual(moving.slice(0, 2 * box), still.slice(0, 2 * box));
 	for (const [leg, sign] of [-1, 1, 1, -1].entries()) {
 		const z = (leg + 2) * box + 2;
 		assert.equal(Math.sign(moving[z] - still[z]), sign);
 	}
-	assert.deepEqual(cowVertices([{ ...cow, moving: true }], camera, 0, textures), still);
+	assert.deepEqual(mobVertices([{ ...cow, moving: true }], camera, 0, textures), still);
+});
+
+test("pig mesh has seven boxes, a separate snout, and shared leg motion and hurt shading", () => {
+	const pig: RenderMob = { kind: 1, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
+	const camera = [0, 0, 0];
+	const quarterStride = Math.PI * 50;
+	const still = mobVertices([pig], camera, quarterStride, textures);
+	const moving = mobVertices([{ ...pig, moving: true, hurt: true }], camera, quarterStride, textures);
+	const box = 36 * 9;
+	assert.equal(still.length, 7 * box);
+	const expectedMin = [-0.42, 0, -0.46], expectedMax = [0.42, 0.9, 0.60];
+	for (let axis = 0; axis < 3; axis++) {
+		const coordinates = still.filter((_, i) => i % 9 === axis);
+		assert.equal(Math.min(...coordinates), Math.fround(expectedMin[axis]));
+		assert.equal(Math.max(...coordinates), Math.fround(expectedMax[axis]));
+	}
+	assert.equal(still[box + 3 * 6 * 9 + 6], textures.pig_face);
+	assert.equal(still[2 * box + 3 * 6 * 9 + 6], textures.pig_snout);
+	for (let i = 5; i < moving.length; i += 9) assert.equal(moving[i], -still[i]);
+	for (const [leg, sign] of [-1, 1, 1, -1].entries()) {
+		const z = (leg + 3) * box + 2;
+		assert.equal(Math.sign(moving[z] - still[z]), sign);
+	}
 });
 
 test("WASM mob records track hurt, yaw and previous position and clear on removal and reset", async () => {
@@ -164,7 +199,8 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	entityPacket[0] = S2C.EntityRemove;
 	core.packet(entityPacket);
 	assert.deepEqual(core.mobs, []);
-	core.packet(spawn);
+	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 1)), S2C.MobSpawn);
+	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0 }]);
 	core.resetWorld();
 	assert.deepEqual(core.mobs, []);
 });

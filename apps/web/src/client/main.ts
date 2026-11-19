@@ -25,7 +25,7 @@ import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity, mobBeforeBlock, type RenderCow } from "./entities.ts";
+import { interpolateEntity, mobBeforeBlock, type RenderMob } from "./entities.ts";
 import { forward } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
@@ -207,7 +207,7 @@ async function main(): Promise<void> {
 	let fps = 0;
 	const entityReceivedAt = new Map<number, number>();
 	const mobHurtAt = new Map<number, number>();
-	let renderCows: Array<RenderCow & { id: number }> = [];
+	let renderMobs: Array<RenderMob & { id: number }> = [];
 
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
@@ -223,7 +223,7 @@ async function main(): Promise<void> {
 				core.resetWorld();
 				entityReceivedAt.clear();
 				mobHurtAt.clear();
-				renderCows = [];
+				renderMobs = [];
 				remoteDigs.clear();
 				dig = newDigState();
 				removeUnloaded();
@@ -266,7 +266,7 @@ async function main(): Promise<void> {
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
 			if (id === S2C.MobHurt) {
-				// Each MobHurt packet advances the mirror's hurt counter for this cow.
+				// Each MobHurt packet advances the mirror's hurt counter for this mob.
 				mobHurtAt.set(new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1), performance.now());
 			}
 			if (id === S2C.EntityRemove) {
@@ -1035,15 +1035,15 @@ async function main(): Promise<void> {
 	// Pointer lock can take effect before pointerlockchange hides the overlay.
 	const canInteract = () => locked() && joined && connection === "open" && !core.dead
 		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden;
-	function aimedCow(block: RayHit | null): number | null {
-		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderCows, REACH, block);
+	function aimedMobId(block: RayHit | null): number | null {
+		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderMobs, REACH, block);
 	}
-	function interactLeft(block: RayHit | null, cow: number | null): void {
-		if (cow !== null) {
-			// Knockback can move the cow off the ray before the next repeat.
+	function interactLeft(block: RayHit | null, mob: number | null): void {
+		if (mob !== null) {
+			// Knockback can move the mob off the ray before the next repeat.
 			miningStartsAt = performance.now() + LEFT_REPEAT_MS;
 			sendPosition();
-			transport.send(core.encodeAttack(cow));
+			transport.send(core.encodeAttack(mob));
 		} else if (block && core.gameMode === "creative") {
 			setBlock(block.x, block.y, block.z, 0);
 		}
@@ -1110,9 +1110,9 @@ async function main(): Promise<void> {
 			const repeatAt = performance.now() + LEFT_REPEAT_MS;
 			heldButtons.set(0, repeatAt);
 			const hit = aimedBlock();
-			const cow = aimedCow(hit);
-			if (cow === null) miningStartsAt = 0;
-			interactLeft(hit, cow);
+			const mob = aimedMobId(hit);
+			if (mob === null) miningStartsAt = 0;
+			interactLeft(hit, mob);
 		} else {
 			if (e.button === 2) heldButtons.set(2, performance.now() + 200);
 			interact(e.button, false, e.shiftKey);
@@ -1288,7 +1288,7 @@ async function main(): Promise<void> {
 		const interactive = canInteract();
 		const mining = interactive && core.gameMode === "survival" && heldButtons.has(0) && now >= miningStartsAt;
 		let block: RayHit | null = null;
-		let cow: number | null = null;
+		let mob: number | null = null;
 		if (joined) {
 			move(dt, now);
 
@@ -1311,30 +1311,30 @@ async function main(): Promise<void> {
 				meshPool.pump(pop, section => core.padded(...section), section => core.paddedLight(...section));
 			}
 
-			renderCows = core.mobs.flatMap(mob => {
-				if (mob.kind !== 0) return [];
+			renderMobs = core.mobs.map(mob => {
 				const elapsed = now - (entityReceivedAt.get(mob.id) ?? now);
 				const dx = mob.position[0] - mob.previous[0], dz = mob.position[2] - mob.previous[2];
 				const position = interpolateEntity(mob.previous, mob.position, elapsed);
-				return [{
+				return {
 					id: mob.id,
+					kind: mob.kind,
 					position,
 					yaw: mob.yaw,
 					moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
 					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
 					light: core.entityLight(position),
-				}];
+				};
 			});
 			block = aimedBlock();
-			cow = aimedCow(block);
-			target = cow !== null ? null : includeSources && !mining ? aimedBlock(true) : block;
+			mob = aimedMobId(block);
+			target = mob !== null ? null : includeSources && !mining ? aimedBlock(true) : block;
 		}
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
 		if (eating) eatProgress.value = Math.min(eatProgress.max, now - eating.startedAt);
 		if (core.gameMode === "survival" && !core.dead) {
-			const hit = cow === null ? block : null;
+			const hit = mob === null ? block : null;
 			const blockState = hit ? core.getBlock(hit.x, hit.y, hit.z) : 0;
 			const selection = digSelection(selectedSlot, held);
 			const ticks = core.miningTicks(blockState, held?.item ?? 0);
@@ -1351,7 +1351,7 @@ async function main(): Promise<void> {
 		if (interactive) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
-				if (button === 0) interactLeft(block, cow);
+				if (button === 0) interactLeft(block, mob);
 				else interact(button, true);
 				heldButtons.set(button, now + (button === 0 ? LEFT_REPEAT_MS : 200));
 			}
@@ -1372,7 +1372,7 @@ async function main(): Promise<void> {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];
 		});
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs, renderCows);
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs, renderMobs);
 		window.__mc.frames++;
 
 		frames++;

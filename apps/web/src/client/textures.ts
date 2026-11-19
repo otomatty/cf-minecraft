@@ -28,7 +28,7 @@ export function paintTexture(name: string): Uint8Array {
 	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.exec(name);
 	if (tool) return paintTool(tool[1], tool[2]);
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name) ?? cowTexture(name);
+		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name) ?? cowTexture(name) ?? pigTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -155,6 +155,31 @@ function cowTexture(name: string): Uint8Array | undefined {
 	return pixels;
 }
 
+function pigTexture(name: string): Uint8Array | undefined {
+	if (name !== "pig_skin" && name !== "pig_face" && name !== "pig_leg" && name !== "pig_snout") return undefined;
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 0; y < TEX_SIZE; y++) {
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const grain = (x * 3 + y * 5 + x * y) % 9;
+			const patch = (x - 4) ** 2 + (y - 5) ** 2 < 13 + grain
+				|| (x - 12) ** 2 + (y - 11) ** 2 < 9 + grain;
+			let color: Rgb = patch ? [224 + grain, 141 + grain, 161 + grain] : [236 + grain, 161 + grain, 178 + grain];
+			const paired = (x >= 3 && x <= 5) || (x >= 10 && x <= 12);
+			if (name === "pig_face" && y >= 4 && y <= 6 && paired) {
+				color = y === 4 && (x === 4 || x === 11) ? [255, 228, 225] : [62, 39, 47];
+			}
+			if (name === "pig_leg" && y >= 11) color = [87 + grain, 53 + grain, 61 + grain];
+			if (name === "pig_snout") {
+				color = [218 + grain, 87 + grain, 134 + grain];
+				if (y === 0) color = [244, 139, 172];
+				if (y >= 6 && y <= 9 && paired) color = [112, 42, 70];
+			}
+			pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
+		}
+	}
+	return pixels;
+}
+
 function bucketTexture(name: string): Uint8Array | undefined {
 	if (name !== "bucket" && name !== "water_bucket" && name !== "lava_bucket") return undefined;
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
@@ -227,6 +252,18 @@ const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter
 		if (x + y === 15 || x + y === 19) return [122, 58, 34];
 		return y <= 6 ? [198, 130, 78] : [163, 90, 52];
 	},
+	raw_porkchop: () => (x, y) => {
+		if (y <= 5 || (x >= 10 && y <= x - 2)) return [255, 235, 223];
+		if (y >= 11 || x <= 3) return [165, 76, 101];
+		if ((x + y * 2) % 7 === 0) return [249, 170, 170];
+		return [223, 117, 139];
+	},
+	cooked_porkchop: () => (x, y) => {
+		if (y >= 11 || x <= 3) return [103, 50, 32];
+		if (y <= 5 || (x >= 10 && y <= x - 2)) return [224, 163, 105];
+		if ((x + y * 2) % 7 === 0) return [143, 75, 45];
+		return [183, 109, 66];
+	},
 	apple: () => (x, y) => {
 		if (y <= 4 && x >= 9) return [85, 157, 58];
 		if (y <= 4) return [111, 67, 39];
@@ -271,6 +308,11 @@ function equipmentTexture(name: string): Uint8Array | undefined {
 				case "cooked_beef":
 					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12
 						&& x + y >= 10 && x + y <= 24 && x - y <= 7 && y - x <= 7;
+					break;
+				case "raw_porkchop":
+				case "cooked_porkchop":
+					visible = x >= 2 && x <= 13 && y >= 3 && y <= 12
+						&& x + y >= 10 && x + y <= 23 && y - x <= 7 && x - y <= 8;
 					break;
 				case "apple":
 					visible = (x === 8 && y >= 2 && y <= 4)
