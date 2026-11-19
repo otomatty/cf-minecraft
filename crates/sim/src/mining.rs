@@ -74,6 +74,31 @@ fn exact_duration_zero_duration_and_drops_for_every_state() {
 }
 
 #[test]
+fn white_wool_breaks_by_hand_and_drops_itself() {
+    let (mut s, [x, y, z]) = setup();
+    let wool = blocks::WHITE_WOOL;
+    assert!(blocks::is_full_opaque_cube(wool));
+    assert_eq!(blocks::info(wool).dig_ticks, Some(16));
+    assert_eq!(blocks::info(wool).tool, None);
+    assert_eq!(items::mining(wool, None), Some((16, true)));
+    s.world.set_block(x, y, z, wool);
+    let ticks = 16;
+    start(&mut s, [x, y, z]);
+    s.tick();
+    for _ in 0..ticks {
+        assert_eq!(s.get_block(x, y, z), Some(wool));
+        s.tick();
+    }
+    assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+    assert_eq!(s.entities.len(), 1);
+    let drop = s.entities.values().next().unwrap();
+    assert_eq!(
+        (drop.item, drop.count),
+        (items::by_name("white_wool").unwrap(), 1)
+    );
+}
+
+#[test]
 fn obsidian_requires_an_iron_pickaxe_and_drops_itself() {
     let (mut s, pos @ [x, y, z]) = setup();
     s.world.set_block(x, y, z, blocks::OBSIDIAN);

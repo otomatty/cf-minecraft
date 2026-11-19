@@ -10,7 +10,7 @@ export interface ItemInfo { id: number; name: string; maxStack: number; block: n
 export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
-export type MobKind = 0 | 1 | 2;
+export type MobKind = 0 | 1 | 2 | 3;
 export interface MobEntity { id: number; kind: MobKind; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number }
 export interface ClientExports {
 	client_enc_attack(id: number): number;

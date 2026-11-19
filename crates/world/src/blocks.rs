@@ -396,7 +396,7 @@ mod tests {
                 FLOWING_WATER,
                 COUNT
             ),
-            (23, 31, 39, 51, 52, 54, 62, 76)
+            (23, 31, 39, 51, 52, 54, 62, 77)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);

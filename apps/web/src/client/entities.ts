@@ -1,6 +1,6 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
-import { chicken, cow, pig } from "./mobs/farm.ts";
+import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
@@ -14,6 +14,7 @@ const mobHitboxes: Record<MobKind, { width: number; height: number }> = {
 	0: { width: 0.9, height: 1.3 },
 	1: { width: 0.9, height: 0.9 },
 	2: { width: 0.4, height: 0.7 },
+	3: { width: 0.9, height: 1.3 },
 };
 
 interface MobPosition {
@@ -113,7 +114,7 @@ export interface RenderMob {
 
 // Protocol kinds index both this table and the GPU skin array. The chicken skin
 // occupies the upper half of a layer; its texels retain their original scale.
-export const mobAssetsByKind = [cow, pig, chicken] as const satisfies Record<MobKind, MobAsset>;
+export const mobAssetsByKind = [cow, pig, chicken, sheep] as const satisfies Record<MobKind, MobAsset>;
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
@@ -124,13 +125,13 @@ const skinFaceCorners = [
 const skinFaceShades = [0.6, 0.8, 0.6, 0.8, 1, 0.5];
 
 function compileCube(cube: MobCube) {
-	const [u, v] = cube.uv, [w, h, d] = cube.size;
+	const [u, v] = cube.uv, [w, h, d] = cube.uvSize ?? cube.size;
 	const rects = [
 		[u, v + d, d, h], [u + d, v + d, w, h], [u + d + w, v + d, d, h],
 		[u + 2 * d + w, v + d, w, h], [u + d, v, w, d], [u + d + w, v, w, d],
 	];
 	const points: Vec3[] = corners.map(([x, y, z]) =>
-		[cube.origin[0] + x * w, cube.origin[1] + y * h, cube.origin[2] + z * d]);
+		[cube.origin[0] + x * cube.size[0], cube.origin[1] + y * cube.size[1], cube.origin[2] + z * cube.size[2]]);
 	const vertices = skinFaceCorners.flatMap((indices, face) => {
 		const mirroredSide = cube.mirror && (face === 0 || face === 2);
 		const [left, top, width, height] = rects[mirroredSide ? 2 - face : face];

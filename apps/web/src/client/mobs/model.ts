@@ -6,6 +6,8 @@ export interface MobCube {
 	readonly size: Vec3;
 	/** Top-left corner of the Bedrock box UV layout in the skin. */
 	readonly uv: readonly [number, number];
+	/** Width, height and depth of the UV net in texels when they differ from the model dimensions. */
+	readonly uvSize?: Vec3;
 	readonly mirror?: boolean;
 }
 

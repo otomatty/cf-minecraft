@@ -4,7 +4,7 @@ import { mobAssets } from "./catalog.ts";
 import { itemTexture } from "../item-textures.ts";
 
 test("adult mob visuals can be looked up by Bedrock identifier", () => {
-	for (const name of ["pig", "cow", "chicken", "zombie", "skeleton", "creeper"]) {
+	for (const name of ["pig", "cow", "chicken", "sheep", "zombie", "skeleton", "creeper"]) {
 		const id = `minecraft:${name}`;
 		assert.equal(mobAssets.get(id)?.id, id);
 	}
@@ -23,8 +23,9 @@ for (const [id, { bones, texture, walkPitch }] of mobAssets) {
 			assert.ok([...bone.pivot, ...(bone.rotation ?? [])].every(Number.isFinite));
 			for (const cube of bone.cubes ?? []) {
 				assert.ok(cube.origin.every(Number.isFinite));
-				assert.ok(cube.size.every(n => Number.isInteger(n) && n > 0));
-				const [w, h, d] = cube.size, [u, v] = cube.uv;
+				assert.ok(cube.size.every(n => Number.isFinite(n) && n > 0));
+				const [w, h, d] = cube.uvSize ?? cube.size, [u, v] = cube.uv;
+				assert.ok([w, h, d].every(n => Number.isInteger(n) && n > 0));
 				assert.ok(cube.uv.every(n => Number.isInteger(n) && n >= 0));
 				assert.ok(u + 2 * (w + d) <= texture.width && v + d + h <= texture.height);
 				for (const [x, y, width, height] of [

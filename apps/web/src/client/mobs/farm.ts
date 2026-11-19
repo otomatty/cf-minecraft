@@ -3,6 +3,55 @@ import { paintMobSkin, type FillRect } from "./skin.ts";
 
 const quadrupedWalk = { leg0: 80, leg1: -80, leg2: -80, leg3: 80 } as const;
 
+const sheepStride = 0.32 * 180 / Math.PI;
+export const sheep: MobAsset = {
+	id: "minecraft:sheep",
+	walkPitch: { leg0: sheepStride, leg1: -sheepStride, leg2: -sheepStride, leg3: sheepStride },
+	bones: [
+		{ name: "root", pivot: [0, 0, 0] },
+		{ name: "body", parent: "root", pivot: [0, 12, 0], cubes: [
+			{ origin: [-5.76, 6.4, -4.48], size: [11.52, 10.4, 10.88], uv: [0, 0], uvSize: [16, 16, 16] },
+			{ origin: [-6.72, 8.32, -2.88], size: [13.44, 9.92, 8], uv: [0, 0], uvSize: [16, 16, 16] },
+		] },
+		{ name: "head", parent: "root", pivot: [0, 14, -3.2], cubes: [
+			{ origin: [-2.56, 12.48, -7.2], size: [5.12, 6.72, 4], uv: [0, 32], uvSize: [16, 16, 8] },
+		] },
+		...[3.52, 3.52, -2.24, -2.24].map((z, i): MobBone => {
+			const x = i % 2 === 0 ? -3.84 : 3.84;
+			return {
+				name: `leg${i}`, parent: "root", pivot: [x, 7.68, z],
+				cubes: [{ origin: [x - 1.28, 0, z - 1.28], size: [2.56, 7.68, 2.56], uv: [48, 32], uvSize: [4, 16, 4] }],
+			};
+		}),
+	],
+	texture: paintMobSkin(64, 64, rect => {
+		// Both fleece boxes share a net of 16×16 faces. The head and hooves use separate nets below.
+		for (let v = 0; v < 56; v++) {
+			for (let u = 0; u < 64; u++) {
+				const x = u % 16, y = v % 16;
+				const tuft = (x * 3 + y * 5) % 7 + (x + y * 2) % 5;
+				const clump = (x % 5 === 2 && y % 4 === 1) || (x % 6 === 4 && y % 5 === 3);
+				rect(u, v, 1, 1, (clump ? 0xd6d2c8 : 0xf8f4ec) - tuft * 0x010101);
+			}
+		}
+		for (let y = 0; y < 16; y++) {
+			for (let x = 0; x < 16; x++) {
+				const grain = (x * 3 + y * 5) % 7 + (x + y * 2) % 5;
+				const eye = y >= 5 && y <= 7 && ((x >= 3 && x <= 5) || (x >= 10 && x <= 12));
+				let face = 0xb09e88 - (grain % 8) * 0x10000 - (grain % 6) * 0x100 - grain % 5;
+				if (eye) face = y === 5 && (x === 4 || x === 11) ? 0xe8dcc4 : 0x2a221e;
+				else if (y >= 10 && x >= 4 && x <= 11) face = 0x967054 - (grain % 6) * 0x10000 - (grain % 4) * 0x100;
+				rect(8 + x, 40 + y, 1, 1, face);
+				const leg = y >= 10 ? 0x4e3e30 + (grain % 5) * 0x10000 + (grain % 4) * 0x100
+					: 0xd6ccba - (grain % 6) * 0x10000 - (grain % 5) * 0x100 - grain % 4;
+				rect(48 + x, 36 + y, 1, 1, leg);
+			}
+		}
+		rect(52, 32, 4, 4, 0xd6ccba);
+		rect(56, 32, 4, 4, 0x4e3e30);
+	}),
+};
+
 // The four legs share a skin. Bedrock numbers the rear pair first.
 function legs(halfStance: number, height: number, rear: number, front: number, frontPivot: number, u: number): MobBone[] {
 	return [rear, rear, front, front].map((z, i) => {

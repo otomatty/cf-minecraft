@@ -82,7 +82,7 @@ WASMはID順の一覧（ID・アイテム・個数・現在と以前の位置）
 
 ブタ、ウシ、ニワトリ、ゾンビ、スケルトン、クリーパーの通常の成体を用意した。家畜は温帯の姿に合わせた。体格、各部位の比率、顔や模様の特徴を統合版と照合し、スキンを独自に描いている。参照した版はブロックと同じ [Bedrock Samples v1.26.60.5](https://github.com/Mojang/bedrock-samples/releases/tag/v1.26.60.5)。各モブの通常モデルとバリエーションの対応は [公式のエンティティ定義](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/entity) にある。
 
-ゲーム中のウシ、ブタ、ニワトリはこのモデルとスキンで描画する。ゾンビ、スケルトン、クリーパーの生成・行動は今後の実装になる。種類を追加するときは、通信で使う `MobKind` と `minecraft:pig` などの識別子を明示的に対応付け、[カタログ](../apps/web/src/client/mobs/catalog.ts) のアセットを使う。
+ゲーム中のウシ、ブタ、ニワトリはこのモデルとスキンで描画する。ヒツジも同じカタログから既存の毛と顔の模様を使う。ゾンビ、スケルトン、クリーパーの生成・行動は今後の実装になる。種類を追加するときは、通信で使う `MobKind` と `minecraft:pig` などの識別子を明示的に対応付け、[カタログ](../apps/web/src/client/mobs/catalog.ts) のアセットを使う。
 
 ```ts
 import { mobAssets } from "./mobs/catalog.ts";

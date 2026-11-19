@@ -27,7 +27,7 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? itemTexture(name) ?? farmAndWorkstationTexture(name);
+		?? cropTexture(name) ?? itemTexture(name) ?? proceduralBlockTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -154,7 +154,13 @@ const furrow = (color: Rgb): Painter => (x, y, rand) => {
 	return shade(color, (ridge === 0 ? .65 : ridge === 1 ? .83 : 1.1) + rand() * .19);
 };
 
-const FARM_AND_WORKSTATION_TEXTURES: Record<string, (rand: () => number) => Painter> = {
+const PROCEDURAL_BLOCK_TEXTURES: Record<string, (rand: () => number) => Painter> = {
+	white_wool: () => (x, y) => {
+		const grain = ((x * 3 + y * 5) % 7 + (x + y * 2) % 5) % 6;
+		return (x + y) % 4 === 0
+			? [226 - grain, 222 - grain, 214 - grain]
+			: [252 - grain, 249 - grain, 242 - grain];
+	},
 	farmland_dry: () => furrow([137, 91, 58]),
 	farmland_moist: () => furrow([86, 56, 48]),
     furnace_top: () => (x,y,r) => shade([111, 116, 125], x < 2 || y < 2 || x > 13 || y > 13 ? .68 : .9+r()*.2),
@@ -165,10 +171,10 @@ const FARM_AND_WORKSTATION_TEXTURES: Record<string, (rand: () => number) => Pain
     crafting_table_bottom: () => (x,y) => shade([124, 87, 49], x === y || x+y === 15 ? .65 : y%4 === 0 ? .82 : 1),
 };
 
-function farmAndWorkstationTexture(name: string): Uint8Array | undefined {
-	if (!Object.hasOwn(FARM_AND_WORKSTATION_TEXTURES, name)) return undefined;
+function proceduralBlockTexture(name: string): Uint8Array | undefined {
+	if (!Object.hasOwn(PROCEDURAL_BLOCK_TEXTURES, name)) return undefined;
 	const rand = mulberry32(hashName(name));
-	const paint = FARM_AND_WORKSTATION_TEXTURES[name](rand);
+	const paint = PROCEDURAL_BLOCK_TEXTURES[name](rand);
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
 		for (let x = 0; x < TEX_SIZE; x++) {

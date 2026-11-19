@@ -50,6 +50,21 @@ test("a ray above the pig's hitbox can still hit a cow", () => {
 	assert.equal(aimedMob([0.46, 0.9, 0], dir, [pig, cow], 5), null);
 });
 
+test("sheep targeting uses a 0.9 by 1.3 foot-centered hitbox", () => {
+	const sheep = { id: 1, kind: 3, position: [0, 0, 2] } as const;
+	const pig = { id: 2, kind: 1, position: [0, 0, 2] } as const;
+	const dir = [0, 0, 1];
+	assert.deepEqual(aimedMob([0, 1.2, 0], dir, [sheep], 5), { id: sheep.id, distance: 1.55 });
+	assert.equal(aimedMob([0, 1.2, 0], dir, [pig], 5), null);
+	assert.deepEqual(aimedMob([0.45, 0.5, 0], dir, [sheep], 5), { id: sheep.id, distance: 1.55 });
+	assert.equal(aimedMob([0.451, 0.5, 0], dir, [sheep], 5), null);
+	assert.equal(aimedMob([-0.451, 0.5, 0], dir, [sheep], 5), null);
+	assert.deepEqual(aimedMob([0, 1.3, 0], dir, [sheep], 5), { id: sheep.id, distance: 1.55 });
+	assert.equal(aimedMob([0, 1.301, 0], dir, [sheep], 5), null);
+	assert.equal(aimedMob([0, -0.001, 0], dir, [sheep], 5), null);
+	assert.equal(aimedMob([0, 0.5, 0], dir, [sheep], 1.54), null);
+});
+
 test("chicken targeting uses a 0.4 by 0.7 foot-centered hitbox", () => {
 	const chicken = { id: 1, kind: 2, position: [0, 0, 2] } as const;
 	const pig = { id: 2, kind: 1, position: [0, 0, 3] } as const;
@@ -137,8 +152,8 @@ function component(vertices: Float32Array, index: number) {
 }
 
 test("farm mobs use their protocol skin layer and catalog dimensions", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken"]);
-	for (const kind of [0, 1, 2] as const) {
+	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep"]);
+	for (const kind of [0, 1, 2, 3] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = mobAssetsByKind[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
@@ -147,7 +162,7 @@ test("farm mobs use their protocol skin layer and catalog dimensions", () => {
 		assert.equal(still.length, cubes.length * boxFloats);
 		assert.equal(Math.min(...component(still, 1)), 0);
 		const maxY = Math.max(...cubes.map(cube => (cube.origin[1] + cube.size[1]) / 16));
-		assert.equal(Math.max(...component(still, 1)), maxY);
+		assert.equal(Math.max(...component(still, 1)), Math.fround(maxY));
 		for (let i = 0; i < still.length; i += 9) {
 			assert.equal(still[i + 6], kind);
 			assert.equal(still[i + 7], 3.5 / 16);
@@ -194,7 +209,7 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 });
 
 test("walking swings the catalog leg bones around their pivots while the body and wings keep their pose", () => {
-	for (const kind of [0, 1, 2] as const) {
+	for (const kind of [0, 1, 2, 3] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const still = mobVertices([mob], [0, 0, 0], quarterStride);
 		const moving = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
@@ -219,6 +234,34 @@ test("walking swings the catalog leg bones around their pivots while the body an
 			}
 			offset = end;
 		}
+	}
+});
+
+test("sheep mesh keeps two fleece boxes, a forward face and four hooves at the world border", () => {
+	const sheep: RenderMob = { kind: 3, position: [29999998.25, 1, -29999998.5], yaw: 0, moving: false, hurt: false, light: [15, 3] };
+	const still = mobVertices([sheep], sheep.position, 0);
+	assert.equal(still.length, 7 * boxFloats);
+	for (const [axis, min, max] of [[0, -0.42, 0.42], [1, 0, 1.2], [2, -0.4, 0.45]]) {
+		const coordinates = still.filter((_, i) => i % 9 === axis);
+		assert.equal(Math.min(...coordinates), Math.fround(min));
+		assert.equal(Math.max(...coordinates), Math.fround(max));
+	}
+	const frontFace = (box: number) => still.subarray(box * boxFloats + 6 * 9, box * boxFloats + 12 * 9);
+	for (const [box, left, top, width, height] of [
+		[0, 16, 16, 16, 16], [1, 16, 16, 16, 16], [2, 8, 40, 16, 16], [3, 52, 36, 4, 16],
+	]) {
+		const face = frontFace(box);
+		const u = component(face, 3), v = component(face, 4);
+		assert.equal(Math.min(...u) * MOB_SKIN_SIZE, left);
+		assert.equal(Math.max(...u) * MOB_SKIN_SIZE, left + width);
+		assert.equal(Math.min(...v) * MOB_SKIN_SIZE, top);
+		assert.equal(Math.max(...v) * MOB_SKIN_SIZE, top + height);
+	}
+	assert.ok(component(frontFace(2), 2).every(z => z === Math.fround(0.45)));
+	const moving = mobVertices([{ ...sheep, moving: true }], sheep.position, quarterStride);
+	for (const [leg, direction] of [[3, -1], [4, 1], [5, 1], [6, -1]]) {
+		const foot = leg * boxFloats + 9; // second vertex is at floor height
+		assert.equal(Math.sign(moving[foot + 2] - still[foot + 2]), direction);
 	}
 });
 
