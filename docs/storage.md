@@ -130,3 +130,17 @@ OPFSとDurable Objectに渡す展開前の論理データは、既存の `Chunk:
 かまどのデータに続けて件数を varint で書き、各件を x（u8）、y（i32 BE）、z（u8）、残り tick（u16 BE）の順で保存する。x と z はチャンク内の 0〜15、y は建築範囲内とする。残り tick は実行時刻から保存時の `game_time` を引いた値を 0〜65535 に収める。件数と残りバイト数は 1 件 8 バイトで一致する必要がある。
 
 かまどの末尾までで終わる旧データと、末尾がまったくない旧データには予定がない。復元時は現在の `game_time` に残り tick を足す。同一時刻・同位置に復元された予定は 1 件にまとまる。チャンクの読み込み解除時にメモリ上の予定を取り除く。[スケジュール tick の実行](water.md#スケジュール-tick)
+
+## BFCache とシングルプレイのワーカー
+
+同じタブで別の URL へ移ると、ブラウザは前のページを戻る/進むキャッシュ（BFCache）に入れることがある。`pagehide` の `event.persisted` が true のときがそれである。シングルプレイの sim worker が OPFS のファイルを `createSyncAccessHandle` で持ったまま凍結されると、新しいページが同じワールドのファイルを開いたときに Chrome が旧ページを BFCache から追い出す。この追い出しで旧 worker のスレッドが落ち、同じレンダラーで動いている新しいページも一緒に落ちることがある。
+
+BFCache に入るシングルプレイでは、sim worker を `close()`（`Worker.terminate()`）で止める。止める前に保存の `flush()` を投げてよい。BFCache に入るときに始めた flush は完了しないので、worker を止めても、完了まで届く保存は増減しない。BFCache から戻ったとき（`pageshow` の `persisted` が true）は worker が止まっているので、`location.reload()` でページを作り直す。
+
+ページが実際に破棄される `pagehide`（`persisted` が false）では `flush()` だけを行う。マルチプレイもローカルの sim worker を持たないので、`pagehide` は `flush()`、BFCache から戻ったときは `resume()` である。`visibilitychange` で hidden になったときの `flush()` も同じである。
+
+Chrome では `Worker.terminate()` が親ワーカーのコンテキストを破棄し、その破棄を購読している子の dedicated worker も terminate する。親スレッドは子が止まるまで終了を完了しない。地形生成の gen worker は sim worker から作られるので、ここで一緒に止まる。gen worker は OPFS を開かない。sync access handle を持っているのは sim worker である。
+
+シングルプレイの自動保存は、未保存のチャンクがあるとき、前回の保存開始から20 tick（約1秒）経過すると実行する。チャンクに変更がなくても100 tick（約5秒）でプレイヤー状態と時刻を保存する。保存中に自動保存の間隔が過ぎた場合は、書き込みが終わった後の tick で再判定する。
+
+OPFS を開けず `persistence: off` で動くワールドは、BFCache に入る際もワーカーを維持する。復帰時にページをリロードするのは、BFCache に入る際にワーカーを止めた場合だけである。
