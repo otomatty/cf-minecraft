@@ -10,7 +10,8 @@ export interface ItemInfo { id: number; name: string; maxStack: number; block: n
 export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
-export interface MobEntity { id: number; kind: number; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number }
+export type MobKind = 0 | 1;
+export interface MobEntity { id: number; kind: MobKind; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number }
 export interface ClientExports {
 	client_enc_attack(id: number): number;
 	client_enc_dig_start(x: number, y: number, z: number): number;
@@ -171,7 +172,8 @@ export class ClientCore {
 		// Nine bytes for ID, kind and yaw, six f64 coordinates and a u32 hurt sequence.
 		for (let offset = 0; offset < bytes.length; offset += 61) {
 			result.push({
-				id: view.getUint32(offset), kind: view.getUint8(offset + 4), yaw: view.getFloat32(offset + 5),
+				// Wasm only stores kinds accepted by the protocol decoder.
+				id: view.getUint32(offset), kind: view.getUint8(offset + 4) as MobKind, yaw: view.getFloat32(offset + 5),
 				position: [view.getFloat64(offset + 9), view.getFloat64(offset + 17), view.getFloat64(offset + 25)],
 				previous: [view.getFloat64(offset + 33), view.getFloat64(offset + 41), view.getFloat64(offset + 49)],
 				hurt: view.getUint32(offset + 57),

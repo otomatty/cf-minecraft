@@ -18,3 +18,7 @@ output = "stone"
 [[smelting]]
 input = "raw_beef"
 output = "cooked_beef"
+
+[[smelting]]
+input = "raw_porkchop"
+output = "cooked_porkchop"

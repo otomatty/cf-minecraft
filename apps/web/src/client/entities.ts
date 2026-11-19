@@ -1,4 +1,4 @@
-import type { RayHit } from "./client-core.ts";
+import type { MobKind, RayHit } from "./client-core.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
 export function interpolateEntity(previous: readonly number[], current: readonly number[], elapsedMs: number): [number, number, number] {
@@ -6,17 +6,26 @@ export function interpolateEntity(previous: readonly number[], current: readonly
 	return [0, 1, 2].map(axis => previous[axis] + (current[axis] - previous[axis]) * t) as [number, number, number];
 }
 
-interface CowPosition {
+// Foot-centered hitboxes, matching the server's MobSpec.
+const mobHitboxes: Record<MobKind, { width: number; height: number }> = {
+	0: { width: 0.9, height: 1.3 },
+	1: { width: 0.9, height: 0.9 },
+};
+
+interface MobPosition {
 	id: number;
+	kind: MobKind;
 	position: readonly [number, number, number];
 }
 
-/** Find the first cow hit by a unit ray, using the server's foot-centered hitbox. */
-export function aimedMob(origin: readonly number[], dir: readonly number[], cows: readonly CowPosition[], reach: number): { id: number; distance: number } | null {
+/** Find the first mob hit by a unit ray, using the server's foot-centered hitbox. */
+export function aimedMob(origin: readonly number[], dir: readonly number[], mobs: readonly MobPosition[], reach: number): { id: number; distance: number } | null {
 	let closest: { id: number; distance: number } | null = null;
-	for (const { id, position: [x, y, z] } of cows) {
-		const min = [x - 0.45, y, z - 0.45];
-		const max = [x + 0.45, y + 1.3, z + 0.45];
+	for (const { id, kind, position: [x, y, z] } of mobs) {
+		const { width, height } = mobHitboxes[kind];
+		const half = width / 2;
+		const min = [x - half, y, z - half];
+		const max = [x + half, y + height, z + half];
 		let near = 0;
 		let far = reach;
 		for (let axis = 0; axis < 3; axis++) {
@@ -35,8 +44,8 @@ export function aimedMob(origin: readonly number[], dir: readonly number[], cows
 	return closest;
 }
 
-export function mobBeforeBlock(origin: readonly number[], dir: readonly number[], cows: readonly CowPosition[], reach: number, block: RayHit | null): number | null {
-	const mob = aimedMob(origin, dir, cows, reach);
+export function mobBeforeBlock(origin: readonly number[], dir: readonly number[], mobs: readonly MobPosition[], reach: number, block: RayHit | null): number | null {
+	const mob = aimedMob(origin, dir, mobs, reach);
 	if (!mob || !block) return mob?.id ?? null;
 	// Recover the ray distance from the face of the selection box hit by Wasm.
 	const axis = [1, 2, 0][block.face >> 1];
@@ -89,7 +98,8 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 	return new Float32Array(out);
 }
 
-export interface RenderCow {
+export interface RenderMob {
+	kind: MobKind;
 	position: [number, number, number];
 	yaw: number;
 	moving: boolean;
@@ -97,32 +107,51 @@ export interface RenderCow {
 	light: RenderItem["light"];
 }
 
-type CowBox = {
+export const mobTextureNames = ["cow_hide", "cow_face", "cow_leg", "pig_skin", "pig_face", "pig_leg", "pig_snout"] as const;
+type MobTextureName = typeof mobTextureNames[number];
+export type MobTextures = Record<MobTextureName, number>;
+
+type MobBox = {
 	min: [number, number, number];
 	max: [number, number, number];
 	legSwing?: number;
+	front?: MobTextureName;
 };
 
-const cowBoxes: readonly CowBox[] = [
+const cowBoxes: readonly MobBox[] = [
 	{ min: [-0.32, 0.49, -0.45], max: [0.32, 1.08, 0.23] },
-	{ min: [-0.24, 0.77, 0.16], max: [0.24, 1.3, 0.45] },
+	{ min: [-0.24, 0.77, 0.16], max: [0.24, 1.3, 0.45], front: "cow_face" },
 	{ min: [-0.28, 0, -0.36], max: [-0.12, 0.54, -0.20], legSwing: 1 },
 	{ min: [0.12, 0, -0.36], max: [0.28, 0.54, -0.20], legSwing: -1 },
 	{ min: [-0.28, 0, 0.04], max: [-0.12, 0.54, 0.20], legSwing: -1 },
 	{ min: [0.12, 0, 0.04], max: [0.28, 0.54, 0.20], legSwing: 1 },
 ];
-export const COW_VERTEX_COUNT = cowBoxes.length * 36;
 
-export function cowVertices(
-	cows: readonly RenderCow[], camera: readonly number[], timeMs: number,
-	textures: { hide: number; face: number; leg: number },
+const pigBoxes: readonly MobBox[] = [
+	{ min: [-0.42, 0.24, -0.46], max: [0.42, 0.76, 0.32] },
+	{ min: [-0.27, 0.39, 0.19], max: [0.27, 0.90, 0.49], front: "pig_face" },
+	{ min: [-0.18, 0.43, 0.48], max: [0.18, 0.60, 0.60], front: "pig_snout" },
+	{ min: [-0.35, 0, -0.38], max: [-0.16, 0.28, -0.19], legSwing: 1 },
+	{ min: [0.16, 0, -0.38], max: [0.35, 0.28, -0.19], legSwing: -1 },
+	{ min: [-0.35, 0, 0.11], max: [-0.16, 0.28, 0.30], legSwing: -1 },
+	{ min: [0.16, 0, 0.11], max: [0.35, 0.28, 0.30], legSwing: 1 },
+];
+
+const mobModels: Record<MobKind, { boxes: readonly MobBox[]; hide: MobTextureName; leg: MobTextureName }> = {
+	0: { boxes: cowBoxes, hide: "cow_hide", leg: "cow_leg" },
+	1: { boxes: pigBoxes, hide: "pig_skin", leg: "pig_leg" },
+};
+
+export function mobVertices(
+	mobs: readonly RenderMob[], camera: readonly number[], timeMs: number, textures: MobTextures,
 ): Float32Array {
 	const vertices: number[] = [];
-	for (const cow of cows) {
-		const yaw = cow.yaw * Math.PI / 180, yawCos = Math.cos(yaw), yawSin = Math.sin(yaw);
-		const stride = cow.moving ? Math.sin(timeMs / 100) * 0.32 : 0;
-		const [ox, oy, oz] = cow.position.map((value, axis) => value - camera[axis]);
-		for (const [boxIndex, { min, max, legSwing }] of cowBoxes.entries()) {
+	for (const mob of mobs) {
+		const { boxes, hide, leg } = mobModels[mob.kind];
+		const yaw = mob.yaw * Math.PI / 180, yawCos = Math.cos(yaw), yawSin = Math.sin(yaw);
+		const stride = mob.moving ? Math.sin(timeMs / 100) * 0.32 : 0;
+		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
+		for (const { min, max, legSwing, front } of boxes) {
 			const angle = stride * (legSwing ?? 0);
 			const swingCos = Math.cos(angle), swingSin = Math.sin(angle);
 			const pivotZ = (min[2] + max[2]) / 2;
@@ -135,14 +164,14 @@ export function cowVertices(
 				return [ox + x * yawCos - legZ * yawSin, oy + legY, oz + x * yawSin + legZ * yawCos];
 			});
 			for (const [face, indices] of faces.entries()) {
-				const texture = legSwing ? textures.leg : boxIndex === 1 && face === 3 ? textures.face : textures.hide;
+				const texture = textures[legSwing ? leg : (face === 3 ? front : undefined) ?? hide];
 				// The item shader reads the sign as the hurt flag and the magnitude as face shading.
-				const shade = [0.5, 1, 0.8, 0.8, 0.6, 0.6][face] * (cow.hurt ? -1 : 1);
+				const shade = [0.5, 1, 0.8, 0.8, 0.6, 0.6][face] * (mob.hurt ? -1 : 1);
 				for (const i of [0, 1, 2, 0, 2, 3]) {
 					vertices.push(
 						...points[indices[i]], [0, 1, 1, 0][i], [1, 1, 0, 0][i],
 						shade, texture,
-						(cow.light[1] + 0.5) / 16, (cow.light[0] + 0.5) / 16,
+						(mob.light[1] + 0.5) / 16, (mob.light[0] + 0.5) / 16,
 					);
 				}
 			}

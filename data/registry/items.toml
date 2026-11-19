@@ -359,3 +359,15 @@ name = "cooked_beef"
 id = 63
 texture = "cooked_beef"
 food = 8
+
+[[items]]
+name = "raw_porkchop"
+id = 64
+texture = "raw_porkchop"
+food = 3
+
+[[items]]
+name = "cooked_porkchop"
+id = 65
+texture = "cooked_porkchop"
+food = 8

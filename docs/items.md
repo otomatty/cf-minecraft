@@ -111,6 +111,8 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 56 | bread（パン） | bread | 64 | 5 |
 | 62 | raw_beef（生の牛肉） | raw_beef | 64 | 3 |
 | 63 | cooked_beef（焼いた牛肉） | cooked_beef | 64 | 8 |
+| 64 | raw_porkchop（生の豚肉） | raw_porkchop | 64 | 3 |
+| 65 | cooked_porkchop（焼いた豚肉） | cooked_porkchop | 64 | 8 |
 
 `items.toml` の任意キー `food` は、1個を食べたときに回復する満腹度を1〜20の整数で指定する。`items::food(id)` で取得できる。リンゴに対応するブロックはなく、採掘したオークの葉の代わりに落ちることがある。入手と食事の規則は [health.md](health.md#空腹と食べ物) を参照。
 

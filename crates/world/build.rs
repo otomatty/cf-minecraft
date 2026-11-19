@@ -795,15 +795,26 @@ struct LootEntry {
 
 fn generate_loot(root: &Path, out: &mut String, items: &[Item]) {
     let data: LootTable = read(&root.join("loot.toml"));
-    out.push_str("pub const COW_LOOT: &[(u16, u8, u8)] = &[\n");
+    const MOB_NAMES: &[&str] = &["cow", "pig"];
+    let mut loot = vec![Vec::new(); MOB_NAMES.len()];
     for entry in data.loot {
-        assert!(entry.mob == "cow", "loot.toml: unknown mob {}", entry.mob);
+        let kind = MOB_NAMES
+            .iter()
+            .position(|&name| name == entry.mob)
+            .unwrap_or_else(|| panic!("loot.toml: unknown mob {}", entry.mob));
         let item = items
             .iter()
             .find(|item| item.name == entry.item)
             .unwrap_or_else(|| panic!("loot.toml: unknown item {}", entry.item));
         assert!(entry.min <= entry.max, "loot.toml: min must be <= max");
-        writeln!(out, "({}, {}, {}),", item.id, entry.min, entry.max).unwrap();
+        loot[kind].push((item.id, entry.min, entry.max));
     }
-    out.push_str("];\n");
+    for (name, entries) in MOB_NAMES.iter().zip(loot) {
+        let name = name.to_ascii_uppercase();
+        writeln!(
+            out,
+            "pub const {name}_LOOT: &[(u16, u8, u8)] = &{entries:?};"
+        )
+        .unwrap();
+    }
 }

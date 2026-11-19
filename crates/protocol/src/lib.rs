@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -17,6 +17,7 @@ pub const MAX_AIR: u16 = 300;
 #[repr(u8)]
 pub enum MobKind {
     Cow = 0,
+    Pig = 1,
 }
 
 impl MobKind {
@@ -27,6 +28,7 @@ impl MobKind {
     fn from_wire_id(value: u8) -> Result<Self, DecodeError> {
         match value {
             0 => Ok(Self::Cow),
+            1 => Ok(Self::Pig),
             _ => Err(DecodeError),
         }
     }
@@ -1251,7 +1253,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 14);
+        assert_eq!(PROTOCOL_VERSION, 15);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1286,13 +1288,28 @@ mod tests {
             if tag == 0x0d {
                 assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
-                bad[5] = 1;
+                bad[5] = 2;
                 assert!(S2C::decode(&bad).is_err());
             }
             let mut trailing = bytes;
             trailing.push(0);
             assert!(S2C::decode(&trailing).is_err());
         }
+    }
+
+    #[test]
+    fn protocol_15_pig_spawn_round_trips() {
+        let spawn = S2C::MobSpawn {
+            id: 7,
+            kind: MobKind::Pig,
+            x: 12.25,
+            y: -60.0,
+            z: -8.75,
+            yaw: 90.0,
+        };
+        let bytes = spawn.encode();
+        assert_eq!(bytes[5], 1);
+        assert_eq!(S2C::decode(&bytes), Ok(spawn));
     }
 
     #[test]
