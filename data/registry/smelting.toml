@@ -22,3 +22,7 @@ output = "cooked_beef"
 [[smelting]]
 input = "raw_porkchop"
 output = "cooked_porkchop"
+
+[[smelting]]
+input = "raw_chicken"
+output = "cooked_chicken"

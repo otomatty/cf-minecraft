@@ -1829,7 +1829,7 @@ async function mobs() {
 					return {
 						id: target.id,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
-						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, kind === 0 ? 13 : 21.5],
+						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [13, 21.5, 19][kind]],
 					};
 				};
 				let mobs = api.stats().mobs;
@@ -1917,7 +1917,7 @@ async function mobs() {
 				captureProblem = `aimed at ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking mob ${current?.blockedBy ?? "none"})`;
 			}
 			if (captureProblem !== null) throw new Error(`mobs: could not photograph ${name} ${lastMobId}; ${captureProblem ?? "capture timed out"}`);
-			const pinkPixels = await page.evaluate(async (data, kind) => {
+			const featurePixels = await page.evaluate(async (data, kind) => {
 				const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
@@ -1927,23 +1927,28 @@ async function mobs() {
 				// from the center at 720 px viewport height. Allow a little margin around the nose.
 				// The pig's snout is 2.8 blocks away and 1.02–1.19 below the eye.
 				// With 21.5° pitch it projects to about x ±31 and y ±15.
+				// The chicken's beak is 3.2 blocks away and 1.06–1.13 below the eye.
+				// With 19° pitch it projects to about x ±11 and y ±6.
 				const scale = img.height / 720;
-				const [left, top, width, height] = kind === 0 ? [58, 23, 116, 65] : [38, 23, 76, 46];
+				const [left, top, width, height] = [[58, 23, 116, 65], [38, 23, 76, 46], [18, 14, 36, 28]][kind];
 				const pixels = ctx.getImageData(
 					Math.floor(img.width / 2 - left * scale), Math.floor(img.height / 2 - top * scale),
 					Math.ceil(width * scale), Math.ceil(height * scale),
 				).data;
-				let pink = 0;
+				let matching = 0;
 				for (let i = 0; i < pixels.length; i += 4) {
 					const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-					const muzzle = kind === 0
+					const matchesColor = kind === 0
 						? r > 100 && r > b * 1.3 && b > g * 1.08 && b < g * 1.4
-						: r > 100 && r > b * 1.25 && b > g * 1.3;
-					if (muzzle) pink++;
+						: kind === 1
+							? r > 100 && r > b * 1.25 && b > g * 1.3
+							: r > 100 && r > g * 1.25 && g > r * 0.4 && g > b * 1.6;
+					if (matchesColor) matching++;
 				}
-				return pink;
+				return matching;
 			}, readFileSync(file).toString("base64"), kind);
-			check(pinkPixels > 20, `mobs: ${name} muzzle is visibly rendered`, `${pinkPixels} pink pixels, ${name} ${photographedId}`);
+			const [feature, color] = kind === 2 ? ["beak", "orange"] : ["muzzle", "pink"];
+			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
 		};
 		await photographMob(0, "cow");
 		// Put the player back at spawn so subsequent herds use the original center.
@@ -1955,7 +1960,7 @@ async function mobs() {
 		check(true, "mobs: the same cow wandered");
 
 		// At spawn in Flat seed 2026, the tick-400 herd is cow and tick 800 selects pig.
-		// The longer wait also covers tick 2000 if the cow camera was away at tick 800.
+		// Rust also confirms tick 1200 and 2800 select pig if the cow camera was away at tick 800.
 		const pigSpawn = await page.waitForFunction(
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 1),
 			{ timeout: 100000, polling: 100 },
@@ -1964,6 +1969,17 @@ async function mobs() {
 		await pigSpawn.dispose();
 		check(pig.kind === 1, "mobs: a pig spawned", `id ${pig.id} at ${pig.position.join(", ")}`);
 		await photographMob(1, "pig");
+		await page.evaluate(({ x, y, z, yaw, pitch }) => window.__mc.setCamera(x, y, z, yaw, pitch), initialCamera);
+		// The Rust herd test confirms that at spawn in Flat seed 2026, player 1 gets
+		// a chicken herd at tick 2000, with another chance at tick 2400 if there is room.
+		const chickenSpawn = await page.waitForFunction(
+			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 2),
+			{ timeout: 100000, polling: 100 },
+		);
+		const chicken = await chickenSpawn.jsonValue();
+		await chickenSpawn.dispose();
+		check(chicken.kind === 2, "mobs: a chicken spawned", `id ${chicken.id} at ${chicken.position.join(", ")}`);
+		await photographMob(2, "chicken");
 		check(errors.length === 0, "mobs: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "mobs", err);

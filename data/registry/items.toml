@@ -371,3 +371,26 @@ name = "cooked_porkchop"
 id = 65
 texture = "cooked_porkchop"
 food = 8
+
+[[items]]
+name = "egg"
+id = 66
+texture = "egg"
+max_stack = 16
+
+[[items]]
+name = "raw_chicken"
+id = 67
+texture = "raw_chicken"
+food = 2
+
+[[items]]
+name = "cooked_chicken"
+id = 68
+texture = "cooked_chicken"
+food = 6
+
+[[items]]
+name = "feather"
+id = 69
+texture = "feather"

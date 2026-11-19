@@ -83,12 +83,19 @@ mod tests {
         assert_eq!(by_name("cooked_beef"), Some(63));
         assert_eq!(by_name("raw_porkchop"), Some(64));
         assert_eq!(by_name("cooked_porkchop"), Some(65));
+        assert_eq!(by_name("egg"), Some(66));
+        assert_eq!(by_name("raw_chicken"), Some(67));
+        assert_eq!(by_name("cooked_chicken"), Some(68));
+        assert_eq!(by_name("feather"), Some(69));
+        assert_eq!(info(66).unwrap().max_stack, 16);
         for item in ITEMS {
             let expected = match item.id {
                 49 => Some(4),
                 56 => Some(5),
                 62 | 64 => Some(3),
                 63 | 65 => Some(8),
+                67 => Some(2),
+                68 => Some(6),
                 _ => None,
             };
             assert_eq!(food(item.id), expected);

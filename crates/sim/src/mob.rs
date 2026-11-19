@@ -23,6 +23,8 @@ struct MobSpec {
     health: u8,
     walk_forward: f32,
     flee_forward: f32,
+    max_fall_speed: Option<f64>,
+    takes_fall_damage: bool,
     loot: &'static [(u16, u8, u8)],
 }
 
@@ -35,6 +37,8 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 10,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            max_fall_speed: None,
+            takes_fall_damage: true,
             loot: items::COW_LOOT,
         },
         MobKind::Pig => &MobSpec {
@@ -44,7 +48,20 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 10,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            max_fall_speed: None,
+            takes_fall_damage: true,
             loot: items::PIG_LOOT,
+        },
+        MobKind::Chicken => &MobSpec {
+            width: 0.4,
+            height: 0.7,
+            head_offset: 0.5,
+            health: 4,
+            walk_forward: 0.5,
+            flee_forward: 0.75,
+            max_fall_speed: Some(0.1),
+            takes_fall_damage: false,
+            loot: items::CHICKEN_LOOT,
         },
     }
 }
@@ -60,8 +77,11 @@ const STOP_DISTANCE_SQUARED: f64 = 0.5 * 0.5;
 const PROBE_DISTANCE: f64 = 0.7;
 const SPAWN_INTERVAL: i64 = 400;
 const HERD_KIND_SALT: u64 = 17;
-const HERD_KINDS: [MobKind; 2] = [MobKind::Cow, MobKind::Pig];
+const HERD_KINDS: [MobKind; 3] = [MobKind::Cow, MobKind::Pig, MobKind::Chicken];
 const LOCAL_LIMIT: usize = 8;
+const EGG_INTERVAL_SALT: u64 = 22;
+const MIN_EGG_TICKS: u16 = 6000;
+const MAX_EGG_TICKS: u16 = 12000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wander {
@@ -91,6 +111,7 @@ pub struct Mob {
     suffocation_ticks: u8,
     lava_ticks: u8,
     last_dry_pos: [f64; 3],
+    egg_ticks: Option<u16>,
 }
 
 impl Mob {
@@ -108,6 +129,7 @@ impl Mob {
             suffocation_ticks: 0,
             lava_ticks: 0,
             last_dry_pos: pos,
+            egg_ticks: None,
         }
     }
 
@@ -222,16 +244,17 @@ impl Mob {
         let pos = self.pos();
         let collisions = mob_collisions(world);
         let grounded = self.body.is_grounded(&collisions);
+        let spec = spec(self.kind);
         let fall = track_fall(world, before, pos, &mut self.fall_start_y, grounded);
         let mut cause = None;
-        if self.take_damage(fall) {
+        if spec.takes_fall_damage && self.take_damage(fall) {
             cause = Some(DeathCause::Fall);
             if self.health == 0 {
                 return cause;
             }
         }
 
-        let head = block_at(world, pos, spec(self.kind).head_offset);
+        let head = block_at(world, pos, spec.head_offset);
         if interval(
             &mut self.suffocation_ticks,
             head.is_some_and(blocks::is_full_opaque_cube),
@@ -328,6 +351,9 @@ impl Mob {
         } else {
             self.body = next;
         }
+        if let Some(speed) = spec.max_fall_speed {
+            self.body.velocity[1] = self.body.velocity[1].max(-speed);
+        }
 
         if knockback {
             return false;
@@ -420,6 +446,9 @@ impl Mob {
         h.u8(self.lava_ticks);
         for v in self.last_dry_pos {
             h.bytes(&v.to_bits().to_be_bytes());
+        }
+        if let Some(egg_ticks) = self.egg_ticks {
+            h.bytes(&egg_ticks.to_be_bytes());
         }
     }
 }
@@ -585,6 +614,11 @@ fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
     bits ^ (bits >> 31)
 }
 
+fn egg_interval(seed: i64, id: u32, time: i64) -> u16 {
+    let range = u64::from(MAX_EGG_TICKS - MIN_EGG_TICKS + 1);
+    MIN_EGG_TICKS + (sample(seed, id, time, EGG_INTERVAL_SALT) % range) as u16
+}
+
 fn grass_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
     let get = |y| chunk.get((x & 15) as usize, y, (z & 15) as usize);
@@ -655,7 +689,11 @@ impl Server {
 
     fn spawn_mob(&mut self, kind: MobKind, pos: [f64; 3]) {
         if let Some(id) = self.allocate_entity_id() {
-            self.mobs.insert(id, Mob::new(kind, pos));
+            let mut mob = Mob::new(kind, pos);
+            if kind == MobKind::Chicken {
+                mob.egg_ticks = Some(egg_interval(self.seed, id, self.game_time));
+            }
+            self.mobs.insert(id, mob);
         }
     }
 
@@ -734,13 +772,25 @@ impl Server {
                 self.send_mob_hurt(id);
             }
         }
-        self.mobs.retain(|_, mob| {
-            mob.pos()[1] >= VOID_Y
+        let mut eggs = Vec::new();
+        self.mobs.retain(|&id, mob| {
+            let stays = mob.pos()[1] >= VOID_Y
                 && self.world.chunks.contains_key(&mob.chunk())
                 && players
                     .iter()
-                    .any(|&(_, pos)| distance_squared(mob.pos(), pos) <= 128.0 * 128.0)
+                    .any(|&(_, pos)| distance_squared(mob.pos(), pos) <= 128.0 * 128.0);
+            if let Some(ticks) = mob.egg_ticks.as_mut().filter(|_| stays && mob.health != 0) {
+                *ticks -= 1;
+                if *ticks == 0 {
+                    *ticks = egg_interval(self.seed, id, self.game_time);
+                    eggs.push(mob.pos());
+                }
+            }
+            stays
         });
+        for pos in eggs {
+            self.spawn_item(items::by_name("egg").unwrap(), 1, pos, [0.0, 0.1, 0.0], 10);
+        }
     }
 
     pub(crate) fn sync_mobs(&mut self) {
@@ -1445,6 +1495,124 @@ mod tests {
     }
 
     #[test]
+    fn chicken_body_uses_its_own_dimensions_health_and_head_height() {
+        let mut world = arena(16);
+        let pos = [2.5, 1.25, 2.5];
+        let mut chicken = Mob::new(MobKind::Chicken, pos);
+        let bounds = chicken.body.bounds();
+        assert_eq!(bounds.min, [2.5 - 0.2, 1.25, 2.5 - 0.2]);
+        assert_eq!(bounds.max, [2.5 + 0.2, 1.25 + 0.7, 2.5 + 0.2]);
+        assert_eq!(chicken.health, 4);
+        assert_eq!(spec(MobKind::Chicken).head_offset, 0.5);
+
+        world.set_block(2, 2, 2, blocks::STONE);
+        for _ in 0..SUFFOCATION_INTERVAL {
+            assert_eq!(chicken.environment_damage(&world, pos), None);
+        }
+        chicken.body.position[1] = 1.5;
+        for _ in 1..SUFFOCATION_INTERVAL {
+            assert_eq!(chicken.environment_damage(&world, chicken.pos()), None);
+        }
+        assert_eq!(
+            chicken.environment_damage(&world, chicken.pos()),
+            Some(DeathCause::Suffocation)
+        );
+        assert_eq!(chicken.health, 3);
+    }
+
+    #[test]
+    fn chicken_falls_slowly_and_lands_without_damage() {
+        let world = arena(16);
+        let mut chicken = Mob::new(MobKind::Chicken, [8.5, 21.0, 8.5]);
+        let collisions = mob_collisions(&world);
+        let mut reached_limit = false;
+        for time in 1..=220 {
+            assert_eq!(chicken.tick(&world, 5, 7, time), None);
+            assert!(chicken.body.velocity[1] >= -0.1);
+            reached_limit |= chicken.body.velocity[1] == -0.1;
+            if chicken.body.is_grounded(&collisions) {
+                assert!(time >= 200);
+                break;
+            }
+        }
+        assert!(reached_limit);
+        assert_eq!(chicken.pos()[1], 1.0);
+        assert_eq!(chicken.health, 4);
+        assert_eq!(chicken.fall_start_y, None);
+    }
+
+    #[test]
+    fn chicken_egg_timer_is_deterministic_and_restarts_after_one_drop() {
+        let run = || {
+            let (mut server, _) = combat(GameMode::Creative);
+            let pos = [7.5, 1.0, 5.5];
+            let id = server.next_entity_id;
+            let spawn_time = server.game_time;
+            server.spawn_mob(MobKind::Chicken, pos);
+            let initial = server.mobs[&id].egg_ticks.unwrap();
+            assert_eq!(initial, egg_interval(server.seed, id, spawn_time));
+            assert!((6000..=12000).contains(&initial));
+
+            let hash = server.state_hash();
+            server.mobs.get_mut(&id).unwrap().egg_ticks = Some(2);
+            assert_ne!(server.state_hash(), hash);
+            server.tick();
+            assert_eq!(server.mobs[&id].egg_ticks, Some(1));
+            assert!(server.entities.is_empty());
+
+            server.spawn_mob(MobKind::Chicken, [pos[0], VOID_Y - 1.0, pos[2]]);
+            let despawning = id + 1;
+            server.mobs.get_mut(&despawning).unwrap().egg_ticks = Some(1);
+            server.tick();
+            assert!(!server.mobs.contains_key(&despawning));
+            assert_eq!(server.entities.len(), 1);
+            let egg = server.entities.values().next().unwrap();
+            assert_eq!((egg.item, egg.count, egg.pickup_delay), (66, 1, 10));
+            assert_eq!(egg.pos, server.mobs[&id].pos());
+            assert_eq!(egg.velocity, [0.0, 0.1, 0.0]);
+            let next = server.mobs[&id].egg_ticks.unwrap();
+            assert_eq!(next, egg_interval(server.seed, id, server.game_time));
+            assert!((6000..=12000).contains(&next));
+            assert_ne!(next, initial);
+            (initial, next)
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn chicken_drops_meat_and_feathers_and_lava_cooks_only_the_meat() {
+        for (burned, meat) in [(false, 67), (true, 68)] {
+            let (mut server, id) = combat(GameMode::Creative);
+            let pos = server.mobs[&id].pos();
+            server.mobs.insert(id, Mob::new(MobKind::Chicken, pos));
+            if burned {
+                server.world.set_block(7, 1, 5, blocks::LAVA);
+                for _ in 1..LAVA_INTERVAL {
+                    server.tick();
+                }
+                assert_eq!(server.mobs[&id].health, 4);
+            } else {
+                hold(&mut server, "iron_axe");
+                attack(&mut server, id);
+            }
+            server.mobs.get_mut(&id).unwrap().egg_ticks = Some(1);
+            server.tick();
+            assert!(!server.mobs.contains_key(&id));
+            let drops: Vec<_> = server
+                .entities
+                .values()
+                .map(|drop| (drop.item, drop.count))
+                .collect();
+            assert_eq!(drops[0], (meat, 1));
+            let feather_count =
+                (sample(server.seed, id, server.game_time, LOOT_SALT + 1) % 3) as u8;
+            let feathers = (feather_count != 0).then_some((69, feather_count));
+            assert_eq!(&drops[1..], feathers.as_slice());
+        }
+        assert_eq!(items::CHICKEN_LOOT, [(67, 1, 1), (69, 0, 2)]);
+    }
+
+    #[test]
     fn lava_at_feet_or_head_burns_loot_after_three_damage_intervals() {
         let run = |y, lava| {
             let (mut server, id) = combat(GameMode::Creative);
@@ -1912,11 +2080,19 @@ mod tests {
     }
 
     #[test]
-    fn pig_herd_is_uniform_and_independent_of_entity_ids() {
+    fn pig_and_chicken_herds_are_uniform_and_independent_of_entity_ids() {
         let mut server = joined(GameMode::Creative);
         let pos = server.spawn();
         let players = [(1, pos)];
-        for (tick, count) in [(800, 1), (5200, 2)] {
+        for (tick, count, expected) in [
+            (800, 1, MobKind::Pig),
+            (1200, 2, MobKind::Pig),
+            (2000, 1, MobKind::Chicken),
+            (2400, 2, MobKind::Chicken),
+            (2800, 1, MobKind::Pig),
+            (3600, 1, MobKind::Chicken),
+            (5200, 2, MobKind::Pig),
+        ] {
             server.game_time = tick;
             let mut spawn = || {
                 server.spawn_herd(1, pos, &players);
@@ -1930,7 +2106,7 @@ mod tests {
             };
             let herd = spawn();
             assert_eq!(herd.len(), count);
-            assert!(herd.iter().all(|&(kind, _)| kind == MobKind::Pig));
+            assert!(herd.iter().all(|&(kind, _)| kind == expected));
             assert_eq!(spawn(), herd);
         }
     }
