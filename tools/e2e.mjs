@@ -13,7 +13,7 @@
 // available. On a machine without a display, wrap the command:
 //   xvfb-run -a -s "-screen 0 1280x720x24" node tools/e2e.mjs
 // On such a machine the frame rate says nothing about real hardware.
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1808,8 +1808,10 @@ async function mobs() {
 		const cow = await spawned.jsonValue();
 		await spawned.dispose();
 		check(cow.kind === 0, "mobs: a cow spawned", `id ${cow.id} at ${cow.position.join(", ")}`);
+		let screenshotSession;
+		const screenshotDeadlineExpired = Symbol();
 		const photographMob = async (kind, name) => {
-			const mobView = async (kind, id, placeCamera = false) => {
+			const mobView = async (kind, id, findCandidate = false) => {
 				const api = window.__mc;
 				const inspect = (target, mobs) => {
 					if (!target) return null;
@@ -1832,7 +1834,7 @@ async function mobs() {
 				};
 				let mobs = api.stats().mobs;
 				const findMob = mobId => mobs.find(mob => mob.kind === kind && mob.id === mobId);
-				if (!placeCamera) {
+				if (!findCandidate) {
 					const target = id == null ? mobs.findLast(mob => mob.kind === kind) : findMob(id);
 					return inspect(target, mobs);
 				}
@@ -1849,8 +1851,7 @@ async function mobs() {
 					globalThis.__mcLastMobAttempt = settled ?? { id: candidate.id, missing: true };
 					if (!settled || settled.blockedBy !== null || settled.yaw !== initial.yaw
 						|| !settled.position.every((value, axis) => value === initial.position[axis])) continue;
-					api.setCamera(...settled.camera);
-					return { ...settled, frames: api.frames };
+					return settled;
 				}
 				return false;
 			};
@@ -1872,6 +1873,10 @@ async function mobs() {
 				const aim = await placement.jsonValue();
 				await placement.dispose();
 				lastMobId = aim.id;
+				aim.frames = await page.evaluate(camera => {
+					window.__mc.setCamera(...camera);
+					return window.__mc.frames;
+				}, aim.camera);
 				try {
 					await page.waitForFunction(frames => document.pointerLockElement?.id === "view"
 						&& document.getElementById("overlay").hidden && window.__mc.frames >= frames + 2,
@@ -1887,7 +1892,21 @@ async function mobs() {
 						captureProblem = `capture deadline expired before screenshot of ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}`;
 						continue;
 					}
-					await page.screenshot({ path: file });
+					// Raw CDP keeps a stalled capture from holding Puppeteer's page-close lock.
+					const capture = await bounded(async () => {
+						screenshotSession ??= await page.createCDPSession();
+						const remaining = captureDeadline - Date.now();
+						if (remaining <= 0) return screenshotDeadlineExpired;
+						return screenshotSession.send("Page.captureScreenshot", {
+							format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: false,
+						}, { timeout: remaining });
+					}, Math.max(1, captureDeadline - Date.now()), screenshotDeadlineExpired);
+					if (capture === screenshotDeadlineExpired || Date.now() >= captureDeadline) {
+						captureProblem = `capture deadline expired during screenshot of ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}`;
+						continue;
+					}
+					if (typeof capture === "string") throw new Error(`mobs: screenshot of ${name} ${aim.id} failed: ${capture}`);
+					writeFileSync(file, Buffer.from(capture.data, "base64"));
 					current = await page.evaluate(mobView, kind, aim.id);
 					if (matches(aim, current)) {
 						photographedId = aim.id;
