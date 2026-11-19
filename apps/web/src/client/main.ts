@@ -150,7 +150,8 @@ async function main(): Promise<void> {
 	if (serverKind === "ws" && !await canEnterWorld()) return;
 	const core = await ClientCore.load(clientWasmUrl);
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
-	const textureNames = core.textureNames();
+	const textureNames = [...core.textureNames(), "bow"];
+	const arrowTexture = textureNames.indexOf("arrow");
 	const renderer = await Renderer.create(canvas, textureNames);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
@@ -262,7 +263,8 @@ async function main(): Promise<void> {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
 			}
-			if (id === S2C.EntitySpawn || id === S2C.EntityMove || id === S2C.MobSpawn || id === S2C.MobMove) {
+			if (id === S2C.EntitySpawn || id === S2C.EntityMove || id === S2C.MobSpawn || id === S2C.MobMove ||
+				id === S2C.ArrowSpawn || id === S2C.ArrowMove) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
@@ -1381,6 +1383,12 @@ async function main(): Promise<void> {
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
+		const renderArrows = core.arrows.map(arrow => ({
+			position: interpolateEntity(arrow.previous, arrow.position, now - (entityReceivedAt.get(arrow.id) ?? now)),
+			velocity: arrow.velocity,
+			texture: arrowTexture,
+			light: core.entityLight(arrow.position),
+		}));
 		const renderItems = core.entities.map(entity => {
 			const item = items.find(item => item.id === entity.item);
 			return {
@@ -1394,7 +1402,7 @@ async function main(): Promise<void> {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];
 		});
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), renderItems, now, renderDigs, renderMobs);
+		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
 		window.__mc.frames++;
 
 		frames++;
@@ -1423,6 +1431,7 @@ async function main(): Promise<void> {
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,
+			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),
 			dig: dig.active,
 			inventory: core.inventory,
 			selectedSlot: core.selectedSlot,

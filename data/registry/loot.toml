@@ -39,3 +39,15 @@ mob = "zombie"
 item = "rotten_flesh"
 min = 0
 max = 2
+
+[[loot]]
+mob = "skeleton"
+item = "bone"
+min = 0
+max = 2
+
+[[loot]]
+mob = "skeleton"
+item = "arrow"
+min = 0
+max = 2

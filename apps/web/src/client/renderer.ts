@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob } from "./entities.ts";
+import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -409,7 +409,10 @@ export class Renderer {
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
 
+	private readonly heldItemTextures: ReadonlyMap<string, number>;
+
 	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
+		this.heldItemTextures = new Map(textureNames.map((name, index) => [name, index]));
 		this.crackTextureBase = textureNames.length;
 		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
 		this.canvas = canvas;
@@ -762,10 +765,12 @@ export class Renderer {
 
 		const crackData = digVertices(digs.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], this.crackTextureBase);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
-		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
-		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
-		const mobData = mobVertices(visibleMobs, [camera.x, camera.y, camera.z], now);
+		const heldItems: RenderSprite[] = [];
+		const eye = [camera.x, camera.y, camera.z];
+		const mobData = mobVertices(visibleMobs, eye, now, { output: heldItems, textures: this.heldItemTextures });
+		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
+		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		if (mobData.length) {
 			if (!this.mobBuffer || this.mobBuffer.size < mobData.byteLength) {
 				this.mobBuffer?.destroy();

@@ -417,3 +417,13 @@ name = "rotten_flesh"
 id = 73
 texture = "rotten_flesh"
 food = 4
+
+[[items]]
+name = "bone"
+id = 74
+texture = "bone"
+
+[[items]]
+name = "arrow"
+id = 75
+texture = "arrow"

@@ -16,6 +16,7 @@
 //! Given the same seed and the same sequence of calls, every host ends up in
 //! the same state. `state_hash` makes that checkable.
 
+mod arrow;
 pub mod entity;
 pub mod furnace;
 mod health;
@@ -148,6 +149,7 @@ struct Client {
     dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
+    visible_arrows: BTreeMap<u32, arrow::ArrowMotion>,
     inventory: Inventory,
     health: health::Health,
     survival_movement: SurvivalMovement,
@@ -221,6 +223,7 @@ pub struct Server {
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     entities: BTreeMap<u32, entity::Entity>,
     mobs: BTreeMap<u32, mob::Mob>,
+    arrows: BTreeMap<u32, arrow::Arrow>,
     next_entity_id: u32,
     game_mode: GameMode,
     seed: i64,
@@ -256,6 +259,7 @@ impl Server {
             furnaces: BTreeMap::new(),
             entities: BTreeMap::new(),
             mobs: BTreeMap::new(),
+            arrows: BTreeMap::new(),
             next_entity_id: 1,
             game_mode: GameMode::Creative,
             seed,
@@ -641,6 +645,7 @@ impl Server {
                 dig: None,
                 visible_entities: BTreeMap::new(),
                 visible_mobs: BTreeMap::new(),
+                visible_arrows: BTreeMap::new(),
                 inventory,
                 health: health::Health::new(vitals, pos[1]),
                 survival_movement: SurvivalMovement::default(),
@@ -732,6 +737,7 @@ impl Server {
 
         self.game_time += 1;
         self.day_time += 1;
+        self.tick_arrows();
         self.tick_mobs();
         self.tick_health();
         self.tick_screens();
@@ -762,6 +768,7 @@ impl Server {
         self.flush_digs();
         self.sync_entities();
         self.sync_mobs();
+        self.sync_arrows();
         let changed: Vec<_> = self
             .clients
             .iter()
@@ -1618,6 +1625,7 @@ impl Server {
                 .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
             self.mobs.retain(|_, mob| mob.chunk() != (cx, cz));
+            self.arrows.retain(|_, arrow| arrow.chunk() != (cx, cz));
         }
     }
 
@@ -1878,6 +1886,7 @@ impl Server {
             h.u8(e.on_ground as u8);
         }
         self.hash_mobs(&mut h);
+        self.hash_arrows(&mut h);
         self.world.hash_into(&mut h);
         h.finish()
     }
