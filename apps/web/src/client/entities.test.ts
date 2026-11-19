@@ -146,12 +146,13 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 
 const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
+const renderedHeights = [1.3, 0.9, 0.7, 1.2] as const;
 
 function component(vertices: Float32Array, index: number) {
 	return vertices.filter((_, i) => i % 9 === index);
 }
 
-test("farm mobs use their protocol skin layer and catalog dimensions", () => {
+test("farm mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
 	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep"]);
 	for (const kind of [0, 1, 2, 3] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
@@ -161,8 +162,7 @@ test("farm mobs use their protocol skin layer and catalog dimensions", () => {
 		const cubes = asset.bones.flatMap(bone => bone.cubes ?? []);
 		assert.equal(still.length, cubes.length * boxFloats);
 		assert.equal(Math.min(...component(still, 1)), 0);
-		const maxY = Math.max(...cubes.map(cube => (cube.origin[1] + cube.size[1]) / 16));
-		assert.equal(Math.max(...component(still, 1)), Math.fround(maxY));
+		assert.equal(Math.max(...component(still, 1)), Math.fround(renderedHeights[kind]));
 		for (let i = 0; i < still.length; i += 9) {
 			assert.equal(still[i + 6], kind);
 			assert.equal(still[i + 7], 3.5 / 16);
@@ -170,6 +170,22 @@ test("farm mobs use their protocol skin layer and catalog dimensions", () => {
 			assert.equal(still[i + 5], -hurt[i + 5]);
 			assert.ok(still[i + 3] >= 0 && still[i + 3] <= asset.texture.width / MOB_SKIN_SIZE);
 			assert.ok(still[i + 4] >= 0 && still[i + 4] <= asset.texture.height / MOB_SKIN_SIZE);
+		}
+	}
+});
+
+test("aiming across the top of a rendered farm mob's head selects it from the front and the side", () => {
+	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1]] as const) {
+		for (const yaw of [0, 45, 90]) {
+			const mob: RenderMob & { id: number } = { id: 12, kind, position: [0, 0, 0], yaw, moving: false, hurt: false, light: [15, 0] };
+			const vertices = mobVertices([mob], [0, 0, 0], 0);
+			const head = vertices.subarray(headBox * boxFloats, (headBox + 1) * boxFloats);
+			const x = component(head, 0), y = component(head, 1), z = component(head, 2);
+			const centerX = (Math.min(...x) + Math.max(...x)) / 2;
+			const centerZ = (Math.min(...z) + Math.max(...z)) / 2;
+			const brow = Math.max(...y) - 0.01;
+			assert.equal(aimedMob([centerX, brow, 3], [0, 0, -1], [mob], 5)?.id, mob.id);
+			assert.equal(aimedMob([3, brow, centerZ], [-1, 0, 0], [mob], 5)?.id, mob.id);
 		}
 	}
 });
@@ -185,15 +201,16 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 	}
 	const faceFloats = 6 * 9;
 	const snoutFront = still.subarray(boxFloats + faceFloats, boxFloats + 2 * faceFloats);
-	assert.deepEqual([...new Set(component(snoutFront, 2))], [1]);
+	const scale = 0.9 / 16;
+	assert.deepEqual([...new Set(component(snoutFront, 2))], [Math.fround(12 * scale)]);
 	// In the catalog, the snout's front stretches from u=33..37 and v=1..4.
 	for (let i = 0; i < snoutFront.length; i += 9) {
 		assert.equal(snoutFront[i + 3] * MOB_SKIN_SIZE, snoutFront[i] < 0.25 ? 33 : 37);
-		assert.equal(snoutFront[i + 4] * MOB_SKIN_SIZE, snoutFront[i + 1] === 0.75 ? 1 : 4);
+		assert.equal(snoutFront[i + 4] * MOB_SKIN_SIZE, snoutFront[i + 1] === Math.fround(12 * scale) ? 1 : 4);
 	}
 
 	// A reflected model has to reverse triangle winding to survive back-face culling.
-	const centre = [0.25, 0.75, 11 / 16];
+	const centre = [0.25, 12 * scale, 7 * scale];
 	for (let i = 0; i < boxFloats; i += faceFloats) {
 		const [ax, ay, az] = still.subarray(i, i + 3);
 		const [bx, by, bz] = still.subarray(i + 9, i + 12);
@@ -215,6 +232,8 @@ test("walking swings the catalog leg bones around their pivots while the body an
 		const moving = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
 		assert.deepEqual(mobVertices([{ ...mob, moving: true }], [0, 0, 0], 0), still);
 		const asset = mobAssetsByKind[kind];
+		const modelHeight = Math.max(...asset.bones.flatMap(b => (b.cubes ?? []).map(c => c.origin[1] + c.size[1])));
+		const scale = renderedHeights[kind] / modelHeight;
 		let offset = 0;
 		for (const bone of asset.bones) {
 			const end = offset + (bone.cubes?.length ?? 0) * boxFloats;
@@ -225,10 +244,12 @@ test("walking swings the catalog leg bones around their pivots while the body an
 				const centreY = first.origin[1] + first.size[1] / 2;
 				const centreZ = first.origin[2] + first.size[2] / 2;
 				const angle = -pitch * Math.PI / 180;
-				const expectedZ = -((centreY - bone.pivot[1]) * Math.sin(angle)
-					+ (centreZ - bone.pivot[2]) * Math.cos(angle) + bone.pivot[2]) / 16;
+				const expectedDelta = -((centreY - bone.pivot[1]) * Math.sin(angle)
+					+ (centreZ - bone.pivot[2]) * (Math.cos(angle) - 1)) * scale;
+				const restZ = component(atRest.subarray(0, boxFloats), 2);
 				const z = component(posed.subarray(0, boxFloats), 2);
-				assert.ok(Math.abs((Math.max(...z) + Math.min(...z)) / 2 - expectedZ) < 1e-6);
+				const delta = (Math.max(...z) + Math.min(...z) - Math.max(...restZ) - Math.min(...restZ)) / 2;
+				assert.ok(Math.abs(delta - expectedDelta) < 1e-6);
 			} else {
 				assert.deepEqual(posed, atRest);
 			}

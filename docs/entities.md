@@ -92,7 +92,7 @@ const { width, height } = pig.texture;
 const rgba = pig.texture.pixels(); // 初回のテクスチャ転送時に取得し、同種の個体で共有する
 ```
 
-- `bones` は親から子の順。各箱の `origin` と関節の `pivot` は、ともにモデル全体を基準にした座標。足元が Y=0、正面が −Z、16 単位が 1 ブロックに対応する。
+- `bones` は親から子の順。各箱の `origin` と関節の `pivot` は、ともにモデル全体を基準にした座標。足元が Y=0、正面が −Z。モデルの基準は 1 ブロックあたり 16 単位。ゲーム内のウシ・ブタ・ニワトリは足元を固定し、体の比率を保ったまま、モデルの高さを攻撃の当たり判定に合わせる。
 - `uv` はスキン左上を原点とする統合版のボックス UV。スキンは行順の RGBA8 で、最近傍サンプリングとアルファテストを使う。スケルトンの胴体は両面を描き、肋骨の隙間から奥の背骨が見えるようにする。[ボーンと UV の仕様](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/visualreference/geometry.v1.12.0?view=minecraft-bedrock-stable)
 - ゾンビの初期姿勢は素手で両腕を前へ伸ばした状態。スケルトンは右腕を18度前に傾けて弓を携える。`rightItem` の子ボーンの `itemSprite.texture` を `itemTexture()` で引き、絵の `grip` をボーンの支点に合わせる。スプライトはボーンのローカル空間で横が +Z、下が −Y。1画素がモデルの1単位に対応し、不透明な画素を X 方向に1単位の厚みで描く。[ゾンビの腕の姿勢](https://github.com/Mojang/bedrock-samples/blob/v1.26.60.5/resource_pack/animations/zombie.animation.json)・[スケルトンの初期装備](https://github.com/Mojang/bedrock-samples/blob/v1.26.60.5/behavior_pack/loot_tables/entities/skeleton_gear.json)
 - 歩行時は `walkPitch[bone.name] ?? 0` に `Math.sin(2 * Math.PI * phase)` を掛け、ボーンの初期 X 回転（度）に足す。`phase` の 0〜1 が一歩行周期。停止中は初期姿勢を使う。これで四足は対角の脚、二足は左右の脚が交互に動く。

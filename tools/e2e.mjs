@@ -1831,7 +1831,7 @@ async function mobs() {
 					return {
 						id: target.id,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
-						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [12.4, 21.9, 16.7, 15][kind]],
+						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [14.5, 20.7, 18.8, 15][kind]],
 					};
 				};
 				let mobs = api.stats().mobs;
@@ -1924,10 +1924,10 @@ async function mobs() {
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
 				ctx.drawImage(img, 0, 0);
-				// Aim at the center of the cow muzzle (Y=17.5/16), pig snout (10.5/16)
-				// or chicken beak (12/16). The snouts are 2.4 blocks from the camera, the beak 2.9.
+				// After scaling to the species height, the cow muzzle, pig snout and chicken
+				// beak are centered at Y=0.91, 0.59 and 0.56 blocks above the feet.
 				const scale = img.height / 720;
-				const [left, top, width, height] = [[40, 20, 80, 40], [26, 18, 52, 36], [22, 10, 44, 20], [60, 45, 120, 90]][kind];
+				const [left, top, width, height] = [[30, 15, 60, 30], [22, 15, 44, 30], [16, 7, 32, 14], [60, 45, 120, 90]][kind];
 				const pixels = ctx.getImageData(
 					Math.floor(img.width / 2 - left * scale), Math.floor(img.height / 2 - top * scale),
 					Math.ceil(width * scale), Math.ceil(height * scale),

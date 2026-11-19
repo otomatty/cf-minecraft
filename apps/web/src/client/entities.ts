@@ -10,12 +10,12 @@ export function interpolateEntity(previous: readonly number[], current: readonly
 }
 
 // Foot-centered hitboxes, matching the server's MobSpec.
-const mobHitboxes: Record<MobKind, { width: number; height: number }> = {
-	0: { width: 0.9, height: 1.3 },
-	1: { width: 0.9, height: 0.9 },
-	2: { width: 0.4, height: 0.7 },
-	3: { width: 0.9, height: 1.3 },
-};
+const mobHitboxes = [
+	{ width: 0.9, height: 1.3 },
+	{ width: 0.9, height: 0.9 },
+	{ width: 0.4, height: 0.7 },
+	{ width: 0.9, height: 1.3 },
+] as const satisfies Record<MobKind, { width: number; height: number }>;
 
 interface MobPosition {
 	id: number;
@@ -148,17 +148,6 @@ function compileCube(cube: MobCube) {
 	return { points, vertices };
 }
 
-const mobMeshes = mobAssetsByKind.map(asset => {
-	const bones = asset.bones.map(bone => ({
-		bone,
-		parent: asset.bones.findIndex(other => other.name === bone.parent),
-		walkPitch: asset.walkPitch[bone.name] ?? 0,
-		cubes: bone.cubes?.map(compileCube) ?? [],
-	}));
-	const floats = bones.reduce((sum, { cubes }) => sum + cubes.length * 36 * 9, 0);
-	return { bones, floats };
-});
-
 type Transform = (point: Vec3) => Vec3;
 const radians = Math.PI / 180;
 
@@ -177,18 +166,40 @@ function bonePose(bone: MobBone, stridePitch: number, parent: Transform): Transf
 	};
 }
 
+const mobMeshes = mobAssetsByKind.map((asset, kind) => {
+	const poses: Transform[] = [];
+	const restPoints: Vec3[] = [];
+	const bones = asset.bones.map(bone => {
+		const parent = asset.bones.findIndex(other => other.name === bone.parent);
+		const pose = bonePose(bone, 0, poses[parent] ?? (point => point));
+		poses.push(pose);
+		const cubes = bone.cubes?.map(compileCube) ?? [];
+		for (const cube of cubes) restPoints.push(...cube.points.map(pose));
+		return { bone, parent, walkPitch: asset.walkPitch[bone.name] ?? 0, cubes };
+	});
+	const floats = bones.reduce((sum, { cubes }) => sum + cubes.length * 36 * 9, 0);
+	const { height, width } = mobHitboxes[kind];
+	const scale = Math.min(1 / 16, height / Math.max(...restPoints.map(point => point[1])));
+	const z = restPoints.map(point => point[2]);
+	const front = Math.min(...z), back = Math.max(...z);
+	// Centre long models over the interaction box so a side view can target the head.
+	const centerZ = Math.max(-front, back) * scale > width / 2 ? (front + back) / 2 : 0;
+	return { bones, floats, scale, centerZ };
+});
+
 export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number): Float32Array {
 	const out = new Float32Array(mobs.reduce((sum, mob) => sum + mobMeshes[mob.kind].floats, 0));
 	let i = 0;
 	for (const mob of mobs) {
-		const yaw = mob.yaw * radians, c = Math.cos(yaw) / 16, s = Math.sin(yaw) / 16;
+		const { bones, scale, centerZ } = mobMeshes[mob.kind];
+		const yaw = mob.yaw * radians, c = Math.cos(yaw) * scale, s = Math.sin(yaw) * scale;
 		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
-		const world: Transform = ([x, y, z]) => [ox + c * x + s * z, oy + y / 16, oz + s * x - c * z];
+		const world: Transform = ([x, y, z]) => [ox + c * x + s * (z - centerZ), oy + y * scale, oz + s * x - c * (z - centerZ)];
 		const stride = mob.moving ? Math.sin(timeMs / 100) : 0;
 		const shadeSign = mob.hurt ? -1 : 1;
 		const blockLight = (mob.light[1] + 0.5) / 16, skyLight = (mob.light[0] + 0.5) / 16;
 		const poses: Transform[] = [];
-		for (const { bone, parent, walkPitch, cubes } of mobMeshes[mob.kind].bones) {
+		for (const { bone, parent, walkPitch, cubes } of bones) {
 			const pose = bonePose(bone, walkPitch * stride, parent < 0 ? world : poses[parent]);
 			poses.push(pose);
 			for (const cube of cubes) {
