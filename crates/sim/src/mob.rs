@@ -190,13 +190,9 @@ impl Mob {
 
     fn environment_damage(&mut self, world: &World, before: [f64; 3]) -> Option<DeathCause> {
         let pos = self.pos();
-        let fall = track_fall(
-            world,
-            before,
-            pos,
-            &mut self.fall_start_y,
-            self.body.is_grounded(&cow_collisions(world)),
-        );
+        let collisions = cow_collisions(world);
+        let grounded = self.body.is_grounded(&collisions);
+        let fall = track_fall(world, before, pos, &mut self.fall_start_y, grounded);
         let mut cause = None;
         if self.take_damage(fall) {
             cause = Some(DeathCause::Fall);
@@ -223,7 +219,7 @@ impl Mob {
 
         let in_lava = head.is_some_and(blocks::is_lava)
             || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
-        if !in_lava {
+        if !in_lava && grounded && has_loot_support(world, &collisions, pos) {
             self.last_dry_pos = pos;
         }
         if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) && self.take_damage(LAVA_DAMAGE) {
@@ -415,6 +411,21 @@ fn cow_collisions(world: &World) -> impl CollisionWorld + '_ {
             Some(blocks::AIR)
         }
     })
+}
+
+fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
+    let [bx, by, bz] = [x, y - 0.01, z].map(|v| v.floor() as i32);
+    if world.get_block(bx, by, bz).is_none_or(blocks::is_lava) {
+        return false;
+    }
+    // The cow's footprint can stay grounded while its center is over an edge.
+    let mut supported = false;
+    collisions.collision_boxes(bx, by, bz, &mut |bounds| {
+        supported |= bounds.max[1] <= y
+            && (bounds.min[0]..bounds.max[0]).contains(&x)
+            && (bounds.min[2]..bounds.max[2]).contains(&z);
+    });
+    supported
 }
 
 /// None means stop. A solid block at foot level can ask physics to jump.
@@ -1391,6 +1402,56 @@ mod tests {
         assert_eq!(run(1, blocks::LAVA), count);
         assert_eq!(run(2, blocks::LAVA), count);
         assert_eq!(run(1, blocks::FLOWING_LAVA), count);
+    }
+
+    #[test]
+    fn lava_death_after_a_fall_drops_loot_on_the_ledge() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let ledge = [7.95, 8.0, 5.5];
+        // A lava-filled shaft with a ledge to the west and a higher wall to the east.
+        server.world.set_block(8, 1, 5, blocks::LAVA);
+        for (x, z) in [(7, 5), (9, 5), (8, 4), (8, 6)] {
+            for y in 1..=7 {
+                server.world.set_block(x, y, z, blocks::STONE);
+            }
+        }
+        for y in 8..=9 {
+            server.world.set_block(9, y, 5, blocks::STONE);
+        }
+        server.mobs.get_mut(&id).unwrap().body.position = ledge;
+        server.tick();
+        assert_eq!(server.mobs[&id].last_dry_pos, ledge);
+
+        server.mobs.get_mut(&id).unwrap().body.velocity[0] = 0.3;
+        server.tick();
+        let cow = &server.mobs[&id];
+        // The cow still overlaps the ledge, but loot centered here would miss it.
+        assert!(cow.pos()[0] > 8.125);
+        assert!(cow.body.is_grounded(&cow_collisions(&server.world)));
+        assert!((0..80).any(|_| {
+            server.tick();
+            !server.mobs.contains_key(&id)
+        }));
+
+        assert_eq!(server.entities.len(), 1);
+        let (&drop_id, drop) = server.entities.iter().next().unwrap();
+        let stack = crate::Stack {
+            item: drop.item,
+            count: drop.count,
+        };
+        assert_eq!(stack.item, items::by_name("cooked_beef").unwrap());
+        assert!((1..=3).contains(&stack.count));
+        assert_eq!(drop.pos, [ledge[0], ledge[1] + 0.65, ledge[2]]);
+        assert_eq!(drop.pickup_delay, 10);
+        for _ in 0..10 {
+            server.tick();
+        }
+        assert_eq!(server.entities[&drop_id].pickup_delay, 0);
+
+        server.clients.get_mut(&1).unwrap().pos = ledge;
+        server.tick();
+        assert!(server.entities.is_empty());
+        assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
     }
 
     #[test]
