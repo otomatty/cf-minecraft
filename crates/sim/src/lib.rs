@@ -1165,19 +1165,30 @@ impl Server {
                     items::ToolKind::Shovel | items::ToolKind::Hoe => 0,
                 }
         });
-        mob.hurt(&self.world, damage, client.pos, client.yaw);
+        mob.hurt(
+            &self.world,
+            damage,
+            (client.pos, client.yaw),
+            self.seed,
+            id,
+            self.game_time,
+        );
         if self.game_mode == GameMode::Survival {
             client.health.add_exhaustion(40);
         }
         if mob.health == 0 {
             let mob = self.mobs.remove(&id).unwrap();
-            self.drop_mob_loot(id, mob);
+            self.drop_mob_loot(id, mob, false);
         } else {
-            let packet = S2C::MobHurt { id }.encode();
-            for (&viewer, client) in &self.clients {
-                if client.visible_mobs.contains_key(&id) {
-                    self.outbox.push((viewer, packet.clone()));
-                }
+            self.send_mob_hurt(id);
+        }
+    }
+
+    fn send_mob_hurt(&mut self, id: u32) {
+        let packet = S2C::MobHurt { id }.encode();
+        for (&viewer, client) in &self.clients {
+            if client.visible_mobs.contains_key(&id) {
+                self.outbox.push((viewer, packet.clone()));
             }
         }
     }

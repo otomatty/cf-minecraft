@@ -1,22 +1,34 @@
 //! Transient animals and their deterministic spawning and movement.
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use jmath::sin_table::{cos, sin};
 use physics::{BlockWorld, CollisionWorld, Input, Player};
 pub use protocol::MobKind;
-use protocol::S2C;
-use world::{blocks, items, Fnv64, World, HEIGHT, MIN_Y};
+use protocol::{DeathCause, S2C};
+use world::{blocks, items, smelting, Fnv64, World, HEIGHT, MIN_Y};
 
-use crate::{health::VOID_Y, Server, MAX_REACH};
+use crate::{
+    health::{
+        block_at, hash_height, interval, track_fall, LAVA_DAMAGE, LAVA_FEET_OFFSET, LAVA_INTERVAL,
+        SUFFOCATION_DAMAGE, SUFFOCATION_INTERVAL, VOID_Y,
+    },
+    Server, MAX_REACH,
+};
 
 const COW_WIDTH: f64 = 0.9;
 const COW_HEIGHT: f64 = 1.3;
+const COW_HEAD_OFFSET: f64 = 1.1;
 const COW_HEALTH: u8 = 10;
 const HURT_TICKS: u8 = 10;
 const LOOT_SALT: u64 = 7;
 const WALK_FORWARD: f32 = 0.5;
 const WALK_CHANCE: u64 = 120;
 const WALK_TICKS: u8 = 100;
+const FLEE_TICKS: u8 = 60;
+const FLEE_FORWARD: f32 = 0.75;
+const FLEE_DISTANCE_SALT: u64 = 20;
+const FLEE_DIRECTION_SALT: u64 = 21;
 const STOP_DISTANCE_SQUARED: f64 = 0.5 * 0.5;
 const PROBE_DISTANCE: f64 = 0.7;
 const SPAWN_INTERVAL: i64 = 400;
@@ -26,6 +38,11 @@ const LOCAL_LIMIT: usize = 8;
 enum Wander {
     Idle,
     Walking {
+        target: [f64; 2],
+        ticks_left: u8,
+        blocked: u8,
+    },
+    Fleeing {
         target: [f64; 2],
         ticks_left: u8,
         blocked: u8,
@@ -41,6 +58,10 @@ pub struct Mob {
     pub hurt_ticks: u8,
     body: Player,
     ai: Wander,
+    fall_start_y: Option<f64>,
+    suffocation_ticks: u8,
+    lava_ticks: u8,
+    last_dry_pos: [f64; 3],
 }
 
 impl Mob {
@@ -53,6 +74,10 @@ impl Mob {
             hurt_ticks: 0,
             body: Player::with_size(pos, COW_WIDTH, COW_HEIGHT),
             ai: Wander::Idle,
+            fall_start_y: None,
+            suffocation_ticks: 0,
+            lava_ticks: 0,
+            last_dry_pos: pos,
         }
     }
 
@@ -74,14 +99,23 @@ impl Mob {
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
     }
 
-    pub(crate) fn hurt(&mut self, world: &World, damage: u8, attacker: [f64; 3], yaw: f32) {
-        self.health = self.health.saturating_sub(damage);
-        self.hurt_ticks = HURT_TICKS;
-        self.ai = Wander::Idle;
+    pub(crate) fn hurt(
+        &mut self,
+        world: &World,
+        damage: u8,
+        (attacker, yaw): ([f64; 3], f32),
+        seed: i64,
+        id: u32,
+        time: i64,
+    ) {
+        if !self.take_damage(damage) || self.health == 0 {
+            return;
+        }
 
         let [x, _, z] = self.pos();
         let (dx, dz) = (x - attacker[0], z - attacker[2]);
-        let (dx, dz) = if dx == 0.0 && dz == 0.0 {
+        let same_position = dx == 0.0 && dz == 0.0;
+        let (dx, dz) = if same_position {
             // Reduce oversized reported angles before indexing the sine table.
             let yaw = f64::from(yaw);
             let degrees = (yaw - (yaw / 360.0).floor() * 360.0).clamp(0.0, 360.0);
@@ -93,7 +127,11 @@ impl Mob {
         // Scale the components first so that very small offsets do not underflow.
         let largest = dx.abs().max(dz.abs());
         let (dx, dz) = (dx / largest, dz / largest);
-        let scale = 0.4 / (dx * dx + dz * dz).sqrt();
+        let length = (dx * dx + dz * dz).sqrt();
+        let away = (!same_position).then(|| [dx / length, dz / length]);
+        self.start_fleeing(seed, id, time, away);
+
+        let scale = 0.4 / length;
         self.body.velocity[0] = dx * scale;
         self.body.velocity[2] = dz * scale;
         if self.body.is_grounded(&cow_collisions(world)) {
@@ -101,14 +139,97 @@ impl Mob {
         }
     }
 
-    fn stop(&mut self) {
-        self.ai = Wander::Idle;
+    fn take_damage(&mut self, damage: u8) -> bool {
+        if damage == 0 || self.hurt_ticks != 0 {
+            return false;
+        }
+        self.health = self.health.saturating_sub(damage);
+        self.hurt_ticks = HURT_TICKS;
+        true
+    }
+
+    fn start_fleeing(&mut self, seed: i64, id: u32, time: i64, away: Option<[f64; 2]>) {
+        self.ai = Wander::Fleeing {
+            target: flee_target(self.pos(), seed, id, time, away),
+            ticks_left: FLEE_TICKS,
+            blocked: 0,
+        };
+    }
+
+    fn stop_horizontal(&mut self) {
         self.body.velocity[0] = 0.0;
         self.body.velocity[2] = 0.0;
     }
 
-    fn tick(&mut self, world: &World, seed: i64, id: u32, time: i64) {
+    fn stop(&mut self) {
+        self.ai = Wander::Idle;
+        self.stop_horizontal();
+    }
+
+    fn tick(&mut self, world: &World, seed: i64, id: u32, time: i64) -> Option<DeathCause> {
         self.age = self.age.saturating_add(1);
+        let before = self.pos();
+        let turn = self.move_body(world, seed, id, time);
+        if self.pos()[1] < VOID_Y {
+            return None;
+        }
+
+        let damage = self.environment_damage(world, before);
+        if damage.is_some() {
+            if self.health != 0 {
+                self.start_fleeing(seed, id, time, None);
+            }
+        } else if turn {
+            let new_target = flee_target(self.pos(), seed, id, time, None);
+            if let Wander::Fleeing { target, .. } = &mut self.ai {
+                *target = new_target;
+            }
+        }
+        damage
+    }
+
+    fn environment_damage(&mut self, world: &World, before: [f64; 3]) -> Option<DeathCause> {
+        let pos = self.pos();
+        let collisions = cow_collisions(world);
+        let grounded = self.body.is_grounded(&collisions);
+        let fall = track_fall(world, before, pos, &mut self.fall_start_y, grounded);
+        let mut cause = None;
+        if self.take_damage(fall) {
+            cause = Some(DeathCause::Fall);
+            if self.health == 0 {
+                return cause;
+            }
+        }
+
+        let head_offset = match self.kind {
+            MobKind::Cow => COW_HEAD_OFFSET,
+        };
+        let head = block_at(world, pos, head_offset);
+        if interval(
+            &mut self.suffocation_ticks,
+            head.is_some_and(blocks::is_full_opaque_cube),
+            SUFFOCATION_INTERVAL,
+        ) && self.take_damage(SUFFOCATION_DAMAGE)
+        {
+            cause = Some(DeathCause::Suffocation);
+            if self.health == 0 {
+                return cause;
+            }
+        }
+
+        let in_lava = head.is_some_and(blocks::is_lava)
+            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
+        if !in_lava && grounded && has_loot_support(world, &collisions, pos) {
+            self.last_dry_pos = pos;
+        }
+        if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) && self.take_damage(LAVA_DAMAGE) {
+            cause = Some(DeathCause::Lava);
+        }
+        cause
+    }
+
+    // Return whether to pick a new flee target after checking for damage.
+    fn move_body(&mut self, world: &World, seed: i64, id: u32, time: i64) -> bool {
         let before = self.pos();
         let [x, y, z] = before;
         let collisions = cow_collisions(world);
@@ -116,7 +237,7 @@ impl Mob {
             jump: physics::in_water(&collisions, before),
             ..Input::default()
         };
-        if self.ai == Wander::Idle && self.hurt_ticks == 0 {
+        if self.ai == Wander::Idle {
             let random = sample(seed, id, time, 0);
             if random.is_multiple_of(WALK_CHANCE) {
                 let [dx, dz] = direction(sample(seed, id, time, 1));
@@ -130,68 +251,104 @@ impl Mob {
         }
 
         let idle_input = input;
+        let fleeing = matches!(self.ai, Wander::Fleeing { .. });
+        let knockback = fleeing && self.hurt_ticks == HURT_TICKS;
+        let movement = match self.ai {
+            Wander::Walking { target, .. } => Some((target, WALK_FORWARD)),
+            Wander::Fleeing { target, .. } if !knockback => Some((target, FLEE_FORWARD)),
+            _ => None,
+        };
+        let mut turn = false;
         let mut step_jump = false;
-        if let Wander::Walking { target, .. } = self.ai {
+        if let Some((target, forward)) = movement {
             let dx = target[0] - x;
             let dz = target[1] - z;
             let distance_squared = dx * dx + dz * dz;
-            if distance_squared <= STOP_DISTANCE_SQUARED {
-                self.stop();
+            let jump = if distance_squared <= STOP_DISTANCE_SQUARED {
+                None
             } else {
                 let scale = PROBE_DISTANCE / distance_squared.sqrt();
                 let ahead = [x + dx * scale, y, z + dz * scale];
-                if let Some(jump) = safe_ahead(world, &collisions, ahead) {
-                    self.yaw = heading(dx, dz);
-                    input.yaw = self.yaw;
-                    input.forward = WALK_FORWARD;
-                    step_jump = jump;
-                    input.jump |= jump;
-                } else {
-                    self.stop();
-                }
+                safe_ahead(world, &collisions, before, ahead)
+            };
+            if let Some(jump) = jump {
+                self.yaw = heading(dx, dz);
+                input.yaw = self.yaw;
+                input.forward = forward;
+                step_jump = jump;
+                input.jump |= jump;
+            } else if fleeing {
+                self.stop_horizontal();
+                turn = true;
+            } else {
+                self.stop();
             }
         }
 
         let was_rising = !self.body.on_ground && self.body.velocity[1] > 0.0;
         let mut next = self.body;
         next.tick(input, &collisions);
-        if input.forward != 0.0 && touches_lava(world, next.position) {
+        if input.forward != 0.0 && enters_lava(world, before, next.position) {
             // Horizontal momentum can differ from the intended heading when turning.
-            self.stop();
+            if fleeing {
+                self.stop_horizontal();
+                turn = true;
+            } else {
+                self.stop();
+            }
             self.body.tick(idle_input, &collisions);
         } else {
             self.body = next;
         }
-        if let Wander::Walking {
-            target,
-            ticks_left,
-            blocked,
-        } = self.ai
-        {
-            // A step jump can take several ticks at the wall.
-            // Check horizontal progress every tick while swimming.
-            let jumping = !self.body.in_water
-                && !self.body.on_ground
-                && (step_jump || was_rising || self.body.velocity[1] > 0.0);
-            let blocked = if !jumping && distance_squared(before, self.pos()) < 0.01 * 0.01 {
-                blocked + 1
-            } else {
-                0
-            };
-            if ticks_left == 1
-                || blocked == 2
-                || distance_squared(self.pos(), [target[0], 0.0, target[1]])
-                    <= STOP_DISTANCE_SQUARED
-            {
-                self.stop();
-            } else {
-                self.ai = Wander::Walking {
-                    target,
-                    ticks_left: ticks_left - 1,
-                    blocked,
-                };
-            }
+
+        if knockback {
+            return false;
         }
+        let (target, ticks_left, blocked) = match self.ai {
+            Wander::Idle => return false,
+            Wander::Walking {
+                target,
+                ticks_left,
+                blocked,
+            }
+            | Wander::Fleeing {
+                target,
+                ticks_left,
+                blocked,
+            } => (target, ticks_left, blocked),
+        };
+        // A step jump can take several ticks at the wall.
+        // Check horizontal progress every tick while swimming.
+        let jumping = !self.body.in_water
+            && !self.body.on_ground
+            && (step_jump || was_rising || self.body.velocity[1] > 0.0);
+        let blocked = if !jumping && distance_squared(before, self.pos()) < 0.01 * 0.01 {
+            blocked + 1
+        } else {
+            0
+        };
+        let arrived =
+            distance_squared(self.pos(), [target[0], 0.0, target[1]]) <= STOP_DISTANCE_SQUARED;
+        if ticks_left <= 1 || (!fleeing && (blocked == 2 || arrived)) {
+            self.stop();
+            return false;
+        }
+
+        if fleeing {
+            turn |= blocked == 2 || arrived;
+            self.ai = Wander::Fleeing {
+                target,
+                ticks_left: ticks_left - 1,
+                blocked: if turn { 0 } else { blocked },
+            };
+        } else {
+            self.ai = Wander::Walking {
+                target,
+                ticks_left: ticks_left - 1,
+                blocked,
+            };
+        }
+        turn
     }
 
     fn hash_into(&self, h: &mut Fnv64) {
@@ -212,14 +369,29 @@ impl Mob {
                 target,
                 ticks_left,
                 blocked,
+            }
+            | Wander::Fleeing {
+                target,
+                ticks_left,
+                blocked,
             } => {
-                h.u8(1);
+                h.u8(if matches!(self.ai, Wander::Walking { .. }) {
+                    1
+                } else {
+                    2
+                });
                 for v in target {
                     h.bytes(&v.to_bits().to_be_bytes());
                 }
                 h.u8(ticks_left);
                 h.u8(blocked);
             }
+        }
+        hash_height(h, self.fall_start_y);
+        h.u8(self.suffocation_ticks);
+        h.u8(self.lava_ticks);
+        for v in self.last_dry_pos {
+            h.bytes(&v.to_bits().to_be_bytes());
         }
     }
 }
@@ -241,12 +413,32 @@ fn cow_collisions(world: &World) -> impl CollisionWorld + '_ {
     })
 }
 
+fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
+    let [bx, by, bz] = [x, y - 0.01, z].map(|v| v.floor() as i32);
+    if world.get_block(bx, by, bz).is_none_or(blocks::is_lava) {
+        return false;
+    }
+    // The cow's footprint can stay grounded while its center is over an edge.
+    let mut supported = false;
+    collisions.collision_boxes(bx, by, bz, &mut |bounds| {
+        supported |= bounds.max[1] <= y
+            && (bounds.min[0]..bounds.max[0]).contains(&x)
+            && (bounds.min[2]..bounds.max[2]).contains(&z);
+    });
+    supported
+}
+
 /// None means stop. A solid block at foot level can ask physics to jump.
-fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) -> Option<bool> {
+fn safe_ahead(
+    world: &World,
+    collisions: &impl CollisionWorld,
+    before: [f64; 3],
+    pos: [f64; 3],
+) -> Option<bool> {
     let [x, y, z] = pos.map(|v| v.floor() as i32);
     let foot = world.get_block(x, y, z)?;
     let below = world.get_block(x, y - 1, z)?;
-    if blocks::is_lava(below) || touches_lava(world, pos) {
+    if blocks::is_lava(below) || enters_lava(world, before, pos) {
         return None;
     }
     if blocks::is_water(foot) || blocks::is_water(below) {
@@ -276,7 +468,8 @@ fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) ->
     let cutoff = pos[1] - 4.0;
     for floor in (y - 5..=y).rev() {
         let state = world.get_block(x, floor, z)?;
-        if blocks::is_lava(state) {
+        // Lava at foot level was already checked against the cow's previous bounds.
+        if floor < y && blocks::is_lava(state) {
             return None;
         }
         if (blocks::is_water(state) && f64::from(floor + 1) > cutoff)
@@ -288,13 +481,32 @@ fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) ->
     None
 }
 
-fn touches_lava(world: &World, [x, y, z]: [f64; 3]) -> bool {
+fn body_cells([x, y, z]: [f64; 3]) -> [RangeInclusive<i32>; 3] {
     let half = COW_WIDTH / 2.0;
-    ((x - half).floor() as i32..=(x + half).floor() as i32).any(|x| {
-        ((z - half).floor() as i32..=(z + half).floor() as i32).any(|z| {
-            (y.floor() as i32..=(y + COW_HEIGHT).floor() as i32)
-                .any(|y| world.get_block(x, y, z).is_some_and(blocks::is_lava))
-        })
+    [
+        (x - half).floor() as i32..=(x + half).floor() as i32,
+        y.floor() as i32..=(y + COW_HEIGHT).floor() as i32,
+        (z - half).floor() as i32..=(z + half).floor() as i32,
+    ]
+}
+
+fn lava_cells(world: &World, pos: [f64; 3]) -> impl Iterator<Item = [i32; 3]> + '_ {
+    let [xs, ys, zs] = body_cells(pos);
+    xs.flat_map(move |x| {
+        let ys = ys.clone();
+        zs.clone()
+            .flat_map(move |z| ys.clone().map(move |y| [x, y, z]))
+    })
+    .filter(|&[x, y, z]| world.get_block(x, y, z).is_some_and(blocks::is_lava))
+}
+
+fn enters_lava(world: &World, before: [f64; 3], after: [f64; 3]) -> bool {
+    let previous = body_cells(before);
+    lava_cells(world, after).any(|cell| {
+        !previous
+            .iter()
+            .zip(cell)
+            .all(|(range, coordinate)| range.contains(&coordinate))
     })
 }
 
@@ -307,6 +519,12 @@ fn distance_squared([x, _, z]: [f64; 3], [other_x, _, other_z]: [f64; 3]) -> f64
 fn direction(random: u64) -> [f64; 2] {
     let radians = (random & 0xffff) as f32 * (std::f32::consts::TAU / 65536.0);
     [f64::from(sin(radians)), f64::from(cos(radians))]
+}
+
+fn flee_target(pos: [f64; 3], seed: i64, id: u32, time: i64, away: Option<[f64; 2]>) -> [f64; 2] {
+    let [dx, dz] = away.unwrap_or_else(|| direction(sample(seed, id, time, FLEE_DIRECTION_SALT)));
+    let range = 5.0 + (sample(seed, id, time, FLEE_DISTANCE_SALT) % 301) as f64 / 100.0;
+    [pos[0] + dx * range, pos[2] + dz * range]
 }
 
 /// Approximate atan in the first octant, then reflect to the physics yaw convention.
@@ -375,15 +593,20 @@ impl Server {
         &self.mobs
     }
 
-    pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob) {
+    pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob, burned: bool) {
         let loot = match mob.kind {
             MobKind::Cow => items::COW_LOOT,
         };
-        let [x, y, z] = mob.pos();
+        let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
         for (index, &(item, min, max)) in loot.iter().enumerate() {
             let range = u64::from(max) - u64::from(min) + 1;
             let roll = sample(self.seed, id, self.game_time, LOOT_SALT + index as u64);
             let mut count = min + (roll % range) as u8;
+            let item = if burned {
+                smelting::output(item).unwrap_or(item)
+            } else {
+                item
+            };
             let max_stack = items::info(item).unwrap().max_stack;
             while count != 0 {
                 let stack = count.min(max_stack);
@@ -456,9 +679,21 @@ impl Server {
                 self.spawn_herd(id, pos, &players);
             }
         }
+        let mut hits = Vec::new();
         for (&id, mob) in &mut self.mobs {
-            if self.world.chunks.contains_key(&mob.chunk()) && mob.pos()[1] >= VOID_Y {
-                mob.tick(&self.world, self.seed, id, self.game_time);
+            if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
+                continue;
+            }
+            if let Some(cause) = mob.tick(&self.world, self.seed, id, self.game_time) {
+                hits.push((id, cause));
+            }
+        }
+        for (id, cause) in hits {
+            if self.mobs[&id].health == 0 {
+                let mob = self.mobs.remove(&id).unwrap();
+                self.drop_mob_loot(id, mob, cause == DeathCause::Lava);
+            } else {
+                self.send_mob_hurt(id);
             }
         }
         self.mobs.retain(|_, mob| {
@@ -934,8 +1169,8 @@ mod tests {
         let mut cow = walking();
         cow.body.on_ground = false; // A newly spawned cow can be supported before its first landing.
         cow.body.velocity = [-0.1, -0.2, -0.3];
-        cow.hurt(&world, 1, [-0.5, 1.0, -2.0], 0.0);
-        assert_eq!(cow.ai, Wander::Idle);
+        cow.hurt(&world, 1, ([-0.5, 1.0, -2.0], 0.0), 5, 7, 1);
+        assert!(matches!(cow.ai, Wander::Fleeing { ticks_left: 60, .. }));
         let [vx, vy, vz] = cow.body.velocity;
         assert!((vx - 0.24).abs() < 1e-12);
         assert!((vz - 0.32).abs() < 1e-12);
@@ -970,10 +1205,11 @@ mod tests {
         assert_eq!(server.mobs[&id], cow);
 
         let mut cow = Mob::cow([0.0; 3]);
-        cow.hurt(&world, 1, [0.0; 3], f32::MIN);
+        cow.hurt(&world, 1, ([0.0; 3], f32::MIN), 5, 7, 1);
         let [vx, _, vz] = cow.body.velocity;
         assert!((vx * vx + vz * vz - 0.16).abs() < 1e-12);
-        cow.hurt(&world, 1, [-f64::MIN_POSITIVE, 0.0, 0.0], 0.0);
+        let mut cow = Mob::cow([0.0; 3]);
+        cow.hurt(&world, 1, ([-f64::MIN_POSITIVE, 0.0, 0.0], 0.0), 5, 7, 1);
         assert_eq!(cow.body.velocity[0], 0.4);
     }
 
@@ -1015,6 +1251,507 @@ mod tests {
         assert_eq!(run(GameMode::Creative, 2), count);
         assert_eq!(run(GameMode::Survival, 2), count);
         assert_eq!(run(GameMode::Survival, 50), count);
+    }
+
+    fn flee_state(cow: &Mob) -> ([f64; 2], u8, u8) {
+        match cow.ai {
+            Wander::Fleeing {
+                target,
+                ticks_left,
+                blocked,
+            } => (target, ticks_left, blocked),
+            ai => panic!("expected fleeing, got {ai:?}"),
+        }
+    }
+
+    #[test]
+    fn fall_damage_starts_at_four_blocks_and_water_breaks_the_fall() {
+        let dry = arena(16);
+        let mut wet = arena(16);
+        wet.set_block(2, 1, 2, blocks::WATER);
+        let time = (1..)
+            .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
+            .unwrap();
+        for (world, start, damage, water) in [
+            (&dry, 5.0, 1, false),
+            (&dry, 4.0, 0, false),
+            (&wet, 7.25, 0, true),
+        ] {
+            let mut cow = Mob::cow([2.5, start, 2.5]);
+            let cause = (0..40)
+                .find_map(|_| {
+                    let cause = cow.tick(world, 5, 7, time);
+                    let landed = if water {
+                        block_at(world, cow.pos(), 0.0).is_some_and(blocks::is_water)
+                    } else {
+                        cow.body.is_grounded(&cow_collisions(world))
+                    };
+                    landed.then_some(cause)
+                })
+                .expect("cow reached the floor or water");
+            assert_eq!(cow.health, COW_HEALTH - damage);
+            assert_eq!(cow.fall_start_y, None);
+            if damage == 0 {
+                assert_eq!(cause, None);
+                assert_eq!(cow.hurt_ticks, 0);
+                assert_eq!(cow.ai, Wander::Idle);
+            } else {
+                assert_eq!(cause, Some(DeathCause::Fall));
+                assert_eq!(cow.hurt_ticks, HURT_TICKS);
+                assert_eq!(flee_state(&cow).1, FLEE_TICKS);
+            }
+            if !water {
+                assert_eq!(cow.pos()[1], 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn immune_landing_consumes_the_fall_without_delayed_damage() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let cow = server.mobs.get_mut(&id).unwrap();
+        cow.body.position[1] = 1.25;
+        cow.body.velocity[1] = -0.5;
+        cow.fall_start_y = Some(6.0);
+        cow.hurt_ticks = HURT_TICKS;
+        server.tick();
+        let cow = &server.mobs[&id];
+        assert_eq!(cow.pos()[1], 1.0);
+        assert_eq!(cow.fall_start_y, None);
+        assert_eq!(cow.health, COW_HEALTH);
+        for _ in 1..HURT_TICKS {
+            server.tick();
+        }
+        assert_eq!(server.mobs[&id].health, COW_HEALTH);
+    }
+
+    #[test]
+    fn lava_at_feet_or_head_burns_loot_after_three_damage_intervals() {
+        let run = |y, lava| {
+            let (mut server, id) = combat(GameMode::Creative);
+            let dry = [5.5, 1.0, 8.5];
+            let trapped = server.mobs[&id].pos();
+            server.mobs.get_mut(&id).unwrap().body.position = dry;
+            server.tick();
+            assert_eq!(server.mobs[&id].last_dry_pos, dry);
+            server.mobs.get_mut(&id).unwrap().body.position = trapped;
+            // The center is the only open column, keeping the cow inside the lava.
+            server.world.set_block(7, y, 5, lava);
+            for (x, z) in [(6, 5), (8, 5), (7, 4), (7, 6)] {
+                for y in 1..=3 {
+                    server.world.set_block(x, y, z, blocks::STONE);
+                }
+            }
+            server.connect_at(2, false, Some([1024.5, 1.0, 1024.5]), None);
+            server.clients.get_mut(&2).unwrap().joined = true;
+            for tick in 1..=30 {
+                assert!(!server.clients[&2].visible_mobs.contains_key(&id));
+                server.tick();
+                let packets: Vec<_> = server
+                    .take_outbox()
+                    .into_iter()
+                    .map(|(client, bytes)| (client, S2C::decode(&bytes).unwrap()))
+                    .collect();
+                let hurts: Vec<_> = packets
+                    .iter()
+                    .filter(|(_, packet)| *packet == S2C::MobHurt { id })
+                    .collect();
+                if tick < 30 {
+                    assert_eq!(server.mobs[&id].health, 10 - 4 * (tick / 10), "tick {tick}");
+                    if tick % 10 == 0 {
+                        assert_eq!(hurts, [&(1, S2C::MobHurt { id })]);
+                        let cow = &server.mobs[&id];
+                        assert_eq!(cow.hurt_ticks, HURT_TICKS);
+                        assert_eq!(flee_state(cow).1, FLEE_TICKS);
+                        assert_eq!([cow.body.velocity[0], cow.body.velocity[2]], [0.0; 2]);
+                    } else {
+                        assert!(hurts.is_empty());
+                    }
+                    assert!(server.entities.is_empty());
+                } else {
+                    assert!(!server.mobs.contains_key(&id));
+                    assert!(hurts.is_empty());
+                    assert!(packets.contains(&(1, S2C::EntityRemove { id })));
+                }
+            }
+            assert_eq!(server.entities.len(), 1);
+            let (&drop_id, drop) = server.entities.iter().next().unwrap();
+            assert_eq!(drop.item, items::by_name("cooked_beef").unwrap());
+            assert!((1..=3).contains(&drop.count));
+            let [x, y, z] = dry;
+            assert_eq!(drop.pos, [x, y + 0.65, z]);
+            assert_eq!(drop.pickup_delay, 10);
+            let stack = crate::Stack {
+                item: drop.item,
+                count: drop.count,
+            };
+            for _ in 0..10 {
+                server.tick();
+            }
+            let drop = &server.entities[&drop_id];
+            assert_eq!(drop.pickup_delay, 0);
+            assert_eq!((drop.item, drop.count), (stack.item, stack.count));
+
+            server.clients.get_mut(&1).unwrap().pos = dry;
+            server.tick();
+            assert!(server.entities.is_empty());
+            assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
+            stack.count
+        };
+        let count = run(1, blocks::LAVA);
+        assert_eq!(run(1, blocks::LAVA), count);
+        assert_eq!(run(2, blocks::LAVA), count);
+        assert_eq!(run(1, blocks::FLOWING_LAVA), count);
+    }
+
+    #[test]
+    fn lava_death_after_a_fall_drops_loot_on_the_ledge() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let ledge = [7.95, 8.0, 5.5];
+        // A lava-filled shaft with a ledge to the west and a higher wall to the east.
+        server.world.set_block(8, 1, 5, blocks::LAVA);
+        for (x, z) in [(7, 5), (9, 5), (8, 4), (8, 6)] {
+            for y in 1..=7 {
+                server.world.set_block(x, y, z, blocks::STONE);
+            }
+        }
+        for y in 8..=9 {
+            server.world.set_block(9, y, 5, blocks::STONE);
+        }
+        server.mobs.get_mut(&id).unwrap().body.position = ledge;
+        server.tick();
+        assert_eq!(server.mobs[&id].last_dry_pos, ledge);
+
+        server.mobs.get_mut(&id).unwrap().body.velocity[0] = 0.3;
+        server.tick();
+        let cow = &server.mobs[&id];
+        // The cow still overlaps the ledge, but loot centered here would miss it.
+        assert!(cow.pos()[0] > 8.125);
+        assert!(cow.body.is_grounded(&cow_collisions(&server.world)));
+        assert!((0..80).any(|_| {
+            server.tick();
+            !server.mobs.contains_key(&id)
+        }));
+
+        assert_eq!(server.entities.len(), 1);
+        let (&drop_id, drop) = server.entities.iter().next().unwrap();
+        let stack = crate::Stack {
+            item: drop.item,
+            count: drop.count,
+        };
+        assert_eq!(stack.item, items::by_name("cooked_beef").unwrap());
+        assert!((1..=3).contains(&stack.count));
+        assert_eq!(drop.pos, [ledge[0], ledge[1] + 0.65, ledge[2]]);
+        assert_eq!(drop.pickup_delay, 10);
+        for _ in 0..10 {
+            server.tick();
+        }
+        assert_eq!(server.entities[&drop_id].pickup_delay, 0);
+
+        server.clients.get_mut(&1).unwrap().pos = ledge;
+        server.tick();
+        assert!(server.entities.is_empty());
+        assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
+    }
+
+    #[test]
+    fn lava_uses_the_feet_offset_above_the_position() {
+        let mut world = arena(0);
+        world.set_block(2, 1, 2, blocks::LAVA);
+        let mut cow = Mob::cow([2.5, 0.95, 2.5]);
+        cow.lava_ticks = LAVA_INTERVAL - 1;
+        let time = (1..)
+            .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
+            .unwrap();
+        assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
+        assert_eq!(cow.health, COW_HEALTH - LAVA_DAMAGE);
+        assert_eq!(block_at(&world, cow.pos(), 0.0), Some(blocks::AIR));
+        assert_eq!(
+            block_at(&world, cow.pos(), COW_HEAD_OFFSET),
+            Some(blocks::AIR)
+        );
+    }
+
+    #[test]
+    fn lava_damage_makes_a_cow_flee_from_an_isolated_lava_cell() {
+        let mut world = arena(16);
+        world.set_block(7, 1, 7, blocks::LAVA);
+        let mut cow = Mob::cow([7.5, 1.0, 7.5]);
+        cow.lava_ticks = LAVA_INTERVAL - 1;
+        let time = (1..)
+            .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
+            .unwrap();
+        assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
+        assert_eq!(flee_state(&cow).1, FLEE_TICKS);
+        let escaped = (time + 1..=time + i64::from(FLEE_TICKS)).any(|tick| {
+            cow.hurt_ticks = cow.hurt_ticks.saturating_sub(1);
+            cow.tick(&world, 5, 7, tick);
+            lava_cells(&world, cow.pos()).next().is_none()
+        });
+        assert!(escaped);
+        assert!(cow.health > 0);
+        assert_eq!(cow.last_dry_pos, cow.pos());
+    }
+
+    fn cover_cow(server: &mut Server, state: u16) {
+        for x in 2..14 {
+            for z in 2..14 {
+                server.world.set_block(x, 2, z, state);
+            }
+        }
+    }
+
+    #[test]
+    fn suffocation_requires_a_full_opaque_cube_at_the_head() {
+        for (head, damage) in [
+            (blocks::STONE, 1),
+            (blocks::OAK_SLAB + 1, 0),
+            (blocks::GLASS, 0),
+        ] {
+            let (mut server, id) = combat(GameMode::Creative);
+            cover_cow(&mut server, head);
+            for tick in 1..=20 {
+                server.tick();
+                assert_eq!(
+                    server.mobs[&id].health,
+                    10 - damage * (tick / 10),
+                    "tick {tick}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn immunity_discards_due_hazard_damage_and_the_interval_keeps_running() {
+        for (head, period, damage) in [
+            (blocks::STONE, SUFFOCATION_INTERVAL, SUFFOCATION_DAMAGE),
+            (blocks::LAVA, LAVA_INTERVAL, LAVA_DAMAGE),
+        ] {
+            let (mut server, id) = combat(GameMode::Creative);
+            cover_cow(&mut server, head);
+            let cow = server.mobs.get_mut(&id).unwrap();
+            cow.hurt_ticks = HURT_TICKS;
+            cow.suffocation_ticks = period - 1;
+            cow.lava_ticks = period - 1;
+            server.tick();
+            assert_eq!(
+                (server.mobs[&id].health, server.mobs[&id].hurt_ticks),
+                (10, 9)
+            );
+            assert_eq!(
+                (
+                    server.mobs[&id].suffocation_ticks,
+                    server.mobs[&id].lava_ticks
+                ),
+                (0, 0)
+            );
+            for _ in 1..period {
+                server.tick();
+                assert_eq!(server.mobs[&id].health, 10);
+            }
+            server.tick();
+            assert_eq!(
+                (server.mobs[&id].health, server.mobs[&id].hurt_ticks),
+                (10 - damage, 10)
+            );
+        }
+    }
+
+    #[test]
+    fn falling_takes_priority_over_suffocation_and_death_drops_raw_beef() {
+        let (mut server, id) = combat(GameMode::Creative);
+        cover_cow(&mut server, blocks::STONE);
+        let cow = server.mobs.get_mut(&id).unwrap();
+        cow.fall_start_y = Some(6.0);
+        cow.suffocation_ticks = SUFFOCATION_INTERVAL - 1;
+        server.tick();
+        let cow = &server.mobs[&id];
+        assert_eq!(cow.health, 8);
+        assert_eq!(cow.suffocation_ticks, 0);
+        let cow = server.mobs.get_mut(&id).unwrap();
+        cow.health = 1;
+        cow.hurt_ticks = 0;
+        cow.suffocation_ticks = SUFFOCATION_INTERVAL - 1;
+        server.tick();
+        assert!(!server.mobs.contains_key(&id));
+        assert_eq!(server.entities.len(), 1);
+        assert_eq!(
+            server.entities.values().next().unwrap().item,
+            items::by_name("raw_beef").unwrap()
+        );
+    }
+
+    #[test]
+    fn attack_flees_away_faster_than_walking_for_sixty_ticks_and_repeats() {
+        let run = || {
+            let (mut server, id) = combat(GameMode::Creative);
+            let start = server.mobs[&id].pos();
+            attack(&mut server, id);
+            server.tick();
+            let cow = &server.mobs[&id];
+            let (target, ticks_left, _) = flee_state(cow);
+            assert_eq!(ticks_left, 60);
+            assert_eq!(target[1], start[2]);
+            assert!((5.0..=8.0).contains(&(target[0] - start[0])));
+            assert_eq!(cow.pos(), [start[0] + 0.4, start[1] + 0.36, start[2]]);
+
+            let mut walker = cow.clone();
+            walker.ai = Wander::Walking {
+                target,
+                ticks_left: WALK_TICKS,
+                blocked: 0,
+            };
+            let mut route = vec![cow.pos()];
+            for elapsed in 1..=60 {
+                let last_walk = walker.pos();
+                walker.tick(&server.world, server.seed, id, server.game_time + 1);
+                let last_flee = server.mobs[&id].pos();
+                server.tick();
+                let cow = &server.mobs[&id];
+                if elapsed < 60 {
+                    assert_eq!(flee_state(cow).1, 60 - elapsed);
+                } else {
+                    assert_eq!(cow.ai, Wander::Idle);
+                }
+                if (18..=22).contains(&elapsed) {
+                    let walk = walker.pos()[0] - last_walk[0];
+                    let flee = cow.pos()[0] - last_flee[0];
+                    assert!((0.10..0.12).contains(&walk), "{walk}");
+                    assert!((0.15..0.17).contains(&flee), "{flee}");
+                }
+                route.push(cow.pos());
+            }
+            route
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn a_second_attack_refreshes_flee_time_and_target() {
+        let (mut server, id) = combat(GameMode::Survival);
+        attack(&mut server, id);
+        server.tick();
+        let first = flee_state(&server.mobs[&id]).0;
+        for _ in 1..HURT_TICKS {
+            server.tick();
+        }
+        assert_eq!(flee_state(&server.mobs[&id]).1, 51);
+
+        let before = server.mobs[&id].pos();
+        let time = server.game_time;
+        attack(&mut server, id);
+        server.tick();
+        let cow = &server.mobs[&id];
+        let (target, ticks_left, _) = flee_state(cow);
+        assert_eq!(cow.health, 8);
+        assert_eq!(ticks_left, 60);
+        assert_ne!(target, first);
+        assert_eq!(
+            target,
+            flee_target(before, server.seed, id, time, Some([1.0, 0.0]))
+        );
+    }
+
+    fn fleeing_toward(target: [f64; 2]) -> Mob {
+        let mut cow = walking();
+        cow.ai = Wander::Fleeing {
+            target,
+            ticks_left: FLEE_TICKS,
+            blocked: 0,
+        };
+        cow
+    }
+
+    #[test]
+    fn fleeing_retargets_before_a_cliff_or_lava() {
+        let cliff = arena(3);
+        let mut lava = arena(16);
+        for x in 0..16 {
+            for z in 3..16 {
+                lava.set_block(x, 1, z, blocks::LAVA);
+            }
+        }
+        for world in [cliff, lava] {
+            let mut cow = fleeing_toward([2.5, 9.0]);
+            let first = flee_state(&cow).0;
+            let mut turned = false;
+            for tick in 1..=19 {
+                cow.tick(&world, 5, 7, tick);
+                assert_eq!(cow.pos()[1], 1.0);
+                assert!(cow.body.is_grounded(&cow_collisions(&world)));
+                assert!(lava_cells(&world, cow.pos()).next().is_none());
+                let (target, left, blocked) = flee_state(&cow);
+                assert_eq!(left, 60 - tick as u8);
+                if !turned && target != first {
+                    assert_eq!(target, flee_target(cow.pos(), 5, 7, tick, None));
+                    assert_eq!(blocked, 0);
+                    assert_eq!([cow.body.velocity[0], cow.body.velocity[2]], [0.0; 2]);
+                    turned = true;
+                }
+            }
+            assert!(turned);
+        }
+    }
+
+    #[test]
+    fn fleeing_rejects_momentum_into_lava_and_retargets_without_moving() {
+        let mut world = arena(16);
+        world.set_block(2, 1, 3, blocks::LAVA);
+        let mut cow = fleeing_toward([9.0, 2.0]);
+        cow.body.velocity[2] = 0.8;
+        let before = cow.pos();
+        cow.tick(&world, 5, 7, 1);
+        assert_eq!(cow.pos(), before);
+        assert_eq!(
+            flee_state(&cow),
+            (flee_target(before, 5, 7, 1, None), 59, 0)
+        );
+    }
+
+    #[test]
+    fn fleeing_cow_at_lava_edge_avoids_new_lava_cells() {
+        let mut world = arena(16);
+        world.set_block(2, 1, 2, blocks::LAVA);
+        world.set_block(2, 1, 3, blocks::LAVA);
+        for (target, velocity) in [([2.5, 9.0], 0.0), ([9.0, 2.5], 0.8)] {
+            let mut cow = fleeing_toward(target);
+            cow.body.position = [2.5, 1.0, 2.5];
+            cow.body.velocity[2] = velocity;
+            let before = cow.pos();
+            assert!(lava_cells(&world, before).eq([[2, 1, 2]]));
+            cow.tick(&world, 5, 7, 1);
+            assert_eq!(cow.pos(), before);
+            assert_eq!(
+                flee_state(&cow),
+                (flee_target(before, 5, 7, 1, None), 59, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn fleeing_retargets_after_two_blocked_ticks_or_on_arrival() {
+        let mut world = arena(16);
+        world.set_block(2, 1, 3, blocks::STONE);
+        world.set_block(2, 2, 3, blocks::STONE);
+        let first = [2.5, 9.0];
+        let mut cow = fleeing_toward(first);
+        cow.body.position[2] = 3.0 - COW_WIDTH / 2.0;
+        cow.tick(&world, 5, 7, 1);
+        assert_eq!(flee_state(&cow), (first, 59, 1));
+        cow.tick(&world, 5, 7, 2);
+        assert_eq!(
+            flee_state(&cow),
+            (flee_target(cow.pos(), 5, 7, 2, None), 58, 0)
+        );
+
+        let mut cow = fleeing_toward([2.5, 2.5]);
+        let before = cow.pos();
+        cow.tick(&world, 5, 7, 3);
+        assert_eq!(cow.pos(), before);
+        assert_eq!(
+            flee_state(&cow),
+            (flee_target(before, 5, 7, 3, None), 59, 0)
+        );
     }
 
     #[test]

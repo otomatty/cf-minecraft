@@ -1940,21 +1940,28 @@ async function mobCombat() {
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 0),
 			{ timeout: 60000, polling: 100 },
 		);
-		const { id, hurt } = await spawned.jsonValue();
+		const { id: initialId, hurt } = await spawned.jsonValue();
 		await spawned.dispose();
-		check(hurt === 0, "mobCombat: cow starts unhurt", `id ${id}`);
+		check(hurt === 0, "mobCombat: cow starts unhurt", `id ${initialId}`);
 
 		const blocks = new Map();
+		let targetId = initialId;
 		let lastPosition;
 		let clicks = 0;
 		let removed = false;
-		const deadline = Date.now() + 30000;
+		const timeoutSeconds = 60;
+		const deadline = Date.now() + timeoutSeconds * 1000;
 		while (Date.now() < deadline) {
-			const aim = await page.evaluate(id => {
+			const aim = await page.evaluate(async (id, firstClick) => {
 				const api = window.__mc;
+				const initial = api.stats().mobs.find(mob => mob.id === id);
+				if (!initial) return null;
+				await new Promise(resolve => setTimeout(resolve, 150));
 				const { mobs } = api.stats();
 				const cow = mobs.find(mob => mob.id === id);
 				if (!cow) return null;
+				if (cow.yaw !== initial.yaw
+					|| !cow.position.every((value, axis) => value === initial.position[axis])) return false;
 				const [x, y, z] = cow.position;
 				// At this distance the grass behind the cow is also within the ray's reach.
 				const distance = 2.25, eye = 1.62, body = 0.785;
@@ -1976,10 +1983,13 @@ async function mobCombat() {
 					if (state !== api.stateId("grass_block")) continue;
 					// The local dev server permits setCamera teleports, including in survival.
 					api.setCamera(...origin, yaw, Math.atan2(eye - body, distance) * 180 / Math.PI);
-					return { position: cow.position, block, state };
+					const hurtBefore = firstClick
+						? Object.fromEntries(mobs.filter(mob => mob.kind === 0).map(mob => [mob.id, mob.hurt]))
+						: null;
+					return { position: cow.position, block, state, hurtBefore };
 				}
 				return false;
-			}, id);
+			}, targetId, clicks === 0);
 			if (aim === null) {
 				removed = true;
 				break;
@@ -1999,17 +2009,23 @@ async function mobCombat() {
 				}
 				clicks++;
 				if (clicks === 1) {
-					await page.waitForFunction(id => window.__mc.stats().mobs.some(mob => mob.id === id && mob.hurt > 0),
-						{ timeout: 3000, polling: 50 }, id);
-					check(true, "mobCombat: the first click increases hurt");
+					const hit = await page.waitForFunction(
+						hurtBefore => window.__mc.stats().mobs.find(mob => mob.kind === 0 && mob.hurt > (hurtBefore[mob.id] ?? 0)),
+						{ timeout: 3000, polling: 50 }, aim.hurtBefore,
+					);
+					const cow = await hit.jsonValue();
+					await hit.dispose();
+					targetId = cow.id;
+					lastPosition = cow.position;
+					check(true, "mobCombat: the first click increases hurt", `initial id ${initialId}, hit id ${targetId}`);
 				}
 			}
 			await new Promise(resolve => setTimeout(resolve, 600));
 		}
-		check(removed && clicks > 1, "mobCombat: repeated attacks remove the same cow", `id ${id}, ${clicks} clicks`);
+		check(removed && clicks > 1, "mobCombat: repeated attacks remove the same cow", `id ${targetId}, ${clicks} clicks`);
 		check(blocks.size > 0 && await page.evaluate(blocks => blocks.every(({ block, state }) => window.__mc.getBlock(...block) === state), [...blocks.values()]),
 			"mobCombat: the grass blocks behind the cow are still intact");
-		if (!removed || !lastPosition) throw new Error(`mobCombat: cow ${id} was not defeated within 30 seconds`);
+		if (!removed || !lastPosition) throw new Error(`mobCombat: cow ${targetId} was not defeated within ${timeoutSeconds} seconds`);
 
 		const beef = 62;
 		const dropped = await page.waitForFunction((item, position) => window.__mc.stats().entities.find(entity =>
