@@ -51,12 +51,13 @@ fn registry_matches_pre_generation_snapshot() {
             FLOWING_LAVA,
             FALLING_LAVA,
             OBSIDIAN,
+            WHITE_WOOL,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 69, 70, 71, 74, 75, 76, 14
+            54, 62, 69, 70, 71, 74, 75, 76, 77, 14
         ]
     );
     for state in 0..COUNT {

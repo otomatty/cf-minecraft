@@ -28,6 +28,37 @@ test("pick block finds the same item for both leaves and places persistent leave
 	assert.equal(pickBlockItem(registry[air], items), undefined);
 });
 
+test("white wool is an opaque hand-mined block with a fluffy white texture", () => {
+	const block = registry.find(entry => entry.name === "white_wool");
+	assert.ok(block);
+	assert.equal(block.texture, "white_wool");
+	assert.equal(block.occludes, true);
+	assert.equal(block.model, "cube");
+	assert.equal(block.digTicks, 16);
+	assert.deepEqual(block.faces, Array(6).fill("white_wool"));
+	const item = core.itemRegistry().find(entry => entry.name === "white_wool");
+	assert.equal(item?.block, block.first);
+	assert.equal(item?.texture, null);
+	const pixels = paintTexture("white_wool");
+	assert.notDeepEqual(pixels, paintTexture("missing_wool"));
+	assert.equal(pixels.length, 16 * 16 * 4);
+	let white = 0;
+	for (let i = 0; i < pixels.length; i += 4) {
+		assert.equal(pixels[i + 3], 255);
+		const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+		if (r > 200 && g > 195 && b > 185 && r - b < 40) white++;
+	}
+	assert.ok(white > 200);
+	for (const name of ["raw_mutton", "cooked_mutton"]) {
+		const food = core.itemRegistry().find(entry => entry.name === name);
+		assert.equal(food?.texture, name);
+		assert.equal(food?.block, null);
+		const icon = paintTexture(name);
+		assert.ok(icon.some((value, i) => i % 4 === 3 && value === 0), name);
+		assert.ok(icon.some((value, i) => i % 4 === 3 && value === 255), name);
+	}
+});
+
 test("inventory icons use registered faces and distinguish blocks built from the same material", () => {
 	const atlas = new Map(core.textureNames().map(name => [name, paintTexture(name)]));
 	const missing = paintTexture("missing");
@@ -55,7 +86,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 76);
+	assert.equal(registry.length, 77);
 	assert.equal(id("water"), 13);
 	for (const [i, level] of [1, 2, 3, 4, 5, 6, 7, "falling"].entries()) {
 		const state = id(`flowing_water[level=${level}]`);

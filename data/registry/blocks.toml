@@ -11,7 +11,7 @@ textures = [
   "furnace_front", "furnace_side", "furnace_top",
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
-  "wheat_green", "wheat_ripe", "lava", "obsidian",
+  "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool",
 ]
 legacy_count = 14
 
@@ -433,3 +433,9 @@ drop = "obsidian"
 tool = "pickaxe"
 min_tier = 4
 dig_ticks = 400
+
+[[blocks]]
+name = "white_wool"
+id = 76
+dig_ticks = 16
+texture = "white_wool"
