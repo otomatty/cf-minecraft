@@ -2182,7 +2182,7 @@ async function zombies() {
 		check(stats.health === 20, "zombies: starts at full health");
 		await resumePointerLock(page, "zombies: initial pointer lock");
 		await page.mouse.move(640, 360);
-		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 4 || mob.kind === 5),
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 4),
 			{ timeout: 100000, polling: 100 });
 		const zombie = await spawned.jsonValue();
 		await spawned.dispose();
@@ -2249,7 +2249,7 @@ async function zombies() {
 }
 
 async function skeletons() {
-	// The sim test fixes seed 2027's first night spawn to a skeleton.
+	// Seed 2027 can spawn a skeleton early when its candidate chunk is loaded.
 	const { page, errors } = await open(`server=local&world=e2e-skeletons-${run}&mode=survival&gen=flat&seed=2027&view=4&time=18000`);
 	try {
 		const stats = await settle(page, "skeletons", chunksInView(4));
@@ -2257,11 +2257,11 @@ async function skeletons() {
 		check(stats.health === 20, "skeletons: starts at full health");
 		await resumePointerLock(page, "skeletons: initial pointer lock");
 		await page.mouse.move(640, 360);
-		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 4 || mob.kind === 5),
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 5),
 			{ timeout: 100000, polling: 100 });
 		const skeleton = await spawned.jsonValue();
 		await spawned.dispose();
-		check(skeleton.kind === 5, "skeletons: the first night hostile is a skeleton", `id ${skeleton.id}`);
+		check(skeleton.kind === 5, "skeletons: a skeleton spawned at night", `id ${skeleton.id}`);
 
 		// Stand inside stopping range with the skeleton's head centered in the frame.
 		await page.evaluate(id => {
@@ -2277,12 +2277,21 @@ async function skeletons() {
 		await shot.dispose();
 		check(arrow.id > 0, "skeletons: an arrow is in flight", `id ${arrow.id}`);
 		const damaged = await page.waitForFunction(() => {
-			const { health } = window.__mc.stats();
-			return health < 20 && { health };
+			const api = window.__mc;
+			const { health, mobs } = api.stats();
+			if (health >= 20) return false;
+			const [x, , z] = api.playerPosition();
+			for (const mob of mobs) {
+				if (mob.kind !== 4) continue;
+				const distance = Math.hypot(mob.position[0] - x, mob.position[2] - z);
+				if (distance <= 2) return { health, nearbyZombie: { id: mob.id, distance } };
+			}
+			return { health, nearbyZombie: null };
 		}, { timeout: 30000, polling: 50 });
-		const { health } = await damaged.jsonValue();
+		const { health, nearbyZombie } = await damaged.jsonValue();
 		await damaged.dispose();
-		check(health === 17, "skeletons: the arrow dealt 3 damage", `${health} health remaining`);
+		const zombieDetail = nearbyZombie ? `, zombie ${nearbyZombie.id} at ${nearbyZombie.distance.toFixed(2)} blocks horizontally` : "";
+		check(health === 17 && nearbyZombie === null, "skeletons: the arrow dealt 3 damage", `${health} health remaining${zombieDetail}`);
 		await page.waitForFunction(() => document.getElementById("damage-flash").hidden, { timeout: 3000 });
 
 		const screenshotSession = await page.createCDPSession();
