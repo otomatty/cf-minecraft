@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
-import { bounded, diagnose, shouldDiagnoseRunFailure } from "./e2e-diag.mjs";
+import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
@@ -56,6 +56,7 @@ async function open(query) {
 	page.on("console", (m) => {
 		if (m.type() === "error") errors.push(m.text());
 	});
+	await watchForCrash(page, (message) => errors.push(`page crashed: ${message}`));
 	await page.goto(`${edge}/play.html?${query}`, { waitUntil: "load" });
 	// Pointer lock is only granted to the focused tab.
 	await page.bringToFront();
@@ -111,7 +112,7 @@ async function settle(page, label, chunks) {
 		);
 	} catch (err) {
 		const state = await diagnose(browser, page, label, { edge, shots });
-		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets })}`);
+		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets, crashed: state.crashed })}`);
 		error.diagnosed = true;
 		throw error;
 	}
@@ -1576,6 +1577,51 @@ async function survivalInventory() {
 		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
 		const restored = await settle(page, "survival reload", chunksInView(2));
 		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
+		// The previous play page was stored in the back-forward cache. Going back
+		// restores it, and single-player reloads that page because its sim worker
+		// was stopped on the way into the cache.
+		try {
+			await page.evaluate(() => { history.back(); });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (!/context was destroyed|Execution context was destroyed|Navigating frame was detached/i.test(message)) throw err;
+		}
+		try {
+			await page.waitForFunction(() => {
+				const nav = performance.getEntriesByType("navigation")[0];
+				return nav?.type === "reload" && document.readyState === "complete";
+			}, { timeout: 30000 });
+		} catch (err) {
+			let nav = "unavailable";
+			try { nav = await page.evaluate(() => performance.getEntriesByType("navigation")[0]?.type ?? "missing"); }
+			catch (readErr) { nav = readErr instanceof Error ? readErr.message : String(readErr); }
+			const reason = err instanceof Error ? err.message : String(err);
+			throw new Error(`survival: back navigation did not reload the cached page (navigation type ${nav}): ${reason}`, { cause: err });
+		}
+		const returned = await settle(page, "survival bfcache", chunksInView(2));
+		check(returned.gameMode === "survival", "survival: returning from BFCache reloads and settles");
+		// Vite's dev client opens an HMR socket at ws(s)://<host>/?token=<id>. Chrome
+		// logs a console error when that socket closes because the page entered
+		// BFCache. Production has no Vite client, so this is not an app error.
+		// Drop only that message: it starts with "WebSocket connection to 'ws://"
+		// or "wss://", the URL query is exactly ?token= (no other parameters), and
+		// it ends with "failed: Page entered Back-Forward Cache."
+		const viteHmrBfcacheSocket = /^WebSocket connection to 'wss?:\/\/[^'?]*\?token=[^'&]*' failed: Page entered Back-Forward Cache\.$/;
+		let ignoredViteHmr = 0;
+		for (let i = errors.length - 1; i >= 0; i--) {
+			if (!viteHmrBfcacheSocket.test(errors[i])) continue;
+			errors.splice(i, 1);
+			ignoredViteHmr += 1;
+		}
+		check(
+			errors.length === 0,
+			"survival: BFCache return has no page errors",
+			ignoredViteHmr
+				? `ignored ${ignoredViteHmr} Vite HMR BFCache socket error${ignoredViteHmr === 1 ? "" : "s"}${errors.length ? `; ${errors.join(" | ")}` : ""}`
+				: errors.join(" | "),
+		);
+		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
+		await settle(page, "survival after back", chunksInView(2));
 		let inventoryRestored = true;
 		let inventoryDetail = "";
 		try {

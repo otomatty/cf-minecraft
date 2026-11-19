@@ -57,10 +57,55 @@ export function processCpuDeltas(before, after) {
 	return result;
 }
 
+const crashWatches = new WeakMap();
+
+/** Record renderer crashes for later diagnostics. `onCrash` receives a short label. */
+export async function watchForCrash(page, onCrash) {
+	const existing = crashWatches.get(page);
+	if (existing) {
+		await existing.ready;
+		return;
+	}
+	const record = { crashed: false, pageErrors: [], targetCrashed: [], ready: null };
+	crashWatches.set(page, record);
+	page.on("error", (error) => {
+		record.crashed = true;
+		const message = error instanceof Error ? error.message : String(error);
+		record.pageErrors.push(message);
+		onCrash?.(`page error: ${message}`);
+	});
+	record.ready = (async () => {
+		try {
+			const session = await page.target().createCDPSession();
+			await session.send("Inspector.enable");
+			session.on("Inspector.targetCrashed", (params) => {
+				record.crashed = true;
+				record.targetCrashed.push(params ?? {});
+				onCrash?.("Inspector.targetCrashed");
+			});
+		} catch (error) {
+			record.inspectorError = error instanceof Error ? error.message : String(error);
+		}
+	})();
+	await record.ready;
+}
+
+function crashRecord(page) {
+	return crashWatches.get(page) ?? null;
+}
+
 export async function diagnose(browser, page, label, { edge, shots }) {
 	// Individual deadlines (including cleanup and the sampling gap) total ~47s.
 	const file = join(shots, `diag-${safeFilename(label)}`);
-	const result = {};
+	const record = crashRecord(page);
+	const result = { crashed: record?.crashed === true };
+	if (result.crashed) {
+		result.crash = {
+			pageErrors: record.pageErrors,
+			targetCrashed: record.targetCrashed,
+		};
+	}
+	if (record?.inspectorError) result.crashWatchError = record.inspectorError;
 	result.page = await bounded(() => page.evaluate(() => {
 		const s = window.__mc?.stats?.();
 		return {

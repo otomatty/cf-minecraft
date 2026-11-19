@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { bounded, diagnose, processCpuDeltas, safeFilename, shouldDiagnoseRunFailure, summarizeTargets } from "./e2e-diag.mjs";
+import { bounded, diagnose, processCpuDeltas, safeFilename, shouldDiagnoseRunFailure, summarizeTargets, watchForCrash } from "./e2e-diag.mjs";
 
 test("run failures are diagnosed only for unmarked timeout messages", () => {
 	assert.equal(shouldDiagnoseRunFailure(new Error("Runtime.callFunctionOn timed out")), true);
@@ -81,6 +81,7 @@ test("diagnostic screenshots use CDP command deadlines and detach on success or 
 			};
 			const label = fails ? "capture-failure" : "capture-success";
 			const result = await diagnose(browser, page, label, { edge: "http://localhost", shots });
+			assert.equal(result.crashed, false);
 			assert.equal(detached, 1);
 			assert.equal(closed, 1);
 			assert.equal(result.screenshotSessionDetach, "detached");
@@ -238,5 +239,50 @@ test("completed and rejected operations clear long deadline timers so Node can e
 		assert.equal(pending.size, 0);
 	} finally {
 		for (const timer of pending) clear(timer);
+	}
+});
+
+test("diagnostics record a renderer crash from page error and Inspector.targetCrashed", async (t) => {
+	const shots = await mkdtemp(join(tmpdir(), "e2e-diag-crash-"));
+	const lines = [];
+	t.mock.method(console, "log", (...args) => lines.push(args.join(" ")));
+	const handlers = {};
+	const notes = [];
+	const session = {
+		async send(method) {
+			if (method === "Inspector.enable") return;
+			if (method === "Page.captureScreenshot") return { data: Buffer.from("png").toString("base64") };
+			throw new Error(method);
+		},
+		on(event, cb) { handlers[event] = cb; },
+		async detach() {},
+	};
+	const page = {
+		on(event, cb) { handlers[event] = cb; },
+		target() { return { async createCDPSession() { return session; } }; },
+		async evaluate() { throw new Error("Target crashed"); },
+	};
+	const browser = {
+		target() { return { async createCDPSession() { throw new Error("browser CDP unavailable"); } }; },
+		async newPage() {
+			return { async goto() {}, async evaluate() { return "complete"; }, async close() {} };
+		},
+	};
+	try {
+		await watchForCrash(page, (message) => notes.push(message));
+		handlers.error(new Error("Aw, Snap!"));
+		handlers["Inspector.targetCrashed"]({});
+		assert.deepEqual(notes, ["page error: Aw, Snap!", "Inspector.targetCrashed"]);
+		const result = await diagnose(browser, page, "renderer crash", { edge: "http://localhost", shots });
+		assert.equal(result.crashed, true);
+		assert.equal(result.page, "Target crashed");
+		assert.deepEqual(result.crash, { pageErrors: ["Aw, Snap!"], targetCrashed: [{}] });
+		assert.match(lines.join("\n"), /DIAG renderer crash .*"crashed":true/);
+		const saved = JSON.parse(await readFile(join(shots, "diag-renderer-crash.json"), "utf8"));
+		assert.equal(saved.crashed, true);
+		assert.deepEqual(saved.crash.pageErrors, ["Aw, Snap!"]);
+		assert.deepEqual(saved.crash.targetCrashed, [{}]);
+	} finally {
+		await rm(shots, { recursive: true, force: true });
 	}
 });

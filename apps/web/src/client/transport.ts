@@ -61,6 +61,7 @@ export class LocalTransport implements Transport {
 	readonly kind = "local";
 	private readonly worker: Worker;
 	private nextId = 0;
+	private closed = false;
 	private readonly pending = new Map<number, { resolve(data?: ArrayBuffer): void; reject(error: Error): void }>();
 
 	private rejectPending(message: string): void {
@@ -110,6 +111,9 @@ export class LocalTransport implements Transport {
 	}
 
 	private post(msg: WorkerRequest, transfer: Transferable[] = []): void {
+		// Restoring a back-forward-cached page can still run a frame before
+		// location.reload(). postMessage on a terminated worker throws.
+		if (this.closed) return;
 		this.worker.postMessage(msg, transfer);
 	}
 
@@ -123,6 +127,7 @@ export class LocalTransport implements Transport {
 	}
 
 	async saveNow(): Promise<void> {
+		if (this.closed) throw new Error("ワールドを閉じました");
 		const id = this.nextId++;
 		await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
@@ -131,6 +136,7 @@ export class LocalTransport implements Transport {
 	}
 
 	async exportWorld(): Promise<Uint8Array<ArrayBuffer>> {
+		if (this.closed) throw new Error("ワールドを閉じました");
 		const id = this.nextId++;
 		const data = await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
@@ -140,6 +146,7 @@ export class LocalTransport implements Transport {
 	}
 
 	async importWorld(world: string, bytes: Uint8Array): Promise<void> {
+		if (this.closed) throw new Error("ワールドを閉じました");
 		const id = this.nextId++, data = new Uint8Array(bytes).buffer;
 		await new Promise<ArrayBuffer | undefined>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
@@ -148,7 +155,11 @@ export class LocalTransport implements Transport {
 	}
 
 	close(): void {
+		if (this.closed) return;
+		this.closed = true;
 		this.rejectPending("ワールドを閉じました");
+		// Chrome destroys this worker's context and terminates nested dedicated
+		// workers (the generation workers) before the parent thread finishes shutdown.
 		this.worker.terminate();
 	}
 }

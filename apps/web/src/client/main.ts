@@ -32,6 +32,7 @@ import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
+import { pageCacheActions, type PageCacheAction } from "./page-cache.ts";
 import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
 const EYE_HEIGHT = 1.62;
@@ -1123,9 +1124,27 @@ async function main(): Promise<void> {
 		if (e.button === 0) stopDig();
 		if (e.button === 2) stopEating();
 	});
-	window.addEventListener("pagehide", () => transport.flush());
+	const runPageCacheAction = (action: PageCacheAction): void => {
+		switch (action) {
+			case "flush":
+				transport.flush();
+				return;
+			case "close":
+				transport.close();
+				return;
+			case "reload":
+				location.reload();
+				return;
+			case "resume":
+				transport.resume?.();
+				return;
+		}
+	};
+	window.addEventListener("pagehide", (event) => {
+		for (const action of pageCacheActions("pagehide", event.persisted, transport.kind)) runPageCacheAction(action);
+	});
 	window.addEventListener("pageshow", (event) => {
-		if (event.persisted) transport.resume?.();
+		for (const action of pageCacheActions("pageshow", event.persisted, transport.kind)) runPageCacheAction(action);
 	});
 	document.addEventListener("visibilitychange", () => {
 		if (document.visibilityState === "hidden") transport.flush();
