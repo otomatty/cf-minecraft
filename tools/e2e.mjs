@@ -1831,7 +1831,7 @@ async function mobs() {
 					return {
 						id: target.id,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
-						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [13, 21.5, 19, 15][kind]],
+						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [14.5, 20.7, 18.8, 15][kind]],
 					};
 				};
 				let mobs = api.stats().mobs;
@@ -1924,36 +1924,27 @@ async function mobs() {
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
 				ctx.drawImage(img, 0, 0);
-				// At 3.4 blocks from the cow, the nose is 2.95 blocks away and 0.62–0.85 below the eye.
-				// With 13° pitch and 70° vertical FOV, it projects to roughly x ±41 and y −11…28
-				// from the center at 720 px viewport height. Allow a little margin around the nose.
-				// The pig's snout is 2.8 blocks away and 1.02–1.19 below the eye.
-				// With 21.5° pitch it projects to about x ±31 and y ±15.
-				// The chicken's beak is 3.2 blocks away and 1.06–1.13 below the eye.
-				// With 19° pitch it projects to about x ±11 and y ±6.
-				// The sheep's wool body is about 0.84 wide and centered 0.91 below the eye.
-				// With 15° pitch the white wool fills roughly x ±60 and y ±45.
+				// After scaling to the species height, the cow muzzle, pig snout and chicken
+				// beak are centered at Y=0.91, 0.59 and 0.56 blocks above the feet.
 				const scale = img.height / 720;
-				const [left, top, width, height] = [[58, 23, 116, 65], [38, 23, 76, 46], [18, 14, 36, 28], [60, 45, 120, 90]][kind];
+				const [left, top, width, height] = [[30, 15, 60, 30], [22, 15, 44, 30], [16, 7, 32, 14], [60, 45, 120, 90]][kind];
 				const pixels = ctx.getImageData(
 					Math.floor(img.width / 2 - left * scale), Math.floor(img.height / 2 - top * scale),
 					Math.ceil(width * scale), Math.ceil(height * scale),
 				).data;
+				// Compare the skin's muzzle/beak swatch after the shader's daylight shading.
+				const swatch = [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
 				let matching = 0;
 				for (let i = 0; i < pixels.length; i += 4) {
 					const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-					const matchesColor = kind === 0
-						? r > 100 && r > b * 1.3 && b > g * 1.08 && b < g * 1.4
-						: kind === 1
-							? r > 100 && r > b * 1.25 && b > g * 1.3
-							: kind === 2
-								? r > 100 && r > g * 1.25 && g > r * 0.4 && g > b * 1.6
-								: r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25;
+					const matchesColor = kind === 3
+						? r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25
+						: r > 100 && Math.abs(g - r * swatch[1] / swatch[0]) < 4 && Math.abs(b - r * swatch[2] / swatch[0]) < 4;
 					if (matchesColor) matching++;
 				}
 				return matching;
 			}, readFileSync(file).toString("base64"), kind);
-			const [feature, color] = kind === 2 ? ["beak", "orange"] : kind === 3 ? ["wool", "white"] : ["muzzle", "pink"];
+			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"], ["wool", "white"]][kind];
 			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
 		};
 		await photographMob(0, "cow");

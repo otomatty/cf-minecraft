@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobTextureNames, mobVertices, type MobTextures, type RenderItem, type RenderMob } from "./entities.ts";
+import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -22,6 +22,7 @@ import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./m
 import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
+import { hasItemTexture } from "./item-textures.ts";
 
 const MAX_SECTIONS = 16384;
 /** A fence has a post and up to eight rails, with six faces per box. */
@@ -143,19 +144,36 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 }
 
 override renderLayer: u32 = 0u;
+// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins.
+override entityPass: u32 = 0u;
+
+@vertex
+fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>) -> VOut {
+	var out: VOut;
+	out.pos = g.viewProj * vec4<f32>(pos, 1.0);
+	out.rel = pos;
+	out.uv = uv;
+	out.shade = shade;
+	out.layer = u32(layer);
+	out.light = light;
+	out.tintColor = vec3<f32>(1.0);
+	return out;
+}
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
 	var color = pixel.rgb;
-	if (in.layer == __GRASS_SIDE_LAYER__u) {
+	if (entityPass == 2u) {
+		if (in.shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
+	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
 		color += pixel.a * in.tintColor;
 	} else {
 		color = color * in.tintColor;
 	}
-	color = color * in.shade * textureSample(lightTex, lightSampler, in.light).rgb;
-	if (renderLayer == 1u && pixel.a < 0.5) { discard; }
+	color = color * abs(in.shade) * textureSample(lightTex, lightSampler, in.light).rgb;
+	if (renderLayer == 1u && select(pixel.a < 0.5, __DROP_ALPHA_TEST__, entityPass == 1u)) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
 	return vec4<f32>(mix(color, g.fogColor.rgb, fog), select(1.0, pixel.a, renderLayer == 2u));
@@ -173,9 +191,33 @@ export function terrainShader(textureNames: readonly string[]): string {
 	return TERRAIN_WGSL
 		.replace("__ISOTROPIC_FACE__", `${allFaces} || (face <= 1u && (${caps}))`)
 		.replace("__GRASS_SIDE_LAYER__", String(textureNames.indexOf("grass_block_side") >>> 0))
+		.replace("__DROP_ALPHA_TEST__", dropAlphaTest(textureNames))
 		.replace("__LEAVES_LAYER__", String(textureNames.indexOf("oak_leaves") >>> 0))
 		.replaceAll("__FLOW_LAYER__", String(textureNames.indexOf("water_flow") >>> 0))
 		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
+}
+
+const cutoutBlockTextures = new Set([
+	"glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass",
+	"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe",
+]);
+
+export function usesCutoutMips(name: string): boolean {
+	return hasItemTexture(name) || cutoutBlockTextures.has(name);
+}
+
+/** Group adjacent sprite layers into a single shader comparison per range. */
+export function dropAlphaTest(textureNames: readonly string[]): string {
+	const ranges: string[] = [];
+	for (let layer = 0; layer < textureNames.length; layer++) {
+		if (!hasItemTexture(textureNames[layer])) continue;
+		const first = layer;
+		while (layer + 1 < textureNames.length && hasItemTexture(textureNames[layer + 1])) layer++;
+		ranges.push(`(in.layer >= ${first}u && in.layer <= ${layer}u)`);
+	}
+	return ranges.length
+		? `(pixel.a <= 0.0 || (pixel.a < 0.5 && (${ranges.join(" || ")})))`
+		: "pixel.a <= 0.0";
 }
 
 const OUTLINE_WGSL = /* wgsl */ `
@@ -335,12 +377,13 @@ export class Renderer {
 	private readonly skyBind: GPUBindGroup;
 	private readonly terrain: GPURenderPipeline;
 	private readonly items: GPURenderPipeline;
+	private readonly mobs: GPURenderPipeline;
 	private readonly cracks: GPURenderPipeline;
 	private readonly crackBuffer: GPUBuffer;
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
 	private mobBuffer: GPUBuffer | null = null;
-	private readonly mobTextures: MobTextures;
+	private readonly mobBind: GPUBindGroup;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
@@ -369,10 +412,6 @@ export class Renderer {
 	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
 		this.crackTextureBase = textureNames.length;
 		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
-		this.mobTextures = Object.fromEntries(
-			mobTextureNames.map((name, index) => [name, textureNames.length + index]),
-		) as MobTextures;
-		textureNames.push(...mobTextureNames);
 		this.canvas = canvas;
 		this.device = device;
 		this.adapterInfo = adapterInfo;
@@ -405,8 +444,7 @@ export class Renderer {
 		const tiles = textureNames.map((name, layer) => {
 			const pixels = name.startsWith("crack_") ? paintCracks(Number(name.slice(6))) : paintTexture(name);
 			this.texturePixels.set(name, pixels);
-			if (["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass",
-				"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].includes(name)) cutouts.add(layer);
+			if (usesCutoutMips(name)) cutouts.add(layer);
 			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
 		});
 		if (textureNames.includes("water") || textureNames.includes("water_flow")) {
@@ -438,6 +476,15 @@ export class Renderer {
 			addressModeU: "clamp-to-edge",
 			addressModeV: "clamp-to-edge",
 		});
+		// Keep each UV island at native resolution, including the chicken's half-height skin.
+		const mobSkins = device.createTexture({
+			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, mobAssetsByKind.length], format: "rgba8unorm",
+			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+		});
+		for (const [layer, { texture: skin }] of mobAssetsByKind.entries()) {
+			device.queue.writeTexture({ texture: mobSkins, origin: [0, 0, layer] }, skin.pixels(),
+				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
+		}
 
 		const skyArt = device.createTexture({ size: [TEX_SIZE, TEX_SIZE, 10], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		for (let layer = 0; layer < 10; layer++) {
@@ -501,25 +548,10 @@ export class Renderer {
 			primitive: { topology: "triangle-list", cullMode: layer === 2 ? "none" : "back", frontFace: "ccw" },
 			depthStencil: { format: "depth24plus", depthWriteEnabled: layer !== 2, depthCompare: "less" },
 		});
-		const terrainSource = terrainShader(textureNames);
-		const itemVertexShader = terrainSource.replace(/@vertex[\s\S]*?override renderLayer/, `
-@vertex fn vs(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>) -> VOut {
-    var out: VOut;
-    out.pos = g.viewProj * vec4<f32>(pos,1.0); out.rel = pos; out.uv = uv; out.shade = shade;
-    out.layer = u32(layer); out.light = light; out.tintColor = vec3<f32>(1.0); return out;
-}
-override renderLayer`);
-		if (itemVertexShader === terrainSource) throw new Error("Item shader vertex replacement did not match terrain shader");
-		const itemAlphaShader = itemVertexShader.replace("pixel.a < 0.5", "pixel.a <= 0.0");
-		if (itemAlphaShader === itemVertexShader) throw new Error("Item shader alpha replacement did not match terrain shader");
-		const itemShader = itemAlphaShader.replace("color = color * in.shade", `if (in.shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
-	color = color * abs(in.shade)`);
-		if (itemShader === itemAlphaShader) throw new Error("Item shader hurt tint replacement did not match terrain shader");
-		const itemModule = device.createShaderModule({ code: itemShader });
-		const itemPipeline = (cracks: boolean): GPURenderPipeline => device.createRenderPipeline({
+		const entityPipeline = (kind: "drops" | "cracks" | "mobs"): GPURenderPipeline => device.createRenderPipeline({
 			layout: pipelineLayout,
 			vertex: {
-				module: itemModule, entryPoint: "vs",
+				module: terrainModule, entryPoint: "vsEntity",
 				buffers: [{ arrayStride: 36, attributes: [
 					{ shaderLocation: 0, offset: 0, format: "float32x3" },
 					{ shaderLocation: 1, offset: 12, format: "float32x2" },
@@ -528,12 +560,23 @@ override renderLayer`);
 					{ shaderLocation: 4, offset: 28, format: "float32x2" },
 				] }],
 			},
-			fragment: { module: itemModule, entryPoint: "fs", constants: { renderLayer: cracks ? 2 : 1 }, targets: [{ format: this.format, ...(cracks ? { blend: { color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const }, alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const } } } : {}) }] },
+			fragment: {
+				module: terrainModule, entryPoint: "fs",
+				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "mobs" ? 2 : 1 },
+				targets: [{
+					format: this.format,
+					...(kind === "cracks" ? { blend: {
+						color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const },
+						alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const },
+					} } : {}),
+				}],
+			},
 			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
-			depthStencil: { format: "depth24plus", depthWriteEnabled: !cracks, depthCompare: "less" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks", depthCompare: "less" },
 		});
-		this.items = itemPipeline(false);
-		this.cracks = itemPipeline(true);
+		this.items = entityPipeline("drops");
+		this.cracks = entityPipeline("cracks");
+		this.mobs = entityPipeline("mobs");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
@@ -541,19 +584,23 @@ override renderLayer`);
 		this.translucent = terrainPipeline(2);
 		this.lightTexture = device.createTexture({ size: [16, 16], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		this.tintTexture = device.createTexture({ size: [256, 256, 3], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		this.terrainBind = device.createBindGroup({
-			layout: this.terrain.getBindGroupLayout(0),
+		const lightSampler = device.createSampler({ minFilter: "linear", magFilter: "linear" });
+		const tintSampler = device.createSampler({ addressModeU: "repeat", addressModeV: "repeat", minFilter: "linear", magFilter: "linear" });
+		const bindAtlas = (atlas: GPUTexture) => device.createBindGroup({
+			layout: terrainLayout,
 			entries: [
 				{ binding: 0, resource: { buffer: this.globals } },
 				{ binding: 1, resource: { buffer: this.origins } },
-				{ binding: 2, resource: texture.createView({ dimension: "2d-array" }) },
+				{ binding: 2, resource: atlas.createView({ dimension: "2d-array" }) },
 				{ binding: 3, resource: sampler },
 				{ binding: 4, resource: this.lightTexture.createView() },
-				{ binding: 5, resource: device.createSampler({ minFilter: "linear", magFilter: "linear" }) },
+				{ binding: 5, resource: lightSampler },
 				{ binding: 6, resource: this.tintTexture.createView({ dimension: "2d-array" }) },
-				{ binding: 7, resource: device.createSampler({ addressModeU: "repeat", addressModeV: "repeat", minFilter: "linear", magFilter: "linear" }) },
+				{ binding: 7, resource: tintSampler },
 			],
 		});
+		this.terrainBind = bindAtlas(texture);
+		this.mobBind = bindAtlas(mobSkins);
 
 		const outlineModule = device.createShaderModule({ code: OUTLINE_WGSL });
 		this.outline = device.createRenderPipeline({
@@ -718,7 +765,7 @@ override renderLayer`);
 		const itemData = itemVertices(limitRenderItems(items), [camera.x, camera.y, camera.z], now);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
-		const mobData = mobVertices(visibleMobs, [camera.x, camera.y, camera.z], now, this.mobTextures);
+		const mobData = mobVertices(visibleMobs, [camera.x, camera.y, camera.z], now);
 		if (mobData.length) {
 			if (!this.mobBuffer || this.mobBuffer.size < mobData.byteLength) {
 				this.mobBuffer?.destroy();
@@ -769,17 +816,17 @@ override renderLayer`);
 		};
 		for (const [layer, pipeline] of [this.terrain, this.cutout, this.translucent].entries()) {
 			if (layer === 2) {
-				if (itemData.length || mobData.length) {
+				if (itemData.length) {
 					pass.setPipeline(this.items);
 					pass.setBindGroup(0, this.terrainBind);
-					if (itemData.length) {
-						pass.setVertexBuffer(0, this.itemBuffer);
-						pass.draw(itemData.length / 9);
-					}
-					if (this.mobBuffer && mobData.length) {
-						pass.setVertexBuffer(0, this.mobBuffer);
-						pass.draw(mobData.length / 9);
-					}
+					pass.setVertexBuffer(0, this.itemBuffer);
+					pass.draw(itemData.length / 9);
+				}
+				if (this.mobBuffer && mobData.length) {
+					pass.setPipeline(this.mobs);
+					pass.setBindGroup(0, this.mobBind);
+					pass.setVertexBuffer(0, this.mobBuffer);
+					pass.draw(mobData.length / 9);
 				}
 				if (cloudsFirst) drawClouds();
 			}

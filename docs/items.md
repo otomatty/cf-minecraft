@@ -65,6 +65,19 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 
 ## 道具アイテム
 
+ホットバー、インベントリ、地面に落ちた非ブロックアイテムは、`items.toml` の `texture` で同じ16×16のドット絵を引く。道具の柄の傾きや素材ごとの色、インゴットの陰影などは統合版のアイテム画像を参考に描いている。[アイテムの描画コード](../apps/web/src/client/item-textures.ts)・[Bedrock Samples v1.26.60.5 のアイテム画像](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/textures/items)
+
+温帯の家畜のドロップと産卵には以下のキーを使う。今後アイテムを追加するときは、用意済みのキーを `items.toml` の `texture` に指定する。
+
+| モブ | 用意したアイテムのキー |
+| --- | --- |
+| ニワトリ | `raw_chicken`（生の鶏肉）、`feather`（羽根）、`egg`（卵） |
+| ウシ | `raw_beef`（生の牛肉）、`leather`（革はアセットのみ） |
+| ブタ | `raw_porkchop`（生の豚肉） |
+| ゾンビ | `rotten_flesh`（腐った肉） |
+| スケルトン | `bone`（骨）、`arrow`（矢） |
+| クリーパー | `gunpowder`（火薬） |
+
 | ID | 名前（texture も同名） | 種類 | tier |
 | --- | --- | --- | --- |
 | 31 | wooden_pickaxe | pickaxe | 1 |
@@ -94,7 +107,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 43 | stick | なし | stick | 64 |
 | 44 | crafting_table | 49 | 上・横・下の専用テクスチャ | 64 |
 
-棒と作業台の絵は `textures.ts` の独自のコード生成。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0` で、今回は配置のみ。サバイバルの E はインベントリ画面を開く。2×2導入時のプロトコル6でクラフト枠・結果・カーソルを追加した。操作、追加レシピ、保存形式と接続時の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
+作業台の各面は `textures.ts` で生成する。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0`。サバイバルの E はインベントリ画面を開く。2×2導入時のプロトコル6でクラフト枠・結果・カーソルを追加した。操作、追加レシピ、保存形式と接続時の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
 
 ## 作物
 
@@ -140,7 +153,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 57 | bucket（空のバケツ） | bucket | 16 |
 | 58 | water_bucket（水入りバケツ） | water_bucket | 1 |
 
-どちらも対応するブロックを持たず、絵は `textures.ts` で生成する。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
+どちらも対応するブロックを持たず、絵は `item-textures.ts` で生成する。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
 
 ## 溶岩と黒曜石
 
