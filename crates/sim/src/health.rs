@@ -6,8 +6,8 @@ use world::{blocks, items, Fnv64, World, MIN_Y};
 use crate::{inventory::Screen, Client, GameMode, Server};
 
 const FALL_DAMAGE_OFFSET: f64 = 3.0;
-const SUFFOCATION_INTERVAL: u8 = 10;
-const SUFFOCATION_DAMAGE: u8 = 1;
+pub(crate) const SUFFOCATION_INTERVAL: u8 = 10;
+pub(crate) const SUFFOCATION_DAMAGE: u8 = 1;
 const AIR_DRAIN: u16 = 1;
 const AIR_RECOVERY: u16 = 5;
 const DROWNING_INTERVAL: u8 = 20;
@@ -15,8 +15,9 @@ const DROWNING_DAMAGE: u8 = 2;
 pub(crate) const VOID_Y: f64 = (MIN_Y - 64) as f64;
 const VOID_INTERVAL: u8 = 10;
 const VOID_DAMAGE: u8 = 4;
-const LAVA_INTERVAL: u8 = 10;
-const LAVA_DAMAGE: u8 = 4;
+pub(crate) const LAVA_INTERVAL: u8 = 10;
+pub(crate) const LAVA_DAMAGE: u8 = 4;
+pub(crate) const LAVA_FEET_OFFSET: f64 = 0.4;
 const REGEN_INTERVAL: u8 = 80;
 const REGEN_HEALTH: u8 = 1;
 const REGEN_FOOD: u8 = 18;
@@ -61,24 +62,14 @@ impl Health {
     /// `prev` is the last accepted position. With no fall in progress, leaving
     /// ground starts from that height, and leaving a fluid starts from `pos`.
     pub fn observe_fall(&mut self, world: &World, prev: [f64; 3], pos: [f64; 3]) {
-        let Some(feet) = block_at(world, pos, 0.0) else {
-            return;
-        };
-        if blocks::is_fluid(feet) {
-            self.fall_start_y = None;
-        } else if grounded(world, pos) {
-            if let Some(start) = self.fall_start_y.take() {
-                let distance = start - pos[1];
-                let damage = (distance.floor() - FALL_DAMAGE_OFFSET).max(0.0) as u8;
-                self.fall_damage = self.fall_damage.saturating_add(damage);
-            }
-        } else if let Some(start) = self.fall_start_y {
-            self.fall_start_y = Some(start.max(pos[1]));
-        } else if block_at(world, prev, 0.0).is_some_and(blocks::is_fluid) {
-            self.fall_start_y = Some(pos[1]);
-        } else {
-            self.fall_start_y = Some(prev[1].max(pos[1]));
-        }
+        let damage = track_fall(
+            world,
+            prev,
+            pos,
+            &mut self.fall_start_y,
+            grounded(world, pos),
+        );
+        self.fall_damage = self.fall_damage.saturating_add(damage);
     }
 
     pub fn add_exhaustion(&mut self, amount: u16) {
@@ -136,7 +127,7 @@ impl Health {
         }
 
         let in_lava = eye.is_some_and(blocks::is_lava)
-            || block_at(world, pos, 0.4).is_some_and(blocks::is_lava);
+            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
         if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) {
             self.damage(LAVA_DAMAGE, DeathCause::Lava);
             if self.vitals.dead {
@@ -200,7 +191,33 @@ impl Health {
     }
 }
 
-fn interval(ticks: &mut u8, active: bool, period: u8) -> bool {
+pub(crate) fn track_fall(
+    world: &World,
+    prev: [f64; 3],
+    pos: [f64; 3],
+    fall_start_y: &mut Option<f64>,
+    landed: bool,
+) -> u8 {
+    let Some(feet) = block_at(world, pos, 0.0) else {
+        return 0;
+    };
+    if blocks::is_fluid(feet) {
+        *fall_start_y = None;
+    } else if landed {
+        return fall_start_y.take().map_or(0, |start| {
+            ((start - pos[1]).floor() - FALL_DAMAGE_OFFSET).max(0.0) as u8
+        });
+    } else if let Some(start) = *fall_start_y {
+        *fall_start_y = Some(start.max(pos[1]));
+    } else if block_at(world, prev, 0.0).is_some_and(blocks::is_fluid) {
+        *fall_start_y = Some(pos[1]);
+    } else {
+        *fall_start_y = Some(prev[1].max(pos[1]));
+    }
+    0
+}
+
+pub(crate) fn interval(ticks: &mut u8, active: bool, period: u8) -> bool {
     if !active {
         *ticks = 0;
         return false;
@@ -213,7 +230,7 @@ fn interval(ticks: &mut u8, active: bool, period: u8) -> bool {
     false
 }
 
-fn block_at(world: &World, [x, y, z]: [f64; 3], offset: f64) -> Option<u16> {
+pub(crate) fn block_at(world: &World, [x, y, z]: [f64; 3], offset: f64) -> Option<u16> {
     world.get_block(
         x.floor() as i32,
         (y + offset).floor() as i32,
