@@ -33,3 +33,9 @@ mob = "sheep"
 item = "raw_mutton"
 min = 1
 max = 2
+
+[[loot]]
+mob = "zombie"
+item = "rotten_flesh"
+min = 0
+max = 2

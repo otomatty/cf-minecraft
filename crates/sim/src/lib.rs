@@ -264,7 +264,7 @@ impl Server {
             spawn: [x as f64 + 0.5, y as f64, z as f64 + 0.5],
             game_time: 0,
             day_time: 0,
-            // Lighting is unused by simulation until mob spawning needs it.
+            // The simulation does not use lighting.
             world: World::with_lighting(false),
             clients: BTreeMap::new(),
             pending: Vec::new(),

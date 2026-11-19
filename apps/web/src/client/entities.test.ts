@@ -146,15 +146,15 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 
 const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
-const renderedHeights = [1.3, 0.9, 0.7, 1.2] as const;
+const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95] as const;
 
 function component(vertices: Float32Array, index: number) {
 	return vertices.filter((_, i) => i % 9 === index);
 }
 
-test("farm mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep"]);
-	for (const kind of [0, 1, 2, 3] as const) {
+test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
+	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie"]);
+	for (const kind of [0, 1, 2, 3, 4] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = mobAssetsByKind[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
@@ -174,8 +174,8 @@ test("farm mobs stand on the ground at gameplay height and use their protocol sk
 	}
 });
 
-test("aiming across the top of a rendered farm mob's head selects it from the front and the side", () => {
-	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1]] as const) {
+test("aiming across the top of a rendered mob's head selects it from the front and the side", () => {
+	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1], [4, 1]] as const) {
 		for (const yaw of [0, 45, 90]) {
 			const mob: RenderMob & { id: number } = { id: 12, kind, position: [0, 0, 0], yaw, moving: false, hurt: false, light: [15, 0] };
 			const vertices = mobVertices([mob], [0, 0, 0], 0);
@@ -320,4 +320,25 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0 }]);
 	core.resetWorld();
 	assert.deepEqual(core.mobs, []);
+});
+
+test("zombie head uses the front of the 64×32 skin and the legs swing in opposite directions", () => {
+	const mob: RenderMob = { kind: 4, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [10, 0] };
+	const asset = mobAssetsByKind[4];
+	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
+	const still = mobVertices([mob], [0, 0, 0], 0);
+	const stride = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
+	const legStart = 4 * boxFloats;
+	assert.deepEqual(stride.subarray(0, legStart), still.subarray(0, legStart));
+	for (const [start, sign] of [[legStart, -1], [legStart + boxFloats, 1]] as const) {
+		const lowerFrontVertex = start + 6 * 9 + 9;
+		assert.equal(still[lowerFrontVertex + 1], 0);
+		assert.ok((stride[lowerFrontVertex + 2] - still[lowerFrontVertex + 2]) * sign > 0);
+	}
+	const front = still.subarray(boxFloats + 6 * 9, boxFloats + 12 * 9);
+	assert.equal(new Set(component(front, 2)).size, 1);
+	for (let i = 0; i < front.length; i += 9) {
+		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
+		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.95) ? 8 : 16);
+	}
 });

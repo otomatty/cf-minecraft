@@ -1608,6 +1608,38 @@ mod tests {
     }
 
     #[test]
+    fn zombie_kind_and_death_cause_reach_the_client_exports() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let spawn = S2C::MobSpawn {
+            id: 7,
+            kind: MobKind::Zombie,
+            x: 0.5,
+            y: 1.0,
+            z: 0.5,
+            yaw: 180.0,
+        }
+        .encode();
+        assert_eq!(unsafe { client_packet(spawn.as_ptr(), spawn.len()) }, 0x0d);
+        assert_eq!(client_mobs(), 61);
+        assert_eq!(state().out[4], 4);
+
+        let death = protocol::PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: protocol::DeathCause::Zombie,
+            ..protocol::PlayerVitals::default()
+        }
+        .packet()
+        .encode();
+        assert_eq!(
+            unsafe { client_packet(death.as_ptr(), death.len()) },
+            u32::from(death[0])
+        );
+        assert_eq!(client_death_cause(), 6);
+    }
+
+    #[test]
     fn item_mirror_updates_previous_count_removal_and_reset() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         client_new();

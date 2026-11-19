@@ -411,3 +411,9 @@ name = "cooked_mutton"
 id = 72
 texture = "cooked_mutton"
 food = 6
+
+[[items]]
+name = "rotten_flesh"
+id = 73
+texture = "rotten_flesh"
+food = 4

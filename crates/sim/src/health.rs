@@ -158,7 +158,7 @@ impl Health {
         }
     }
 
-    fn damage(&mut self, amount: u8, cause: DeathCause) {
+    pub(crate) fn damage(&mut self, amount: u8, cause: DeathCause) {
         self.vitals.health = self.vitals.health.saturating_sub(amount);
         if self.vitals.health == 0 {
             self.eating = None;
@@ -321,13 +321,17 @@ impl Server {
             }
         }
         for id in deaths {
-            self.abort_dig(id);
-            let client = self.clients.get_mut(&id).unwrap();
-            client.inventory_dirty = true;
-            let pos = client.pos;
-            let stacks: Vec<_> = client.inventory.take_all().collect();
-            self.drop_carried_stacks(stacks, pos);
+            self.finish_player_death(id);
         }
+    }
+
+    pub(crate) fn finish_player_death(&mut self, id: u32) {
+        self.abort_dig(id);
+        let client = self.clients.get_mut(&id).unwrap();
+        client.inventory_dirty = true;
+        let pos = client.pos;
+        let stacks: Vec<_> = client.inventory.take_all().collect();
+        self.drop_carried_stacks(stacks, pos);
     }
 }
 
@@ -1123,7 +1127,7 @@ mod tests {
             assert_eq!(bytes[bytes.len() - 2], 5);
             assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
             let cause = bytes.len() - 2;
-            bytes[cause] = 6;
+            bytes[cause] = 7;
             assert!(crate::Inventory::from_bytes(&bytes).is_err());
             release_and_reconnect(&mut s);
             assert_eq!(vitals(&s), dead);

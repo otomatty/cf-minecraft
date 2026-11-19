@@ -1,4 +1,4 @@
-//! Transient animals and their deterministic spawning and movement.
+//! Transient mobs and their deterministic spawning and movement.
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
@@ -13,7 +13,7 @@ use crate::{
         block_at, hash_height, interval, track_fall, LAVA_DAMAGE, LAVA_FEET_OFFSET, LAVA_INTERVAL,
         SUFFOCATION_DAMAGE, SUFFOCATION_INTERVAL, VOID_Y,
     },
-    Server, MAX_REACH,
+    GameMode, Server, MAX_REACH,
 };
 
 struct MobSpec {
@@ -23,6 +23,7 @@ struct MobSpec {
     health: u8,
     walk_forward: f32,
     flee_forward: f32,
+    chase_forward: Option<f32>,
     max_fall_speed: Option<f64>,
     takes_fall_damage: bool,
     loot: &'static [(u16, u8, u8)],
@@ -37,6 +38,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 10,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
             loot: items::COW_LOOT,
@@ -48,6 +50,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 10,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
             loot: items::PIG_LOOT,
@@ -59,6 +62,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 4,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            chase_forward: None,
             max_fall_speed: Some(0.1),
             takes_fall_damage: false,
             loot: items::CHICKEN_LOOT,
@@ -70,9 +74,22 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             health: 8,
             walk_forward: 0.5,
             flee_forward: 0.75,
+            chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
             loot: items::SHEEP_LOOT,
+        },
+        MobKind::Zombie => &MobSpec {
+            width: 0.6,
+            height: 1.95,
+            head_offset: 1.74,
+            health: 20,
+            walk_forward: 0.5,
+            flee_forward: 0.0,
+            chase_forward: Some(0.6),
+            max_fall_speed: None,
+            takes_fall_damage: true,
+            loot: items::ZOMBIE_LOOT,
         },
     }
 }
@@ -93,6 +110,21 @@ const LOCAL_LIMIT: usize = 8;
 const EGG_INTERVAL_SALT: u64 = 22;
 const MIN_EGG_TICKS: u16 = 6000;
 const MAX_EGG_TICKS: u16 = 12000;
+const ZOMBIE_SPAWN_INTERVAL: i64 = 200;
+const ZOMBIE_SPAWN_SALT: u64 = 23;
+const ZOMBIE_LOCAL_LIMIT: usize = 4;
+const ZOMBIE_TARGET_RANGE: f64 = 16.0;
+const ZOMBIE_ATTACK_RANGE: f64 = 0.8;
+const ZOMBIE_ATTACK_DAMAGE: u8 = 3;
+const ZOMBIE_ATTACK_INTERVAL: u8 = 20;
+const SUNLIGHT_DAMAGE: u8 = 2;
+const SUNLIGHT_INTERVAL: u8 = 20;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Hostile {
+    attack_ticks: u8,
+    sunlight_ticks: u8,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Wander {
@@ -123,6 +155,7 @@ pub struct Mob {
     lava_ticks: u8,
     last_dry_pos: [f64; 3],
     egg_ticks: Option<u16>,
+    hostile: Option<Hostile>,
 }
 
 impl Mob {
@@ -141,6 +174,7 @@ impl Mob {
             lava_ticks: 0,
             last_dry_pos: pos,
             egg_ticks: None,
+            hostile: spec.chase_forward.map(|_| Hostile::default()),
         }
     }
 
@@ -191,8 +225,10 @@ impl Mob {
         let largest = dx.abs().max(dz.abs());
         let (dx, dz) = (dx / largest, dz / largest);
         let length = (dx * dx + dz * dz).sqrt();
-        let away = (!same_position).then(|| [dx / length, dz / length]);
-        self.start_fleeing(seed, id, time, away);
+        if self.hostile.is_none() {
+            let away = (!same_position).then(|| [dx / length, dz / length]);
+            self.start_fleeing(seed, id, time, away);
+        }
 
         let scale = 0.4 / length;
         self.body.velocity[0] = dx * scale;
@@ -229,17 +265,27 @@ impl Mob {
         self.stop_horizontal();
     }
 
-    fn tick(&mut self, world: &World, seed: i64, id: u32, time: i64) -> Option<DeathCause> {
+    fn tick(
+        &mut self,
+        world: &World,
+        seed: i64,
+        id: u32,
+        time: i64,
+        chase: Option<[f64; 3]>,
+    ) -> Option<DeathCause> {
+        if let Some(hostile) = &mut self.hostile {
+            hostile.attack_ticks = hostile.attack_ticks.saturating_sub(1);
+        }
         self.age = self.age.saturating_add(1);
         let before = self.pos();
-        let turn = self.move_body(world, seed, id, time);
+        let turn = self.move_body(world, seed, id, time, chase);
         if self.pos()[1] < VOID_Y {
             return None;
         }
 
         let damage = self.environment_damage(world, before);
         if damage.is_some() {
-            if self.health != 0 {
+            if self.health != 0 && self.hostile.is_none() {
                 self.start_fleeing(seed, id, time, None);
             }
         } else if turn {
@@ -249,6 +295,41 @@ impl Mob {
             }
         }
         damage
+    }
+
+    fn sunlight_hit(&mut self, world: &World, daytime: bool) -> bool {
+        let pos = self.pos();
+        let head_offset = spec(self.kind).head_offset;
+        let Some(hostile) = &mut self.hostile else {
+            return false;
+        };
+        let exposed = daytime
+            && self.health != 0
+            && pos[1] >= VOID_Y
+            && sees_sunlight(world, pos, head_offset);
+        interval(&mut hostile.sunlight_ticks, exposed, SUNLIGHT_INTERVAL)
+            && self.take_damage(SUNLIGHT_DAMAGE)
+    }
+
+    fn attacks(&mut self, target: [f64; 3]) -> bool {
+        let bounds = self.body.bounds();
+        let Some(hostile) = &mut self.hostile else {
+            return false;
+        };
+        if hostile.attack_ticks != 0 {
+            return false;
+        }
+        let player = Player::new(target).bounds();
+        let [dx, dy, dz] = std::array::from_fn(|axis| {
+            (bounds.min[axis] - player.max[axis])
+                .max(player.min[axis] - bounds.max[axis])
+                .max(0.0)
+        });
+        if dx * dx + dy * dy + dz * dz > ZOMBIE_ATTACK_RANGE * ZOMBIE_ATTACK_RANGE {
+            return false;
+        }
+        hostile.attack_ticks = ZOMBIE_ATTACK_INTERVAL;
+        true
     }
 
     fn environment_damage(&mut self, world: &World, before: [f64; 3]) -> Option<DeathCause> {
@@ -290,7 +371,14 @@ impl Mob {
     }
 
     // Return whether to pick a new flee target after checking for damage.
-    fn move_body(&mut self, world: &World, seed: i64, id: u32, time: i64) -> bool {
+    fn move_body(
+        &mut self,
+        world: &World,
+        seed: i64,
+        id: u32,
+        time: i64,
+        chase: Option<[f64; 3]>,
+    ) -> bool {
         let before = self.pos();
         let [x, y, z] = before;
         let collisions = mob_collisions(world);
@@ -298,7 +386,12 @@ impl Mob {
             jump: physics::in_water(&collisions, before),
             ..Input::default()
         };
-        if self.ai == Wander::Idle {
+        let fleeing = matches!(self.ai, Wander::Fleeing { .. });
+        let knockback = (fleeing || self.hostile.is_some()) && self.hurt_ticks == HURT_TICKS;
+        let chasing = chase.is_some();
+        if chasing {
+            self.ai = Wander::Idle;
+        } else if !knockback && self.ai == Wander::Idle {
             let random = sample(seed, id, time, 0);
             if random.is_multiple_of(WALK_CHANCE) {
                 let [dx, dz] = direction(sample(seed, id, time, 1));
@@ -313,12 +406,16 @@ impl Mob {
 
         let spec = spec(self.kind);
         let idle_input = input;
-        let fleeing = matches!(self.ai, Wander::Fleeing { .. });
-        let knockback = fleeing && self.hurt_ticks == HURT_TICKS;
-        let movement = match self.ai {
-            Wander::Walking { target, .. } => Some((target, spec.walk_forward)),
-            Wander::Fleeing { target, .. } if !knockback => Some((target, spec.flee_forward)),
-            _ => None,
+        let movement = if knockback {
+            None
+        } else if let Some([tx, _, tz]) = chase {
+            spec.chase_forward.map(|forward| ([tx, tz], forward))
+        } else {
+            match self.ai {
+                Wander::Walking { target, .. } => Some((target, spec.walk_forward)),
+                Wander::Fleeing { target, .. } => Some((target, spec.flee_forward)),
+                Wander::Idle => None,
+            }
         };
         let mut turn = false;
         let mut step_jump = false;
@@ -326,7 +423,11 @@ impl Mob {
             let dx = target[0] - x;
             let dz = target[1] - z;
             let distance_squared = dx * dx + dz * dz;
-            let jump = if distance_squared <= STOP_DISTANCE_SQUARED {
+            let stop_distance = if chasing { 0.0 } else { STOP_DISTANCE_SQUARED };
+            if chasing && distance_squared > 0.0 {
+                self.yaw = heading(dx, dz);
+            }
+            let jump = if distance_squared <= stop_distance {
                 None
             } else {
                 let scale = PROBE_DISTANCE / distance_squared.sqrt();
@@ -334,7 +435,9 @@ impl Mob {
                 safe_ahead(world, &collisions, spec, before, ahead)
             };
             if let Some(jump) = jump {
-                self.yaw = heading(dx, dz);
+                if !chasing {
+                    self.yaw = heading(dx, dz);
+                }
                 input.yaw = self.yaw;
                 input.forward = forward;
                 step_jump = jump;
@@ -461,6 +564,10 @@ impl Mob {
         if let Some(egg_ticks) = self.egg_ticks {
             h.bytes(&egg_ticks.to_be_bytes());
         }
+        if let Some(hostile) = &self.hostile {
+            h.u8(hostile.attack_ticks);
+            h.u8(hostile.sunlight_ticks);
+        }
     }
 }
 
@@ -478,6 +585,30 @@ fn mob_collisions(world: &World) -> impl CollisionWorld + '_ {
         } else {
             Some(blocks::AIR)
         }
+    })
+}
+
+fn sees_sunlight(world: &World, pos: [f64; 3], head_offset: f64) -> bool {
+    let collisions = mob_collisions(world);
+    if physics::in_water(&collisions, pos)
+        || block_at(world, pos, head_offset).is_some_and(blocks::is_water)
+    {
+        return false;
+    }
+    let [x, y, z] = [pos[0], pos[1] + head_offset, pos[2]].map(|v| v.floor() as i32);
+    let Some(chunk) = world.chunks.get(&(x >> 4, z >> 4)) else {
+        return false;
+    };
+    (y.saturating_add(1).max(MIN_Y)..MIN_Y + HEIGHT).all(|by| {
+        let state = chunk.get((x & 15) as usize, by, (z & 15) as usize);
+        if blocks::is_water(state) {
+            return false;
+        }
+        let mut blocked = false;
+        if blocks::is_solid(state) {
+            collisions.collision_boxes(x, by, z, &mut |_| blocked = true);
+        }
+        !blocked
     })
 }
 
@@ -650,6 +781,31 @@ fn grass_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     }
 }
 
+fn zombie_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
+    let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
+    let get = |y| chunk.get((x & 15) as usize, y, (z & 15) as usize);
+    let ground = (MIN_Y..MIN_Y + HEIGHT)
+        .rev()
+        .find(|&y| blocks::is_solid(get(y)))?;
+    let state = get(ground);
+    if blocks::is_oak_leaves(state)
+        || blocks::is_fluid(state)
+        || get(ground + 1) != blocks::AIR
+        || get(ground + 2) != blocks::AIR
+    {
+        return None;
+    }
+    let mut full = false;
+    mob_collisions(world).collision_boxes(x, ground, z, &mut |bounds| {
+        full |= bounds == physics::Aabb::block(x, ground, z);
+    });
+    full.then_some([
+        f64::from(x) + 0.5,
+        f64::from(ground + 1),
+        f64::from(z) + 0.5,
+    ])
+}
+
 // Distinct columns inside a radius of two blocks, ordered around the center.
 const HERD_OFFSETS: [(i32, i32); 12] = [
     (1, 0),
@@ -717,7 +873,7 @@ impl Server {
         let nearby = self
             .mobs
             .values()
-            .filter(|mob| distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
+            .filter(|mob| mob.hostile.is_none() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
             .count();
         if nearby >= LOCAL_LIMIT {
             return;
@@ -754,6 +910,33 @@ impl Server {
         }
     }
 
+    fn spawn_zombie(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
+        let nearby = self
+            .mobs
+            .values()
+            .filter(|mob| mob.hostile.is_some() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0);
+        if nearby.take(ZOMBIE_LOCAL_LIMIT).count() == ZOMBIE_LOCAL_LIMIT {
+            return;
+        }
+        let roll = sample(self.seed, id, self.game_time, ZOMBIE_SPAWN_SALT);
+        let [dx, dz] = direction(roll);
+        // Allow for rounding to the center of the sampled column.
+        let radius = 24.75 + ((roll >> 16) % 2251) as f64 / 100.0;
+        let x = (pos[0] + dx * radius).floor() as i32;
+        let z = (pos[2] + dz * radius).floor() as i32;
+        let Some(candidate) = zombie_surface(&self.world, x, z) else {
+            return;
+        };
+        if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate))
+            || players
+                .iter()
+                .any(|&(other, p)| other != id && distance_squared(p, candidate) <= 24.0 * 24.0)
+        {
+            return;
+        }
+        self.spawn_mob(MobKind::Zombie, candidate);
+    }
+
     pub(crate) fn tick_mobs(&mut self) {
         let players: Vec<_> = self
             .clients
@@ -766,19 +949,62 @@ impl Server {
                 self.spawn_herd(id, pos, &players);
             }
         }
+        let day = self.day_time.rem_euclid(24000);
+        if (13000..23000).contains(&day) && self.game_time % ZOMBIE_SPAWN_INTERVAL == 0 {
+            for &(id, pos) in &players {
+                self.spawn_zombie(id, pos, &players);
+            }
+        }
         let mut hits = Vec::new();
+        let mut player_deaths = Vec::new();
         for (&id, mob) in &mut self.mobs {
             if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
                 continue;
             }
-            if let Some(cause) = mob.tick(&self.world, self.seed, id, self.game_time) {
-                hits.push((id, cause));
+            let target = if mob.hostile.is_some() && self.game_mode == GameMode::Survival {
+                let pos = mob.pos();
+                self.clients
+                    .iter()
+                    .filter(|(_, client)| client.joined && !client.health.vitals.dead)
+                    .filter_map(|(&id, client)| {
+                        let dy = pos[1] - client.pos[1];
+                        let distance = distance_squared(pos, client.pos) + dy * dy;
+                        (distance <= ZOMBIE_TARGET_RANGE * ZOMBIE_TARGET_RANGE)
+                            .then_some((distance, id, client.pos))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+                    .map(|(_, id, pos)| (id, pos))
+            } else {
+                None
+            };
+            let damage = mob.tick(
+                &self.world,
+                self.seed,
+                id,
+                self.game_time,
+                target.map(|(_, pos)| pos),
+            );
+            let sunlight = mob.sunlight_hit(&self.world, day < 12000);
+            if damage.is_some() || sunlight {
+                hits.push((id, damage == Some(DeathCause::Lava)));
+            }
+            if let Some((player, pos)) = target {
+                if mob.health != 0 && mob.pos()[1] >= VOID_Y && mob.attacks(pos) {
+                    let health = &mut self.clients.get_mut(&player).unwrap().health;
+                    health.damage(ZOMBIE_ATTACK_DAMAGE, DeathCause::Zombie);
+                    if health.vitals.dead {
+                        player_deaths.push(player);
+                    }
+                }
             }
         }
-        for (id, cause) in hits {
+        for player in player_deaths {
+            self.finish_player_death(player);
+        }
+        for (id, burned) in hits {
             if self.mobs[&id].health == 0 {
                 let mob = self.mobs.remove(&id).unwrap();
-                self.drop_mob_loot(id, mob, cause == DeathCause::Lava);
+                self.drop_mob_loot(id, mob, burned);
             } else {
                 self.send_mob_hurt(id);
             }
@@ -891,16 +1117,16 @@ mod tests {
         let start = (1..1000)
             .find(|&t| sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
             .unwrap();
-        a.tick(&world, 5, 7, start - 1);
-        b.tick(&world, 5, 7, start - 1);
+        a.tick(&world, 5, 7, start - 1, None);
+        b.tick(&world, 5, 7, start - 1, None);
         assert_eq!(a.ai, Wander::Idle);
-        a.tick(&world, 5, 7, start);
-        b.tick(&world, 5, 7, start);
+        a.tick(&world, 5, 7, start, None);
+        b.tick(&world, 5, 7, start, None);
         assert!(matches!(a.ai, Wander::Walking { .. }));
         let mut stopped = false;
         for t in start + 1..=start + 100 {
-            a.tick(&world, 5, 7, t);
-            b.tick(&world, 5, 7, t);
+            a.tick(&world, 5, 7, t, None);
+            b.tick(&world, 5, 7, t, None);
             assert_eq!(a, b);
             if a.ai == Wander::Idle {
                 stopped = true;
@@ -920,14 +1146,14 @@ mod tests {
             ticks_left: 100,
             blocked: 0,
         };
-        cow.tick(&world, 5, 7, 1);
+        cow.tick(&world, 5, 7, 1, None);
         assert_eq!(cow.ai, Wander::Idle);
         cow.ai = Wander::Walking {
             target: [2.5, 9.0],
             ticks_left: 1,
             blocked: 0,
         };
-        cow.tick(&world, 5, 7, 2);
+        cow.tick(&world, 5, 7, 2, None);
         assert!(cow.pos()[2] > 2.0);
         assert_eq!(cow.ai, Wander::Idle);
 
@@ -935,9 +1161,9 @@ mod tests {
         world.set_block(2, 2, 3, blocks::STONE);
         let mut cow = walking();
         cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
-        cow.tick(&world, 5, 7, 1);
+        cow.tick(&world, 5, 7, 1, None);
         assert!(matches!(cow.ai, Wander::Walking { blocked: 1, .. }));
-        cow.tick(&world, 5, 7, 2);
+        cow.tick(&world, 5, 7, 2, None);
         assert_eq!(cow.ai, Wander::Idle);
     }
 
@@ -956,7 +1182,7 @@ mod tests {
         for world in [cliff, foot_lava, body_lava, floor_lava] {
             let mut cow = walking();
             for t in 1..20 {
-                cow.tick(&world, 5, 7, t);
+                cow.tick(&world, 5, 7, t, None);
                 if cow.ai == Wander::Idle {
                     break;
                 }
@@ -976,12 +1202,12 @@ mod tests {
         let mut cow = walking();
         cow.body.position[2] = 2.55;
         for tick in 1..=2 {
-            cow.tick(&world, 5, 7, tick);
+            cow.tick(&world, 5, 7, tick, None);
             assert_eq!(cow.pos()[2], 2.55);
             assert!(matches!(cow.ai, Wander::Walking { blocked: 0, .. }));
         }
         for tick in 3..=30 {
-            cow.tick(&world, 5, 7, tick);
+            cow.tick(&world, 5, 7, tick, None);
         }
         assert_eq!(cow.pos()[1], 2.0);
         assert!(cow.pos()[2] > 3.45, "{cow:?}");
@@ -1001,12 +1227,12 @@ mod tests {
         cow.body.position[1] = 1.6;
         cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
 
-        cow.tick(&world, 5, 7, 1);
+        cow.tick(&world, 5, 7, 1, None);
         assert!(
             matches!(cow.ai, Wander::Walking { blocked: 1, .. }),
             "{cow:?}"
         );
-        cow.tick(&world, 5, 7, 2);
+        cow.tick(&world, 5, 7, 2, None);
         assert_eq!(cow.ai, Wander::Idle);
         assert!(cow.pos()[2] < 3.0);
     }
@@ -1020,7 +1246,7 @@ mod tests {
         let mut cow = walking();
         cow.body.position[1] = 0.5;
         for tick in 1..=30 {
-            cow.tick(&world, 5, 7, tick);
+            cow.tick(&world, 5, 7, tick, None);
             assert_eq!(cow.pos()[1], 0.5);
         }
         assert!(cow.pos()[2] > 4.0, "{cow:?}");
@@ -1036,10 +1262,10 @@ mod tests {
             }
             let mut cow = walking();
             cow.body.position[2] = 2.55;
-            cow.tick(&world, 5, 7, 1);
+            cow.tick(&world, 5, 7, 1, None);
             assert_eq!(cow.pos()[1] > 1.0, can_jump, "{cow:?}");
             for tick in 2..=30 {
-                cow.tick(&world, 5, 7, tick);
+                cow.tick(&world, 5, 7, tick, None);
             }
             if can_jump {
                 assert_eq!(cow.pos()[1], 2.0);
@@ -1060,7 +1286,7 @@ mod tests {
         let mut cow = walking();
         let mut jumped = false;
         for t in 1..35 {
-            cow.tick(&world, 5, 7, t);
+            cow.tick(&world, 5, 7, t, None);
             jumped |= cow.pos()[1] > 2.0;
         }
         assert!(jumped);
@@ -1076,12 +1302,12 @@ mod tests {
             .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
             .unwrap();
         for _ in 0..80 {
-            cow.tick(&pool, 5, 7, quiet);
+            cow.tick(&pool, 5, 7, quiet, None);
         }
         let mut low = cow.pos()[1];
         let mut high = low;
         for _ in 0..60 {
-            cow.tick(&pool, 5, 7, quiet);
+            cow.tick(&pool, 5, 7, quiet, None);
             low = low.min(cow.pos()[1]);
             high = high.max(cow.pos()[1]);
         }
@@ -1385,7 +1611,7 @@ mod tests {
             let mut cow = Mob::cow([2.5, start, 2.5]);
             let cause = (0..40)
                 .find_map(|_| {
-                    let cause = cow.tick(world, 5, 7, time);
+                    let cause = cow.tick(world, 5, 7, time, None);
                     let landed = if water {
                         block_at(world, cow.pos(), 0.0).is_some_and(blocks::is_water)
                     } else {
@@ -1538,7 +1764,7 @@ mod tests {
         let collisions = mob_collisions(&world);
         let mut reached_limit = false;
         for time in 1..=220 {
-            assert_eq!(chicken.tick(&world, 5, 7, time), None);
+            assert_eq!(chicken.tick(&world, 5, 7, time, None), None);
             assert!(chicken.body.velocity[1] >= -0.1);
             reached_limit |= chicken.body.velocity[1] == -0.1;
             if chicken.body.is_grounded(&collisions) {
@@ -1846,7 +2072,7 @@ mod tests {
         let time = (1..)
             .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
             .unwrap();
-        assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
+        assert_eq!(cow.tick(&world, 5, 7, time, None), Some(DeathCause::Lava));
         assert_eq!(cow.health, spec(MobKind::Cow).health - LAVA_DAMAGE);
         assert_eq!(block_at(&world, cow.pos(), 0.0), Some(blocks::AIR));
         assert_eq!(
@@ -1864,11 +2090,11 @@ mod tests {
         let time = (1..)
             .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
             .unwrap();
-        assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
+        assert_eq!(cow.tick(&world, 5, 7, time, None), Some(DeathCause::Lava));
         assert_eq!(flee_state(&cow).1, FLEE_TICKS);
         let escaped = (time + 1..=time + i64::from(FLEE_TICKS)).any(|tick| {
             cow.hurt_ticks = cow.hurt_ticks.saturating_sub(1);
-            cow.tick(&world, 5, 7, tick);
+            cow.tick(&world, 5, 7, tick, None);
             lava_cells(&world, spec(MobKind::Cow), cow.pos())
                 .next()
                 .is_none()
@@ -1989,7 +2215,7 @@ mod tests {
             let mut route = vec![cow.pos()];
             for elapsed in 1..=60 {
                 let last_walk = walker.pos();
-                walker.tick(&server.world, server.seed, id, server.game_time + 1);
+                walker.tick(&server.world, server.seed, id, server.game_time + 1, None);
                 let last_flee = server.mobs[&id].pos();
                 server.tick();
                 let cow = &server.mobs[&id];
@@ -2061,7 +2287,7 @@ mod tests {
             let first = flee_state(&cow).0;
             let mut turned = false;
             for tick in 1..=19 {
-                cow.tick(&world, 5, 7, tick);
+                cow.tick(&world, 5, 7, tick, None);
                 assert_eq!(cow.pos()[1], 1.0);
                 assert!(cow.body.is_grounded(&mob_collisions(&world)));
                 assert!(lava_cells(&world, spec(MobKind::Cow), cow.pos())
@@ -2087,7 +2313,7 @@ mod tests {
         let mut cow = fleeing_toward([9.0, 2.0]);
         cow.body.velocity[2] = 0.8;
         let before = cow.pos();
-        cow.tick(&world, 5, 7, 1);
+        cow.tick(&world, 5, 7, 1, None);
         assert_eq!(cow.pos(), before);
         assert_eq!(
             flee_state(&cow),
@@ -2106,7 +2332,7 @@ mod tests {
             cow.body.velocity[2] = velocity;
             let before = cow.pos();
             assert!(lava_cells(&world, spec(MobKind::Cow), before).eq([[2, 1, 2]]));
-            cow.tick(&world, 5, 7, 1);
+            cow.tick(&world, 5, 7, 1, None);
             assert_eq!(cow.pos(), before);
             assert_eq!(
                 flee_state(&cow),
@@ -2123,9 +2349,9 @@ mod tests {
         let first = [2.5, 9.0];
         let mut cow = fleeing_toward(first);
         cow.body.position[2] = 3.0 - spec(MobKind::Cow).width / 2.0;
-        cow.tick(&world, 5, 7, 1);
+        cow.tick(&world, 5, 7, 1, None);
         assert_eq!(flee_state(&cow), (first, 59, 1));
-        cow.tick(&world, 5, 7, 2);
+        cow.tick(&world, 5, 7, 2, None);
         assert_eq!(
             flee_state(&cow),
             (flee_target(cow.pos(), 5, 7, 2, None), 58, 0)
@@ -2133,7 +2359,7 @@ mod tests {
 
         let mut cow = fleeing_toward([2.5, 2.5]);
         let before = cow.pos();
-        cow.tick(&world, 5, 7, 3);
+        cow.tick(&world, 5, 7, 3, None);
         assert_eq!(cow.pos(), before);
         assert_eq!(
             flee_state(&cow),
@@ -2253,6 +2479,294 @@ mod tests {
         server.world.remove_chunk(x >> 4, z >> 4);
         server.spawn_herd(1, pos, &players);
         assert!(server.mobs().is_empty());
+    }
+
+    #[test]
+    fn zombies_spawn_only_at_night_on_their_own_interval_in_both_modes() {
+        for mode in [GameMode::Creative, GameMode::Survival] {
+            let mut server = joined(mode);
+            let origin = server.clients[&1].pos;
+            for (time, day, expected) in [
+                (199, 18000, 0),
+                (200, 6000, 0),
+                (200, 12000, 0),
+                (200, 12999, 0),
+                (200, 13000, 1),
+                (200, 22999, 1),
+                (200, 23000, 0),
+                (200, 24000 + 18000, 1),
+            ] {
+                server.mobs.clear();
+                server.set_time(time - 1, day - 1);
+                server.tick();
+                assert_eq!(server.mobs.len(), expected, "tick {time}, day {day}");
+                for mob in server.mobs.values() {
+                    assert_eq!(mob.kind, MobKind::Zombie);
+                    assert!(
+                        (24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(mob.pos(), origin))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zombie_and_animal_spawn_caps_are_independent() {
+        let mut server = joined(GameMode::Creative);
+        let pos = server.spawn();
+        let players = [(1, pos)];
+        for _ in 0..LOCAL_LIMIT {
+            server.spawn_cow(pos);
+        }
+        for time in (200..=1200).step_by(200) {
+            server.game_time = time;
+            server.spawn_zombie(1, pos, &players);
+        }
+        assert_eq!(server.mobs.len(), LOCAL_LIMIT + ZOMBIE_LOCAL_LIMIT);
+        assert_eq!(
+            server
+                .mobs
+                .values()
+                .filter(|mob| mob.kind == MobKind::Zombie)
+                .count(),
+            ZOMBIE_LOCAL_LIMIT
+        );
+
+        server.mobs.retain(|_, mob| mob.kind == MobKind::Zombie);
+        server.game_time = 400;
+        server.spawn_herd(1, pos, &players);
+        let herd = |server: &Server| {
+            server
+                .mobs
+                .values()
+                .filter(|mob| mob.kind != MobKind::Zombie)
+                .map(|mob| (mob.kind, mob.pos()))
+                .collect::<Vec<_>>()
+        };
+        let with_zombies = herd(&server);
+        server.mobs.clear();
+        server.spawn_herd(1, pos, &players);
+        assert_eq!(herd(&server), with_zombies);
+        assert_eq!(with_zombies.len(), 3);
+    }
+
+    #[test]
+    fn zombie_spawn_column_uses_the_highest_solid_and_requires_clearance() {
+        let mut world = arena(16);
+        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
+        assert_eq!(zombie_surface(&world, 16, 5), None);
+        for state in [
+            blocks::OAK_LEAVES,
+            blocks::OAK_SLAB,
+            blocks::WATER,
+            blocks::LAVA,
+        ] {
+            world.set_block(5, 1, 5, state);
+            assert_eq!(zombie_surface(&world, 5, 5), None, "state {state}");
+        }
+        world.set_block(5, 1, 5, blocks::AIR);
+        world.set_block(5, 10, 5, blocks::GLASS);
+        assert_eq!(zombie_surface(&world, 5, 5), Some([5.5, 11.0, 5.5]));
+        world.set_block(5, 12, 5, blocks::WATER);
+        assert_eq!(zombie_surface(&world, 5, 5), None);
+
+        let mut server = joined(GameMode::Creative);
+        let pos = server.spawn();
+        server.game_time = 200;
+        server.spawn_zombie(1, pos, &[(1, pos)]);
+        let candidate = server.mobs.values().next().unwrap().pos();
+        server.mobs.clear();
+        server.spawn_zombie(1, pos, &[(1, pos), (2, candidate)]);
+        assert!(server.mobs.is_empty());
+    }
+
+    #[test]
+    fn zombie_sunlight_hits_every_twenty_exposed_day_ticks() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        server.set_time(0, 6000);
+        for tick in 1..=40 {
+            server.tick();
+            let mob = &server.mobs[&id];
+            assert_eq!(mob.health, 20 - 2 * (tick / 20));
+            if tick % 20 == 0 {
+                assert_eq!(mob.hurt_ticks, HURT_TICKS);
+                assert!(!matches!(mob.ai, Wander::Fleeing { .. }));
+                assert!(server
+                    .take_outbox()
+                    .iter()
+                    .any(|(_, bytes)| { S2C::decode(bytes) == Ok(S2C::MobHurt { id }) }));
+            }
+        }
+        server.set_time(40, 11999);
+        for _ in 0..40 {
+            server.tick();
+        }
+        assert_eq!(server.mobs[&id].health, 16);
+        assert_eq!(server.mobs[&id].hostile.as_ref().unwrap().sunlight_ticks, 0);
+    }
+
+    #[test]
+    fn zombie_sunlight_is_blocked_by_roof_shapes_and_water() {
+        let pos = [5.5, 1.0, 5.5];
+        let mut world = arena(16);
+        for (y, state) in [
+            (1, blocks::WATER),
+            (2, blocks::WATER),
+            (30, blocks::WATER),
+            (30, blocks::OAK_SLAB),
+            (MIN_Y + HEIGHT - 1, blocks::GLASS),
+        ] {
+            world.set_block(5, y, 5, state);
+            let mut zombie = Mob::new(MobKind::Zombie, pos);
+            for _ in 0..40 {
+                assert!(!zombie.sunlight_hit(&world, true));
+            }
+            assert_eq!(zombie.health, 20);
+            world.set_block(5, y, 5, blocks::AIR);
+        }
+    }
+
+    #[test]
+    fn zombie_chases_survival_and_hits_every_twenty_ticks_with_box_reach() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        server.tick();
+        let mob = &server.mobs[&id];
+        assert!(mob.pos()[0] < pos[0]);
+        assert_eq!(mob.yaw, 90.0);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        for _ in 0..20 {
+            if server.clients[&1].health.vitals.health != 20 {
+                break;
+            }
+            server.tick();
+        }
+        assert_eq!(server.clients[&1].health.vitals.health, 17);
+        for remaining in (1..=20).rev() {
+            assert_eq!(
+                server.mobs[&id].hostile.as_ref().unwrap().attack_ticks,
+                remaining
+            );
+            assert_eq!(server.clients[&1].health.vitals.health, 17);
+            server.tick();
+        }
+        assert_eq!(server.clients[&1].health.vitals.health, 14);
+
+        let mut zombie = Mob::new(MobKind::Zombie, [0.0; 3]);
+        assert!(!zombie.attacks([1.401, 0.0, 0.0]));
+        assert!(!zombie.attacks([0.0, 2.751, 0.0]));
+        assert!(!zombie.attacks([1.2, 2.55, 0.0]));
+        assert!(zombie.attacks([1.4, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn zombie_ignores_creative_players_and_takes_knockback_without_fleeing() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let player = server.clients[&1].pos;
+        let pos = [player[0] + 1.0, player[1], player[2]];
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        server.set_time(0, 18000);
+        server.tick();
+        assert_eq!(server.mobs[&id].pos(), pos);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        attack(&mut server, id);
+        server.tick();
+        let mob = &server.mobs[&id];
+        assert_eq!(mob.health, 19);
+        assert_eq!(mob.pos(), [pos[0] + 0.4, pos[1] + 0.36, pos[2]]);
+        assert_eq!(mob.ai, Wander::Idle);
+    }
+
+    #[test]
+    fn zombie_death_drops_rotten_flesh_in_sunlight_and_lava() {
+        let item = items::by_name("rotten_flesh").unwrap();
+        assert_eq!(items::info(item).unwrap().food, Some(4));
+        assert_eq!(smelting::output(item), None);
+        for lava in [false, true] {
+            let (mut server, id) = combat(GameMode::Creative);
+            let pos = server.mobs[&id].pos();
+            if lava {
+                let [x, y, z] = pos.map(|v| v.floor() as i32);
+                server.world.set_block(x, y, z, blocks::LAVA);
+            }
+            for expected in 0..=2 {
+                let time = (1..)
+                    .find(|&t| sample(server.seed, id, t, LOOT_SALT) % 3 == expected)
+                    .unwrap();
+                server.set_time(time - 1, 6000);
+                let mut zombie = Mob::new(MobKind::Zombie, pos);
+                zombie.health = 1;
+                zombie.hostile.as_mut().unwrap().sunlight_ticks = SUNLIGHT_INTERVAL - 1;
+                zombie.lava_ticks = LAVA_INTERVAL - 1;
+                server.mobs.insert(id, zombie);
+                server.entities.clear();
+                server.tick();
+                assert!(!server.mobs.contains_key(&id));
+                assert!(server.entities.values().all(|drop| drop.item == item));
+                assert_eq!(
+                    server
+                        .entities
+                        .values()
+                        .map(|drop| u64::from(drop.count))
+                        .sum::<u64>(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zombie_kills_a_player_with_cause_six_and_drops_their_inventory() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let pos = server.clients[&1].pos;
+        server.set_time(0, 18000);
+        hold(&mut server, "raw_beef");
+        server.clients.get_mut(&1).unwrap().health.vitals.health = 3;
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        server.tick();
+        assert!(server.clients[&1].health.vitals.dead);
+        assert_eq!(server.clients[&1].health.vitals.cause as u8, 6);
+        let save = server.inventory_data(1).unwrap();
+        assert_eq!(
+            crate::Inventory::from_bytes(&save).unwrap().1.cause,
+            DeathCause::Zombie
+        );
+        assert!(server.clients[&1]
+            .inventory
+            .slots()
+            .iter()
+            .all(Option::is_none));
+        assert_eq!(server.entities.len(), 1);
+        assert!(server.take_outbox().iter().any(|(player, bytes)| {
+            *player == 1
+                && matches!(
+                    S2C::decode(bytes),
+                    Ok(S2C::PlayerStatus {
+                        health: 0,
+                        cause: 6,
+                        ..
+                    })
+                )
+        }));
+    }
+
+    #[test]
+    fn zombie_cooldowns_contribute_to_the_state_hash() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        let original = server.state_hash();
+        let mob = server.mobs.get_mut(&id).unwrap();
+        mob.hostile.as_mut().unwrap().attack_ticks = 1;
+        let attacking = server.state_hash();
+        assert_ne!(attacking, original);
+        let mob = server.mobs.get_mut(&id).unwrap();
+        mob.hostile.as_mut().unwrap().sunlight_ticks = 1;
+        assert_ne!(server.state_hash(), attacking);
     }
 
     #[test]

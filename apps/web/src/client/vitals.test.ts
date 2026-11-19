@@ -27,3 +27,7 @@ test("air uses one bubble per 30 units, rounded up", () => {
 test("lava death uses the cause 5 message", () => {
 	assert.equal(deathCauses[5], "溶岩で焼けた");
 });
+
+test("zombie death uses the cause 6 message", () => {
+	assert.equal(deathCauses[6], "ゾンビに倒された");
+});
