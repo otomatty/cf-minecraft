@@ -6,6 +6,7 @@ import { paintTexture, downsample, textureIconPixels } from "./textures.ts";
 import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
+import { itemTexture } from "./item-textures.ts";
 import { ClientCore } from "./client-core.ts";
 import { filterVisibleSections, outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
@@ -302,7 +303,7 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 });
 
 
-test("sixteen original tool textures have transparent backgrounds and distinct tier colors", () => {
+test("tool sprites preserve their grip shapes and distinct colors for each material", () => {
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 	const tools = core.itemRegistry().filter(item => /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.test(item.name));
 	assert.ok(tools.every(item => item.block === null && item.maxStack === 1));
@@ -316,6 +317,8 @@ test("sixteen original tool textures have transparent backgrounds and distinct t
 			assert.ok(core.textureNames().includes(name));
 			const pixels = paintTexture(name);
 			assert.equal(pixels.length, 16 * 16 * 4);
+			const gripX = kind === "hoe" ? 8 : 2;
+			assert.equal(pixels[(12 * 16 + gripX) * 4 + 3], 255, name);
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 0));
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 255));
 			assert.deepEqual(paintTexture(name), pixels);
@@ -323,4 +326,34 @@ test("sixteen original tool textures have transparent backgrounds and distinct t
 		});
 		for (let a = 0; a < images.length; a++) for (let b = a + 1; b < images.length; b++) assert.notDeepEqual(images[a], images[b]);
 	}
+});
+
+test("registered item sprites and prepared mob drops resolve through the atlas painter", () => {
+	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
+	const keys = core.itemRegistry().flatMap(item => item.texture ? [item.texture] : []);
+	const futureDrops = ["arrow", "bone", "gunpowder", "leather", "rotten_flesh"];
+	for (const name of [...keys, ...futureDrops, "bow"]) {
+		const pixels = itemTexture(name);
+		assert.ok(pixels, name);
+		assert.equal(pixels.length, 16 * 16 * 4);
+		const alpha = pixels.filter((_, i) => i % 4 === 3);
+		assert.deepEqual(new Set(alpha), new Set([0, 255]), name);
+		assert.deepEqual(paintTexture(name), pixels, name);
+	}
+	assert.equal(itemTexture("unknown_item"), undefined);
+});
+
+test("dropped sprites keep cutout coverage while block drops retain their alpha test", async () => {
+	const { dropAlphaTest, usesCutoutMips } = await import("./renderer.ts");
+	const names = ["water", "stick", "apple", "grass_block_side", "iron_shovel", "crack_0"];
+	assert.equal(dropAlphaTest(names), "(pixel.a <= 0.0 || (pixel.a < 0.5 && ((in.layer >= 1u && in.layer <= 2u) || (in.layer >= 4u && in.layer <= 4u))))");
+	assert.equal(dropAlphaTest(["water", "crack_0"]), "pixel.a <= 0.0");
+	assert.deepEqual(names.map(usesCutoutMips), [false, true, true, false, true, false]);
+	let mip = paintTexture("stick");
+	for (let size = 16; size > 2; size >>= 1) {
+		const visible = mip.filter((v, i) => i % 4 === 3 && v >= 128).length;
+		mip = downsample(mip, size, usesCutoutMips("stick"));
+		assert.equal(mip.filter((v, i) => i % 4 === 3 && v >= 128).length, Math.round(visible / 4));
+	}
+	assert.ok(mip.some((v, i) => i % 4 === 3 && v < 128));
 });

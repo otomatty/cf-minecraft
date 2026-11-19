@@ -1,5 +1,8 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
+import { chicken, cow, pig } from "./mobs/farm.ts";
+import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
+
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
 export function interpolateEntity(previous: readonly number[], current: readonly number[], elapsedMs: number): [number, number, number] {
 	const t = Math.max(0, Math.min(1, elapsedMs / 50));
@@ -108,91 +111,101 @@ export interface RenderMob {
 	light: RenderItem["light"];
 }
 
-export const mobTextureNames = [
-	"cow_hide", "cow_face", "cow_leg", "pig_skin", "pig_face", "pig_leg", "pig_snout",
-	"chicken_plumage", "chicken_face", "chicken_beak", "chicken_wattle", "chicken_leg",
-] as const;
-type MobTextureName = typeof mobTextureNames[number];
-export type MobTextures = Record<MobTextureName, number>;
+// Protocol kinds index both this table and the GPU skin array. The chicken skin
+// occupies the upper half of a layer; its texels retain their original scale.
+export const mobAssetsByKind = [cow, pig, chicken] as const satisfies Record<MobKind, MobAsset>;
+export const MOB_SKIN_SIZE = 64;
 
-type MobBox = {
-	min: [number, number, number];
-	max: [number, number, number];
-	legSwing?: number;
-	front?: MobTextureName;
-	texture?: MobTextureName;
-};
-
-const cowBoxes: readonly MobBox[] = [
-	{ min: [-0.32, 0.49, -0.45], max: [0.32, 1.08, 0.23] },
-	{ min: [-0.24, 0.77, 0.16], max: [0.24, 1.3, 0.45], front: "cow_face" },
-	{ min: [-0.28, 0, -0.36], max: [-0.12, 0.54, -0.20], legSwing: 1 },
-	{ min: [0.12, 0, -0.36], max: [0.28, 0.54, -0.20], legSwing: -1 },
-	{ min: [-0.28, 0, 0.04], max: [-0.12, 0.54, 0.20], legSwing: -1 },
-	{ min: [0.12, 0, 0.04], max: [0.28, 0.54, 0.20], legSwing: 1 },
+// Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
+// The six rectangles in a Bedrock box UV net are west, front, east, back, top, bottom.
+const skinFaceCorners = [
+	[7, 4, 0, 3], [4, 5, 1, 0], [5, 6, 2, 1], [6, 7, 3, 2], [7, 6, 5, 4], [0, 1, 2, 3],
 ];
+const skinFaceShades = [0.6, 0.8, 0.6, 0.8, 1, 0.5];
 
-const pigBoxes: readonly MobBox[] = [
-	{ min: [-0.42, 0.24, -0.46], max: [0.42, 0.76, 0.32] },
-	{ min: [-0.27, 0.39, 0.19], max: [0.27, 0.90, 0.49], front: "pig_face" },
-	{ min: [-0.18, 0.43, 0.48], max: [0.18, 0.60, 0.60], front: "pig_snout" },
-	{ min: [-0.35, 0, -0.38], max: [-0.16, 0.28, -0.19], legSwing: 1 },
-	{ min: [0.16, 0, -0.38], max: [0.35, 0.28, -0.19], legSwing: -1 },
-	{ min: [-0.35, 0, 0.11], max: [-0.16, 0.28, 0.30], legSwing: -1 },
-	{ min: [0.16, 0, 0.11], max: [0.35, 0.28, 0.30], legSwing: 1 },
-];
+function compileCube(cube: MobCube) {
+	const [u, v] = cube.uv, [w, h, d] = cube.size;
+	const rects = [
+		[u, v + d, d, h], [u + d, v + d, w, h], [u + d + w, v + d, d, h],
+		[u + 2 * d + w, v + d, w, h], [u + d, v, w, d], [u + d + w, v, w, d],
+	];
+	const points: Vec3[] = corners.map(([x, y, z]) =>
+		[cube.origin[0] + x * w, cube.origin[1] + y * h, cube.origin[2] + z * d]);
+	const vertices = skinFaceCorners.flatMap((indices, face) => {
+		const mirroredSide = cube.mirror && (face === 0 || face === 2);
+		const [left, top, width, height] = rects[mirroredSide ? 2 - face : face];
+		// Model -Z becomes game +Z. Reverse the winding so these quads still face out.
+		return [0, 3, 2, 0, 2, 1].map(i => {
+			const rightEdge = i === 1 || i === 2;
+			return {
+				corner: indices[i], shade: skinFaceShades[face],
+				u: (left + (rightEdge !== !!cube.mirror ? width : 0)) / MOB_SKIN_SIZE,
+				v: (top + (i >= 2 ? height : 0)) / MOB_SKIN_SIZE,
+			};
+		});
+	});
+	return { points, vertices };
+}
 
-const chickenBoxes: readonly MobBox[] = [
-	{ min: [-0.15, 0.18, -0.20], max: [0.15, 0.45, 0.12] },
-	{ min: [-0.10, 0.39, 0.02], max: [0.10, 0.70, 0.15], front: "chicken_face" },
-	{ min: [-0.07, 0.49, 0.145], max: [0.07, 0.56, 0.20], texture: "chicken_beak" },
-	{ min: [-0.035, 0.405, 0.145], max: [0.035, 0.49, 0.177], texture: "chicken_wattle" },
-	{ min: [-0.10, 0, -0.05], max: [-0.06, 0.20, 0.015], legSwing: 1 },
-	{ min: [0.06, 0, -0.05], max: [0.10, 0.20, 0.015], legSwing: -1 },
-	{ min: [-0.20, 0.235, -0.17], max: [-0.145, 0.39, 0.06] },
-	{ min: [0.145, 0.235, -0.17], max: [0.20, 0.39, 0.06] },
-];
+const mobMeshes = mobAssetsByKind.map(asset => {
+	const bones = asset.bones.map(bone => ({
+		bone,
+		parent: asset.bones.findIndex(other => other.name === bone.parent),
+		walkPitch: asset.walkPitch[bone.name] ?? 0,
+		cubes: bone.cubes?.map(compileCube) ?? [],
+	}));
+	const floats = bones.reduce((sum, { cubes }) => sum + cubes.length * 36 * 9, 0);
+	return { bones, floats };
+});
 
-const mobModels: Record<MobKind, { boxes: readonly MobBox[]; hide: MobTextureName; leg: MobTextureName }> = {
-	0: { boxes: cowBoxes, hide: "cow_hide", leg: "cow_leg" },
-	1: { boxes: pigBoxes, hide: "pig_skin", leg: "pig_leg" },
-	2: { boxes: chickenBoxes, hide: "chicken_plumage", leg: "chicken_leg" },
-};
+type Transform = (point: Vec3) => Vec3;
+const radians = Math.PI / 180;
 
-export function mobVertices(
-	mobs: readonly RenderMob[], camera: readonly number[], timeMs: number, textures: MobTextures,
-): Float32Array {
-	const vertices: number[] = [];
+function bonePose(bone: MobBone, stridePitch: number, parent: Transform): Transform {
+	const [pitch, yaw, roll] = bone.rotation ?? [0, 0, 0];
+	if (pitch + stridePitch === 0 && yaw === 0 && roll === 0) return parent;
+	const [px, py, pz] = bone.pivot;
+	const rx = -(pitch + stridePitch) * radians, ry = -yaw * radians, rz = roll * radians;
+	const cx = Math.cos(rx), sx = Math.sin(rx), cy = Math.cos(ry), sy = Math.sin(ry);
+	const cz = Math.cos(rz), sz = Math.sin(rz);
+	return ([x, y, z]) => {
+		x -= px; y -= py; z -= pz;
+		const y1 = cx * y - sx * z, z1 = sx * y + cx * z;
+		const x2 = cy * x + sy * z1, z2 = cy * z1 - sy * x;
+		return parent([px + cz * x2 - sz * y1, py + sz * x2 + cz * y1, pz + z2]);
+	};
+}
+
+export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number): Float32Array {
+	const out = new Float32Array(mobs.reduce((sum, mob) => sum + mobMeshes[mob.kind].floats, 0));
+	let i = 0;
 	for (const mob of mobs) {
-		const { boxes, hide, leg } = mobModels[mob.kind];
-		const yaw = mob.yaw * Math.PI / 180, yawCos = Math.cos(yaw), yawSin = Math.sin(yaw);
-		const stride = mob.moving ? Math.sin(timeMs / 100) * 0.32 : 0;
+		const yaw = mob.yaw * radians, c = Math.cos(yaw) / 16, s = Math.sin(yaw) / 16;
 		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
-		for (const { min, max, legSwing, front, texture } of boxes) {
-			const angle = stride * (legSwing ?? 0);
-			const swingCos = Math.cos(angle), swingSin = Math.sin(angle);
-			const pivotZ = (min[2] + max[2]) / 2;
-			const points = corners.map(([cx, cy, cz]) => {
-				const x = cx ? max[0] : min[0];
-				const y = (cy ? max[1] : min[1]) - max[1];
-				const z = (cz ? max[2] : min[2]) - pivotZ;
-				const legY = y * swingCos - z * swingSin + max[1];
-				const legZ = y * swingSin + z * swingCos + pivotZ;
-				return [ox + x * yawCos - legZ * yawSin, oy + legY, oz + x * yawSin + legZ * yawCos];
-			});
-			for (const [face, indices] of faces.entries()) {
-				const layer = textures[legSwing ? leg : (face === 3 ? front : undefined) ?? texture ?? hide];
-				// The item shader reads the sign as the hurt flag and the magnitude as face shading.
-				const shade = [0.5, 1, 0.8, 0.8, 0.6, 0.6][face] * (mob.hurt ? -1 : 1);
-				for (const i of [0, 1, 2, 0, 2, 3]) {
-					vertices.push(
-						...points[indices[i]], [0, 1, 1, 0][i], [1, 1, 0, 0][i],
-						shade, layer,
-						(mob.light[1] + 0.5) / 16, (mob.light[0] + 0.5) / 16,
-					);
+		const world: Transform = ([x, y, z]) => [ox + c * x + s * z, oy + y / 16, oz + s * x - c * z];
+		const stride = mob.moving ? Math.sin(timeMs / 100) : 0;
+		const shadeSign = mob.hurt ? -1 : 1;
+		const blockLight = (mob.light[1] + 0.5) / 16, skyLight = (mob.light[0] + 0.5) / 16;
+		const poses: Transform[] = [];
+		for (const { bone, parent, walkPitch, cubes } of mobMeshes[mob.kind].bones) {
+			const pose = bonePose(bone, walkPitch * stride, parent < 0 ? world : poses[parent]);
+			poses.push(pose);
+			for (const cube of cubes) {
+				const points = cube.points.map(pose);
+				for (const vertex of cube.vertices) {
+					const [x, y, z] = points[vertex.corner];
+					out[i++] = x;
+					out[i++] = y;
+					out[i++] = z;
+					out[i++] = vertex.u;
+					out[i++] = vertex.v;
+					out[i++] = vertex.shade * shadeSign;
+					out[i++] = mob.kind;
+					out[i++] = blockLight;
+					out[i++] = skyLight;
 				}
 			}
 		}
 	}
-	return new Float32Array(vertices);
+	return out;
 }

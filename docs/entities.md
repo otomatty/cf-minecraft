@@ -78,6 +78,25 @@ WASMはID順の一覧（ID・アイテム・個数・現在と以前の位置）
 | 回転角 | 経過ms / 2000（rad） |
 | 上下動 | 0.04 + sin(経過ms / 500) × 0.03 |
 
+## モブの描画アセット
+
+ブタ、ウシ、ニワトリ、ゾンビ、スケルトン、クリーパーの通常の成体を用意した。家畜は温帯の姿に合わせた。体格、各部位の比率、顔や模様の特徴を統合版と照合し、スキンを独自に描いている。参照した版はブロックと同じ [Bedrock Samples v1.26.60.5](https://github.com/Mojang/bedrock-samples/releases/tag/v1.26.60.5)。各モブの通常モデルとバリエーションの対応は [公式のエンティティ定義](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/entity) にある。
+
+ゲーム中のウシ、ブタ、ニワトリはこのモデルとスキンで描画する。ゾンビ、スケルトン、クリーパーの生成・行動は今後の実装になる。種類を追加するときは、通信で使う `MobKind` と `minecraft:pig` などの識別子を明示的に対応付け、[カタログ](../apps/web/src/client/mobs/catalog.ts) のアセットを使う。
+
+```ts
+import { mobAssets } from "./mobs/catalog.ts";
+
+const pig = mobAssets.get("minecraft:pig")!;
+const { width, height } = pig.texture;
+const rgba = pig.texture.pixels(); // 初回のテクスチャ転送時に取得し、同種の個体で共有する
+```
+
+- `bones` は親から子の順。各箱の `origin` と関節の `pivot` は、ともにモデル全体を基準にした座標。足元が Y=0、正面が −Z、16 単位が 1 ブロックに対応する。
+- `uv` はスキン左上を原点とする統合版のボックス UV。スキンは行順の RGBA8 で、最近傍サンプリングとアルファテストを使う。スケルトンの胴体は両面を描き、肋骨の隙間から奥の背骨が見えるようにする。[ボーンと UV の仕様](https://learn.microsoft.com/en-us/minecraft/creator/reference/content/visualreference/geometry.v1.12.0?view=minecraft-bedrock-stable)
+- ゾンビの初期姿勢は素手で両腕を前へ伸ばした状態。スケルトンは右腕を18度前に傾けて弓を携える。`rightItem` の子ボーンの `itemSprite.texture` を `itemTexture()` で引き、絵の `grip` をボーンの支点に合わせる。スプライトはボーンのローカル空間で横が +Z、下が −Y。1画素がモデルの1単位に対応し、不透明な画素を X 方向に1単位の厚みで描く。[ゾンビの腕の姿勢](https://github.com/Mojang/bedrock-samples/blob/v1.26.60.5/resource_pack/animations/zombie.animation.json)・[スケルトンの初期装備](https://github.com/Mojang/bedrock-samples/blob/v1.26.60.5/behavior_pack/loot_tables/entities/skeleton_gear.json)
+- 歩行時は `walkPitch[bone.name] ?? 0` に `Math.sin(2 * Math.PI * phase)` を掛け、ボーンの初期 X 回転（度）に足す。`phase` の 0〜1 が一歩行周期。停止中は初期姿勢を使う。これで四足は対角の脚、二足は左右の脚が交互に動く。
+
 ## 決定性の現在値
 
 | seed=2026 / 600 ticks | ハッシュ |

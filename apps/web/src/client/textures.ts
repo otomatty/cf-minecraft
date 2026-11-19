@@ -1,6 +1,7 @@
 import { CARRIED_GRASS_TOP_TINT, CARRIED_LEAVES_TINT, CARRIED_SHORT_GRASS_TINT, WATER_TINT } from "./block-tints.ts";
 import { buildingTexture } from "./building-textures.ts";
 import { floraTexture } from "./flora-textures.ts";
+import { itemTexture } from "./item-textures.ts";
 import { terrainTexture } from "./terrain-textures.ts";
 
 export { GRASS_TINT, LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
@@ -25,11 +26,8 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
-	const tool = /^(wooden|stone|copper|iron)_(pickaxe|axe|shovel|hoe)$/.exec(name);
-	if (tool) return paintTool(tool[1], tool[2]);
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name)
-		?? cowTexture(name) ?? pigTexture(name) ?? chickenTexture(name);
+		?? cropTexture(name) ?? itemTexture(name) ?? farmAndWorkstationTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -128,106 +126,6 @@ function hashName(name: string): number {
 const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
 const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
 
-function cowTexture(name: string): Uint8Array | undefined {
-	if (name !== "cow_hide" && name !== "cow_face" && name !== "cow_leg") return undefined;
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	const bounds = (v: number, lo: number, hi: number) => lo <= v && v <= hi;
-	for (let y = 0; y < TEX_SIZE; y++) {
-		for (let x = 0; x < TEX_SIZE; x++) {
-			const grain = (x * 5 + y * 3 + x * y) % 7;
-			let color: Rgb = [244 - grain, 239 - grain, 225 - grain];
-			if (name === "cow_hide") {
-				const patch = (x - 3) ** 2 + (y - 4) ** 2 < 22 + grain
-					|| (x - 13) ** 2 + 2 * (y - 12) ** 2 < 17 + grain;
-				if (patch) color = [35 + grain, 31 + grain, 33 + grain];
-			} else if (name === "cow_face") {
-				if (y >= 9 && bounds(x, 1, 14)) {
-					color = y === 9 ? [231, 146, 161] : [215 + grain, 112 + grain, 134 + grain];
-					if (bounds(y, 11, 12) && (bounds(x, 3, 4) || bounds(x, 11, 12))) color = [124, 60, 73];
-				} else if (bounds(y, 4, 6) && (bounds(x, 2, 4) || bounds(x, 11, 13))) {
-					color = [30, 25, 30];
-				}
-			} else if (y >= 10) {
-				color = [48 + grain, 39 + grain, 43 + grain];
-			}
-			pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
-		}
-	}
-	return pixels;
-}
-
-function pigTexture(name: string): Uint8Array | undefined {
-	if (name !== "pig_skin" && name !== "pig_face" && name !== "pig_leg" && name !== "pig_snout") return undefined;
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let y = 0; y < TEX_SIZE; y++) {
-		for (let x = 0; x < TEX_SIZE; x++) {
-			const grain = (x * 3 + y * 5 + x * y) % 9;
-			const patch = (x - 4) ** 2 + (y - 5) ** 2 < 13 + grain
-				|| (x - 12) ** 2 + (y - 11) ** 2 < 9 + grain;
-			let color: Rgb = patch ? [224 + grain, 141 + grain, 161 + grain] : [236 + grain, 161 + grain, 178 + grain];
-			const paired = (x >= 3 && x <= 5) || (x >= 10 && x <= 12);
-			if (name === "pig_face" && y >= 4 && y <= 6 && paired) {
-				color = y === 4 && (x === 4 || x === 11) ? [255, 228, 225] : [62, 39, 47];
-			}
-			if (name === "pig_leg" && y >= 11) color = [87 + grain, 53 + grain, 61 + grain];
-			if (name === "pig_snout") {
-				color = [218 + grain, 87 + grain, 134 + grain];
-				if (y === 0) color = [244, 139, 172];
-				if (y >= 6 && y <= 9 && paired) color = [112, 42, 70];
-			}
-			pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
-		}
-	}
-	return pixels;
-}
-
-function chickenTexture(name: string): Uint8Array | undefined {
-	if (name !== "chicken_plumage" && name !== "chicken_face" && name !== "chicken_beak"
-		&& name !== "chicken_wattle" && name !== "chicken_leg") return undefined;
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let y = 0; y < TEX_SIZE; y++) {
-		for (let x = 0; x < TEX_SIZE; x++) {
-			const grain = (x * 5 + y * 3 + x * y) % 6;
-			const featherEdge = (y + Math.abs((x % 6) - 2)) % 6 === 0;
-			let color: Rgb = featherEdge ? [229 - grain, 228 - grain, 220 - grain] : [253 - grain, 250 - grain, 241 - grain];
-			if (name === "chicken_face" && y >= 4 && y <= 6 && ((x >= 2 && x <= 4) || (x >= 11 && x <= 13))) {
-				color = y === 4 && (x === 3 || x === 12) ? [255, 252, 238] : [43, 36, 35];
-			} else if (name === "chicken_beak") {
-				color = y >= 11 ? [215 + grain, 112 + grain, 27] : [249, 155 + grain, 39 + grain];
-			} else if (name === "chicken_wattle") {
-				color = [187 + grain * 3, 42 + grain, 46 + grain];
-			} else if (name === "chicken_leg") {
-				color = y % 4 === 3 ? [205, 153, 47] : [239 + grain, 194 + grain, 73];
-			}
-			pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
-		}
-	}
-	return pixels;
-}
-
-function bucketTexture(name: string): Uint8Array | undefined {
-	if (name !== "bucket" && name !== "water_bucket" && name !== "lava_bucket") return undefined;
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	const paint = (x: number, y: number, color: Rgb) =>
-		pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
-	for (let y = 3; y <= 13; y++) {
-		const inset = y === 3 || y >= 11 ? 1 + Math.floor((y - 3) / 6) : 0;
-		const left = 2 + inset;
-		const right = 13 - inset;
-		for (let x = left; x <= right; x++) {
-			let color: Rgb = x === left || x === right || y === 13 ? [55, 63, 72]
-				: x < 6 ? [183, 194, 203] : x < 10 ? [137, 150, 162] : [102, 115, 126];
-			if (y === 3) color = [203, 212, 217];
-			if ((y === 4 || y === 5) && x > left && x < right) {
-				if (name === "lava_bucket") color = y === 4 ? [255, 182, 55] : [221, 71, 18];
-				else color = name === "bucket" ? [64, 76, 85] : y === 4 ? [101, 207, 237] : [42, 148, 203];
-			}
-			paint(x, y, color);
-		}
-	}
-	return pixels;
-}
-
 function cropTexture(name: string): Uint8Array | undefined {
 	const stage = ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].indexOf(name);
 	if (stage < 0) return undefined;
@@ -256,138 +154,26 @@ const furrow = (color: Rgb): Painter => (x, y, rand) => {
 	return shade(color, (ridge === 0 ? .65 : ridge === 1 ? .83 : 1.1) + rand() * .19);
 };
 
-const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter> = {
+const FARM_AND_WORKSTATION_TEXTURES: Record<string, (rand: () => number) => Painter> = {
 	farmland_dry: () => furrow([137, 91, 58]),
 	farmland_moist: () => furrow([86, 56, 48]),
-	wheat_seeds: () => (x, y) => (x + y) % 3 === 0 ? [220, 195, 107] : [158, 125, 56],
-	wheat: () => (x, y) => x === 7 || y > 10 ? [154, 104, 44] : [230, 180, 72],
-	bread: () => (x, y) => {
-		if (y >= 11 || x === 2 || x === 13) return [151, 79, 38];
-		if (y < 8 && (x + y === 12 || x + y === 16)) return [251, 211, 139];
-		return shade([222, 147, 67], 1.1 - y * .018);
-	},
-	raw_beef: () => (x, y) => {
-		if (x + y <= 12 || (x === 7 && y >= 7 && y <= 9)) return [255, 234, 219];
-		if (y >= 11 || x + y >= 22) return [143, 38, 55];
-		if (x - y === 2 || x - y === 3) return [230, 116, 131];
-		return [194, 60, 80];
-	},
-	cooked_beef: () => (x, y) => {
-		if (y >= 11 || x + y >= 22) return [92, 45, 30];
-		if (x + y === 15 || x + y === 19) return [122, 58, 34];
-		return y <= 6 ? [198, 130, 78] : [163, 90, 52];
-	},
-	raw_porkchop: () => (x, y) => {
-		if (y <= 5 || (x >= 10 && y <= x - 2)) return [255, 235, 223];
-		if (y >= 11 || x <= 3) return [165, 76, 101];
-		if ((x + y * 2) % 7 === 0) return [249, 170, 170];
-		return [223, 117, 139];
-	},
-	cooked_porkchop: () => (x, y) => {
-		if (y >= 11 || x <= 3) return [103, 50, 32];
-		if (y <= 5 || (x >= 10 && y <= x - 2)) return [224, 163, 105];
-		if ((x + y * 2) % 7 === 0) return [143, 75, 45];
-		return [183, 109, 66];
-	},
-	egg: () => (x, y) => {
-		if (x <= 5 && y <= 8) return [255, 253, 239];
-		if (x >= 11 || y >= 12) return [219, 192, 162];
-		return [244, 226, 201];
-	},
-	raw_chicken: () => (x, y) => {
-		if (x + y <= 12 || x - y >= 5) return [255, 225, 213];
-		if (y >= 11 || x + y >= 22) return [201, 118, 133];
-		return [242, 165, 174];
-	},
-	cooked_chicken: () => (x, y) => {
-		if (x + y <= 12 || x - y >= 5) return [231, 177, 110];
-		if (y >= 11 || (x + y) % 5 === 0) return [129, 66, 41];
-		return [190, 112, 62];
-	},
-	feather: () => (x, y) => {
-		if (x + y === 15) return [183, 170, 150];
-		if (x + y > 16 || (y + 2 * x) % 5 === 0) return [227, 226, 221];
-		return [254, 251, 241];
-	},
-	apple: () => (x, y) => {
-		if (y <= 4 && x >= 9) return [85, 157, 58];
-		if (y <= 4) return [111, 67, 39];
-		if (x >= 4 && x <= 6 && y <= 8) return [248, 111, 99];
-		return shade([211, 43, 54], 1.15 - (x + y) * .016);
-	},
-    coal: () => (x,y,r) => shade([47, 48, 55], .7 + r()*.6 + (x+y)%3*.08),
-    copper_ingot: () => (x,y) => shade([204, 113, 70], y < 7 ? 1.2 : .8 + x*.012),
-    iron_ingot: () => (x,y) => shade([179, 190, 202], y < 7 ? 1.2 : .8 + x*.012),
     furnace_top: () => (x,y,r) => shade([111, 116, 125], x < 2 || y < 2 || x > 13 || y > 13 ? .68 : .9+r()*.2),
     furnace_side: () => (x,y,r) => shade([108, 113, 121], y%5 === 0 || (x+(Math.floor(y/5)%2)*4)%8 === 0 ? .65 : .9+r()*.2),
     furnace_front: () => (x,y,r) => x >= 3 && x <= 12 && y >= 6 && y <= 12 ? [31, 29, 34] : shade([112, 118, 126], y === 4 || y === 14 ? .65 : .9+r()*.2),
-    stick: () => (x) => x % 2 ? [185, 139, 77] : [116, 79, 42],
     crafting_table_top: () => (x,y,r) => shade([174, 128, 70], x < 2 || y < 2 || x > 13 || y > 13 ? .62 : x % 5 === 2 || y % 5 === 2 ? .75 : .94+r()*.12),
     crafting_table_side: () => (x,y,r) => shade([146, 103, 57], x < 3 || x > 12 ? .66 : y < 3 ? 1.2 : y === 7 || y === 12 ? .72 : .94+r()*.12),
     crafting_table_bottom: () => (x,y) => shade([124, 87, 49], x === y || x+y === 15 ? .65 : y%4 === 0 ? .82 : 1),
 };
 
-function equipmentTexture(name: string): Uint8Array | undefined {
-	if (!Object.hasOwn(EQUIPMENT_AND_WORKSTATIONS, name)) return undefined;
+function farmAndWorkstationTexture(name: string): Uint8Array | undefined {
+	if (!Object.hasOwn(FARM_AND_WORKSTATION_TEXTURES, name)) return undefined;
 	const rand = mulberry32(hashName(name));
-	const paint = EQUIPMENT_AND_WORKSTATIONS[name](rand);
+	const paint = FARM_AND_WORKSTATION_TEXTURES[name](rand);
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
 		for (let x = 0; x < TEX_SIZE; x++) {
 			const [r, g, b] = paint(x, y, rand);
-			let visible = true;
-			switch (name) {
-				case "wheat_seeds":
-					visible = [[4, 5], [9, 4], [7, 9], [11, 10], [4, 12]]
-						.some(([sx, sy]) => (x === sx && y === sy) || (x === sx + 1 && y === sy - 1));
-					break;
-				case "wheat":
-					visible = (x === 7 && y >= 2 && y <= 14)
-						|| (x >= 5 && x <= 9 && y >= 3 && y <= 10 && (x + y) % 3 !== 0);
-					break;
-				case "bread":
-					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12 && x + y >= 8 && x - y <= 7
-						&& x + y <= 24;
-					break;
-				case "raw_beef":
-				case "cooked_beef":
-					visible = x >= 2 && x <= 13 && y >= 4 && y <= 12
-						&& x + y >= 10 && x + y <= 24 && x - y <= 7 && y - x <= 7;
-					break;
-				case "raw_porkchop":
-				case "cooked_porkchop":
-					visible = x >= 2 && x <= 13 && y >= 3 && y <= 12
-						&& x + y >= 10 && x + y <= 23 && y - x <= 7 && x - y <= 8;
-					break;
-				case "egg":
-					visible = (x - 7.5) ** 2 / 22 + (y - 8) ** 2 / 36 <= 1;
-					break;
-				case "raw_chicken":
-				case "cooked_chicken":
-					visible = ((x - 7) ** 2 / 25 + (y - 9) ** 2 / 17 <= 1)
-						|| (x >= 8 && y >= 3 && x + y <= 17 && x - y >= 2 && x - y <= 9);
-					break;
-				case "feather":
-					visible = (x + y === 15 && x >= 2 && y >= 2)
-						|| (x >= 4 && y >= 2 && x - y <= 11 && y - x <= 6
-							&& x + y >= 12 && x + y <= 18 && (x + y !== 18 || y % 3 !== 0));
-					break;
-				case "apple":
-					visible = (x === 8 && y >= 2 && y <= 4)
-						|| (x >= 9 && x <= 12 && y >= 2 && y <= 4 && x + y <= 14)
-						|| ((x - 7.5) ** 2 + (y - 9) ** 2 <= 30 && y >= 5 && y <= 13);
-					break;
-				case "coal":
-					visible = x >= 3 && x <= 12 && y >= 3 && y <= 12 && x + y >= 8 && x + y <= 23;
-					break;
-				case "copper_ingot":
-				case "iron_ingot":
-					visible = x >= 2 && x <= 13 && y >= 5 && y <= 11 && x + y >= 8;
-					break;
-				case "stick":
-					visible = y >= 2 && y <= 13 && (x === 7 || x === 8);
-			}
-			pixels.set([clamp(r), clamp(g), clamp(b), visible ? 255 : 0], (y * TEX_SIZE + x) * 4);
+			pixels.set([clamp(r), clamp(g), clamp(b), 255], (y * TEX_SIZE + x) * 4);
 		}
 	}
 	return pixels;
@@ -404,24 +190,6 @@ export function paintCracks(stage: number): Uint8Array {
 			const at = (y * TEX_SIZE + x) * 4;
 			pixels.set([28, 23, 31, 210], at);
 		}
-	}
-	return pixels;
-}
-
-/** Original upright silhouettes: a two-pixel grip and distinct heads. */
-function paintTool(tier: string, kind: string): Uint8Array {
-	const colors: Record<string, Rgb> = { wooden: [168, 115, 58], stone: [120, 134, 148], copper: [209, 119, 73], iron: [204, 221, 226] };
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-		const handle = (x === 7 || x === 8) && y >= (kind === "hoe" ? 4 : 5);
-		const head = kind === "pickaxe" ? ((y === 3 || y === 4) && x >= 3 && x <= 12) || (y === 5 && (x === 3 || x === 12))
-			: kind === "axe" ? x >= 4 && x <= 9 && y >= 2 && y <= 6 && (x !== 4 || y >= 3)
-			: kind === "hoe" ? (y === 3 && x >= 7 && x <= 12) || (x >= 11 && x <= 12 && y >= 4 && y <= 6)
-			: x >= 5 && x <= 10 && y >= 2 && y <= 6 && (y !== 6 || x >= 6 && x <= 9);
-		if (!handle && !head) continue;
-		const color = head ? shade(colors[tier], (x + y) % 3 === 0 ? .82 : 1) : x === 7 ? [111, 75, 43] : [151, 101, 54];
-		const i = (y * TEX_SIZE + x) * 4;
-		pixels.set([clamp(color[0]), clamp(color[1]), clamp(color[2]), 255], i);
 	}
 	return pixels;
 }
