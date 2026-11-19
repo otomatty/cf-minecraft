@@ -1,5 +1,6 @@
 //! Transient animals and their deterministic spawning and movement.
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use jmath::sin_table::{cos, sin};
 use physics::{BlockWorld, CollisionWorld, Input, Player};
@@ -60,6 +61,7 @@ pub struct Mob {
     fall_start_y: Option<f64>,
     suffocation_ticks: u8,
     lava_ticks: u8,
+    last_dry_pos: [f64; 3],
 }
 
 impl Mob {
@@ -75,6 +77,7 @@ impl Mob {
             fall_start_y: None,
             suffocation_ticks: 0,
             lava_ticks: 0,
+            last_dry_pos: pos,
         }
     }
 
@@ -220,6 +223,9 @@ impl Mob {
 
         let in_lava = head.is_some_and(blocks::is_lava)
             || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
+        if !in_lava {
+            self.last_dry_pos = pos;
+        }
         if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) && self.take_damage(LAVA_DAMAGE) {
             cause = Some(DeathCause::Lava);
         }
@@ -267,7 +273,7 @@ impl Mob {
             } else {
                 let scale = PROBE_DISTANCE / distance_squared.sqrt();
                 let ahead = [x + dx * scale, y, z + dz * scale];
-                safe_ahead(world, &collisions, ahead)
+                safe_ahead(world, &collisions, before, ahead)
             };
             if let Some(jump) = jump {
                 self.yaw = heading(dx, dz);
@@ -286,7 +292,7 @@ impl Mob {
         let was_rising = !self.body.on_ground && self.body.velocity[1] > 0.0;
         let mut next = self.body;
         next.tick(input, &collisions);
-        if input.forward != 0.0 && touches_lava(world, next.position) {
+        if input.forward != 0.0 && enters_lava(world, before, next.position) {
             // Horizontal momentum can differ from the intended heading when turning.
             if fleeing {
                 self.stop_horizontal();
@@ -388,6 +394,9 @@ impl Mob {
         hash_height(h, self.fall_start_y);
         h.u8(self.suffocation_ticks);
         h.u8(self.lava_ticks);
+        for v in self.last_dry_pos {
+            h.bytes(&v.to_bits().to_be_bytes());
+        }
     }
 }
 
@@ -409,11 +418,16 @@ fn cow_collisions(world: &World) -> impl CollisionWorld + '_ {
 }
 
 /// None means stop. A solid block at foot level can ask physics to jump.
-fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) -> Option<bool> {
+fn safe_ahead(
+    world: &World,
+    collisions: &impl CollisionWorld,
+    before: [f64; 3],
+    pos: [f64; 3],
+) -> Option<bool> {
     let [x, y, z] = pos.map(|v| v.floor() as i32);
     let foot = world.get_block(x, y, z)?;
     let below = world.get_block(x, y - 1, z)?;
-    if blocks::is_lava(below) || touches_lava(world, pos) {
+    if blocks::is_lava(below) || enters_lava(world, before, pos) {
         return None;
     }
     if blocks::is_water(foot) || blocks::is_water(below) {
@@ -443,7 +457,8 @@ fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) ->
     let cutoff = pos[1] - 4.0;
     for floor in (y - 5..=y).rev() {
         let state = world.get_block(x, floor, z)?;
-        if blocks::is_lava(state) {
+        // Lava at foot level was already checked against the cow's previous bounds.
+        if floor < y && blocks::is_lava(state) {
             return None;
         }
         if (blocks::is_water(state) && f64::from(floor + 1) > cutoff)
@@ -455,13 +470,32 @@ fn safe_ahead(world: &World, collisions: &impl CollisionWorld, pos: [f64; 3]) ->
     None
 }
 
-fn touches_lava(world: &World, [x, y, z]: [f64; 3]) -> bool {
+fn body_cells([x, y, z]: [f64; 3]) -> [RangeInclusive<i32>; 3] {
     let half = COW_WIDTH / 2.0;
-    ((x - half).floor() as i32..=(x + half).floor() as i32).any(|x| {
-        ((z - half).floor() as i32..=(z + half).floor() as i32).any(|z| {
-            (y.floor() as i32..=(y + COW_HEIGHT).floor() as i32)
-                .any(|y| world.get_block(x, y, z).is_some_and(blocks::is_lava))
-        })
+    [
+        (x - half).floor() as i32..=(x + half).floor() as i32,
+        y.floor() as i32..=(y + COW_HEIGHT).floor() as i32,
+        (z - half).floor() as i32..=(z + half).floor() as i32,
+    ]
+}
+
+fn lava_cells(world: &World, pos: [f64; 3]) -> impl Iterator<Item = [i32; 3]> + '_ {
+    let [xs, ys, zs] = body_cells(pos);
+    xs.flat_map(move |x| {
+        let ys = ys.clone();
+        zs.clone()
+            .flat_map(move |z| ys.clone().map(move |y| [x, y, z]))
+    })
+    .filter(|&[x, y, z]| world.get_block(x, y, z).is_some_and(blocks::is_lava))
+}
+
+fn enters_lava(world: &World, before: [f64; 3], after: [f64; 3]) -> bool {
+    let previous = body_cells(before);
+    lava_cells(world, after).any(|cell| {
+        !previous
+            .iter()
+            .zip(cell)
+            .all(|(range, coordinate)| range.contains(&coordinate))
     })
 }
 
@@ -552,7 +586,7 @@ impl Server {
         let loot = match mob.kind {
             MobKind::Cow => items::COW_LOOT,
         };
-        let [x, y, z] = mob.pos();
+        let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
         for (index, &(item, min, max)) in loot.iter().enumerate() {
             let range = u64::from(max) - u64::from(min) + 1;
             let roll = sample(self.seed, id, self.game_time, LOOT_SALT + index as u64);
@@ -1284,6 +1318,12 @@ mod tests {
     fn lava_at_feet_or_head_burns_loot_after_three_damage_intervals() {
         let run = |y, lava| {
             let (mut server, id) = combat(GameMode::Creative);
+            let dry = [5.5, 1.0, 8.5];
+            let trapped = server.mobs[&id].pos();
+            server.mobs.get_mut(&id).unwrap().body.position = dry;
+            server.tick();
+            assert_eq!(server.mobs[&id].last_dry_pos, dry);
+            server.mobs.get_mut(&id).unwrap().body.position = trapped;
             // The center is the only open column, keeping the cow inside the lava.
             server.world.set_block(7, y, 5, lava);
             for (x, z) in [(6, 5), (8, 5), (7, 4), (7, 6)] {
@@ -1324,10 +1364,28 @@ mod tests {
                 }
             }
             assert_eq!(server.entities.len(), 1);
-            let drop = server.entities.values().next().unwrap();
+            let (&drop_id, drop) = server.entities.iter().next().unwrap();
             assert_eq!(drop.item, items::by_name("cooked_beef").unwrap());
             assert!((1..=3).contains(&drop.count));
-            drop.count
+            let [x, y, z] = dry;
+            assert_eq!(drop.pos, [x, y + 0.65, z]);
+            assert_eq!(drop.pickup_delay, 10);
+            let stack = crate::Stack {
+                item: drop.item,
+                count: drop.count,
+            };
+            for _ in 0..10 {
+                server.tick();
+            }
+            let drop = &server.entities[&drop_id];
+            assert_eq!(drop.pickup_delay, 0);
+            assert_eq!((drop.item, drop.count), (stack.item, stack.count));
+
+            server.clients.get_mut(&1).unwrap().pos = dry;
+            server.tick();
+            assert!(server.entities.is_empty());
+            assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
+            stack.count
         };
         let count = run(1, blocks::LAVA);
         assert_eq!(run(1, blocks::LAVA), count);
@@ -1351,6 +1409,27 @@ mod tests {
             block_at(&world, cow.pos(), COW_HEAD_OFFSET),
             Some(blocks::AIR)
         );
+    }
+
+    #[test]
+    fn lava_damage_makes_a_cow_flee_from_an_isolated_lava_cell() {
+        let mut world = arena(16);
+        world.set_block(7, 1, 7, blocks::LAVA);
+        let mut cow = Mob::cow([7.5, 1.0, 7.5]);
+        cow.lava_ticks = LAVA_INTERVAL - 1;
+        let time = (1..)
+            .find(|&t| !sample(5, 7, t, 0).is_multiple_of(WALK_CHANCE))
+            .unwrap();
+        assert_eq!(cow.tick(&world, 5, 7, time), Some(DeathCause::Lava));
+        assert_eq!(flee_state(&cow).1, FLEE_TICKS);
+        let escaped = (time + 1..=time + i64::from(FLEE_TICKS)).any(|tick| {
+            cow.hurt_ticks = cow.hurt_ticks.saturating_sub(1);
+            cow.tick(&world, 5, 7, tick);
+            lava_cells(&world, cow.pos()).next().is_none()
+        });
+        assert!(escaped);
+        assert!(cow.health > 0);
+        assert_eq!(cow.last_dry_pos, cow.pos());
     }
 
     fn cover_cow(server: &mut Server, state: u16) {
@@ -1539,7 +1618,7 @@ mod tests {
                 cow.tick(&world, 5, 7, tick);
                 assert_eq!(cow.pos()[1], 1.0);
                 assert!(cow.body.is_grounded(&cow_collisions(&world)));
-                assert!(!touches_lava(&world, cow.pos()));
+                assert!(lava_cells(&world, cow.pos()).next().is_none());
                 let (target, left, blocked) = flee_state(&cow);
                 assert_eq!(left, 60 - tick as u8);
                 if !turned && target != first {
@@ -1566,6 +1645,26 @@ mod tests {
             flee_state(&cow),
             (flee_target(before, 5, 7, 1, None), 59, 0)
         );
+    }
+
+    #[test]
+    fn fleeing_cow_at_lava_edge_avoids_new_lava_cells() {
+        let mut world = arena(16);
+        world.set_block(2, 1, 2, blocks::LAVA);
+        world.set_block(2, 1, 3, blocks::LAVA);
+        for (target, velocity) in [([2.5, 9.0], 0.0), ([9.0, 2.5], 0.8)] {
+            let mut cow = fleeing_toward(target);
+            cow.body.position = [2.5, 1.0, 2.5];
+            cow.body.velocity[2] = velocity;
+            let before = cow.pos();
+            assert!(lava_cells(&world, before).eq([[2, 1, 2]]));
+            cow.tick(&world, 5, 7, 1);
+            assert_eq!(cow.pos(), before);
+            assert_eq!(
+                flee_state(&cow),
+                (flee_target(before, 5, 7, 1, None), 59, 0)
+            );
+        }
     }
 
     #[test]
