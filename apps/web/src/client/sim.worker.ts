@@ -96,6 +96,7 @@ function pumpGeneration(c: ServerCore): void {
 
 const CLIENT = 1;
 const AUTOSAVE_TICKS = 100;
+const DIRTY_SAVE_TICKS = 20;
 const STATS_TICKS = 20;
 const READ_RETRY_TICKS = 20;
 
@@ -113,6 +114,8 @@ let gameMode: "creative" | "survival" = "creative";
 let currentWorld = "";
 let archiveQueue: Promise<unknown> = Promise.resolve();
 let persistence: PendingChunkSaves | null = null;
+let saving: Promise<void> | null = null;
+let lastSaveTick = 0;
 const reads = new PendingChunkReads((cx, cz) => persistence ? persistence.readChunk(cx, cz) : Promise.resolve(null));
 
 function save(): Promise<void> {
@@ -123,7 +126,12 @@ function save(): Promise<void> {
 	const chunks: DirtyChunk[] = [];
 	for (let d = c.takeDirty(); d !== null; d = c.takeDirty()) chunks.push(d);
 	const meta: Meta = { gameMode, generator, seed: seed.toString(), gameTime: c.gameTime.toString(), dayTime: c.dayTime.toString() };
-	return s.save(chunks, meta, c.inventoryData(CLIENT));
+	lastSaveTick = Number(meta.gameTime);
+	const pending = s.save(chunks, meta, c.inventoryData(CLIENT));
+	saving = pending;
+	return pending.finally(() => {
+		if (saving === pending) saving = null;
+	});
 }
 
 async function serveRequests(c: ServerCore): Promise<void> {
@@ -166,6 +174,8 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
 	if (epoch !== initEpoch) return;
 	c.connect(CLIENT, import.meta.env.DEV, undefined, player ?? undefined);
+	saving = null;
+	lastSaveTick = Number(c.gameTime);
 	core = c;
 	post({ type: "ready", generator, seed: seed.toString(), persistence: store ? "opfs" : "off" });
 
@@ -188,7 +198,10 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 			void serveRequests(c);
 
 			const t = Number(c.gameTime);
-			if (t % AUTOSAVE_TICKS === 0) void save();
+			const sinceSave = t - lastSaveTick;
+			// Explicit saves use the store's serial queue. Avoid queuing periodic
+			// snapshots while any save is still pending.
+			if (persistence && !saving && (sinceSave >= AUTOSAVE_TICKS || (sinceSave >= DIRTY_SAVE_TICKS && c.dirtyChunks > 0))) void save();
 			if (t % STATS_TICKS === 0) {
 				const stats: ServerStats = {
 					generation: generation?.stats() ?? null,

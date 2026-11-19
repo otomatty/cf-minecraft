@@ -1124,6 +1124,7 @@ async function main(): Promise<void> {
 		if (e.button === 0) stopDig();
 		if (e.button === 2) stopEating();
 	});
+	let closedOnHide = false;
 	const runPageCacheAction = (action: PageCacheAction): void => {
 		switch (action) {
 			case "flush":
@@ -1131,6 +1132,7 @@ async function main(): Promise<void> {
 				return;
 			case "close":
 				transport.close();
+				closedOnHide = true;
 				return;
 			case "reload":
 				location.reload();
@@ -1141,10 +1143,11 @@ async function main(): Promise<void> {
 		}
 	};
 	window.addEventListener("pagehide", (event) => {
-		for (const action of pageCacheActions("pagehide", event.persisted, transport.kind)) runPageCacheAction(action);
+		const persistence = transport instanceof LocalTransport ? transport.persistence : undefined;
+		for (const action of pageCacheActions("pagehide", event.persisted, transport.kind, { persistence })) runPageCacheAction(action);
 	});
 	window.addEventListener("pageshow", (event) => {
-		for (const action of pageCacheActions("pageshow", event.persisted, transport.kind)) runPageCacheAction(action);
+		for (const action of pageCacheActions("pageshow", event.persisted, transport.kind, { closedOnHide })) runPageCacheAction(action);
 	});
 	document.addEventListener("visibilitychange", () => {
 		if (document.visibilityState === "hidden") transport.flush();

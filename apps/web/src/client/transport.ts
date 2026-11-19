@@ -46,8 +46,10 @@ export type WorkerRequest =
 	| { type: "export"; id: number }
 	| { type: "import"; id: number; world: string; data: ArrayBuffer };
 
+export type WorkerPersistence = "opfs" | "off";
+
 export type WorkerEvent =
-	| { type: "ready"; generator: number; seed: string; persistence: string }
+	| { type: "ready"; generator: number; seed: string; persistence: WorkerPersistence }
 	| { type: "packets"; list: ArrayBuffer[] }
 	| { type: "stats"; stats: ServerStats }
 	| { type: "error"; message: string }
@@ -62,7 +64,12 @@ export class LocalTransport implements Transport {
 	private readonly worker: Worker;
 	private nextId = 0;
 	private closed = false;
+	private workerPersistence?: WorkerPersistence;
 	private readonly pending = new Map<number, { resolve(data?: ArrayBuffer): void; reject(error: Error): void }>();
+
+	get persistence(): WorkerPersistence | undefined {
+		return this.workerPersistence;
+	}
 
 	private rejectPending(message: string): void {
 		for (const request of this.pending.values()) request.reject(new Error(message));
@@ -75,6 +82,7 @@ export class LocalTransport implements Transport {
 			const msg = event.data;
 			switch (msg.type) {
 				case "ready":
+					this.workerPersistence = msg.persistence;
 					handlers.onGenerator?.(msg.generator);
 					handlers.onOpen();
 					break;

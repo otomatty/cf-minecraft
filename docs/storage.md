@@ -140,3 +140,7 @@ BFCache に入るシングルプレイでは、sim worker を `close()`（`Worke
 ページが実際に破棄される `pagehide`（`persisted` が false）では `flush()` だけを行う。マルチプレイもローカルの sim worker を持たないので、`pagehide` は `flush()`、BFCache から戻ったときは `resume()` である。`visibilitychange` で hidden になったときの `flush()` も同じである。
 
 Chrome では `Worker.terminate()` が親ワーカーのコンテキストを破棄し、その破棄を購読している子の dedicated worker も terminate する。親スレッドは子が止まるまで終了を完了しない。地形生成の gen worker は sim worker から作られるので、ここで一緒に止まる。gen worker は OPFS を開かない。sync access handle を持っているのは sim worker である。
+
+シングルプレイの自動保存は、未保存のチャンクがあるとき、前回の保存開始から20 tick（約1秒）経過すると実行する。チャンクに変更がなくても100 tick（約5秒）でプレイヤー状態と時刻を保存する。保存中に自動保存の間隔が過ぎた場合は、書き込みが終わった後の tick で再判定する。
+
+OPFS を開けず `persistence: off` で動くワールドは、BFCache に入る際もワーカーを維持する。復帰時にページをリロードするのは、BFCache に入る際にワーカーを止めた場合だけである。

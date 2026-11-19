@@ -286,3 +286,46 @@ test("diagnostics record a renderer crash from page error and Inspector.targetCr
 		await rm(shots, { recursive: true, force: true });
 	}
 });
+
+test("diagnostics include a renderer crash reported while collecting fresh-tab state", async (t) => {
+	const shots = await mkdtemp(join(tmpdir(), "e2e-diag-late-crash-"));
+	t.mock.method(console, "log", () => {});
+	const handlers = {};
+	const session = {
+		async send(method) {
+			if (method === "Inspector.enable") return;
+			throw new Error("screenshot unavailable");
+		},
+		on(event, cb) { handlers[event] = cb; },
+		async detach() {},
+	};
+	const page = {
+		on(event, cb) { handlers[event] = cb; },
+		target() { return { async createCDPSession() { return session; } }; },
+		async evaluate() { return { readyState: "complete" }; },
+	};
+	const browser = {
+		target() { return { async createCDPSession() { throw new Error("browser CDP unavailable"); } }; },
+		async newPage() {
+			return {
+				async goto() {},
+				async evaluate() {
+					handlers.error(new Error("Aw, Snap!"));
+					handlers["Inspector.targetCrashed"]({ status: "crashed" });
+					return "complete";
+				},
+				async close() {},
+			};
+		},
+	};
+	try {
+		await watchForCrash(page);
+		const result = await diagnose(browser, page, "late crash", { edge: "http://localhost", shots });
+		assert.deepEqual(result.page, { readyState: "complete" });
+		assert.equal(result.crashed, true);
+		assert.deepEqual(result.crash, { pageErrors: ["Aw, Snap!"], targetCrashed: [{ status: "crashed" }] });
+		assert.deepEqual(JSON.parse(await readFile(join(shots, "diag-late-crash.json"), "utf8")), result);
+	} finally {
+		await rm(shots, { recursive: true, force: true });
+	}
+});

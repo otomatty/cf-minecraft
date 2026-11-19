@@ -112,7 +112,7 @@ async function settle(page, label, chunks) {
 		);
 	} catch (err) {
 		const state = await diagnose(browser, page, label, { edge, shots });
-		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets, crashed: state.crashed })}`);
+		const error = new Error(`${label}: world did not settle: ${err.message} ${JSON.stringify({ page: state.page, targets: state.targets, crashed: state.crashed, crash: state.crash })}`);
 		error.diagnosed = true;
 		throw error;
 	}
@@ -1574,32 +1574,43 @@ async function survivalInventory() {
 		const savedItem = await page.evaluate(() => window.__mc.stats().inventory[0].item);
 		// Export waits for a full save, including the remaining item in player.dat.
 		await page.evaluate(async () => { await window.__mc.exportWorld(); });
+		const previous = await page.evaluate(() => ({ url: location.href, timeOrigin: performance.timeOrigin }));
 		await page.goto(`${edge}/play.html?server=local&world=e2e-survival-${run}&mode=creative&view=2`, { waitUntil: "load" });
 		const restored = await settle(page, "survival reload", chunksInView(2));
 		check(restored.gameMode === "survival", "survival: saved mode ignores URL changes");
-		// The previous play page was stored in the back-forward cache. Going back
-		// restores it, and single-player reloads that page because its sim worker
-		// was stopped on the way into the cache.
+		// Going back either restores the cached page (which must reload) or
+		// loads a fresh document through a back_forward navigation.
 		try {
 			await page.evaluate(() => { history.back(); });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			if (!/context was destroyed|Execution context was destroyed|Navigating frame was detached/i.test(message)) throw err;
 		}
+		let navigationType;
 		try {
-			await page.waitForFunction(() => {
+			const navigation = await page.waitForFunction(previous => {
+				// A restored document retains its original navigation timing.
+				if (location.href !== previous.url || performance.timeOrigin === previous.timeOrigin || document.readyState !== "complete") return false;
 				const nav = performance.getEntriesByType("navigation")[0];
-				return nav?.type === "reload" && document.readyState === "complete";
-			}, { timeout: 30000 });
+				return (nav?.type === "reload" || nav?.type === "back_forward") && nav.type;
+			}, { timeout: 30000 }, previous);
+			navigationType = await navigation.jsonValue();
+			await navigation.dispose();
 		} catch (err) {
 			let nav = "unavailable";
-			try { nav = await page.evaluate(() => performance.getEntriesByType("navigation")[0]?.type ?? "missing"); }
+			try {
+				nav = await page.evaluate(previous => {
+					const type = performance.getEntriesByType("navigation")[0]?.type ?? "missing";
+					return performance.timeOrigin === previous.timeOrigin ? `${type}, original document still active` : type;
+				}, previous);
+			}
 			catch (readErr) { nav = readErr instanceof Error ? readErr.message : String(readErr); }
 			const reason = err instanceof Error ? err.message : String(err);
-			throw new Error(`survival: back navigation did not reload the cached page (navigation type ${nav}): ${reason}`, { cause: err });
+			throw new Error(`survival: back navigation did not load a fresh document (navigation type ${nav}): ${reason}`, { cause: err });
 		}
-		const returned = await settle(page, "survival bfcache", chunksInView(2));
-		check(returned.gameMode === "survival", "survival: returning from BFCache reloads and settles");
+		const returnDetail = navigationType === "reload" ? "reload after BFCache restore" : "back_forward without BFCache";
+		const returned = await settle(page, `survival back navigation (${navigationType})`, chunksInView(2));
+		check(returned.gameMode === "survival", "survival: back navigation settles in survival mode", returnDetail);
 		// Vite's dev client opens an HMR socket at ws(s)://<host>/?token=<id>. Chrome
 		// logs a console error when that socket closes because the page entered
 		// BFCache. Production has no Vite client, so this is not an app error.
@@ -1615,7 +1626,7 @@ async function survivalInventory() {
 		}
 		check(
 			errors.length === 0,
-			"survival: BFCache return has no page errors",
+			"survival: back navigation has no page errors",
 			ignoredViteHmr
 				? `ignored ${ignoredViteHmr} Vite HMR BFCache socket error${ignoredViteHmr === 1 ? "" : "s"}${errors.length ? `; ${errors.join(" | ")}` : ""}`
 				: errors.join(" | "),

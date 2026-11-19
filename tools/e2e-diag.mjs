@@ -90,22 +90,10 @@ export async function watchForCrash(page, onCrash) {
 	await record.ready;
 }
 
-function crashRecord(page) {
-	return crashWatches.get(page) ?? null;
-}
-
 export async function diagnose(browser, page, label, { edge, shots }) {
 	// Individual deadlines (including cleanup and the sampling gap) total ~47s.
 	const file = join(shots, `diag-${safeFilename(label)}`);
-	const record = crashRecord(page);
-	const result = { crashed: record?.crashed === true };
-	if (result.crashed) {
-		result.crash = {
-			pageErrors: record.pageErrors,
-			targetCrashed: record.targetCrashed,
-		};
-	}
-	if (record?.inspectorError) result.crashWatchError = record.inspectorError;
+	const result = {};
 	result.page = await bounded(() => page.evaluate(() => {
 		const s = window.__mc?.stats?.();
 		return {
@@ -191,11 +179,23 @@ export async function diagnose(browser, page, label, { edge, shots }) {
 		if (fresh) result.freshTabClose = await bounded(async () => { await fresh.close(); return "closed"; }, 1000);
 	}
 	if (connected === true) result.sessionDetach = await bounded(async () => { await session.detach(); return "detached"; }, 1000);
-	const saved = await bounded(async () => {
+	const directoryReady = await bounded(async () => {
 		await mkdir(shots, { recursive: true });
-		await writeFile(`${file}.json`, `${JSON.stringify(result, null, 2)}\n`);
 		return true;
 	}, 500);
+	const record = crashWatches.get(page);
+	result.crashed = record?.crashed === true;
+	if (result.crashed) {
+		result.crash = {
+			pageErrors: [...record.pageErrors],
+			targetCrashed: [...record.targetCrashed],
+		};
+	}
+	if (record?.inspectorError) result.crashWatchError = record.inspectorError;
+	const saved = directoryReady === true ? await bounded(async () => {
+		await writeFile(`${file}.json`, `${JSON.stringify(result, null, 2)}\n`);
+		return true;
+	}, 500) : directoryReady;
 	if (saved !== true) result.writeError = saved;
 	console.log(`DIAG ${String(label).replace(/[\r\n]/g, " ")} ${JSON.stringify(result)}`);
 	return result;
