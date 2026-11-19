@@ -2174,6 +2174,80 @@ async function mobCombat() {
 	} finally { await page.close(); }
 }
 
+async function zombies() {
+	const { page, errors } = await open(`server=local&world=e2e-zombies-${run}&mode=survival&gen=flat&seed=2026&view=4&time=18000`);
+	try {
+		const stats = await settle(page, "zombies", chunksInView(4));
+		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "zombies: starts in survival Flat");
+		check(stats.health === 20, "zombies: starts at full health");
+		await resumePointerLock(page, "zombies: initial pointer lock");
+		await page.mouse.move(640, 360);
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 4),
+			{ timeout: 100000, polling: 100 });
+		const zombie = await spawned.jsonValue();
+		await spawned.dispose();
+		check(zombie.kind === 4, "zombies: a zombie spawned at night", `id ${zombie.id}`);
+
+		// Move within pursuit range and watch from the front as the zombie approaches.
+		const screenshotSession = await page.createCDPSession();
+		const camera = await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z], yaw } = api.stats().mobs.find(mob => mob.id === id);
+			const angle = yaw * Math.PI / 180;
+			const camera = [x - 11 * Math.sin(angle), y + 1.62, z + 11 * Math.cos(angle)];
+			api.setCamera(...camera, yaw + 180, -1.5);
+			return camera;
+		}, zombie.id);
+		const approaching = await page.waitForFunction((id, [x, , z]) => {
+			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
+			if (!mob) return false;
+			const distance = Math.hypot(mob.position[0] - x, mob.position[2] - z);
+			return distance <= 7 && { distance };
+		}, { timeout: 30000, polling: 50 }, zombie.id, camera);
+		const { distance } = await approaching.jsonValue();
+		await approaching.dispose();
+		check(distance <= 7, "zombies: the same zombie approached the player", `id ${zombie.id}, ${distance.toFixed(2)} blocks away`);
+
+		const file = join(shots, "mobs-zombie.png");
+		const capture = await bounded(() => screenshotSession.send("Page.captureScreenshot", {
+			format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: false,
+		}, { timeout: 8000 }), 8000);
+		if (!capture || typeof capture === "string") throw new Error(`zombies: screenshot failed (${capture})`);
+		writeFileSync(file, Buffer.from(capture.data, "base64"));
+		const greenPixels = await page.evaluate(async data => {
+			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const scale = img.height / 720;
+			const pixels = ctx.getImageData(
+				Math.floor(img.width / 2 - 58 * scale), Math.floor(img.height / 2 - 55 * scale),
+				Math.ceil(116 * scale), Math.ceil(90 * scale),
+			).data;
+			let green = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+				// Use color ratios so the face swatches can be recognized in moonlight.
+				if (g > 16 && r > g * 0.50 && r < g * 0.86 && b > g * 0.34 && b < g * 0.75) green++;
+			}
+			return green;
+		}, capture.data);
+		check(greenPixels > 20, "zombies: green skin is visibly rendered", `${greenPixels} green pixels, zombie ${zombie.id}`);
+
+		const damaged = await page.waitForFunction(() => {
+			const { health } = window.__mc.stats();
+			return health < 20 && { health };
+		}, { timeout: 30000, polling: 100 });
+		const { health } = await damaged.jsonValue();
+		await damaged.dispose();
+		check(health < 20, "zombies: the player took damage", `${health} health remaining`);
+		check(errors.length === 0, "zombies: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "zombies", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -2183,6 +2257,7 @@ try {
 	await lavaFlow();
 	await mobs();
 	await mobCombat();
+	await zombies();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

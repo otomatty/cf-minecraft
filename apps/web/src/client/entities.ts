@@ -1,6 +1,7 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
+import { zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
@@ -15,6 +16,7 @@ const mobHitboxes = [
 	{ width: 0.9, height: 0.9 },
 	{ width: 0.4, height: 0.7 },
 	{ width: 0.9, height: 1.3 },
+	{ width: 0.6, height: 1.95 },
 ] as const satisfies Record<MobKind, { width: number; height: number }>;
 
 interface MobPosition {
@@ -112,9 +114,9 @@ export interface RenderMob {
 	light: RenderItem["light"];
 }
 
-// Protocol kinds index both this table and the GPU skin array. The chicken skin
-// occupies the upper half of a layer; its texels retain their original scale.
-export const mobAssetsByKind = [cow, pig, chicken, sheep] as const satisfies Record<MobKind, MobAsset>;
+// Protocol kinds index both this table and the GPU skin array. The 64×32 skins
+// occupy the upper half of a layer at their original texel scale.
+export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie] as const satisfies Record<MobKind, MobAsset>;
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.

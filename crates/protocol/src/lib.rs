@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -20,6 +20,7 @@ pub enum MobKind {
     Pig = 1,
     Chicken = 2,
     Sheep = 3,
+    Zombie = 4,
 }
 
 impl MobKind {
@@ -33,6 +34,7 @@ impl MobKind {
             1 => Ok(Self::Pig),
             2 => Ok(Self::Chicken),
             3 => Ok(Self::Sheep),
+            4 => Ok(Self::Zombie),
             _ => Err(DecodeError),
         }
     }
@@ -47,6 +49,7 @@ pub enum DeathCause {
     Drowning = 3,
     Void = 4,
     Lava = 5,
+    Zombie = 6,
 }
 
 /// Fields shared by the status packet and the player save.
@@ -89,6 +92,7 @@ impl PlayerVitals {
             3 => DeathCause::Drowning,
             4 => DeathCause::Void,
             5 => DeathCause::Lava,
+            6 => DeathCause::Zombie,
             _ => return Err(DecodeError),
         };
         let food = if has_food { r.u8()? } else { MAX_FOOD };
@@ -1011,7 +1015,7 @@ mod tests {
             assert!(C2S::decode(&[tag, 0]).is_err());
         }
 
-        for cause in 0..=5 {
+        for cause in 0..=6 {
             let (health, air, dead) = if cause == 0 {
                 (MAX_HEALTH, MAX_AIR, false)
             } else {
@@ -1049,7 +1053,7 @@ mod tests {
         no_cause[1] = 0;
         no_cause[4] = 1;
         assert!(S2C::decode(&no_cause).is_err());
-        no_cause[5] = 6;
+        no_cause[5] = 7;
         assert!(S2C::decode(&no_cause).is_err());
     }
 
@@ -1257,7 +1261,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 17);
+        assert_eq!(PROTOCOL_VERSION, 18);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1292,7 +1296,7 @@ mod tests {
             if tag == 0x0d {
                 assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
-                bad[5] = 4;
+                bad[5] = 5;
                 assert!(S2C::decode(&bad).is_err());
             }
             let mut trailing = bytes;
@@ -1344,6 +1348,23 @@ mod tests {
         let bytes = spawn.encode();
         assert_eq!(bytes[5], 3);
         assert_eq!(S2C::decode(&bytes), Ok(spawn));
+    }
+
+    #[test]
+    fn protocol_18_zombie_spawn_round_trips_and_rejects_unknown_kind() {
+        let spawn = S2C::MobSpawn {
+            id: 10,
+            kind: MobKind::Zombie,
+            x: 12.25,
+            y: -60.0,
+            z: -8.75,
+            yaw: 90.0,
+        };
+        let mut bytes = spawn.encode();
+        assert_eq!((bytes.len(), bytes[5]), (34, 4));
+        assert_eq!(S2C::decode(&bytes), Ok(spawn));
+        bytes[5] = 5;
+        assert!(S2C::decode(&bytes).is_err());
     }
 
     #[test]
