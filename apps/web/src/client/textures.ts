@@ -29,7 +29,7 @@ export function paintTexture(name: string): Uint8Array {
 	if (tool) return paintTool(tool[1], tool[2]);
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
 		?? cropTexture(name) ?? bucketTexture(name) ?? equipmentTexture(name)
-		?? cowTexture(name) ?? pigTexture(name) ?? chickenTexture(name);
+		?? cowTexture(name) ?? pigTexture(name) ?? chickenTexture(name) ?? sheepTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -205,6 +205,36 @@ function chickenTexture(name: string): Uint8Array | undefined {
 	return pixels;
 }
 
+function sheepTexture(name: string): Uint8Array | undefined {
+	const wool = name === "sheep_wool" || name === "white_wool";
+	if (!wool && name !== "sheep_face" && name !== "sheep_leg") return undefined;
+	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+	for (let y = 0; y < TEX_SIZE; y++) {
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const tuft = ((x * 3 + y * 5) % 7) + ((x + y * 2) % 5);
+			const clump = (x % 5 === 2 && y % 4 === 1) || (x % 6 === 4 && y % 5 === 3);
+			let color: Rgb = clump ? [214 - tuft, 210 - tuft, 200 - tuft] : [248 - tuft, 244 - tuft, 236 - tuft];
+			if (name === "white_wool") {
+				const lock = (x + y) % 4 === 0;
+				const grain = tuft % 6;
+				color = lock ? [226 - grain, 222 - grain, 214 - grain] : [252 - grain, 249 - grain, 242 - grain];
+			} else if (name === "sheep_face") {
+				const grain = tuft % 8;
+				color = [176 - grain, 158 - (tuft % 6), 136 - (tuft % 5)];
+				const eye = y >= 5 && y <= 7 && ((x >= 3 && x <= 5) || (x >= 10 && x <= 12));
+				if (eye) color = y === 5 && (x === 4 || x === 11) ? [232, 220, 196] : [42, 34, 30];
+				else if (y >= 10 && x >= 4 && x <= 11) color = [150 - (tuft % 6), 112 - (tuft % 4), 84];
+			} else if (name === "sheep_leg") {
+				color = y >= 10
+					? [78 + (tuft % 5), 62 + (tuft % 4), 48]
+					: [214 - (tuft % 6), 204 - (tuft % 5), 186 - (tuft % 4)];
+			}
+			pixels.set([clamp(color[0]), clamp(color[1]), clamp(color[2]), 255], (y * TEX_SIZE + x) * 4);
+		}
+	}
+	return pixels;
+}
+
 function bucketTexture(name: string): Uint8Array | undefined {
 	if (name !== "bucket" && name !== "water_bucket" && name !== "lava_bucket") return undefined;
 	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
@@ -309,6 +339,18 @@ const EQUIPMENT_AND_WORKSTATIONS: Record<string, (rand: () => number) => Painter
 		if (x + y > 16 || (y + 2 * x) % 5 === 0) return [227, 226, 221];
 		return [254, 251, 241];
 	},
+	raw_mutton: () => (x, y) => {
+		if (y <= 4 || x >= 12) return [255, 206, 206];
+		if (y >= 11 || x <= 3) return [168, 36, 52];
+		if ((x + y) % 4 === 0) return [236, 128, 140];
+		return [196, 58, 74];
+	},
+	cooked_mutton: () => (x, y) => {
+		if (y <= 4 || x >= 12) return [176, 118, 72];
+		if (y >= 11 || x <= 3) return [92, 46, 28];
+		if ((x + y) % 4 === 0) return [122, 68, 38];
+		return [154, 88, 48];
+	},
 	apple: () => (x, y) => {
 		if (y <= 4 && x >= 9) return [85, 157, 58];
 		if (y <= 4) return [111, 67, 39];
@@ -371,6 +413,10 @@ function equipmentTexture(name: string): Uint8Array | undefined {
 					visible = (x + y === 15 && x >= 2 && y >= 2)
 						|| (x >= 4 && y >= 2 && x - y <= 11 && y - x <= 6
 							&& x + y >= 12 && x + y <= 18 && (x + y !== 18 || y % 3 !== 0));
+					break;
+				case "raw_mutton":
+				case "cooked_mutton":
+					visible = (x - 8) ** 2 / 28 + (y - 8) ** 2 / 22 <= 1 && y >= 3 && y <= 13;
 					break;
 				case "apple":
 					visible = (x === 8 && y >= 2 && y <= 4)

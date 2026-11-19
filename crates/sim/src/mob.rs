@@ -63,6 +63,17 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             takes_fall_damage: false,
             loot: items::CHICKEN_LOOT,
         },
+        MobKind::Sheep => &MobSpec {
+            width: 0.9,
+            height: 1.3,
+            head_offset: 1.1,
+            health: 8,
+            walk_forward: 0.5,
+            flee_forward: 0.75,
+            max_fall_speed: None,
+            takes_fall_damage: true,
+            loot: items::SHEEP_LOOT,
+        },
     }
 }
 
@@ -77,7 +88,7 @@ const STOP_DISTANCE_SQUARED: f64 = 0.5 * 0.5;
 const PROBE_DISTANCE: f64 = 0.7;
 const SPAWN_INTERVAL: i64 = 400;
 const HERD_KIND_SALT: u64 = 17;
-const HERD_KINDS: [MobKind; 3] = [MobKind::Cow, MobKind::Pig, MobKind::Chicken];
+const HERD_KINDS: [MobKind; 4] = [MobKind::Cow, MobKind::Pig, MobKind::Chicken, MobKind::Sheep];
 const LOCAL_LIMIT: usize = 8;
 const EGG_INTERVAL_SALT: u64 = 22;
 const MIN_EGG_TICKS: u16 = 6000;
@@ -1613,6 +1624,91 @@ mod tests {
     }
 
     #[test]
+    fn sheep_body_uses_the_cow_sized_hitbox_with_health_eight_and_head_height() {
+        let mut world = arena(16);
+        let pos = [2.5, 1.0, 2.5];
+        let mut sheep = Mob::new(MobKind::Sheep, pos);
+        let bounds = sheep.body.bounds();
+        assert_eq!(bounds.min, [2.5 - 0.45, 1.0, 2.5 - 0.45]);
+        assert_eq!(bounds.max, [2.5 + 0.45, 1.0 + 1.3, 2.5 + 0.45]);
+        assert_eq!(sheep.health, 8);
+        assert_eq!(spec(MobKind::Sheep).head_offset, 1.1);
+        assert_eq!(
+            spec(MobKind::Sheep).walk_forward,
+            spec(MobKind::Cow).walk_forward
+        );
+        assert_eq!(
+            spec(MobKind::Sheep).flee_forward,
+            spec(MobKind::Cow).flee_forward
+        );
+        assert_eq!(spec(MobKind::Sheep).max_fall_speed, None);
+        assert!(spec(MobKind::Sheep).takes_fall_damage);
+
+        // Head y is feet + 1.1, so a solid at y=2 starts covering it at feet 0.9.
+        world.set_block(2, 2, 2, blocks::STONE);
+        sheep.body.position[1] = 0.89;
+        for _ in 0..SUFFOCATION_INTERVAL {
+            assert_eq!(sheep.environment_damage(&world, sheep.pos()), None);
+        }
+        sheep.body.position[1] = 0.9;
+        for _ in 1..SUFFOCATION_INTERVAL {
+            assert_eq!(sheep.environment_damage(&world, sheep.pos()), None);
+        }
+        assert_eq!(
+            sheep.environment_damage(&world, sheep.pos()),
+            Some(DeathCause::Suffocation)
+        );
+        assert_eq!(sheep.health, 7);
+    }
+
+    #[test]
+    fn sheep_drops_wool_and_mutton_and_lava_cooks_only_the_meat() {
+        let wool = items::by_name("white_wool").unwrap();
+        let raw = items::by_name("raw_mutton").unwrap();
+        let cooked = items::by_name("cooked_mutton").unwrap();
+        for burned in [false, true] {
+            let (mut server, id) = combat(GameMode::Creative);
+            let pos = server.mobs[&id].pos();
+            server.mobs.insert(id, Mob::new(MobKind::Sheep, pos));
+            let rolled_at = if burned {
+                server.world.set_block(7, 1, 5, blocks::LAVA);
+                for (x, z) in [(6, 5), (8, 5), (7, 4), (7, 6)] {
+                    for y in 1..=2 {
+                        server.world.set_block(x, y, z, blocks::STONE);
+                    }
+                }
+                for _ in 0..2 * usize::from(LAVA_INTERVAL) {
+                    server.tick();
+                }
+                server.game_time
+            } else {
+                hold(&mut server, "iron_axe");
+                attack(&mut server, id);
+                server.tick();
+                assert_eq!(server.mobs[&id].health, 2);
+                for _ in 1..HURT_TICKS {
+                    server.tick();
+                }
+                attack(&mut server, id);
+                server.tick();
+                server.game_time - 1
+            };
+            assert!(!server.mobs.contains_key(&id));
+            let drops: Vec<_> = server
+                .entities
+                .values()
+                .map(|drop| (drop.item, drop.count))
+                .collect();
+            let mutton = 1 + (sample(server.seed, id, rolled_at, LOOT_SALT + 1) % 2) as u8;
+            let meat = if burned { cooked } else { raw };
+            assert_eq!(drops, vec![(wool, 1), (meat, mutton)]);
+        }
+        assert_eq!(items::SHEEP_LOOT, [(wool, 1, 1), (raw, 1, 2)]);
+        assert_eq!(smelting::output(raw), Some(cooked));
+        assert_eq!(smelting::output(wool), None);
+    }
+
+    #[test]
     fn lava_at_feet_or_head_burns_loot_after_three_damage_intervals() {
         let run = |y, lava| {
             let (mut server, id) = combat(GameMode::Creative);
@@ -2055,7 +2151,10 @@ mod tests {
             server.tick();
             assert!(server.mobs().is_empty());
             server.tick();
-            assert!(server.mobs().values().all(|mob| mob.kind == MobKind::Cow));
+            assert!(server
+                .mobs()
+                .values()
+                .all(|mob| mob.kind == MobKind::Chicken));
             let herd: Vec<_> = server.mobs().values().map(Mob::pos).collect();
             assert!((1..=3).contains(&herd.len()));
             for &[x, y, z] in &herd {
@@ -2085,13 +2184,13 @@ mod tests {
         let pos = server.spawn();
         let players = [(1, pos)];
         for (tick, count, expected) in [
-            (800, 1, MobKind::Pig),
-            (1200, 2, MobKind::Pig),
-            (2000, 1, MobKind::Chicken),
+            (800, 1, MobKind::Sheep),
+            (1200, 2, MobKind::Cow),
+            (2000, 1, MobKind::Pig),
             (2400, 2, MobKind::Chicken),
-            (2800, 1, MobKind::Pig),
-            (3600, 1, MobKind::Chicken),
-            (5200, 2, MobKind::Pig),
+            (2800, 1, MobKind::Sheep),
+            (3600, 1, MobKind::Pig),
+            (5200, 2, MobKind::Sheep),
         ] {
             server.game_time = tick;
             let mut spawn = || {

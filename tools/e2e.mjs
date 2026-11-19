@@ -1801,9 +1801,11 @@ async function mobs() {
 		await resumePointerLock(page, "mobs: initial pointer lock");
 		await page.mouse.move(640, 360);
 		const initialCamera = await page.evaluate(() => window.__mc.stats().camera);
+		// Flat seed 2026, player 1 at spawn: sample(seed, 1, tick, 17) % 4 picks
+		// chicken at 400, sheep at 800, two cows at 1200, and a pig at 2000.
 		const spawned = await page.waitForFunction(
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 0),
-			{ timeout: 60000, polling: 100 },
+			{ timeout: 100000, polling: 100 },
 		);
 		const cow = await spawned.jsonValue();
 		await spawned.dispose();
@@ -1829,7 +1831,7 @@ async function mobs() {
 					return {
 						id: target.id,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
-						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [13, 21.5, 19][kind]],
+						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [13, 21.5, 19, 15][kind]],
 					};
 				};
 				let mobs = api.stats().mobs;
@@ -1929,8 +1931,10 @@ async function mobs() {
 				// With 21.5° pitch it projects to about x ±31 and y ±15.
 				// The chicken's beak is 3.2 blocks away and 1.06–1.13 below the eye.
 				// With 19° pitch it projects to about x ±11 and y ±6.
+				// The sheep's wool body is about 0.84 wide and centered 0.91 below the eye.
+				// With 15° pitch the white wool fills roughly x ±60 and y ±45.
 				const scale = img.height / 720;
-				const [left, top, width, height] = [[58, 23, 116, 65], [38, 23, 76, 46], [18, 14, 36, 28]][kind];
+				const [left, top, width, height] = [[58, 23, 116, 65], [38, 23, 76, 46], [18, 14, 36, 28], [60, 45, 120, 90]][kind];
 				const pixels = ctx.getImageData(
 					Math.floor(img.width / 2 - left * scale), Math.floor(img.height / 2 - top * scale),
 					Math.ceil(width * scale), Math.ceil(height * scale),
@@ -1942,12 +1946,14 @@ async function mobs() {
 						? r > 100 && r > b * 1.3 && b > g * 1.08 && b < g * 1.4
 						: kind === 1
 							? r > 100 && r > b * 1.25 && b > g * 1.3
-							: r > 100 && r > g * 1.25 && g > r * 0.4 && g > b * 1.6;
+							: kind === 2
+								? r > 100 && r > g * 1.25 && g > r * 0.4 && g > b * 1.6
+								: r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25;
 					if (matchesColor) matching++;
 				}
 				return matching;
 			}, readFileSync(file).toString("base64"), kind);
-			const [feature, color] = kind === 2 ? ["beak", "orange"] : ["muzzle", "pink"];
+			const [feature, color] = kind === 2 ? ["beak", "orange"] : kind === 3 ? ["wool", "white"] : ["muzzle", "pink"];
 			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
 		};
 		await photographMob(0, "cow");
@@ -1959,8 +1965,8 @@ async function mobs() {
 		}, { timeout: 25000, polling: 100 }, cow);
 		check(true, "mobs: the same cow wandered");
 
-		// At spawn in Flat seed 2026, the tick-400 herd is cow and tick 800 selects pig.
-		// Rust also confirms tick 1200 and 2800 select pig if the cow camera was away at tick 800.
+		// Flat seed 2026, player 1: the 4-way split selects pig at tick 2000 (1 mob).
+		// Tick 3600 is another pig if the 2000 herd had no room under the local cap.
 		const pigSpawn = await page.waitForFunction(
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 1),
 			{ timeout: 100000, polling: 100 },
@@ -1970,8 +1976,8 @@ async function mobs() {
 		check(pig.kind === 1, "mobs: a pig spawned", `id ${pig.id} at ${pig.position.join(", ")}`);
 		await photographMob(1, "pig");
 		await page.evaluate(({ x, y, z, yaw, pitch }) => window.__mc.setCamera(x, y, z, yaw, pitch), initialCamera);
-		// The Rust herd test confirms that at spawn in Flat seed 2026, player 1 gets
-		// a chicken herd at tick 2000, with another chance at tick 2400 if there is room.
+		// The same Rust herd test selects chicken at tick 400 (3 mobs), already present
+		// by the time the cow and pig above have spawned. Tick 2400 is another chicken herd.
 		const chickenSpawn = await page.waitForFunction(
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 2),
 			{ timeout: 100000, polling: 100 },
@@ -1980,6 +1986,17 @@ async function mobs() {
 		await chickenSpawn.dispose();
 		check(chicken.kind === 2, "mobs: a chicken spawned", `id ${chicken.id} at ${chicken.position.join(", ")}`);
 		await photographMob(2, "chicken");
+		await page.evaluate(({ x, y, z, yaw, pitch }) => window.__mc.setCamera(x, y, z, yaw, pitch), initialCamera);
+		// Rust confirms sheep at tick 800 (1 mob) for this seed and player, so it is
+		// already in the world. Tick 2800 selects sheep again if that herd was missed.
+		const sheepSpawn = await page.waitForFunction(
+			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 3),
+			{ timeout: 100000, polling: 100 },
+		);
+		const sheep = await sheepSpawn.jsonValue();
+		await sheepSpawn.dispose();
+		check(sheep.kind === 3, "mobs: a sheep spawned", `id ${sheep.id} at ${sheep.position.join(", ")}`);
+		await photographMob(3, "sheep");
 		check(errors.length === 0, "mobs: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "mobs", err);
@@ -1994,9 +2011,10 @@ async function mobCombat() {
 		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "mobCombat: starts in survival Flat");
 		await resumePointerLock(page, "mobCombat: initial pointer lock");
 		await page.mouse.move(640, 360);
+		// First cow herd is tick 1200 under the 4-kind split (previously tick 400).
 		const spawned = await page.waitForFunction(
 			() => window.__mc.stats().mobs.findLast(mob => mob.kind === 0),
-			{ timeout: 60000, polling: 100 },
+			{ timeout: 100000, polling: 100 },
 		);
 		const { id: initialId, hurt } = await spawned.jsonValue();
 		await spawned.dispose();

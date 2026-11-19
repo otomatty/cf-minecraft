@@ -11,6 +11,7 @@ const mobHitboxes: Record<MobKind, { width: number; height: number }> = {
 	0: { width: 0.9, height: 1.3 },
 	1: { width: 0.9, height: 0.9 },
 	2: { width: 0.4, height: 0.7 },
+	3: { width: 0.9, height: 1.3 },
 };
 
 interface MobPosition {
@@ -111,6 +112,7 @@ export interface RenderMob {
 export const mobTextureNames = [
 	"cow_hide", "cow_face", "cow_leg", "pig_skin", "pig_face", "pig_leg", "pig_snout",
 	"chicken_plumage", "chicken_face", "chicken_beak", "chicken_wattle", "chicken_leg",
+	"sheep_wool", "sheep_face", "sheep_leg",
 ] as const;
 type MobTextureName = typeof mobTextureNames[number];
 export type MobTextures = Record<MobTextureName, number>;
@@ -153,10 +155,23 @@ const chickenBoxes: readonly MobBox[] = [
 	{ min: [0.145, 0.235, -0.17], max: [0.20, 0.39, 0.06] },
 ];
 
+const sheepBoxes: readonly MobBox[] = [
+	// Wool torso, rounder and larger than the cow's 0.64 by 0.59 body.
+	{ min: [-0.36, 0.40, -0.40], max: [0.36, 1.05, 0.28] },
+	// A second wool layer that sticks out around the torso.
+	{ min: [-0.42, 0.52, -0.32], max: [0.42, 1.14, 0.18] },
+	{ min: [-0.16, 0.78, 0.20], max: [0.16, 1.20, 0.45], front: "sheep_face" },
+	{ min: [-0.32, 0, -0.30], max: [-0.16, 0.48, -0.14], legSwing: 1 },
+	{ min: [0.16, 0, -0.30], max: [0.32, 0.48, -0.14], legSwing: -1 },
+	{ min: [-0.32, 0, 0.06], max: [-0.16, 0.48, 0.22], legSwing: -1 },
+	{ min: [0.16, 0, 0.06], max: [0.32, 0.48, 0.22], legSwing: 1 },
+];
+
 const mobModels: Record<MobKind, { boxes: readonly MobBox[]; hide: MobTextureName; leg: MobTextureName }> = {
 	0: { boxes: cowBoxes, hide: "cow_hide", leg: "cow_leg" },
 	1: { boxes: pigBoxes, hide: "pig_skin", leg: "pig_leg" },
 	2: { boxes: chickenBoxes, hide: "chicken_plumage", leg: "chicken_leg" },
+	3: { boxes: sheepBoxes, hide: "sheep_wool", leg: "sheep_leg" },
 };
 
 export function mobVertices(

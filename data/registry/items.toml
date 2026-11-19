@@ -394,3 +394,20 @@ food = 6
 name = "feather"
 id = 69
 texture = "feather"
+
+[[items]]
+name = "white_wool"
+id = 70
+block = "white_wool"
+
+[[items]]
+name = "raw_mutton"
+id = 71
+texture = "raw_mutton"
+food = 2
+
+[[items]]
+name = "cooked_mutton"
+id = 72
+texture = "cooked_mutton"
+food = 6
