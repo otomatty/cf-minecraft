@@ -1152,6 +1152,9 @@ impl Server {
         {
             return;
         }
+        if self.world.local_block_light([x, candidate[1] as i32, z]) > 0 {
+            return;
+        }
         self.spawn_mob(hostile_kind(self.seed, id, self.game_time), candidate);
     }
 
@@ -2872,6 +2875,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn night_spawn_requires_zero_block_light_at_the_feet() {
+        let mut server = joined(GameMode::Creative);
+        assert!(!server.world.lighting_enabled());
+        let night_tick = |server: &mut Server| {
+            server.mobs.clear();
+            server.set_time(199, 17999);
+            server.tick();
+        };
+        night_tick(&mut server);
+        let [x, y, z] = server
+            .mobs
+            .values()
+            .next()
+            .unwrap()
+            .pos()
+            .map(|axis| axis.floor() as i32);
+
+        assert!(server
+            .world
+            .set_block(x + 5, y, z, blocks::LAMP_BLOCK)
+            .is_some());
+        night_tick(&mut server);
+        assert!(server.mobs.is_empty());
+
+        // From the lamp, any route around this wall above ground exceeds 14 steps.
+        for wall_y in y..=y + 5 {
+            for wall_z in z - 5..=z + 5 {
+                assert!(server
+                    .world
+                    .set_block(x + 4, wall_y, wall_z, blocks::STONE)
+                    .is_some());
+            }
+        }
+        night_tick(&mut server);
+        assert_eq!(server.mobs.len(), 1);
+
+        server.world.set_block(x + 5, y, z, blocks::AIR);
+        // Place the lamp on the open side to check the exact light cutoff.
+        assert!(server
+            .world
+            .set_block(x - 14, y, z, blocks::LAMP_BLOCK)
+            .is_some());
+        night_tick(&mut server);
+        assert!(server.mobs.is_empty());
+        server.world.set_block(x - 14, y, z, blocks::AIR);
+        assert!(server
+            .world
+            .set_block(x - 15, y, z, blocks::LAMP_BLOCK)
+            .is_some());
+        night_tick(&mut server);
+        assert_eq!(server.mobs.len(), 1);
     }
 
     #[test]

@@ -12,6 +12,9 @@ const DIRS: [Pos; 6] = [
     (-1, 0, 0),
     (1, 0, 0),
 ];
+const LOCAL_RADIUS: i32 = 14;
+const LOCAL_SIDE: usize = (2 * LOCAL_RADIUS + 1) as usize;
+const LOCAL_VOLUME: usize = LOCAL_SIDE * LOCAL_SIDE * LOCAL_SIDE;
 
 /// Two block levels per byte, low nibble first in section index order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +106,14 @@ fn neighbor(p: Pos, d: Pos) -> Pos {
 }
 fn index(p: Pos) -> usize {
     (((p.1 - MIN_Y) & 15) * 256 + (p.2 & 15) * 16 + (p.0 & 15)) as usize
+}
+fn local_index((x, y, z): Pos) -> usize {
+    ((z + LOCAL_RADIUS) as usize * LOCAL_SIDE + (x + LOCAL_RADIUS) as usize) * LOCAL_SIDE
+        + (y + LOCAL_RADIUS) as usize
+}
+
+fn attenuate(value: u8, opacity: u8) -> u8 {
+    value.saturating_sub(opacity.max(1))
 }
 
 impl World {
@@ -339,6 +350,74 @@ impl World {
         self.level((x, y, z), false)
     }
 
+    /// Compute block light at one cell without updating the world's lighting.
+    /// When lighting is enabled, chunks awaiting deferred lighting are closed boundaries.
+    pub fn local_block_light(&self, [x, y, z]: [i32; 3]) -> u8 {
+        let loaded_chunk = |x: i32, z: i32| {
+            self.chunks
+                .get(&(x >> 4, z >> 4))
+                .filter(|c| !self.lighting_enabled || c.lighting.is_some())
+        };
+        let top = MIN_Y + HEIGHT - 1;
+        if !(MIN_Y..=top).contains(&y) || loaded_chunk(x, z).is_none() {
+            return 0;
+        }
+
+        let mut opacity = [15; LOCAL_VOLUME];
+        let mut levels = [0; LOCAL_VOLUME];
+        let mut queue = VecDeque::new();
+        for dz in -LOCAL_RADIUS..=LOCAL_RADIUS {
+            let Some(world_z) = z.checked_add(dz) else {
+                continue;
+            };
+            let reach = LOCAL_RADIUS - dz.abs();
+            for dx in -reach..=reach {
+                let Some(world_x) = x.checked_add(dx) else {
+                    continue;
+                };
+                let Some(chunk) = loaded_chunk(world_x, world_z) else {
+                    continue;
+                };
+                let reach = reach - dx.abs();
+                for dy in (-reach).max(MIN_Y - y)..=reach.min(top - y) {
+                    let p = (dx, dy, dz);
+                    let cell = local_index(p);
+                    let info = blocks::info(chunk.get(
+                        (world_x & 15) as usize,
+                        y + dy,
+                        (world_z & 15) as usize,
+                    ));
+                    opacity[cell] = info.opacity;
+                    let distance = (LOCAL_RADIUS - reach + dy.abs()) as u8;
+                    if info.emission > distance {
+                        levels[cell] = info.emission;
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+
+        // Every remaining step costs at least one level. Discard paths that
+        // cannot reach the center, including steps outside the scanned diamond.
+        while let Some(p) = queue.pop_front() {
+            let value = levels[local_index(p)];
+            for d in DIRS {
+                let n = neighbor(p, d);
+                let distance = (n.0.abs() + n.1.abs() + n.2.abs()) as u8;
+                if value <= distance + 1 {
+                    continue;
+                }
+                let cell = local_index(n);
+                let next = attenuate(value, opacity[cell]);
+                if next > distance.max(levels[cell]) {
+                    levels[cell] = next;
+                    queue.push_back(n);
+                }
+            }
+        }
+        levels[local_index((0, 0, 0))]
+    }
+
     fn loaded(&self, p: Pos) -> bool {
         section_index(p.1).is_some()
             && self
@@ -415,15 +494,11 @@ impl World {
             return 0;
         };
         let opacity = blocks::info(state).opacity;
-        if opacity == 15 {
-            return 0;
-        }
-        let cost = if sky && value == 15 && to.1 < from.1 && opacity == 0 {
-            0
+        if sky && value == 15 && to.1 < from.1 && opacity == 0 {
+            value
         } else {
-            opacity.max(1)
-        };
-        value.saturating_sub(cost)
+            attenuate(value, opacity)
+        }
     }
     fn spread(&mut self, sky: bool, mut queue: VecDeque<Pos>) {
         while let Some(p) = queue.pop_front() {
@@ -740,6 +815,164 @@ mod tests {
         assert_eq!(w.block_light(1, 0, 8), 4);
         assert_rebuild(&w);
     }
+
+    #[test]
+    fn local_block_light_flat_ground_and_chunk_crossing() {
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        for cx in [-1, 0] {
+            let mut chunk = Chunk::empty(cx, 0);
+            for z in 0..16 {
+                for x in 0..16 {
+                    chunk.set(x, 0, z, blocks::STONE);
+                }
+            }
+            if cx == -1 {
+                chunk.set(15, 1, 8, blocks::LAMP_BLOCK);
+            }
+            lit.insert_chunk(chunk.clone());
+            unlit.insert_chunk(chunk);
+        }
+        let mut before = Fnv64::new();
+        unlit.hash_into(&mut before);
+        for (p, expected) in [
+            ([-1, 1, 8], 15),
+            ([0, 1, 8], 14),
+            ([13, 1, 8], 1),
+            ([14, 1, 8], 0),
+            ([0, 0, 8], 0),
+            ([0, MIN_Y - 1, 8], 0),
+            ([0, MIN_Y + HEIGHT, 8], 0),
+        ] {
+            let [x, y, z] = p;
+            assert_eq!(lit.block_light(x, y, z), expected, "{p:?}");
+            assert_eq!(unlit.local_block_light(p), expected, "{p:?}");
+        }
+        let mut after = Fnv64::new();
+        unlit.hash_into(&mut after);
+        assert_eq!(before.finish(), after.finish());
+        assert!(unlit.chunks.values().all(|c| c.lighting.is_none()));
+    }
+
+    #[test]
+    fn local_block_light_respects_walls_filters_and_multiple_emitters() {
+        let mut chunk = solid(0, 0);
+        for x in 0..16 {
+            chunk.set(x, 0, 8, blocks::AIR);
+        }
+        chunk.set(0, 0, 8, blocks::LAMP_BLOCK);
+        chunk.set(2, 0, 8, blocks::OAK_LEAVES);
+        chunk.set(3, 0, 8, blocks::WATER);
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        lit.insert_chunk(chunk.clone());
+        unlit.insert_chunk(chunk);
+        for (edit, expected) in [
+            ((5, blocks::AIR), 9),
+            ((5, blocks::STONE), 0),
+            ((12, blocks::LAMP_BLOCK), 9),
+            ((10, blocks::STONE), 0),
+            ((5, blocks::AIR), 9),
+            ((8, blocks::LAMP_BLOCK), 13),
+        ] {
+            let (x, state) = edit;
+            lit.set_block(x, 0, 8, state);
+            unlit.set_block(x, 0, 8, state);
+            assert_eq!(lit.block_light(6, 0, 8), expected, "{edit:?}");
+            assert_eq!(unlit.local_block_light([6, 0, 8]), expected, "{edit:?}");
+        }
+    }
+
+    #[test]
+    fn local_block_light_missing_chunks_are_closed() {
+        let mut source = Chunk::empty(0, 0);
+        source.set(15, 0, 15, blocks::LAMP_BLOCK);
+        let target = Chunk::empty(1, 1);
+        let bridge = Chunk::empty(1, 0);
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        for chunk in [source, target] {
+            lit.insert_chunk(chunk.clone());
+            unlit.insert_chunk(chunk);
+        }
+        assert_eq!(lit.block_light(16, 0, 16), 0);
+        assert_eq!(unlit.local_block_light([16, 0, 16]), 0);
+        assert_eq!(lit.block_light(16, 0, 15), 0);
+        assert_eq!(unlit.local_block_light([16, 0, 15]), 0);
+
+        lit.insert_chunk_unlit(bridge.clone());
+        assert_eq!(
+            lit.local_block_light([16, 0, 16]),
+            lit.block_light(16, 0, 16)
+        );
+        lit.light_chunk(1, 0);
+        unlit.insert_chunk(bridge);
+        assert_eq!(lit.block_light(16, 0, 16), 13);
+        assert_eq!(unlit.local_block_light([16, 0, 16]), 13);
+        lit.remove_chunk(1, 0);
+        unlit.remove_chunk(1, 0);
+        assert_eq!(lit.block_light(16, 0, 16), 0);
+        assert_eq!(unlit.local_block_light([16, 0, 16]), 0);
+    }
+
+    #[test]
+    fn local_block_light_matches_fixed_seed_layouts_and_edits() {
+        let mut rng = 0x4fe145d7u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        let states = [
+            blocks::AIR,
+            blocks::STONE,
+            blocks::OAK_LEAVES,
+            blocks::WATER,
+            blocks::LAMP_BLOCK,
+            blocks::LAVA,
+        ];
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        let top = MIN_Y + HEIGHT - 1;
+        for (cx, cz) in [(-1, -1), (-1, 0), (0, 0)] {
+            let mut chunk = Chunk::empty(cx, cz);
+            for base_y in [MIN_Y, 0, top - 7] {
+                for _ in 0..100 {
+                    let x = (next() % 16) as usize;
+                    let y = base_y + (next() % 8) as i32;
+                    let z = (next() % 16) as usize;
+                    chunk.set(x, y, z, states[next() as usize % states.len()]);
+                }
+            }
+            lit.insert_chunk(chunk.clone());
+            unlit.insert_chunk(chunk);
+        }
+        let mut position = || {
+            let x = (next() % 32) as i32 - 16;
+            let y = [MIN_Y, 0, top - 7][(next() % 3) as usize] + (next() % 10) as i32 - 1;
+            let z = (next() % 32) as i32 - 16;
+            ([x, y, z], states[next() as usize % states.len()])
+        };
+        for batch in 0..=12 {
+            if batch > 0 {
+                for _ in 0..12 {
+                    let ([x, y, z], state) = position();
+                    lit.set_block(x, y, z, state);
+                    unlit.set_block(x, y, z, state);
+                }
+            }
+            for _ in 0..48 {
+                let (p @ [x, y, z], _) = position();
+                assert_eq!(
+                    unlit.local_block_light(p),
+                    lit.block_light(x, y, z),
+                    "{p:?} after edit batch {batch}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn boundaries_late_load_replacement_and_unload() {
         let mut a = solid(-1, 0);
@@ -926,5 +1159,36 @@ mod tests {
         println!("lighting disabled: init={disabled_initial:?}, lamp placement={disabled_edit:?}");
         assert_eq!(w.block_light(9, 1, 8), 14);
         assert_ne!(bytes, w.chunks[&(0, 0)].to_bytes());
+    }
+
+    #[test]
+    fn local_block_light_timings() {
+        use std::hint::black_box;
+
+        let mut world = World::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut chunk = Chunk::empty(cx, cz);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        for y in MIN_Y..=0 {
+                            chunk.set(x, y, z, blocks::STONE);
+                        }
+                    }
+                }
+                world.insert_chunk(chunk);
+            }
+        }
+        let runs = 1000;
+        for (source, expected) in [(blocks::AIR, 0), (blocks::LAMP_BLOCK, 10)] {
+            world.set_block(13, 1, 8, source);
+            let start = Instant::now();
+            for _ in 0..runs {
+                let level = black_box(&world).local_block_light(black_box([8, 1, 8]));
+                assert_eq!(level, expected);
+            }
+            let mean = start.elapsed() / runs;
+            println!("local block light: target level {expected}, mean={mean:?} ({runs} calls)");
+        }
     }
 }
