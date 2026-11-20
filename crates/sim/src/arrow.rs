@@ -99,12 +99,13 @@ impl Arrow {
     }
 
     fn was_fired_this_tick(&self) -> bool {
-        // Player releases run before tick_arrows; skeletons shoot after it.
+        // Player releases run before tick_arrows, which advances age even on impact.
+        // Skeletons shoot after tick_arrows.
         let launch_age = match self.shooter {
             Shooter::Player { .. } => 1,
             Shooter::Skeleton => 0,
         };
-        self.age == launch_age && self.embedded_ticks.is_none()
+        self.age == launch_age
     }
 
     fn ready_for_pickup(&self) -> bool {
@@ -613,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn bow_spawn_is_fresh_only_on_the_release_tick_and_while_in_flight() {
+    fn bow_spawn_is_fresh_only_on_the_release_tick_even_on_impact() {
         let feet = [5.0, 2.0, 5.0];
         let mut server = with_players(GameMode::Creative, &[(1, feet), (2, [5.0, 2.0, 160.0])]);
         server.apply(
@@ -649,8 +650,10 @@ mod tests {
         };
         server.tick();
         assert_eq!(server.arrows[&shot].age, 1);
+        assert_eq!(server.arrows[&shot].embedded_ticks, None);
+        assert_eq!(server.arrows[&embedded].age, 1);
         assert_eq!(server.arrows[&embedded].embedded_ticks, Some(0));
-        assert_eq!(spawns(&mut server), [(1, embedded, false), (1, shot, true)]);
+        assert_eq!(spawns(&mut server), [(1, embedded, true), (1, shot, true)]);
 
         server.disconnect(1);
         server.connect_at(1, true, Some(feet), None);
@@ -666,6 +669,9 @@ mod tests {
         server.clients.get_mut(&2).unwrap().pos = feet;
         server.tick();
         assert_eq!(server.arrows[&shot].age, 2);
+        assert_eq!(server.arrows[&shot].embedded_ticks, None);
+        assert_eq!(server.arrows[&embedded].age, 2);
+        assert_eq!(server.arrows[&embedded].embedded_ticks, Some(1));
         assert_eq!(
             spawns(&mut server),
             [
