@@ -60,12 +60,20 @@ impl Entity {
         self.velocity[1] -= 0.04;
         let actual = physics::resolve(&collisions, bounds, self.velocity);
         self.on_ground = self.velocity[1] < 0.0 && actual[1] != self.velocity[1];
+        let before = self.pos;
         for (a, delta) in actual.into_iter().enumerate() {
             self.pos[a] += delta;
             if delta != self.velocity[a] {
                 self.velocity[a] = 0.0;
             }
             self.velocity[a] *= if a != 1 && self.on_ground { 0.6 } else { 0.98 };
+        }
+        // Outside the build height, the collision world has no chunk walls.
+        if !world.chunks.contains_key(&self.chunk()) {
+            for axis in [0, 2] {
+                self.pos[axis] = before[axis];
+                self.velocity[axis] = 0.0;
+            }
         }
     }
 }
@@ -130,6 +138,43 @@ mod tests {
         assert_eq!(s.entities[&id].pickup_delay, 40);
         assert_eq!(s.entities[&id].pos, [20.0, 2.0, 2.0]);
     }
+    #[test]
+    fn above_build_height_items_cross_only_into_loaded_chunks() {
+        let y = f64::from(world::MIN_Y + world::HEIGHT) + 2.0;
+        let pos = [15.8, y, 3.5];
+        for loaded in [false, true] {
+            let mut s = server();
+            if loaded {
+                s.world.chunks.insert((1, 0), Chunk::empty(1, 0));
+            }
+            let id = item(&mut s, pos, [0.5, 0.0, 0.1], 40);
+            s.take_dirty().unwrap();
+            s.tick_entities();
+
+            let e = &s.entities[&id];
+            assert_eq!(e.pos[1], y - 0.04);
+            assert_eq!(e.velocity[1], -0.04 * 0.98);
+            if loaded {
+                assert_eq!(e.chunk(), (1, 0));
+                assert_eq!(e.pos, [16.3, y - 0.04, 3.6]);
+                assert_eq!(s.dirty_chunks(), 2);
+            } else {
+                assert_eq!(e.chunk(), (0, 0));
+                assert_eq!(e.pos, [pos[0], y - 0.04, pos[2]]);
+                assert_eq!([e.velocity[0], e.velocity[2]], [0.0; 2]);
+                let saved_pos = e.pos;
+                assert_eq!(s.dirty_chunks(), 0);
+                s.mark_entity_chunks();
+                s.flush_entity_changes();
+                let (cx, cz, bytes) = s.take_dirty().unwrap();
+                assert_eq!((cx, cz), (0, 0));
+                let mut restored = Server::new(5, Generator::Flat);
+                assert!(restored.load_chunk(cx, cz, &bytes));
+                assert_eq!(restored.entities[&1].pos, saved_pos);
+            }
+        }
+    }
+
     #[test]
     fn pickup_delay_range_partial_full_and_client_order() {
         let mut s = server();

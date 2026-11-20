@@ -333,6 +333,33 @@ test("DO saves compressed chunks and restores them through storage_call", t => {
 	assert.deepEqual(result.missing, []);
 });
 
+test("DO retries failed compression with the newest snapshot for each chunk", t => {
+	const { world, sqlite } = fixture(t);
+	const warnings = t.mock.method(console, "warn", () => {});
+	const first = { cx: 0, cz: 0, data: new Uint8Array([1, 2, 3]) };
+	const second = { cx: 1, cz: 0, data: new Uint8Array([4, 5, 6]) };
+	const newest = { ...first, data: new Uint8Array([7, 8, 9]) };
+	const dirty = [first, second];
+	storageCore(world, [], dirty);
+	const call = world.codec.call.bind(world.codec);
+	const failure = t.mock.method(world.codec, "call", (op, data) => {
+		if (op === 4 && data === second.data) throw new Error("compression failed");
+		return call(op, data);
+	});
+
+	assert.equal(world.save(), null);
+	assert.deepEqual(sqlite.prepare("SELECT data FROM chunks").all(), []);
+	assert.deepEqual(dirty, []);
+	assert.equal(warnings.mock.callCount(), 1);
+	failure.mock.restore();
+
+	dirty.push(newest);
+	assert.equal(world.save(), 2);
+	const rows = sqlite.prepare("SELECT data FROM chunks ORDER BY cx").all();
+	assert.deepEqual(rows.map(row => call(3, row.data)), [newest.data, second.data]);
+	assert.equal(world.save(), 0);
+});
+
 test("DO migrates a legacy table once and compresses legacy rows only on save", t => {
 	const { world, sqlite, context } = fixture(t, false, true);
 	new WorldDO(context, {}); // Repeated startup must not add the column twice.
@@ -829,6 +856,77 @@ test("DO eviction saves animals and dropped items and the recreated world stream
 	assert.ok(restored.client.mobs.some(mob => mob.kind === animal.kind
 		&& Math.hypot(mob.position[0] - animal.position[0], mob.position[2] - animal.position[2]) <= 2));
 	assert.deepEqual(restored.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
+});
+
+test("DO reads pending animals and drops ahead of SQLite after a transaction rolls back", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.env.GEN_OFFLOAD = "0";
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	f.world.lastAccessCheck = Date.now();
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const join = async () => {
+		assert.equal((await f.join("dev:player")).status, 101);
+		const [id, socket] = [...f.world.sockets.entries()][0];
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		const core = f.world.core;
+		core.packet(id, client.encodeHello(4));
+		let consumed = 0;
+		const step = () => {
+			f.world.step();
+			for (const data of socket.sent.slice(consumed)) if (typeof data !== "string") client.packet(data);
+			consumed = socket.sent.length;
+		};
+		return { id, client, core, step };
+	};
+	const before = await join();
+	for (let i = 0; i < 20; i++) before.step();
+	before.core.setTime(399n, 6000n);
+	before.step();
+	const animal = before.client.mobs[0];
+	assert.ok(animal);
+	const [x, y, z] = animal.position;
+	const cx = Math.floor(x / 16), cz = Math.floor(z / 16);
+	const inChunk = ({ position: [x, , z] }) => Math.floor(x / 16) === cx && Math.floor(z / 16) === cz;
+	const readRow = () => f.sqlite.prepare("SELECT data FROM chunks WHERE cx = ? AND cz = ?").get(cx, cz).data;
+	const stored = readRow();
+
+	// Drop into the animal's chunk, which currently has a stale row in SQLite.
+	const item = before.client.inventory[0]!.item;
+	before.core.packet(before.id, before.client.encodeTeleport(cx * 16 + 8.5, y, cz * 16 + 8.5));
+	before.core.packet(before.id, before.client.encodeDropItem([0, 0, 0]));
+	before.step();
+	assert.ok(before.client.mobs.some(inChunk));
+	assert.ok(before.client.entities.some(drop => inChunk(drop) && drop.item === item && drop.count === 1));
+	const gameTime = before.core.gameTime;
+	const dayTime = before.core.dayTime;
+
+	const warn = t.mock.method(console, "warn", () => {});
+	const sql = f.context.storage.sql;
+	const exec = sql.exec.bind(sql);
+	const failure = t.mock.method(sql, "exec", (query, ...args) => {
+		const result = exec(query, ...args);
+		if (query.startsWith("INSERT INTO chunks")) throw new Error("write rolled back");
+		return result;
+	});
+	f.world.evict();
+	failure.mock.restore();
+	assert.equal(warn.mock.callCount(), 1);
+	assert.deepEqual(readRow(), stored);
+	assert.equal(f.world.core, null);
+
+	const after = await join();
+	assert.equal(after.core.gameTime, gameTime);
+	assert.equal(after.core.dayTime, dayTime);
+	for (let i = 0; i < 20; i++) after.step();
+	assert.ok(after.client.mobs.some(mob => inChunk(mob) && mob.kind === animal.kind));
+	assert.ok(after.client.entities.some(drop => inChunk(drop) && drop.item === item && drop.count === 1));
+	assert.deepEqual(readRow(), stored, "reading a pending snapshot does not commit it");
+	assert.ok(f.world.save(false) > 0);
+	assert.notDeepEqual(readRow(), stored);
+	assert.equal(f.world.save(false), 0);
+	assert.equal(warn.mock.callCount(), 1);
 });
 
 test("DO restores the saved mode and persists creative for a missing gamemode", t => {

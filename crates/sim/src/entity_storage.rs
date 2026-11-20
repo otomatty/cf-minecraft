@@ -4,6 +4,11 @@ use world::{items, HEIGHT, MIN_Y};
 
 use crate::{entity::Entity, entity::EntityKind, health::VOID_Y, mob::Mob, ChunkPos, Server};
 
+// The swept collision scan visits a box sized by the three velocity components.
+// Airborne mobs approach 3.92 blocks/tick ((v - 0.08) * 0.98), drops approach
+// 1.96 after drag, and even a fully drawn bow launches at 3.0. Eight per axis
+// leaves room above those speeds while bounding the number of cells scanned.
+const MAX_SAVED_SPEED: f64 = 8.0;
 const MAX_SAVED_Y: f64 = (MIN_Y + HEIGHT + 64) as f64;
 const ANIMAL: u8 = 0;
 const ITEM: u8 = 1;
@@ -22,13 +27,17 @@ fn valid_position((cx, cz): ChunkPos, [x, y, z]: [f64; 3]) -> bool {
         && (VOID_Y..=MAX_SAVED_Y).contains(&y)
 }
 
+fn valid_velocity(velocity: [f64; 3]) -> bool {
+    velocity.iter().all(|v| v.abs() <= MAX_SAVED_SPEED)
+}
+
 pub(super) fn read_motion(
     chunk: ChunkPos,
     r: &mut Reader,
 ) -> Result<([f64; 3], [f64; 3]), DecodeError> {
     let pos = [r.f64()?, r.f64()?, r.f64()?];
     let velocity = [r.f64()?, r.f64()?, r.f64()?];
-    if !valid_position(chunk, pos) || !velocity.iter().all(|v| v.is_finite()) {
+    if !valid_position(chunk, pos) || !valid_velocity(velocity) {
         return Err(DecodeError);
     }
     Ok((pos, velocity))
@@ -96,12 +105,16 @@ impl Server {
         let animals = self
             .mobs
             .iter()
-            .filter(|(_, mob)| mob.is_animal() && valid_position(chunk, mob.pos()))
+            .filter(|(_, mob)| {
+                mob.is_animal()
+                    && valid_position(chunk, mob.pos())
+                    && valid_velocity(mob.velocity())
+            })
             .map(|(&id, mob)| (id, SavedEntity::Animal(mob)));
         let items = self
             .entities
             .iter()
-            .filter(|(_, item)| valid_position(chunk, item.pos))
+            .filter(|(_, item)| valid_position(chunk, item.pos) && valid_velocity(item.velocity))
             .map(|(&id, item)| (id, SavedEntity::Item(item)));
         let mut entities: Vec<_> = animals.chain(items).collect();
         entities.sort_unstable_by_key(|(id, _)| *id);
@@ -331,6 +344,34 @@ mod tests {
         let mut excess = bytes;
         excess.push(0);
         reject(&excess);
+    }
+
+    #[test]
+    fn saved_velocity_bound_is_inclusive_and_invalid_records_are_not_written() {
+        let mut source = server();
+        let pos = [2.5, 4.0, 3.5];
+        let limit = [MAX_SAVED_SPEED, -MAX_SAVED_SPEED, MAX_SAVED_SPEED];
+        source.spawn_item(1, 5, pos, limit, 40);
+        source.spawn_item(1, 5, pos, [1e12, 0.0, 0.0], 40);
+        let prefix = source.world.chunks[&(0, 0)].to_bytes().len();
+        let bytes = save(&mut source);
+        let mut target = Server::new(5, Generator::Flat);
+        assert!(target.load_chunk(0, 0, &bytes));
+        assert_eq!(target.entities.len(), 1);
+        assert_eq!(target.entities[&1].velocity, limit);
+
+        // Counts (furnace, scheduled ticks, entity), then tag, item ID, count, position.
+        let velocity_x = prefix + 3 + 4 + 24;
+        for invalid in [MAX_SAVED_SPEED.next_up(), -MAX_SAVED_SPEED.next_up(), 1e12] {
+            let mut bad = bytes.clone();
+            bad[velocity_x..velocity_x + 8].copy_from_slice(&invalid.to_be_bytes());
+            let mut target = Server::new(5, Generator::Flat);
+            target.set_stored([(0, 0)]);
+            assert!(!target.load_chunk(0, 0, &bad));
+            assert!(target.entities.is_empty());
+            assert!(target.ensure_chunk((0, 0)));
+            assert_eq!(target.stats.chunks_generated, 1);
+        }
     }
 
     #[test]

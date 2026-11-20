@@ -145,6 +145,24 @@ async function distinctColours(page, file, measureBrightness = false) {
 	}, { dataUrl: `data:image/png;base64,${readFileSync(file).toString("base64")}`, measureBrightness });
 }
 
+async function waitForSkyBrightness(page, night) {
+	try {
+		const result = await page.waitForFunction(night => {
+			const sky = window.__mc.stats().skyBrightness;
+			return (night ? sky < 0.1 : sky > 0.9) && { sky };
+		}, { timeout: 10000 }, night);
+		try {
+			return { ...(await result.jsonValue()), matched: true };
+		} finally {
+			await result.dispose();
+		}
+	} catch (err) {
+		if (err.name !== "TimeoutError") throw err;
+		const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
+		return { sky, matched: false };
+	}
+}
+
 /** Identical seed, fixed camera, and the same screenshot grid used by the blank-frame check. */
 async function dayNight() {
 	const measurements = [];
@@ -157,9 +175,9 @@ async function dayNight() {
 				window.__mc.setCamera(spawn[0], spawn[1] + 16, spawn[2], 0, 15);
 			}, stats.spawn);
 			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+			const sky = await waitForSkyBrightness(page, time === 18000);
 			const brightness = await distinctColours(page, join(shots, `sky-${time}.png`), true);
-			const sky = await page.evaluate(() => window.__mc.stats().skyBrightness);
-			measurements.push({ brightness, sky });
+			measurements.push({ brightness, ...sky });
 			check(errors.length === 0, `sky ${time}: no page errors`, errors.slice(0, 3).join(" | "));
 		} catch (err) {
 			await diagnoseFailure(page, `sky-${time}`, err);
@@ -169,7 +187,7 @@ async function dayNight() {
 		}
 	}
 	const [day, night] = measurements;
-	check(day.sky > 0.9 && night.sky < 0.1, "sky: clock selects noon and midnight", `${day.sky} / ${night.sky}`);
+	check(day.matched && night.matched, "sky: clock selects noon and midnight", `${day.sky} / ${night.sky}`);
 	check(night.brightness < day.brightness * 0.65, "sky: midnight frame is darker than noon", `${night.brightness.toFixed(1)} / ${day.brightness.toFixed(1)}`);
 }
 
@@ -206,7 +224,8 @@ async function torches() {
 	};
 	try {
 		const stats = await settle(page, "torches night", chunksInView(view));
-		check(stats.skyBrightness < 0.1, "torches: flat world is at night");
+		const { sky, matched } = await waitForSkyBrightness(page, true);
+		check(matched, "torches: flat world is at night", `skyBrightness=${sky}`);
 		const [x, y, z] = stats.spawn.map(Math.floor);
 		const torch = [x, y, z];
 		await resumePointerLock(page, "torches initial pointer lock");

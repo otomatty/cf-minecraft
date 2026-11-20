@@ -4,7 +4,7 @@ import {
 	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL, SERVICE_RESTART,
 } from "../shared/close-codes.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
-import { Generator, ServerCore } from "../shared/server-core.ts";
+import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
 import serverWasm from "../wasm/server.wasm";
@@ -58,6 +58,8 @@ export class WorldDO extends DurableObject<Env> {
 	private generation: GenerationDispatcher | null = null;
 	private generationFailed = false;
 	private codec: RegionCodec | null = null;
+	private readonly pendingChunks = new Map<string, DirtyChunk>();
+	private pendingClock: { gameTime: bigint; dayTime: bigint } | null = null;
 	private seed: bigint | null = null;
 	private generator: number = Generator.DebugHills;
 	private readonly sockets = new Map<number, WebSocket>();
@@ -137,9 +139,12 @@ export class WorldDO extends DurableObject<Env> {
 		const gameMode = this.meta("gamemode") ?? "creative";
 		this.setMeta("gamemode", gameMode);
 		core.setGameMode(gameMode === "survival" ? "survival" : "creative");
-		core.setTime(BigInt(this.meta("gameTime") ?? "0"), BigInt(this.meta("dayTime") ?? "0"));
+		core.setTime(
+			this.pendingClock?.gameTime ?? BigInt(this.meta("gameTime") ?? "0"),
+			this.pendingClock?.dayTime ?? BigInt(this.meta("dayTime") ?? "0"),
+		);
 		const stored = this.ctx.storage.sql.exec<{ cx: number; cz: number }>("SELECT cx, cz FROM chunks").toArray();
-		core.setStored(stored.map((r) => [r.cx, r.cz] as const));
+		core.setStored([...stored, ...this.pendingChunks.values()].map(({ cx, cz }) => [cx, cz] as const));
 		this.core = core;
 		this.generationFailed = false;
 		if ((this.env.GEN_OFFLOAD as string | undefined) !== "0") {
@@ -419,6 +424,11 @@ export class WorldDO extends DurableObject<Env> {
 		}
 
 		for (const [cx, cz] of core.takeRequests()) {
+			const pending = this.pendingChunks.get(`${cx},${cz}`);
+			if (pending) {
+				core.loadChunk(cx, cz, pending.data);
+				continue;
+			}
 			const rows = this.ctx.storage.sql
 				.exec<{ data: ArrayBuffer; format: number }>("SELECT data, format FROM chunks WHERE cx = ? AND cz = ?", cx, cz)
 				.toArray();
@@ -440,40 +450,49 @@ export class WorldDO extends DurableObject<Env> {
 			core.loadChunk(cx, cz, data);
 		}
 
-		if (core.gameTime % BigInt(AUTOSAVE_TICKS) === 0n) this.save(false);
-
-		if (this.sockets.size === 0) {
-			if (++this.idleTicks >= IDLE_STOP_TICKS) {
-				this.save();
-				this.stopTicking();
-			}
-		} else {
-			this.idleTicks = 0;
+		this.idleTicks = this.sockets.size === 0 ? this.idleTicks + 1 : 0;
+		if (this.idleTicks >= IDLE_STOP_TICKS) {
+			if (this.save() === null) this.idleTicks = 0;
+			else this.stopTicking();
+		} else if (core.gameTime % BigInt(AUTOSAVE_TICKS) === 0n) {
+			this.save(false);
 		}
 	}
 
-	private save(includeEntityChanges = true): number {
+	private save(includeEntityChanges = true): number | null {
 		const core = this.core;
 		if (!core) return 0;
-		if (includeEntityChanges) core.flushEntityChanges();
-		let saved = 0;
-		// One transaction: a crash leaves either the old or the new snapshot.
-		this.ctx.storage.transactionSync(() => {
+		try {
+			if (includeEntityChanges) core.flushEntityChanges();
+			// The core can unload a chunk as soon as takeDirty returns it.
 			for (let chunk = core.takeDirty(); chunk !== null; chunk = core.takeDirty()) {
-				const data = this.codec!.call(4, chunk.data);
-				const blob = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-				this.ctx.storage.sql.exec(
-					"INSERT INTO chunks (cx, cz, data, format) VALUES (?, ?, ?, 1) ON CONFLICT (cx, cz) DO UPDATE SET data = excluded.data, format = excluded.format",
-					chunk.cx,
-					chunk.cz,
-					blob,
-				);
-				saved++;
+				this.pendingChunks.set(`${chunk.cx},${chunk.cz}`, chunk);
 			}
-			this.setMeta("gameTime", core.gameTime.toString());
-			this.setMeta("dayTime", core.dayTime.toString());
-		});
-		return saved;
+			const clock = { gameTime: core.gameTime, dayTime: core.dayTime };
+			this.pendingClock = clock;
+			// No simulation step can interleave with this synchronous transaction.
+			this.ctx.storage.transactionSync(() => {
+				for (const chunk of this.pendingChunks.values()) {
+					const data = this.codec!.call(4, chunk.data);
+					const blob = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+					this.ctx.storage.sql.exec(
+						"INSERT INTO chunks (cx, cz, data, format) VALUES (?, ?, ?, 1) ON CONFLICT (cx, cz) DO UPDATE SET data = excluded.data, format = excluded.format",
+						chunk.cx,
+						chunk.cz,
+						blob,
+					);
+				}
+				this.setMeta("gameTime", clock.gameTime.toString());
+				this.setMeta("dayTime", clock.dayTime.toString());
+			});
+			const saved = this.pendingChunks.size;
+			this.pendingChunks.clear();
+			this.pendingClock = null;
+			return saved;
+		} catch (error) {
+			console.warn("Failed to save Durable Object chunks; will retry on next save", this.worldName, error);
+			return null;
+		}
 	}
 
 	private loopMetrics(): Pick<WorldMetrics, "ticksRun" | "ticksSkipped" | "tps" | "timerGap"> {

@@ -242,9 +242,13 @@ impl Mob {
         self.hostile.is_none()
     }
 
+    pub(super) fn velocity(&self) -> [f64; 3] {
+        self.body.velocity
+    }
+
     pub(super) fn write_saved(&self, w: &mut world::io::Writer) {
         w.u8(self.kind.wire_id());
-        for value in self.pos().into_iter().chain(self.body.velocity) {
+        for value in self.pos().into_iter().chain(self.velocity()) {
             w.f64(value);
         }
         w.f32(self.yaw);
