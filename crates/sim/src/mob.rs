@@ -1104,6 +1104,9 @@ impl Server {
     }
 
     pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob, burned: bool) {
+        if mob.is_animal() {
+            self.dirty_entity_chunk(mob.chunk());
+        }
         let spec = spec(mob.kind);
         let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
         for (index, &(item, min, max)) in spec.loot.iter().enumerate() {
@@ -1137,7 +1140,7 @@ impl Server {
                 mob.egg_ticks = Some(egg_interval(self.seed, id, self.game_time));
             }
             if mob.is_animal() {
-                self.mark_entity_chunk(mob.chunk());
+                self.dirty_entity_chunk(mob.chunk());
             }
             self.mobs.insert(id, mob);
         }
@@ -1242,8 +1245,10 @@ impl Server {
         let mut shots = Vec::new();
         let mut fuse_updates = Vec::new();
         let mut explosions = Vec::new();
+        let mut changed = Vec::new();
         for (&id, mob) in &mut self.mobs {
-            if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
+            let from = mob.chunk();
+            if !self.world.chunks.contains_key(&from) || mob.pos()[1] < VOID_Y {
                 continue;
             }
             let target = if mob.hostile.is_some() && self.game_mode == GameMode::Survival {
@@ -1277,6 +1282,10 @@ impl Server {
                     mob.body.position[axis] = before[axis];
                     mob.body.velocity[axis] = 0.0;
                 }
+            }
+            let to = mob.chunk();
+            if self.entity_persistence && mob.is_animal() && from != to {
+                changed.extend([from, to]);
             }
             let after_fuse = mob.fuse_ticks();
             if before_fuse != after_fuse {
@@ -1359,8 +1368,14 @@ impl Server {
                     eggs.push(mob.pos());
                 }
             }
+            if self.entity_persistence && mob.is_animal() && !stays {
+                changed.push(mob.chunk());
+            }
             stays
         });
+        for chunk in changed {
+            self.dirty_entity_chunk(chunk);
+        }
         for pos in eggs {
             self.spawn_item(items::by_name("egg").unwrap(), 1, pos, [0.0, 0.1, 0.0], 10);
         }
@@ -3532,6 +3547,36 @@ mod tests {
     }
 
     #[test]
+    fn animal_crossing_and_void_despawn_dirty_the_affected_chunks_immediately() {
+        let mut server = Server::new(5, Generator::Flat);
+        for cx in [0, 1] {
+            server.world.insert_chunk(world::Chunk::empty(cx, 0));
+        }
+        server.spawn_cow([15.8, 80.0, 3.5]);
+        let (cx, cz, _) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        server.mobs.get_mut(&1).unwrap().body.velocity[0] = 0.5;
+
+        server.tick();
+        assert_eq!(server.mobs[&1].chunk(), (1, 0));
+        for expected in [(0, 0), (1, 0)] {
+            let (cx, cz, _) = server.take_dirty().unwrap();
+            assert_eq!((cx, cz), expected);
+        }
+        assert!(server.take_dirty().is_none());
+
+        server.mobs.get_mut(&1).unwrap().body.position[1] = VOID_Y - 1.0;
+        server.tick();
+        assert!(server.mobs.is_empty());
+        let (cx, cz, bytes) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (1, 0));
+        assert!(Server::read_saved_chunk(cx, cz, &bytes)
+            .unwrap()
+            .entities
+            .is_empty());
+    }
+
+    #[test]
     fn animals_stay_beyond_128_and_despawn_in_missing_chunks_and_below_void() {
         let mut server = joined(GameMode::Creative);
         let [x, y, z] = server.spawn();
@@ -3553,6 +3598,9 @@ mod tests {
             [1, 2, 4, 5]
         );
         server.unload_far_chunks();
+        assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [1, 2, 4]);
+        let (cx, cz, _) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
         assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [1, 2, 4]);
         let (cx, cz, _) = server.take_dirty().unwrap();
         assert_eq!((cx, cz), (8, 0));

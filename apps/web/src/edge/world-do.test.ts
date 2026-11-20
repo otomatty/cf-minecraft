@@ -810,16 +810,20 @@ test("DO eviction saves animals and dropped items and the recreated world stream
 	const before = await join();
 	for (let i = 0; i < 20; i++) before.step();
 	before.core.setTime(399n, 6000n);
+	before.step();
+	const chunksAtAutosave = f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n;
+	assert.ok(chunksAtAutosave > 0, "the scheduled save includes newly spawned animals");
 	const item = before.client.inventory[0]!.item;
 	before.core.packet(before.id, before.client.encodeDropItem([1, 0, 0]));
 	before.step();
 	const animal = before.client.mobs[0];
 	assert.ok(animal);
 	assert.deepEqual(before.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
-	assert.equal(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n, 0);
+	assert.equal(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n, chunksAtAutosave);
+	assert.ok(before.core.dirtyChunks > 0, "the dropped item is pending before eviction");
 
 	f.world.evict();
-	assert.ok(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n > 0);
+	assert.ok(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n > chunksAtAutosave);
 	const restored = await join();
 	for (let i = 0; i < 20; i++) restored.step();
 	assert.ok(restored.client.mobs.some(mob => mob.kind === animal.kind

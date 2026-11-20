@@ -164,6 +164,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	generator = meta?.generator ?? msg.generator;
 	gameMode = meta?.gameMode ?? msg.gameMode ?? "creative";
 	c.start(seed, generator);
+	c.setEntityPersistence(store !== null);
 	c.setGameMode(gameMode);
 	if (meta) c.setTime(BigInt(meta.gameTime), BigInt(meta.dayTime));
 	if (msg.startTime !== null) c.setTime(c.gameTime, BigInt(msg.startTime));

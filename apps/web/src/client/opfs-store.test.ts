@@ -264,8 +264,7 @@ test("OPFS saves entity-only chunks and a fresh core streams the restored entiti
 	const animal = before.client.mobs[0];
 	assert.ok(animal);
 	assert.deepEqual(before.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
-	assert.equal(before.core.takeDirty(), null);
-	before.core.flushEntityChanges();
+	assert.ok(before.core.dirtyChunks > 0);
 	const chunks = [];
 	for (let d = before.core.takeDirty(); d !== null; d = before.core.takeDirty()) chunks.push(d);
 	await saves.save(chunks, { gameMode: "creative", generator: Generator.Flat, seed: "2026", gameTime: "400", dayTime: "6001" });

@@ -89,6 +89,10 @@ impl Server {
     }
 
     pub(super) fn write_saved_entities(&self, chunk: ChunkPos, w: &mut Writer) {
+        if !self.entity_persistence {
+            w.varint(0);
+            return;
+        }
         let animals = self
             .mobs
             .iter()
@@ -122,30 +126,49 @@ impl Server {
         }
     }
 
-    pub(super) fn mark_entity_chunk(&mut self, chunk: ChunkPos) {
-        if self.world.chunks.contains_key(&chunk) {
-            self.entity_changes.insert(chunk);
+    pub fn set_entity_persistence(&mut self, enabled: bool) {
+        self.entity_persistence = enabled;
+        if !enabled {
+            self.entity_changes.clear();
+            self.entity_dirty.clear();
+            self.entity_unloads.clear();
+        }
+    }
+
+    pub(super) fn dirty_entity_chunk(&mut self, chunk: ChunkPos) {
+        if self.entity_persistence {
+            self.entity_dirty.insert(chunk);
         }
     }
 
     pub(super) fn mark_entity_chunks(&mut self) {
+        if !self.entity_persistence {
+            return;
+        }
         let chunks = self.entities.values().map(Entity::chunk).chain(
             self.mobs
                 .values()
                 .filter(|mob| mob.is_animal())
                 .map(Mob::chunk),
         );
-        self.entity_changes
-            .extend(chunks.filter(|chunk| self.world.chunks.contains_key(chunk)));
+        let mut waiting_for_chunk = std::collections::BTreeSet::new();
+        for chunk in chunks {
+            if self.world.chunks.contains_key(&chunk) {
+                self.entity_changes.insert(chunk);
+            } else {
+                waiting_for_chunk.insert(chunk);
+            }
+        }
+        // A drop can precede streaming its chunk. Keep its immediate save
+        // pending until the chunk arrives or the last such entity is removed.
+        self.entity_dirty.retain(|chunk| {
+            self.world.chunks.contains_key(chunk) || waiting_for_chunk.contains(chunk)
+        });
     }
 
     /// Includes the latest entity state in the next explicit world save.
     pub fn flush_entity_changes(&mut self) {
-        for chunk in &self.entity_changes {
-            if let Some(chunk) = self.world.chunks.get_mut(chunk) {
-                chunk.dirty = true;
-            }
-        }
+        self.entity_dirty.extend(&self.entity_changes);
     }
 }
 
@@ -311,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_are_batched_at_600_ticks_and_include_both_chunks_after_a_move() {
+    fn crossing_dirties_both_chunks_before_the_600_tick_save() {
         let mut source = server();
         source.world.insert_chunk(Chunk::empty(1, 0));
         source.connect(1);
@@ -324,11 +347,9 @@ mod tests {
         source.game_time = 598;
 
         source.tick();
+        assert_eq!(source.game_time, 599);
         assert_eq!(source.entities[&1].chunk(), (1, 0));
-        assert_eq!(source.dirty_chunks(), 0);
-        assert!(source.take_dirty().is_none());
-        source.tick();
-        assert_eq!(source.game_time, 600);
+        assert_eq!(source.dirty_chunks(), 2);
         let (cx, cz, bytes) = source.take_dirty().unwrap();
         assert_eq!((cx, cz), (0, 0));
         assert!(Server::read_saved_chunk(cx, cz, &bytes)
@@ -345,5 +366,161 @@ mod tests {
             1
         );
         assert!(source.take_dirty().is_none());
+    }
+
+    #[test]
+    fn movement_within_one_chunk_waits_for_tick_600() {
+        let mut source = server();
+        source.connect(1);
+        source.spawn_item(1, 5, [3.5, 80.0, 3.5], [0.5, 0.0, 0.0], 40);
+        let first = save(&mut source);
+        source.game_time = 598;
+
+        source.tick();
+        assert!(source.entities[&1].pos[0] > 3.5);
+        assert_eq!(source.dirty_chunks(), 0);
+        assert!(source.take_dirty().is_none());
+        source.tick();
+        assert_eq!(source.game_time, 600);
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert_ne!(bytes, first);
+        let saved = Server::read_saved_chunk(cx, cz, &bytes).unwrap();
+        assert!(
+            matches!(&saved.entities[..], [SavedEntity::Item(item)] if item.pos == source.entities[&1].pos)
+        );
+        assert!(source.take_dirty().is_none());
+    }
+
+    #[test]
+    fn drop_pickup_and_expiry_are_written_on_the_tick_they_happen() {
+        use protocol::C2S;
+
+        let mut source = Server::new(5, Generator::Flat);
+        source.connect(1);
+        source.apply(
+            1,
+            C2S::Hello {
+                protocol: protocol::PROTOCOL_VERSION,
+                view_distance: 2,
+            },
+        );
+        source.tick();
+        let item = source.clients[&1].inventory.selected_stack().unwrap().item;
+        source.handle_packet(1, &C2S::DropItem { dir: [0.0; 3] }.encode());
+        source.tick();
+        assert!(source.clients[&1].inventory.selected_stack().is_none());
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        let saved = Server::read_saved_chunk(cx, cz, &bytes).unwrap();
+        assert!(
+            matches!(&saved.entities[..], [SavedEntity::Item(drop)] if drop.item == item && drop.count == 1)
+        );
+        assert!(source.take_dirty().is_none());
+
+        let drop = source.entities.get_mut(&1).unwrap();
+        drop.pos = source.clients[&1].pos;
+        drop.velocity = [0.0; 3];
+        drop.pickup_delay = 1;
+        source.tick();
+        assert_eq!(
+            source.clients[&1].inventory.selected_stack().unwrap().item,
+            item
+        );
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert!(Server::read_saved_chunk(cx, cz, &bytes)
+            .unwrap()
+            .entities
+            .is_empty());
+        assert!(source.take_dirty().is_none());
+
+        source.spawn_item(item, 1, [3.5, 80.0, 3.5], [0.0; 3], 40);
+        source.entities.get_mut(&2).unwrap().age = 5999;
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!(
+            Server::read_saved_chunk(cx, cz, &bytes)
+                .unwrap()
+                .entities
+                .len(),
+            1
+        );
+        source.tick();
+        assert!(source.entities.is_empty());
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert!(Server::read_saved_chunk(cx, cz, &bytes)
+            .unwrap()
+            .entities
+            .is_empty());
+        assert!(source.take_dirty().is_none());
+    }
+
+    #[test]
+    fn persistence_off_releases_entity_chunks_and_preserves_block_dirty_chunks() {
+        let mut source = server();
+        source.set_entity_persistence(false);
+        source.connect(1);
+        for cx in [0, 30, 60] {
+            source.world.insert_chunk(Chunk::empty(cx, 0));
+            let pos = [f64::from(cx * 16) + 2.5, 80.0, 3.5];
+            source.clients.get_mut(&1).unwrap().pos = pos;
+            source.spawn_mob(MobKind::Cow, pos);
+            source.spawn_item(1, 5, pos, [0.0; 3], 40);
+            source.game_time = 599;
+            source.tick();
+            source.flush_entity_changes();
+            assert_eq!(source.loaded_chunks(), 1);
+            assert_eq!(source.dirty_chunks(), 0);
+            assert_eq!(source.mobs.len(), 1);
+            assert_eq!(source.entities.len(), 1);
+            source.clients.get_mut(&1).unwrap().pos[0] += 16.0 * 25.0;
+            source.unload_far_chunks();
+            assert_eq!(source.loaded_chunks(), 0);
+            assert!(source.mobs.is_empty());
+            assert!(source.entities.is_empty());
+            assert!(source.take_dirty().is_none());
+        }
+        source.world.insert_chunk(Chunk::empty(0, 0));
+        assert_eq!(
+            source.world.set_block(0, 80, 0, world::blocks::GLASS),
+            Some(world::blocks::AIR)
+        );
+        source.unload_far_chunks();
+        assert_eq!(source.loaded_chunks(), 1);
+        assert_eq!(source.dirty_chunks(), 1);
+    }
+
+    #[test]
+    fn restoring_two_chunks_evicts_the_oldest_drops_and_rewrites_their_chunk() {
+        let snapshot = |cx, item| {
+            let mut source = Server::new(5, Generator::Flat);
+            source.world.insert_chunk(Chunk::empty(cx, 0));
+            for _ in 0..600 {
+                source.spawn_item(item, 1, [f64::from(cx * 16) + 2.5, 80.0, 3.5], [0.0; 3], 40);
+            }
+            source.take_dirty().unwrap().2
+        };
+        let mut target = Server::new(5, Generator::Flat);
+        assert!(target.load_chunk(0, 0, &snapshot(0, 1)));
+        assert_eq!(target.entities.len(), 600);
+        assert_eq!(target.dirty_chunks(), 0);
+        assert!(target.load_chunk(1, 0, &snapshot(1, 2)));
+        assert_eq!(target.entities.len(), 1024);
+        assert_eq!(
+            target.entities.keys().copied().collect::<Vec<_>>(),
+            (177..=1200).collect::<Vec<_>>()
+        );
+        assert_eq!(target.dirty_chunks(), 1);
+        let (cx, cz, bytes) = target.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert_eq!(
+            Server::read_saved_chunk(cx, cz, &bytes)
+                .unwrap()
+                .entities
+                .len(),
+            424
+        );
+        assert!(target.take_dirty().is_none());
     }
 }

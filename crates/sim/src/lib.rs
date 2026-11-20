@@ -56,6 +56,7 @@ const DEFAULT_VIEW_DISTANCE: i32 = 6;
 const UNLOAD_MARGIN: i32 = 2;
 const UNLOAD_INTERVAL: i64 = 100;
 const ENTITY_SAVE_INTERVAL: i64 = 600;
+const MAX_DROPPED_ITEMS: usize = 1024;
 /// Generous interaction range; real reach rules arrive with survival mode.
 const MAX_REACH: f64 = 8.0;
 
@@ -229,7 +230,9 @@ pub struct Server {
     mobs: BTreeMap<u32, mob::Mob>,
     arrows: BTreeMap<u32, arrow::Arrow>,
     next_entity_id: u32,
+    entity_persistence: bool,
     entity_changes: BTreeSet<ChunkPos>,
+    entity_dirty: BTreeSet<ChunkPos>,
     entity_unloads: BTreeSet<ChunkPos>,
     game_mode: GameMode,
     seed: i64,
@@ -267,7 +270,9 @@ impl Server {
             mobs: BTreeMap::new(),
             arrows: BTreeMap::new(),
             next_entity_id: 1,
+            entity_persistence: true,
             entity_changes: BTreeSet::new(),
+            entity_dirty: BTreeSet::new(),
             entity_unloads: BTreeSet::new(),
             game_mode: GameMode::Creative,
             seed,
@@ -365,10 +370,6 @@ impl Server {
         let Some(id) = self.allocate_entity_id() else {
             return;
         };
-        if self.entities.len() >= 1024 {
-            let (_, removed) = self.entities.pop_first().unwrap();
-            self.mark_entity_chunk(removed.chunk());
-        }
         let entity = entity::Entity {
             kind: entity::EntityKind::Item,
             pos,
@@ -379,9 +380,18 @@ impl Server {
             pickup_delay,
             on_ground: false,
         };
-        self.mark_entity_chunk(entity.chunk());
+        self.dirty_entity_chunk(entity.chunk());
         self.entities.insert(id, entity);
+        self.limit_dropped_items();
     }
+
+    fn limit_dropped_items(&mut self) {
+        while self.entities.len() > MAX_DROPPED_ITEMS {
+            let (_, removed) = self.entities.pop_first().unwrap();
+            self.dirty_entity_chunk(removed.chunk());
+        }
+    }
+
     fn tick_entities(&mut self) {
         let held: Vec<_> = self
             .clients
@@ -397,14 +407,22 @@ impl Server {
                 )
             })
             .collect();
+        let mut changed = Vec::new();
         self.entities
             .extract_if(.., |_, e| {
                 let previous = e.pos;
-                if self.world.chunks.contains_key(&e.chunk()) {
+                let from = e.chunk();
+                if self.world.chunks.contains_key(&from) {
                     e.tick(&self.world);
                 }
-                let active = e.age < 6000 && e.pos[1] >= health::VOID_Y;
-                !active || crosses_lava(&self.world, previous, e.pos)
+                let to = e.chunk();
+                let active = e.age < 6000
+                    && e.pos[1] >= health::VOID_Y
+                    && !crosses_lava(&self.world, previous, e.pos);
+                if self.entity_persistence && (!active || from != to) {
+                    changed.extend([from, to]);
+                }
+                !active
             })
             .for_each(drop);
         if (self.game_time + 1) % 10 == 0 {
@@ -414,6 +432,7 @@ impl Server {
             if e.pickup_delay != 0 || !self.world.chunks.contains_key(&e.chunk()) {
                 continue;
             }
+            let count_before = e.count;
             for c in self
                 .clients
                 .values_mut()
@@ -433,8 +452,14 @@ impl Server {
                     }
                 }
             }
+            if self.entity_persistence && e.count != count_before {
+                changed.push(e.chunk());
+            }
         }
         self.entities.retain(|_, e| e.count != 0);
+        for chunk in changed {
+            self.dirty_entity_chunk(chunk);
+        }
         for (id, before) in held {
             if before
                 != (
@@ -515,6 +540,9 @@ impl Server {
                     a.count += b.count;
                     a.age = a.age.max(b.age);
                     a.pickup_delay = a.pickup_delay.max(b.pickup_delay);
+                    let chunk = a.chunk();
+                    self.dirty_entity_chunk(chunk);
+                    self.dirty_entity_chunk(b.chunk());
                 }
             }
         }
@@ -732,8 +760,6 @@ impl Server {
     }
 
     pub fn tick(&mut self) {
-        // Mark both ends of the tick so moves and removals also save the old chunk.
-        self.mark_entity_chunks();
         // Expire immunity before processing attacks, so a new hit keeps all ten ticks.
         for mob in self.mobs.values_mut() {
             mob.hurt_ticks = mob.hurt_ticks.saturating_sub(1);
@@ -1698,17 +1724,16 @@ impl Server {
     fn unload_far_chunks(&mut self) {
         let mut removed = Vec::new();
         let mut waiting_for_save = Vec::new();
-        for (&(cx, cz), chunk) in &mut self.world.chunks {
+        for (&(cx, cz), chunk) in &self.world.chunks {
             let c = (cx, cz);
             if players_keep_chunk(&self.clients, cx, cz) {
                 continue;
             }
-            if self.entity_changes.contains(&c) {
-                if !chunk.dirty {
+            if self.entity_changes.contains(&c) || self.entity_dirty.contains(&c) {
+                if self.entity_unloads.insert(c) && !chunk.dirty {
                     waiting_for_save.push(c);
                 }
-                chunk.dirty = true;
-                self.entity_unloads.insert(c);
+                self.entity_dirty.insert(c);
             } else if !chunk.dirty {
                 removed.push(c);
             }
@@ -1787,6 +1812,7 @@ impl Server {
                         }
                     }
                 }
+                self.limit_dropped_items();
                 self.stats.chunks_loaded_from_storage += 1;
                 true
             }
@@ -1806,7 +1832,11 @@ impl Server {
     /// Next chunk that needs saving, serialized. The chunk counts as saved
     /// once this returns, so the host must persist it.
     pub fn take_dirty(&mut self) -> Option<(i32, i32, Vec<u8>)> {
-        let chunk = self.world.chunks.values_mut().find(|c| c.dirty)?;
+        let chunk = self
+            .world
+            .chunks
+            .values_mut()
+            .find(|c| c.dirty || self.entity_dirty.contains(&(c.cx, c.cz)))?;
         chunk.dirty = false;
         self.stored.insert((chunk.cx, chunk.cz));
         let (cx, cz) = (chunk.cx, chunk.cz);
@@ -1842,6 +1872,7 @@ impl Server {
         let c = (cx, cz);
         self.write_saved_entities(c, &mut w);
         self.entity_changes.remove(&c);
+        self.entity_dirty.remove(&c);
         if self.entity_unloads.remove(&c) && !players_keep_chunk(&self.clients, cx, cz) {
             self.unload_chunks(&[c]);
         }
@@ -1921,7 +1952,11 @@ impl Server {
         })
     }
     pub fn dirty_chunks(&self) -> usize {
-        self.world.chunks.values().filter(|c| c.dirty).count()
+        self.world
+            .chunks
+            .values()
+            .filter(|c| c.dirty || self.entity_dirty.contains(&(c.cx, c.cz)))
+            .count()
     }
 
     // ---- inspection --------------------------------------------------------
