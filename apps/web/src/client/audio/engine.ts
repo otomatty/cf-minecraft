@@ -23,6 +23,7 @@ export class GameAudio {
 	private unavailable = typeof globalThis.AudioContext !== "function";
 	private visible = true;
 	private resuming: Promise<void> | null = null;
+	private pendingClick = false;
 	private volumes: Volumes = { ...DEFAULT_VOLUMES };
 	private voices = new Set<ReturnType<typeof playEffect>>();
 	private counts: Partial<Record<Sound["kind"], number>> = {};
@@ -58,29 +59,31 @@ export class GameAudio {
 			if (this.graph.context.state === "running") {
 				if (click) this.play({ kind: "click" });
 			} else {
-				const resumed = this.resume();
-				if (click) void resumed?.then(() => this.play({ kind: "click" }));
+				this.pendingClick ||= click;
+				this.resume();
 			}
-		} catch {
-			this.disable();
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
-	private resume(): Promise<void> | null {
+	private resume(): void {
 		const graph = this.graph;
-		if (!graph || this.unavailable) return null;
-		if (this.resuming) return this.resuming;
+		if (!graph || this.unavailable) return;
 		try {
-			const request = graph.context.resume().catch(() => {
-				if (this.resuming === request) this.disable();
+			const request = graph.context.resume().then(() => {
+				if (this.resuming === request && this.pendingClick) {
+					this.pendingClick = false;
+					this.play({ kind: "click" });
+				}
+			}).catch(error => {
+				if (this.resuming === request) this.disable(error);
 			}).finally(() => {
 				if (this.resuming === request) this.resuming = null;
 			});
 			this.resuming = request;
-			return request;
-		} catch {
-			this.disable();
-			return null;
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
@@ -93,16 +96,15 @@ export class GameAudio {
 			graph.output.gain.value = visible ? 1 : 0;
 			if (visible) {
 				// Queue a new resume after any suspend already requested by pagehide.
-				this.resuming = null;
-				void this.resume();
+				this.resume();
 			} else {
 				for (const voice of this.voices) voice.stop();
-				void graph.context.suspend().catch(() => {
-					if (graph.context.state === "closed") this.disable();
+				void graph.context.suspend().catch(error => {
+					if (graph.context.state === "closed") this.disable(error);
 				});
 			}
-		} catch {
-			this.disable();
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
@@ -116,8 +118,8 @@ export class GameAudio {
 				this.stopTrack();
 				this.nextTrack = 0;
 			}
-		} catch {
-			this.disable();
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
@@ -136,8 +138,8 @@ export class GameAudio {
 			const voice = playEffect(graph.context, graph.effects, graph.noise, sound, gain, pan, ended => this.voices.delete(ended));
 			this.voices.add(voice);
 			this.counts[sound.kind] = (this.counts[sound.kind] ?? 0) + 1;
-		} catch {
-			this.disable();
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
@@ -162,8 +164,8 @@ export class GameAudio {
 				track.nextNote++;
 				if (start >= now - 0.05) track.graph.note(note, Math.max(start, now));
 			}
-		} catch {
-			this.disable();
+		} catch (error) {
+			this.disable(error);
 		}
 	}
 
@@ -182,8 +184,12 @@ export class GameAudio {
 		this.track = null;
 	}
 
-	private disable(): void {
+	private disable(reason?: unknown): void {
+		if (this.unavailable) return;
 		this.unavailable = true;
+		if (reason !== undefined) console.warn("audio disabled", reason);
+		this.pendingClick = false;
+		this.resuming = null;
 		const graph = this.graph;
 		this.graph = null;
 		if (!graph) return;

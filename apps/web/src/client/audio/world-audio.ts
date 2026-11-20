@@ -34,9 +34,9 @@ export class WorldAudio {
 	private nextDig = 0;
 	private core: ClientCore;
 	private registry: readonly BlockStateInfo[];
-	private audio: GameAudio;
+	private audio: Pick<GameAudio, "play">;
 
-	constructor(core: ClientCore, registry: readonly BlockStateInfo[], audio: GameAudio) {
+	constructor(core: ClientCore, registry: readonly BlockStateInfo[], audio: Pick<GameAudio, "play">) {
 		this.core = core;
 		this.registry = registry;
 		this.audio = audio;
@@ -76,10 +76,11 @@ export class WorldAudio {
 		const priorBlock = cell ? (pending && now - pending.at <= 5000 ? pending.state : core.getBlock(...cell)) : -1;
 		const type = data[0];
 		const removed = type === S2C.EntityRemove;
-		const entityPacket = removed || type === S2C.MobHurt || type === S2C.MobFuse || type === S2C.ArrowMove || type === S2C.ArrowSpawn;
+		const itemChanged = removed || type === S2C.EntityCount;
+		const entityPacket = itemChanged || type === S2C.MobHurt || type === S2C.MobFuse || type === S2C.ArrowMove || type === S2C.ArrowSpawn;
 		const entity = entityPacket && data.length >= 5 ? new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1) : -1;
 		const priorMob = removed || type === S2C.MobFuse ? core.mobs.find(mob => mob.id === entity) : undefined;
-		const priorItem = removed && !priorMob ? core.entities.find(item => item.id === entity) : undefined;
+		const priorItem = itemChanged && !priorMob ? core.entities.find(item => item.id === entity) : undefined;
 		const priorArrow = (removed && !priorMob && !priorItem) || type === S2C.ArrowMove
 			? core.arrows.find(arrow => arrow.id === entity) : undefined;
 		const priorVitals = type === S2C.PlayerStatus ? { health: core.health, food: core.food, dead: core.dead } : null;
@@ -112,10 +113,18 @@ export class WorldAudio {
 			audio.play({ kind: "fuse" }, priorMob.position);
 		} else if (id === S2C.ArrowSpawn || id === S2C.ArrowMove) {
 			const arrow = core.arrows.find(arrow => arrow.id === entity);
-			if (arrow && id === S2C.ArrowSpawn) audio.play({ kind: "arrowShoot" }, arrow.position);
+			if (arrow?.fresh && id === S2C.ArrowSpawn) audio.play({ kind: "arrowShoot" }, arrow.position);
 			else if (arrow && priorArrow && arrowStopped(priorArrow, arrow) && !this.stuckArrows.has(entity)) {
 				this.stuckArrows.add(entity);
 				audio.play({ kind: "arrowStick" }, arrow.position);
+			}
+		} else if (priorItem && (id === S2C.EntityRemove || id === S2C.EntityCount) && !core.dead) {
+			const remaining = id === S2C.EntityRemove ? 0 : core.entities.find(item => item.id === entity)?.count;
+			const [x, y, z] = priorItem.position;
+			if (remaining !== undefined && remaining < priorItem.count &&
+				Math.abs(x - feet[0]) <= 1.6 && Math.abs(z - feet[2]) <= 1.6 && Math.abs(y - feet[1] - 0.9) <= 1.8) {
+				this.pickups = this.pickups.filter(pickup => now - pickup.at <= CORRELATION_MS);
+				this.pickups.push({ item: priorItem.item, count: priorItem.count - remaining, position: priorItem.position, at: now });
 			}
 		} else if (id === S2C.EntityRemove) {
 			if (priorMob) {
@@ -123,12 +132,6 @@ export class WorldAudio {
 				if (sound) audio.play(sound, priorMob.position);
 				// A lethal arrow can remove a mob without a final MobHurt packet.
 				if (sound?.kind !== "explosion") this.rememberHit([priorMob.position[0], priorMob.position[1] + 0.65, priorMob.position[2]], now);
-			} else if (priorItem && !core.dead) {
-				const [x, y, z] = priorItem.position;
-				if (Math.abs(x - feet[0]) <= 1.6 && Math.abs(z - feet[2]) <= 1.6 && Math.abs(y - feet[1] - 0.9) <= 1.8) {
-					this.pickups = this.pickups.filter(pickup => now - pickup.at <= CORRELATION_MS);
-					this.pickups.push({ ...priorItem, at: now });
-				}
 			} else if (priorArrow && !this.stuckArrows.delete(entity)) {
 				const nearbyHits = this.hits.filter(hit => now - hit.at <= CORRELATION_MS);
 				const point = arrowHitPosition(priorArrow, nearbyHits.map(hit => hit.position));

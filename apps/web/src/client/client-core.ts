@@ -11,7 +11,7 @@ export interface InventorySlot { item: number; count: number }
 
 export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
 export type MobKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
-export interface ArrowEntity { id: number; position: [number, number, number]; previous: [number, number, number]; velocity: [number, number, number] }
+export interface ArrowEntity { id: number; position: [number, number, number]; previous: [number, number, number]; velocity: [number, number, number]; fresh: boolean }
 export interface MobEntity { id: number; kind: MobKind; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number; fuse: number }
 export interface ClientExports {
 	client_enc_attack(id: number): number;
@@ -193,12 +193,13 @@ export class ClientCore {
 		const result: ArrowEntity[] = [];
 		const readVec = (offset: number): [number, number, number] =>
 			[view.getFloat64(offset), view.getFloat64(offset + 8), view.getFloat64(offset + 16)];
-		for (let offset = 0; offset < bytes.length; offset += 76) {
+		for (let offset = 0; offset < bytes.length; offset += 77) {
 			result.push({
 				id: view.getUint32(offset),
 				position: readVec(offset + 4),
 				previous: readVec(offset + 28),
 				velocity: readVec(offset + 52),
+				fresh: view.getUint8(offset + 76) === 1,
 			});
 		}
 		return result;

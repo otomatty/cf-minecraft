@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { arrowHitPosition, arrowStopped, blockSound, creeperIgnited, distanceGain, materialFor, MAX_VOICES,
-	mobRemovalSound, playerSounds, soundGain, spatialSound, voicesToStop } from "./events.ts";
+	mobRemovalSound, playerSounds, soundGain, spatialSound, voicesToStop, type Sound } from "./events.ts";
+import { GameAudio } from "./engine.ts";
 import { musicPlan } from "./music.ts";
-import type { ArrowEntity } from "../client-core.ts";
+import { WorldAudio } from "./world-audio.ts";
+import { ClientCore, S2C, type ArrowEntity } from "../client-core.ts";
+import type { Vec3 } from "../math.ts";
 
 test("material follows the block name, including the current registry variants", () => {
 	for (const [material, names] of Object.entries({
@@ -97,10 +102,106 @@ test("creeper ignition and explosion are distinct from other mob removals", () =
 });
 
 test("arrow impacts infer embedding from the preserved vector and hits from the flight segment", () => {
-	const arrow: ArrowEntity = { id: 1, position: [0, 0, 0], previous: [-2, 0, 0], velocity: [2, 0, 0] };
+	const arrow: ArrowEntity = { id: 1, position: [0, 0, 0], previous: [-2, 0, 0], velocity: [2, 0, 0], fresh: false };
 	assert.equal(arrowStopped(arrow, { ...arrow, position: [1.5, 0, 0] }), true);
 	assert.equal(arrowStopped(arrow, { ...arrow, velocity: [0, 0, 0] }), true);
 	assert.equal(arrowStopped(arrow, { ...arrow, velocity: [1.98, -0.05, 0] }), false);
 	assert.deepEqual(arrowHitPosition(arrow, [[1, 0.3, 0], [2, 2, 0]]), [1, 0, 0]);
 	assert.equal(arrowHitPosition(arrow, [[5, 0, 0]]), null);
+});
+
+test("only nearby partial pickups count toward inventory gains and play pickup sounds", () => {
+	const wasm = new WebAssembly.Module(readFileSync(new URL("../../wasm/client.wasm", import.meta.url)));
+	const core = new ClientCore(new WebAssembly.Instance(wasm, {}));
+	const played: Array<{ kind: Sound["kind"]; position?: Vec3 }> = [];
+	const audio = new WorldAudio(core, [], { play: (sound, position) => played.push({ kind: sound.kind, position }) });
+	const packet = (data: Uint8Array) => assert.equal(audio.packet(data, [0, 0, 0], new Map()), data[0]);
+
+	const drop = (id: number, position: Vec3) => {
+		const spawn = new Uint8Array(33);
+		const view = new DataView(spawn.buffer);
+		spawn[0] = S2C.EntitySpawn;
+		view.setUint32(1, id);
+		view.setUint16(6, 1);
+		spawn[8] = 4;
+		position.forEach((value, axis) => view.setFloat64(9 + axis * 8, value));
+		packet(spawn);
+		packet(Uint8Array.of(S2C.EntityCount, 0, 0, 0, id, 3));
+		assert.equal(core.entities.find(entity => entity.id === id)?.count, 3);
+	};
+	const far: Vec3 = [4, 0.9, 0];
+	const near: Vec3 = [1, 0.9, 0];
+	const otherNear: Vec3 = [0, 0.9, 1];
+	drop(1, far);
+	drop(2, near);
+	drop(3, otherNear);
+	assert.deepEqual(played, []);
+	const inventory = new Uint8Array(3 + 42 * 3 + 1 + 12 * 3 + 6);
+	inventory.set([S2C.Inventory, 0, 36, 0, 1, 2]);
+	packet(inventory);
+	assert.deepEqual(played, [
+		{ kind: "pickup", position: near },
+		{ kind: "pickup", position: otherNear },
+	]);
+});
+
+test("a user gesture retries a pending resume and only the latest request can complete it", async t => {
+	const requests: Array<ReturnType<typeof Promise.withResolvers<void>>> = [];
+	const context = {
+		state: "suspended",
+		destination: {},
+		sampleRate: 1,
+		createGain: () => ({ gain: { value: 0 }, connect() {}, disconnect() {} }),
+		createBuffer: () => ({ getChannelData: () => new Float32Array(2) }),
+		resume() {
+			const request = Promise.withResolvers<void>();
+			requests.push(request);
+			return request.promise;
+		},
+		async suspend() { this.state = "suspended"; },
+		async close() { this.state = "closed"; },
+	};
+	const saved = Object.getOwnPropertyDescriptor(globalThis, "AudioContext");
+	Object.defineProperty(globalThis, "AudioContext", { configurable: true, value: function () { return context; } });
+	t.after(() => {
+		if (saved) Object.defineProperty(globalThis, "AudioContext", saved);
+		else Reflect.deleteProperty(globalThis, "AudioContext");
+	});
+	const warn = t.mock.method(console, "warn", () => {});
+	const audio = new GameAudio({ x: 0, y: 0, z: 0, yaw: 0 });
+	const play = t.mock.method(audio, "play", () => {});
+	audio.activate(false);
+	context.state = "running";
+	requests[0].resolve();
+	await setImmediate();
+
+	audio.setVisible(false);
+	audio.setVisible(true); // This attempt is outside a user gesture.
+	audio.activate(true);
+	audio.activate(true);
+	assert.equal(requests.length, 4);
+	requests[1].reject(new Error("superseded resume"));
+	await setImmediate();
+	assert.equal(audio.stats().state, "suspended");
+	assert.equal(warn.mock.callCount(), 0);
+
+	context.state = "running";
+	requests[2].resolve();
+	requests[3].resolve();
+	await setImmediate();
+	assert.equal(play.mock.callCount(), 1);
+	assert.deepEqual(play.mock.calls[0].arguments, [{ kind: "click" }]);
+	assert.equal(audio.stats().state, "running");
+
+	audio.setVisible(false);
+	audio.setVisible(true);
+	audio.activate(true);
+	const reason = new Error("latest resume failed");
+	requests[5].reject(reason);
+	await setImmediate();
+	requests[4].reject(new Error("superseded after disable"));
+	await setImmediate();
+	assert.equal(audio.stats().state, "unavailable");
+	assert.equal(play.mock.callCount(), 1);
+	assert.deepEqual(warn.mock.calls.map(call => call.arguments), [["audio disabled", reason]]);
 });

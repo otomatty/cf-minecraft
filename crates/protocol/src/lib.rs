@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -277,6 +277,7 @@ pub enum S2C {
         id: u32,
         pos: [f64; 3],
         velocity: [f64; 3],
+        fresh: bool,
     },
     ArrowMove {
         id: u32,
@@ -668,6 +669,7 @@ impl S2C {
                 id: entity,
                 pos,
                 velocity,
+                ..
             }
             | S2C::ArrowMove {
                 id: entity,
@@ -682,6 +684,9 @@ impl S2C {
                 w.i32(*entity as i32);
                 for value in pos.iter().chain(velocity) {
                     w.f64(*value);
+                }
+                if let S2C::ArrowSpawn { fresh, .. } = self {
+                    w.u8(u8::from(*fresh));
                 }
             }
             S2C::MobHurt { id: entity } => {
@@ -852,7 +857,17 @@ impl S2C {
                 let pos = entity_pos(&mut r)?;
                 let velocity = entity_pos(&mut r)?;
                 if tag == id::S2C_ARROW_SPAWN {
-                    S2C::ArrowSpawn { id, pos, velocity }
+                    let fresh = match r.u8()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(DecodeError),
+                    };
+                    S2C::ArrowSpawn {
+                        id,
+                        pos,
+                        velocity,
+                        fresh,
+                    }
                 } else {
                     S2C::ArrowMove { id, pos, velocity }
                 }
@@ -1342,7 +1357,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 22);
+        assert_eq!(PROTOCOL_VERSION, 23);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1476,12 +1491,32 @@ mod tests {
         let id = u32::MAX;
         let pos = [12.25, -60.0, -8.75];
         let velocity = [0.25, -0.5, 1.0];
-        for (tag, packet) in [
-            (0x10, S2C::ArrowSpawn { id, pos, velocity }),
-            (0x11, S2C::ArrowMove { id, pos, velocity }),
+        for (tag, packet, flag) in [
+            (
+                0x10,
+                S2C::ArrowSpawn {
+                    id,
+                    pos,
+                    velocity,
+                    fresh: true,
+                },
+                Some(1),
+            ),
+            (
+                0x10,
+                S2C::ArrowSpawn {
+                    id,
+                    pos,
+                    velocity,
+                    fresh: false,
+                },
+                Some(0),
+            ),
+            (0x11, S2C::ArrowMove { id, pos, velocity }, None),
         ] {
             let mut bytes = packet.encode();
-            assert_eq!((bytes[0], bytes.len()), (tag, 53));
+            assert_eq!((bytes[0], bytes.get(53).copied()), (tag, flag));
+            assert_eq!(bytes.len(), 53 + usize::from(flag.is_some()));
             assert_eq!(S2C::decode(&bytes), Ok(packet));
             for end in 0..bytes.len() {
                 assert!(S2C::decode(&bytes[..end]).is_err());
@@ -1495,6 +1530,11 @@ mod tests {
                     bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
                     assert!(S2C::decode(&bad).is_err());
                 }
+            }
+            if flag.is_some() {
+                let mut bad = bytes.clone();
+                bad[53] = 2;
+                assert!(S2C::decode(&bad).is_err());
             }
             bytes.push(0);
             assert!(S2C::decode(&bytes).is_err());
