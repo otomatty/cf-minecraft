@@ -41,6 +41,7 @@ export interface Transport {
 export type WorkerRequest =
 	| { type: "init"; wasmUrl: string; world: string; seed: string | null; generator: number; startTime: number | null; genworkers?: boolean; gameMode?: "creative" | "survival" }
 	| { type: "packet"; data: ArrayBuffer }
+	| { type: "debugDayTime"; tick: number }
 	| { type: "save" }
 	| { type: "saveNow"; id: number }
 	| { type: "export"; id: number }
@@ -128,6 +129,10 @@ export class LocalTransport implements Transport {
 	send(packet: Uint8Array<ArrayBuffer>): void {
 		const data = packet.slice().buffer;
 		this.post({ type: "packet", data }, [data]);
+	}
+
+	setDayTime(tick: number): void {
+		this.post({ type: "debugDayTime", tick });
 	}
 
 	flush(): void {

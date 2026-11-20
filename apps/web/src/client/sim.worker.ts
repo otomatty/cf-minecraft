@@ -232,6 +232,11 @@ scope.onmessage = (event: MessageEvent<WorkerRequest>) => {
 		case "packet":
 			core?.packet(CLIENT, new Uint8Array(msg.data));
 			break;
+		case "debugDayTime":
+			if (import.meta.env.DEV && core && Number.isInteger(msg.tick) && msg.tick >= 0 && msg.tick < 24000) {
+				core.setTime(core.gameTime, BigInt(msg.tick));
+			}
+			break;
 		case "export":
 		case "import":
 			archiveQueue = archiveQueue.then(async () => {

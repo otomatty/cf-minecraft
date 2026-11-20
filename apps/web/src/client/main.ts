@@ -101,6 +101,7 @@ interface DebugHandle {
 	tint(x: number, z: number): CellTint | null;
 	sendRawPosition(x: number, y: number, z: number): void;
 	setCamera(x: number, y: number, z: number, yaw: number, pitch: number): void;
+	setDayTime(tick: number): boolean;
 	setBlock(x: number, y: number, z: number, block: number): boolean;
 	getBlock(x: number, y: number, z: number): number;
 	stateName(id: number): string;
@@ -202,6 +203,7 @@ async function main(): Promise<void> {
 	let reconnects = 0;
 	let closePending = false;
 	let positionsCorrected = 0;
+	let lastKnockback: { velocity: [number, number, number]; position: readonly number[]; receivedAt: number; positionsCorrected: number } | null = null;
 	let closed: string | null = null;
 	let selected = 1;
 	let lightMs = 0;
@@ -364,6 +366,12 @@ async function main(): Promise<void> {
 				if (autopilot) overlay.hidden = true;
 			} else if (id === S2C.PlayerStatus) {
 				syncVitals();
+			} else if (id === S2C.PlayerKnockback) {
+				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				lastKnockback = {
+					velocity: [view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)],
+					position: core.playerPosition, receivedAt: performance.now(), positionsCorrected,
+				};
 			} else if (id === S2C.PlayerCorrect) {
 				positionsCorrected++;
 				worldAudio.resetMovement();
@@ -1500,6 +1508,7 @@ async function main(): Promise<void> {
 					moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
 					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
 					fuse: mob.fuse,
+					burning: mob.burning,
 					light: core.entityLight(position),
 				};
 			});
@@ -1603,6 +1612,7 @@ async function main(): Promise<void> {
 			connection,
 			reconnects,
 			positionsCorrected,
+			lastKnockback,
 			fps,
 			...frame,
 			sections: core.chunkCount * 24,
@@ -1619,6 +1629,7 @@ async function main(): Promise<void> {
 			mainThreadMeshMs,
 			chunks: core.chunkCount,
 			gameTime: core.gameTime,
+			dayTime: core.dayTime,
 			tps: measuredTps(),
 			server: serverStats,
 			adapter: renderer.adapterInfo,
@@ -1633,6 +1644,12 @@ async function main(): Promise<void> {
 			transport.send(core.encodeTeleport(x, y - EYE_HEIGHT, z));
 			Object.assign(camera, { x, y, z, yaw, pitch });
 			resetPlayer();
+		},
+		setDayTime: tick => {
+			if (!import.meta.env.DEV || connection !== "open" || !(transport instanceof LocalTransport)
+				|| !Number.isInteger(tick) || tick < 0 || tick >= 24000) return false;
+			transport.setDayTime(tick);
+			return true;
 		},
 		setBlock,
 		getBlock: (x, y, z) => core.getBlock(x, y, z),
@@ -1657,6 +1674,7 @@ window.__mc = {
 	tint: () => null,
 	sendRawPosition: () => {},
 	setCamera: () => {},
+	setDayTime: () => false,
 	setBlock: () => false,
 	getBlock: () => -1,
 	stateName: () => "?",

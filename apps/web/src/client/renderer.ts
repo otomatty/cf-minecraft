@@ -13,7 +13,8 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
+import { flameVertices, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
+import { flameFrames } from "./mobs/flame.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -144,7 +145,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 }
 
 override renderLayer: u32 = 0u;
-// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins.
+// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins, 3 = flames.
 override entityPass: u32 = 0u;
 
 @vertex
@@ -178,7 +179,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 	} else {
 		color = color * in.tintColor;
 	}
-	color = color * abs(shade) * textureSample(lightTex, lightSampler, in.light).rgb;
+	if (entityPass != 3u) {
+		color = color * abs(shade) * textureSample(lightTex, lightSampler, in.light).rgb;
+	}
 	if (renderLayer == 1u && select(pixel.a < 0.5, __DROP_ALPHA_TEST__, entityPass == 1u)) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
@@ -384,6 +387,7 @@ export class Renderer {
 	private readonly terrain: GPURenderPipeline;
 	private readonly items: GPURenderPipeline;
 	private readonly mobs: GPURenderPipeline;
+	private readonly flames: GPURenderPipeline;
 	private readonly cracks: GPURenderPipeline;
 	private readonly crackBuffer: GPUBuffer;
 	private readonly crackTextureBase: number;
@@ -411,6 +415,7 @@ export class Renderer {
 	private readonly globalsF32 = new Float32Array(this.globalsData);
 	private readonly globalsI32 = new Int32Array(this.globalsData);
 	private readonly firstWaterFrame: number;
+	private readonly firstFlameFrame: number;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
@@ -461,13 +466,18 @@ export class Renderer {
 				for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) tiles.push(waterTextureFrame(frame, flowing));
 			}
 		}
+		this.firstFlameFrame = tiles.length;
+		for (const pixels of flameFrames) {
+			cutouts.add(tiles.length);
+			tiles.push(pixels);
+		}
 		const texture = device.createTexture({
 			size: [TEX_SIZE, TEX_SIZE, Math.max(2, tiles.length)],
 			format: "rgba8unorm",
 			mipLevelCount: MIP_LEVELS,
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
-		// Upload the entire array in five writes, including both animation strips.
+		// Upload the entire array in five writes, including the animation frames.
 		for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS && tiles.length; level++, size >>= 1) {
 			const tileBytes = size * size * 4;
 			const mip = new Uint8Array(tiles.length * tileBytes);
@@ -557,7 +567,7 @@ export class Renderer {
 			primitive: { topology: "triangle-list", cullMode: layer === 2 ? "none" : "back", frontFace: "ccw" },
 			depthStencil: { format: "depth24plus", depthWriteEnabled: layer !== 2, depthCompare: "less" },
 		});
-		const entityPipeline = (kind: "drops" | "cracks" | "mobs"): GPURenderPipeline => device.createRenderPipeline({
+		const entityPipeline = (kind: "drops" | "cracks" | "mobs" | "flames"): GPURenderPipeline => device.createRenderPipeline({
 			layout: pipelineLayout,
 			vertex: {
 				module: terrainModule, entryPoint: "vsEntity",
@@ -571,7 +581,7 @@ export class Renderer {
 			},
 			fragment: {
 				module: terrainModule, entryPoint: "fs",
-				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "mobs" ? 2 : 1 },
+				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
 				targets: [{
 					format: this.format,
 					...(kind === "cracks" ? { blend: {
@@ -586,8 +596,10 @@ export class Renderer {
 		this.items = entityPipeline("drops");
 		this.cracks = entityPipeline("cracks");
 		this.mobs = entityPipeline("mobs");
+		this.flames = entityPipeline("flames");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		// Each drop uses up to 36 vertices, each burning mob uses two double-sided quads.
+		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * (36 + 24) * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -776,7 +788,9 @@ export class Renderer {
 		const eye = [camera.x, camera.y, camera.z];
 		const mobData = mobVertices(visibleMobs, eye, now, { output: heldItems, textures: this.heldItemTextures });
 		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
+		const flameData = flameVertices(visibleMobs, eye, now, this.firstFlameFrame);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
+		if (flameData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength, flameData);
 		if (mobData.length) {
 			if (!this.mobBuffer || this.mobBuffer.size < mobData.byteLength) {
 				this.mobBuffer?.destroy();
@@ -838,6 +852,12 @@ export class Renderer {
 					pass.setBindGroup(0, this.mobBind);
 					pass.setVertexBuffer(0, this.mobBuffer);
 					pass.draw(mobData.length / 9);
+				}
+				if (flameData.length) {
+					pass.setPipeline(this.flames);
+					pass.setBindGroup(0, this.terrainBind);
+					pass.setVertexBuffer(0, this.itemBuffer);
+					pass.draw(flameData.length / 9, 1, itemData.length / 9);
 				}
 				if (cloudsFirst) drawClouds();
 			}

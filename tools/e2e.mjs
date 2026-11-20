@@ -2587,12 +2587,14 @@ async function zombies() {
 			return camera;
 		}, zombie.id);
 		const approaching = await page.waitForFunction((id, [x, , z]) => {
-			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
+			const { mobs, positionsCorrected } = window.__mc.stats();
+			const mob = mobs.find(mob => mob.id === id);
 			if (!mob) return false;
-			const distance = Math.hypot(mob.position[0] - x, mob.position[2] - z);
-			return distance <= 7 && { distance };
+			const dx = x - mob.position[0], dz = z - mob.position[2];
+			const distance = Math.hypot(dx, dz);
+			return distance <= 7 && { distance, away: [dx, dz], positionsCorrected };
 		}, { timeout: 30000, polling: 50 }, zombie.id, camera);
-		const { distance } = await approaching.jsonValue();
+		const { distance, away, positionsCorrected: beforeHit } = await approaching.jsonValue();
 		await approaching.dispose();
 		check(distance <= 7, "zombies: the same zombie approached the player", `id ${zombie.id}, ${distance.toFixed(2)} blocks away`);
 
@@ -2629,9 +2631,111 @@ async function zombies() {
 		const { health } = await damaged.jsonValue();
 		await damaged.dispose();
 		check(health < 20, "zombies: the player took damage", `${health} health remaining`);
+
+		const pushed = await page.waitForFunction(([awayX, awayZ]) => {
+			const api = window.__mc;
+			const { lastKnockback: hit, server } = api.stats();
+			if (!hit || !server) return false;
+			const [vx, , vz] = hit.velocity;
+			if (vx * awayX + vz * awayZ <= 0) return false;
+			const [x, , z] = api.playerPosition();
+			const distance = ((x - hit.position[0]) * awayX + (z - hit.position[2]) * awayZ) / Math.hypot(awayX, awayZ);
+			return distance >= 0.3 && { distance, corrections: hit.positionsCorrected, serverTick: server.gameTime };
+		}, { timeout: 15000 }, away);
+		const push = await pushed.jsonValue();
+		await pushed.dispose();
+		check(push.distance >= 0.3, "zombies: moved at least 0.3 blocks horizontally away from the attacker", `${push.distance.toFixed(3)} blocks`);
+		// Server stats arrive every 20 ticks, so two updates cover at least one second after the push.
+		await page.waitForFunction(tick => window.__mc.stats().server?.gameTime >= tick + 40,
+			{ timeout: 10000, polling: 50 }, push.serverTick);
+		const corrections = await page.evaluate(() => window.__mc.stats().positionsCorrected);
+		check(corrections === beforeHit && corrections === push.corrections, "zombies: no position correction during or after knockback",
+			`${beforeHit} → ${push.corrections} → ${corrections}`);
 		check(errors.length === 0, "zombies: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "zombies", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
+async function mobBurning() {
+	const { page, errors } = await open(`server=local&world=e2e-mob-burning-${run}&mode=creative&gen=flat&seed=2&view=4&time=18000`);
+	try {
+		await settle(page, "mob burning", chunksInView(4));
+		await resumePointerLock(page, "mob burning: initial pointer lock");
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 4 || mob.kind === 5),
+			{ timeout: 100000, polling: 100 });
+		const mob = await spawned.jsonValue();
+		await spawned.dispose();
+		check(mob.burning === false, "mob burning: the mob starts unlit at night", `id ${mob.id}`);
+
+		const screenshotSession = await page.createCDPSession();
+		const daylight = await page.evaluate(() => window.__mc.setDayTime(6000));
+		if (!daylight) throw new Error("mob burning: could not set the local world to noon");
+		const burning = await page.waitForFunction(id => {
+			const { dayTime, mobs } = window.__mc.stats();
+			return dayTime >= 6000 && dayTime < 6200 && mobs.some(mob => mob.id === id && mob.burning === true);
+		}, { timeout: 10000, polling: 50 }, mob.id);
+		await burning.dispose();
+		check(true, "mob burning: the same mob is burning in direct sunlight at noon", `id ${mob.id}`);
+
+		const frames = await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z] } = api.stats().mobs.find(mob => mob.id === id);
+			api.setCamera(x, y + 1.62, z - 4.5, 0, 9);
+			return api.frames;
+		}, mob.id);
+		await page.waitForFunction(start => window.__mc.frames >= start + 2, { timeout: 5000 }, frames);
+		const capture = await bounded(() => screenshotSession.send("Page.captureScreenshot", {
+			format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: false,
+		}, { timeout: 8000 }), 8000);
+		if (!capture || typeof capture === "string") throw new Error(`mob burning: screenshot failed (${capture})`);
+		writeFileSync(join(shots, "mobs-burning.png"), Buffer.from(capture.data, "base64"));
+		const flamePixels = await page.evaluate(async data => {
+			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const scale = img.height / 720;
+			const pixels = ctx.getImageData(
+				Math.floor(img.width / 2 - 90 * scale), Math.floor(img.height / 2 - 110 * scale),
+				Math.ceil(180 * scale), Math.ceil(220 * scale),
+			).data;
+			let count = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+				if (r >= 245 && g >= 110 && b <= 150 && g - b >= 55 && r - g >= 20) count++;
+			}
+			return count;
+		}, capture.data);
+		check(flamePixels > 20, "mob burning: orange and yellow flame pixels are visible near the mob", `${flamePixels} pixels`);
+
+		const roof = await page.evaluate(id => {
+			const api = window.__mc;
+			const mob = api.stats().mobs.find(mob => mob.id === id && mob.burning);
+			if (!mob) throw new Error("mob burning: lost the burning mob before shading it");
+			const [x, y, z] = mob.position.map(Math.floor);
+			api.setCamera(x + 0.5, mob.position[1] + 1.62, z - 1.5, 0, 0);
+			const stone = api.stateId("stone");
+			for (let dx = -1; dx <= 1; dx++) {
+				for (let dz = -1; dz <= 1; dz++) {
+					if (!api.setBlock(x + dx, y + 3, z + dz, stone)) throw new Error("mob burning: could not place roof");
+				}
+			}
+			return { x, y: y + 3, z, stone };
+		}, mob.id);
+		const extinguished = await page.waitForFunction((id, { x, y, z, stone }) => {
+			const api = window.__mc;
+			const mob = api.stats().mobs.find(mob => mob.id === id);
+			if (!mob || mob.burning !== false) return false;
+			return Math.abs(Math.floor(mob.position[0]) - x) <= 1 && Math.abs(Math.floor(mob.position[2]) - z) <= 1
+				&& api.getBlock(Math.floor(mob.position[0]), y, Math.floor(mob.position[2])) === stone;
+		}, { timeout: 5000, polling: 50 }, mob.id, roof);
+		await extinguished.dispose();
+		check(true, "mob burning: the same mob stopped burning under the roof", `id ${mob.id}`);
+		check(errors.length === 0, "mob burning: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "mob-burning", err);
 		throw err;
 	} finally { await page.close(); }
 }
@@ -2811,6 +2915,7 @@ try {
 	await audio();
 	await chat();
 	await zombies();
+	await mobBurning();
 	await skeletons();
 	await creepers();
 	await swimming();
