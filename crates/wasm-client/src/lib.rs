@@ -31,6 +31,7 @@ struct MobEntity {
     previous: [f64; 3],
     yaw: f32,
     hurt: u32,
+    fuse: u8,
 }
 struct ArrowEntity {
     pos: [f64; 3],
@@ -350,6 +351,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                     previous: [x, y, z],
                     yaw,
                     hurt: 0,
+                    fuse: 0,
                 },
             );
         }
@@ -381,6 +383,11 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             if let Some(mob) = st.mobs.get_mut(&id) {
                 st.mob_hurt_sequence = st.mob_hurt_sequence.wrapping_add(1).max(1);
                 mob.hurt = st.mob_hurt_sequence;
+            }
+        }
+        S2C::MobFuse { id, ticks } => {
+            if let Some(mob) = st.mobs.get_mut(&id) {
+                mob.fuse = ticks;
             }
         }
         S2C::DigProgress { .. } => {}
@@ -1523,7 +1530,7 @@ pub extern "C" fn client_entities() -> usize {
     st.out = w.finish();
     st.out.len()
 }
-/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32.
+/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32, fuse u8.
 #[no_mangle]
 pub extern "C" fn client_mobs() -> usize {
     let st = state();
@@ -1536,6 +1543,7 @@ pub extern "C" fn client_mobs() -> usize {
             w.f64(v);
         }
         w.i32(mob.hurt as i32);
+        w.u8(mob.fuse);
     }
     st.out = w.finish();
     st.out.len()
@@ -1641,7 +1649,7 @@ mod tests {
             0x0d,
         );
         for sequence in 0_u32..=2 {
-            assert_eq!(client_mobs(), 61);
+            assert_eq!(client_mobs(), 62);
             assert_eq!(state().out[57..61], sequence.to_be_bytes());
             if sequence < 2 {
                 receive(S2C::MobHurt { id: 7 }, 0x0f);
@@ -1667,8 +1675,37 @@ mod tests {
         }
         .encode();
         assert_eq!(unsafe { client_packet(spawn.as_ptr(), spawn.len()) }, 0x0d);
-        assert_eq!(client_mobs(), 61);
+        assert_eq!(client_mobs(), 62);
         assert_eq!(state().out[4], 4);
+        assert_eq!(state().out[61], 0);
+
+        let creeper = S2C::MobSpawn {
+            id: 8,
+            kind: MobKind::Creeper,
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            yaw: 45.0,
+        }
+        .encode();
+        assert_eq!(
+            unsafe { client_packet(creeper.as_ptr(), creeper.len()) },
+            0x0d
+        );
+        assert_eq!(client_mobs(), 62 * 2);
+        assert_eq!(state().out[62 + 4], 6);
+        assert_eq!(state().out[62 + 61], 0);
+        let fuse = S2C::MobFuse { id: 8, ticks: 12 }.encode();
+        assert_eq!(unsafe { client_packet(fuse.as_ptr(), fuse.len()) }, 0x12);
+        assert_eq!(client_mobs(), 62 * 2);
+        assert_eq!(state().out[62 + 61], 12);
+        let cleared = S2C::MobFuse { id: 8, ticks: 0 }.encode();
+        assert_eq!(
+            unsafe { client_packet(cleared.as_ptr(), cleared.len()) },
+            0x12
+        );
+        assert_eq!(client_mobs(), 62 * 2);
+        assert_eq!(state().out[62 + 61], 0);
 
         let death = protocol::PlayerVitals {
             health: 0,

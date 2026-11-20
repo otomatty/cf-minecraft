@@ -146,15 +146,15 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 
 const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
-const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95, 1.99] as const;
+const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95, 1.99, 1.625] as const;
 
 function component(vertices: Float32Array, index: number) {
 	return vertices.filter((_, i) => i % 9 === index);
 }
 
 test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton"]);
-	for (const kind of [0, 1, 2, 3, 4, 5] as const) {
+	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton", "minecraft:creeper"]);
+	for (const kind of [0, 1, 2, 3, 4, 5, 6] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = mobAssetsByKind[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
@@ -305,21 +305,29 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	const position = [29999998.25, 1, -3.5], moved = [29999998.5, 1, -3.5];
 	const spawn = packet(S2C.MobSpawn, position, 0, 0);
 	assert.equal(core.packet(spawn), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0, fuse: 0 }]);
 	const entityPacket = new Uint8Array(5);
 	new DataView(entityPacket.buffer).setUint32(1, id);
 	entityPacket[0] = S2C.MobHurt;
 	assert.equal(core.packet(entityPacket), S2C.MobHurt);
 	assert.equal(core.packet(packet(S2C.MobMove, moved, 270)), S2C.MobMove);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1, fuse: 0 }]);
 	assert.deepEqual([...core.encodeAttack(id)], [0x10, 0x80, 0, 0, 2]);
 	entityPacket[0] = S2C.EntityRemove;
 	core.packet(entityPacket);
 	assert.deepEqual(core.mobs, []);
 	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 1)), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0, fuse: 0 }]);
 	core.resetWorld();
 	assert.deepEqual(core.mobs, []);
+
+	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 6)), S2C.MobSpawn);
+	const fusePacket = Uint8Array.of(S2C.MobFuse, ...entityPacket.subarray(1), 12);
+	assert.equal(core.packet(fusePacket), S2C.MobFuse);
+	assert.deepEqual(core.mobs, [{ id, kind: 6, position, previous: position, yaw: 90, hurt: 0, fuse: 12 }]);
+	fusePacket[5] = 0;
+	assert.equal(core.packet(fusePacket), S2C.MobFuse);
+	assert.equal(core.mobs[0].fuse, 0);
 });
 
 test("zombie head uses the front of the 64×32 skin and the legs swing in opposite directions", () => {
@@ -340,6 +348,36 @@ test("zombie head uses the front of the 64×32 skin and the legs swing in opposi
 	for (let i = 0; i < front.length; i += 9) {
 		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
 		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.95) ? 8 : 16);
+	}
+});
+
+test("creeper uses the 64×32 skin, swells with its fuse, and flashes white on odd fuse quarters", () => {
+	const creeper: RenderMob & { id: number } = {
+		id: 9, kind: 6, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, fuse: 0, light: [15, 3],
+	};
+	const asset = mobAssetsByKind[6];
+	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
+	assert.equal(aimedMob([0, 1.69, 3], [0, 0, -1], [creeper], 5)?.id, 9);
+	assert.equal(aimedMob([0, 1.71, 3], [0, 0, -1], [creeper], 5), null);
+	const still = mobVertices([creeper], [0, 0, 0], 0);
+	const swollen = mobVertices([{ ...creeper, fuse: 30 }], [0, 0, 0], 0);
+	assert.equal(Math.max(...component(still, 1)), Math.fround(1.625));
+	assert.equal(Math.max(...component(swollen, 1)), Math.fround(1.625 * 1.2));
+	const flashing = mobVertices([{ ...creeper, fuse: 4 }], [0, 0, 0], 0);
+	const quiet = mobVertices([{ ...creeper, fuse: 3 }], [0, 0, 0], 0);
+	for (let i = 5; i < still.length; i += 9) {
+		assert.equal(flashing[i], Math.fround(still[i] + 2));
+		assert.equal(quiet[i], still[i]);
+	}
+	const stride = mobVertices([{ ...creeper, moving: true }], [0, 0, 0], quarterStride);
+	const legStart = 2 * boxFloats;
+	assert.deepEqual(stride.subarray(0, legStart), still.subarray(0, legStart));
+	assert.notDeepEqual(stride.subarray(legStart), still.subarray(legStart));
+	const front = still.subarray(boxFloats + 6 * 9, boxFloats + 12 * 9);
+	assert.equal(new Set(component(front, 2)).size, 1);
+	for (let i = 0; i < front.length; i += 9) {
+		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
+		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.625) ? 8 : 16);
 	}
 });
 

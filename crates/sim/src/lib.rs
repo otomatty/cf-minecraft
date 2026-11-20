@@ -1043,17 +1043,7 @@ impl Server {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
                 if old == blocks::FURNACE {
-                    if let Some(f) = self.furnaces.remove(&[x, y, z]) {
-                        for stack in f.slots.into_iter().flatten() {
-                            self.spawn_item(
-                                stack.item,
-                                stack.count,
-                                [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
-                                [0.0, 0.1, 0.0],
-                                10,
-                            );
-                        }
-                    }
+                    self.drop_furnace_contents([x, y, z]);
                 }
                 if state == blocks::FURNACE {
                     self.furnaces.insert([x, y, z], furnace::Furnace::default());
@@ -1063,7 +1053,7 @@ impl Server {
                 if self.game_mode == GameMode::Survival {
                     if state == blocks::AIR {
                         if drops {
-                            self.spawn_mining_drops([x, y, z], old);
+                            self.spawn_mining_drops([x, y, z], old, false);
                         }
                     } else {
                         let client = self.clients.get_mut(&id).unwrap();
@@ -1071,12 +1061,49 @@ impl Server {
                         client.inventory_dirty = true;
                     }
                 }
-                self.stats.blocks_changed += 1;
-                self.broadcast_block(x, y, z, state);
-                self.schedule_fluid_neighbors([x, y, z]);
-                self.check_wheat_above([x, y, z], state);
+                self.finish_block_change([x, y, z], state, false);
             }
         }
+    }
+
+    fn drop_furnace_contents(&mut self, [x, y, z]: [i32; 3]) {
+        if let Some(furnace) = self.furnaces.remove(&[x, y, z]) {
+            for stack in furnace.slots.into_iter().flatten() {
+                self.spawn_item(
+                    stack.item,
+                    stack.count,
+                    [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
+                    [0.0, 0.1, 0.0],
+                    10,
+                );
+            }
+        }
+    }
+
+    /// Break a block the way a survival dig does, including furnace contents,
+    /// without taking an item from a player's hand.
+    fn break_exploded_block(&mut self, [x, y, z]: [i32; 3], drops: bool) {
+        let Some(old) = self.world.set_block(x, y, z, blocks::AIR) else {
+            return;
+        };
+        if old == blocks::AIR {
+            return;
+        }
+        if old == blocks::FURNACE {
+            self.drop_furnace_contents([x, y, z]);
+        }
+        self.abort_digs_at([x, y, z]);
+        if drops {
+            self.spawn_mining_drops([x, y, z], old, true);
+        }
+        self.finish_block_change([x, y, z], blocks::AIR, true);
+    }
+
+    fn finish_block_change(&mut self, [x, y, z]: [i32; 3], state: u16, exploded: bool) {
+        self.stats.blocks_changed += 1;
+        self.broadcast_block(x, y, z, state);
+        self.schedule_fluid_neighbors([x, y, z]);
+        self.check_wheat_above([x, y, z], state, exploded);
     }
 
     fn block_drop_random(&self, pos: [i32; 3]) -> jmath::JavaRandom {
@@ -1089,22 +1116,30 @@ impl Server {
         jmath::JavaRandom::new(jmath::mix_stafford13(hash.finish()) as i64)
     }
 
-    fn spawn_mining_drops(&mut self, pos: [i32; 3], state: u16) {
+    fn spawn_mining_drops(&mut self, pos: [i32; 3], state: u16, exploded: bool) {
+        let mut blast_random = exploded.then(|| self.block_drop_random(pos));
         if state == blocks::SHORT_GRASS {
             if self.block_drop_random(pos).next_int_bound(8) == 0 {
-                self.spawn_block_drop(items::by_name("wheat_seeds").unwrap(), 1, pos, 0.25);
+                let seeds = items::by_name("wheat_seeds").unwrap();
+                self.spawn_block_drop_with_random(seeds, 1, pos, 0.25, blast_random.as_mut());
             }
         } else if let Some(mut item) = items::mining_drop(state) {
             let count = if state == blocks::RIPE_WHEAT {
-                self.spawn_block_drop(items::by_name("wheat").unwrap(), 1, pos, 0.25);
+                let wheat = items::by_name("wheat").unwrap();
+                self.spawn_block_drop_with_random(wheat, 1, pos, 0.25, blast_random.as_mut());
                 1 + self.block_drop_random(pos).next_int_bound(2) as u8
             } else {
-                if state == blocks::OAK_LEAVES && self.leaf_drops_apple() {
+                if state == blocks::OAK_LEAVES
+                    && blast_random.as_mut().map_or_else(
+                        || self.leaf_drops_apple(),
+                        |roll| roll.next_int_bound(10) == 0,
+                    )
+                {
                     item = items::by_name("apple").unwrap();
                 }
                 1
             };
-            self.spawn_block_drop(item, count, pos, 0.25);
+            self.spawn_block_drop_with_random(item, count, pos, 0.25, blast_random.as_mut());
         }
     }
 
@@ -1114,8 +1149,27 @@ impl Server {
         roll.next_int_bound(10) == 0
     }
 
-    fn spawn_block_drop(&mut self, item: u16, count: u8, [x, y, z]: [i32; 3], height: f64) {
-        let mut random = jmath::JavaRandom::new(self.seed.wrapping_add(self.next_entity_id as i64));
+    fn spawn_block_drop(&mut self, item: u16, count: u8, pos: [i32; 3], height: f64) {
+        self.spawn_block_drop_with_random(item, count, pos, height, None);
+    }
+
+    fn spawn_block_drop_with_random(
+        &mut self,
+        item: u16,
+        count: u8,
+        [x, y, z]: [i32; 3],
+        height: f64,
+        random: Option<&mut jmath::JavaRandom>,
+    ) {
+        let mut legacy_random;
+        let random = match random {
+            Some(random) => random,
+            None => {
+                legacy_random =
+                    jmath::JavaRandom::new(self.seed.wrapping_add(self.next_entity_id as i64));
+                &mut legacy_random
+            }
+        };
         let velocity = [
             random.next_double() * 0.1 - 0.05,
             0.1,

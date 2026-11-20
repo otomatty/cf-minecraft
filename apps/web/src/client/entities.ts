@@ -1,7 +1,7 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
-import { skeleton, zombie } from "./mobs/hostile.ts";
+import { creeper, skeleton, zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
@@ -18,6 +18,7 @@ const mobHitboxes = [
 	{ width: 0.9, height: 1.3 },
 	{ width: 0.6, height: 1.95 },
 	{ width: 0.6, height: 1.99 },
+	{ width: 0.6, height: 1.7 },
 ] as const satisfies Record<MobKind, { width: number; height: number }>;
 
 interface MobPosition {
@@ -151,12 +152,13 @@ export interface RenderMob {
 	yaw: number;
 	moving: boolean;
 	hurt: boolean;
+	fuse?: number;
 	light: RenderItem["light"];
 }
 
 // Protocol kinds index both this table and the GPU skin array. The 64×32 skins
 // occupy the upper half of a layer at their original texel scale.
-export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie, skeleton] as const satisfies Record<MobKind, MobAsset>;
+export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie, skeleton, creeper] as const satisfies Record<MobKind, MobAsset>;
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
@@ -235,9 +237,13 @@ export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[
 	let i = 0;
 	for (const mob of mobs) {
 		const { bones, scale, centerZ } = mobMeshes[mob.kind];
-		const yaw = mob.yaw * radians, c = Math.cos(yaw) * scale, s = Math.sin(yaw) * scale;
+		const fuse = Math.min(mob.fuse ?? 0, 30);
+		const swell = 1 + 0.2 * fuse / 30;
+		const flash = Math.floor(fuse / 4) % 2 === 1;
+		const drawn = scale * swell;
+		const yaw = mob.yaw * radians, c = Math.cos(yaw) * drawn, s = Math.sin(yaw) * drawn;
 		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
-		const world: Transform = ([x, y, z]) => [ox + c * x + s * (z - centerZ), oy + y * scale, oz + s * x - c * (z - centerZ)];
+		const world: Transform = ([x, y, z]) => [ox + c * x + s * (z - centerZ), oy + y * drawn, oz + s * x - c * (z - centerZ)];
 		const stride = mob.moving ? Math.sin(timeMs / 100) : 0;
 		const shadeSign = mob.hurt ? -1 : 1;
 		const blockLight = (mob.light[1] + 0.5) / 16, skyLight = (mob.light[0] + 0.5) / 16;
@@ -266,7 +272,8 @@ export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[
 					out[i++] = z;
 					out[i++] = vertex.u;
 					out[i++] = vertex.v;
-					out[i++] = vertex.shade * shadeSign;
+					const shade = vertex.shade * shadeSign;
+					out[i++] = flash ? shade + Math.sign(shade) * 2 : shade;
 					out[i++] = mob.kind;
 					out[i++] = blockLight;
 					out[i++] = skyLight;

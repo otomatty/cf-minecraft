@@ -27,6 +27,7 @@ struct MobSpec {
     chase_forward: Option<f32>,
     max_fall_speed: Option<f64>,
     takes_fall_damage: bool,
+    burns_in_sunlight: bool,
     loot: &'static [(u16, u8, u8)],
 }
 
@@ -42,6 +43,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
+            burns_in_sunlight: false,
             loot: items::COW_LOOT,
         },
         MobKind::Pig => &MobSpec {
@@ -54,6 +56,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
+            burns_in_sunlight: false,
             loot: items::PIG_LOOT,
         },
         MobKind::Chicken => &MobSpec {
@@ -66,6 +69,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: None,
             max_fall_speed: Some(0.1),
             takes_fall_damage: false,
+            burns_in_sunlight: false,
             loot: items::CHICKEN_LOOT,
         },
         MobKind::Sheep => &MobSpec {
@@ -78,6 +82,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: None,
             max_fall_speed: None,
             takes_fall_damage: true,
+            burns_in_sunlight: false,
             loot: items::SHEEP_LOOT,
         },
         MobKind::Zombie => &MobSpec {
@@ -90,6 +95,7 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: Some(0.6),
             max_fall_speed: None,
             takes_fall_damage: true,
+            burns_in_sunlight: true,
             loot: items::ZOMBIE_LOOT,
         },
         MobKind::Skeleton => &MobSpec {
@@ -102,7 +108,21 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             chase_forward: Some(0.6),
             max_fall_speed: None,
             takes_fall_damage: true,
+            burns_in_sunlight: true,
             loot: items::SKELETON_LOOT,
+        },
+        MobKind::Creeper => &MobSpec {
+            width: 0.6,
+            height: 1.7,
+            head_offset: 1.45,
+            health: 20,
+            walk_forward: 0.5,
+            flee_forward: 0.0,
+            chase_forward: Some(0.6),
+            max_fall_speed: None,
+            takes_fall_damage: true,
+            burns_in_sunlight: false,
+            loot: items::CREEPER_LOOT,
         },
     }
 }
@@ -136,12 +156,21 @@ const ZOMBIE_ATTACK_DAMAGE: u8 = 3;
 const ZOMBIE_ATTACK_INTERVAL: u8 = 20;
 const SUNLIGHT_DAMAGE: u8 = 2;
 const SUNLIGHT_INTERVAL: u8 = 20;
+const CREEPER_IGNITE_RANGE: f64 = 3.0;
+const CREEPER_FUSE_LIMIT: u8 = 30;
+const EXPLOSION_BLOCK_RADIUS: f64 = 3.0;
+const EXPLOSION_HURT_RADIUS: f64 = 6.0;
+const EXPLOSION_DAMAGE: f64 = 15.0;
+const PLAYER_BODY_CENTER: f64 = 0.9;
+const EXPLOSION_DROP_SALT: u64 = 25;
+const EXPLOSION_TOUGH_DIG_TICKS: u16 = 250;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Hostile {
     attack_ticks: u8,
     sunlight_ticks: u8,
     shot_ticks: Option<u8>,
+    fuse: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,6 +223,7 @@ impl Mob {
             egg_ticks: None,
             hostile: spec.chase_forward.map(|_| Hostile {
                 shot_ticks: (kind == MobKind::Skeleton).then_some(SKELETON_INITIAL_SHOT_TICKS),
+                fuse: (kind == MobKind::Creeper).then_some(0),
                 ..Hostile::default()
             }),
         }
@@ -286,6 +316,44 @@ impl Mob {
         self.stop_horizontal();
     }
 
+    fn fuse_ticks(&self) -> Option<u8> {
+        self.hostile.as_ref().and_then(|hostile| hostile.fuse)
+    }
+
+    /// Ignite while a target is close and visible. Otherwise a lit fuse cools down.
+    /// The returned flag means this tick the creeper stops and faces the target.
+    fn advance_fuse(&mut self, world: &World, chase: Option<[f64; 3]>) -> bool {
+        let Some(fuse) = self.fuse_ticks() else {
+            return false;
+        };
+        let ignite = chase.is_some_and(|target| {
+            spatial_distance(self.pos(), target) <= CREEPER_IGNITE_RANGE
+                && self.sees_player(world, target)
+        });
+        self.hostile.as_mut().unwrap().fuse = Some(if ignite {
+            fuse + 1
+        } else {
+            fuse.saturating_sub(1)
+        });
+        ignite
+    }
+
+    fn sees_player(&self, world: &World, target: [f64; 3]) -> bool {
+        let [tx, ty, tz] = target;
+        clear_sight(world, self.eye(), [tx, ty + physics::EYE_HEIGHT, tz])
+    }
+
+    fn face_hold(&mut self, chase: Option<[f64; 3]>) {
+        if let Some([tx, _, tz]) = chase {
+            let [x, _, z] = self.pos();
+            if x != tx || z != tz {
+                self.yaw = heading(tx - x, tz - z);
+            }
+        }
+        self.stop_horizontal();
+        self.ai = Wander::Idle;
+    }
+
     fn tick(
         &mut self,
         world: &World,
@@ -300,9 +368,14 @@ impl Mob {
                 *ticks = ticks.saturating_sub(1);
             }
         }
+        let hold = self.advance_fuse(world, chase);
         self.age = self.age.saturating_add(1);
+        if self.fuse_ticks() == Some(CREEPER_FUSE_LIMIT) {
+            self.face_hold(chase);
+            return None;
+        }
         let before = self.pos();
-        let turn = self.move_body(world, seed, id, time, chase);
+        let turn = self.move_body(world, seed, id, time, chase, hold);
         if self.pos()[1] < VOID_Y {
             return None;
         }
@@ -322,6 +395,9 @@ impl Mob {
     }
 
     fn sunlight_hit(&mut self, world: &World, daytime: bool) -> bool {
+        if !spec(self.kind).burns_in_sunlight {
+            return false;
+        }
         let pos = self.pos();
         let head_offset = spec(self.kind).head_offset;
         let Some(hostile) = &mut self.hostile else {
@@ -340,7 +416,7 @@ impl Mob {
         let Some(hostile) = &mut self.hostile else {
             return false;
         };
-        if hostile.attack_ticks != 0 || hostile.shot_ticks.is_some() {
+        if hostile.attack_ticks != 0 || hostile.shot_ticks.is_some() || hostile.fuse.is_some() {
             return false;
         }
         let player = Player::new(target).bounds();
@@ -425,12 +501,13 @@ impl Mob {
         id: u32,
         time: i64,
         chase: Option<[f64; 3]>,
+        hold: bool,
     ) -> bool {
         let before = self.pos();
         let [x, y, z] = before;
         let collisions = mob_collisions(world);
         let mut input = Input {
-            jump: physics::in_water(&collisions, before),
+            jump: !hold && physics::in_water(&collisions, before),
             ..Input::default()
         };
         let fleeing = matches!(self.ai, Wander::Fleeing { .. });
@@ -453,7 +530,10 @@ impl Mob {
 
         let spec = spec(self.kind);
         let idle_input = input;
-        let movement = if knockback {
+        let movement = if hold {
+            self.face_hold(chase);
+            None
+        } else if knockback {
             None
         } else if let Some(target) = chase {
             let [tx, ty, tz] = target;
@@ -628,6 +708,9 @@ impl Mob {
             h.u8(hostile.sunlight_ticks);
             if let Some(ticks) = hostile.shot_ticks {
                 h.u8(ticks);
+            }
+            if let Some(fuse) = hostile.fuse {
+                h.u8(fuse);
             }
         }
     }
@@ -822,11 +905,51 @@ fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
 }
 
 fn hostile_kind(seed: i64, player: u32, time: i64) -> MobKind {
-    if sample(seed, player, time, HOSTILE_KIND_SALT).is_multiple_of(2) {
-        MobKind::Zombie
-    } else {
-        MobKind::Skeleton
+    match sample(seed, player, time, HOSTILE_KIND_SALT) % 3 {
+        0 => MobKind::Zombie,
+        1 => MobKind::Skeleton,
+        _ => MobKind::Creeper,
     }
+}
+
+fn spatial_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn blast_damage(distance: f64) -> u8 {
+    if distance >= EXPLOSION_HURT_RADIUS {
+        return 0;
+    }
+    (EXPLOSION_DAMAGE * (EXPLOSION_HURT_RADIUS - distance) / EXPLOSION_HURT_RADIUS).floor() as u8
+}
+
+fn explosion_spares(state: u16) -> bool {
+    if state == blocks::AIR || blocks::is_fluid(state) {
+        return true;
+    }
+    match blocks::info(state).dig_ticks {
+        None => true,
+        Some(ticks) => ticks >= EXPLOSION_TOUGH_DIG_TICKS,
+    }
+}
+
+fn explosion_drops(seed: i64, time: i64, [x, y, z]: [i32; 3]) -> bool {
+    let bits = (seed as u64)
+        ^ (time as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (x as u32 as u64).wrapping_mul(0xd1b5_4a32_d192_ed03)
+        ^ (y as u32 as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        ^ (z as u32 as u64).wrapping_mul(0x94d0_49bb_1331_11eb)
+        ^ EXPLOSION_DROP_SALT.wrapping_mul(0x94d0_49bb_1331_11eb);
+    jmath::mix_stafford13(bits).is_multiple_of(3)
+}
+
+fn block_center_range(center: f64) -> RangeInclusive<i32> {
+    let min = (center - EXPLOSION_BLOCK_RADIUS - 0.5).floor() as i32;
+    let max = (center + EXPLOSION_BLOCK_RADIUS - 0.5).floor() as i32;
+    min..=max
 }
 
 fn egg_interval(seed: i64, id: u32, time: i64) -> u16 {
@@ -1033,6 +1156,8 @@ impl Server {
         let mut hits = Vec::new();
         let mut player_deaths = Vec::new();
         let mut shots = Vec::new();
+        let mut fuse_updates = Vec::new();
+        let mut explosions = Vec::new();
         for (&id, mob) in &mut self.mobs {
             if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
                 continue;
@@ -1053,6 +1178,7 @@ impl Server {
             } else {
                 None
             };
+            let before_fuse = mob.fuse_ticks();
             let damage = mob.tick(
                 &self.world,
                 self.seed,
@@ -1060,6 +1186,16 @@ impl Server {
                 self.game_time,
                 target.map(|(_, pos)| pos),
             );
+            let after_fuse = mob.fuse_ticks();
+            if before_fuse != after_fuse {
+                if let Some(ticks) = after_fuse {
+                    fuse_updates.push((id, ticks));
+                }
+            }
+            if after_fuse == Some(CREEPER_FUSE_LIMIT) {
+                explosions.push(id);
+                continue;
+            }
             let sunlight = mob.sunlight_hit(&self.world, day < 12000);
             if damage.is_some() || sunlight {
                 hits.push((id, damage == Some(DeathCause::Lava)));
@@ -1084,11 +1220,32 @@ impl Server {
                 self.arrows.insert(id, arrow);
             }
         }
+        for &(id, ticks) in &fuse_updates {
+            self.send_mob_fuse(id, ticks);
+        }
+        let blasts: Vec<[f64; 3]> = explosions
+            .iter()
+            .filter_map(|&id| {
+                let mob = self.mobs.get(&id)?;
+                let [x, y, z] = mob.pos();
+                Some([x, y + spec(mob.kind).height / 2.0, z])
+            })
+            .collect();
+        for id in &explosions {
+            let _ = self.mobs.remove(id);
+        }
+        for center in blasts {
+            let deaths = self.apply_explosion(center);
+            player_deaths.extend(deaths);
+        }
         for player in player_deaths {
             self.finish_player_death(player);
         }
         for (id, burned) in hits {
-            if self.mobs[&id].health == 0 {
+            let Some(health) = self.mobs.get(&id).map(|mob| mob.health) else {
+                continue;
+            };
+            if health == 0 {
                 let mob = self.mobs.remove(&id).unwrap();
                 self.drop_mob_loot(id, mob, burned);
             } else {
@@ -1143,9 +1300,106 @@ impl Server {
                     Some(_) => continue,
                 };
                 self.outbox.push((client, packet.encode()));
+                if matches!(packet, S2C::MobSpawn { .. }) {
+                    if let Some(ticks) = self.mobs[&id].fuse_ticks().filter(|ticks| *ticks > 0) {
+                        self.outbox
+                            .push((client, S2C::MobFuse { id, ticks }.encode()));
+                    }
+                }
             }
             c.visible_mobs = visible;
         }
+    }
+
+    fn send_mob_fuse(&mut self, id: u32, ticks: u8) {
+        let packet = S2C::MobFuse { id, ticks }.encode();
+        for (&viewer, client) in &self.clients {
+            if client.visible_mobs.contains_key(&id) {
+                self.outbox.push((viewer, packet.clone()));
+            }
+        }
+    }
+
+    fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
+        for y in block_center_range(center[1]) {
+            for z in block_center_range(center[2]) {
+                for x in block_center_range(center[0]) {
+                    let block_center = [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5];
+                    if spatial_distance(center, block_center) > EXPLOSION_BLOCK_RADIUS {
+                        continue;
+                    }
+                    let Some(state) = self.world.get_block(x, y, z) else {
+                        continue;
+                    };
+                    if explosion_spares(state) {
+                        continue;
+                    }
+                    let drops = explosion_drops(self.seed, self.game_time, [x, y, z]);
+                    self.break_exploded_block([x, y, z], drops);
+                }
+            }
+        }
+
+        let mut deaths = Vec::new();
+        if self.game_mode == GameMode::Survival {
+            let players: Vec<_> = self
+                .clients
+                .iter()
+                .filter(|(_, client)| client.joined && !client.health.vitals.dead)
+                .map(|(&id, client)| {
+                    let [x, y, z] = client.pos;
+                    (id, [x, y + PLAYER_BODY_CENTER, z])
+                })
+                .collect();
+            for (id, body) in players {
+                let damage = blast_damage(spatial_distance(center, body));
+                if damage == 0 {
+                    continue;
+                }
+                let health = &mut self.clients.get_mut(&id).unwrap().health;
+                health.damage(damage, DeathCause::Explosion);
+                if health.vitals.dead {
+                    deaths.push(id);
+                }
+            }
+        }
+
+        let victims: Vec<_> = self
+            .mobs
+            .iter()
+            .filter_map(|(&id, mob)| {
+                if mob.health == 0 || mob.hurt_ticks != 0 {
+                    return None;
+                }
+                let [x, y, z] = mob.pos();
+                let body = [x, y + spec(mob.kind).height / 2.0, z];
+                let damage = blast_damage(spatial_distance(center, body));
+                (damage != 0).then_some((id, damage))
+            })
+            .collect();
+        for (id, damage) in victims {
+            let dead = {
+                let Some(mob) = self.mobs.get_mut(&id) else {
+                    continue;
+                };
+                mob.hurt(
+                    &self.world,
+                    damage,
+                    (center, 0.0),
+                    self.seed,
+                    id,
+                    self.game_time,
+                );
+                mob.health == 0
+            };
+            if dead {
+                let mob = self.mobs.remove(&id).unwrap();
+                self.drop_mob_loot(id, mob, false);
+            } else {
+                self.send_mob_hurt(id);
+            }
+        }
+        deaths
     }
 
     pub(crate) fn hash_mobs(&self, h: &mut Fnv64) {
@@ -2591,7 +2845,7 @@ mod tests {
                 server.tick();
                 assert_eq!(server.mobs.len(), expected, "tick {time}, day {day}");
                 for mob in server.mobs.values() {
-                    assert_eq!(mob.kind, MobKind::Zombie);
+                    assert_eq!(mob.kind, MobKind::Creeper);
                     assert!(
                         (24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(mob.pos(), origin))
                     );
@@ -2601,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn both_hostiles_share_a_cap_independent_of_animals() {
+    fn all_hostiles_share_a_cap_independent_of_animals() {
         let mut server = joined(GameMode::Creative);
         let pos = server.spawn();
         let players = [(1, pos)];
@@ -2621,10 +2875,10 @@ mod tests {
                 .map(|mob| mob.kind)
                 .collect::<Vec<_>>(),
             [
+                MobKind::Creeper,
                 MobKind::Zombie,
-                MobKind::Zombie,
+                MobKind::Creeper,
                 MobKind::Skeleton,
-                MobKind::Zombie
             ]
         );
 
@@ -2879,16 +3133,49 @@ mod tests {
     }
 
     #[test]
-    fn hostile_selection_has_two_equal_parities_and_fixed_flat_spawns() {
-        let mut skeletons = 0;
+    fn hostile_selection_splits_three_ways_and_flat_spawns_are_fixed() {
+        let mut counts = [0_usize; 3];
         for time in 1..=4096 {
-            let expected =
-                [MobKind::Zombie, MobKind::Skeleton][(sample(2026, 1, time, 24) & 1) as usize];
+            let roll = sample(2026, 1, time, HOSTILE_KIND_SALT) % 3;
+            let expected = match roll {
+                0 => MobKind::Zombie,
+                1 => MobKind::Skeleton,
+                _ => MobKind::Creeper,
+            };
             assert_eq!(hostile_kind(2026, 1, time), expected);
-            skeletons += usize::from(expected == MobKind::Skeleton);
+            counts[roll as usize] += 1;
         }
-        assert_eq!(skeletons, 2107);
-        for (seed, expected) in [(2026, MobKind::Zombie), (2027, MobKind::Skeleton)] {
+        assert_eq!(counts, [1301, 1369, 1426]);
+        let mut server = joined(GameMode::Survival);
+        let pos = server.clients[&1].pos;
+        let mut found = [None; 3];
+        for seed in 1..8000 {
+            if found.iter().all(Option::is_some) {
+                break;
+            }
+            server.seed = seed;
+            server.mobs.clear();
+            server.game_time = 200;
+            server.spawn_hostile(1, pos, &[(1, pos)]);
+            let Some(kind) = server.mobs.values().next().map(|mob| mob.kind) else {
+                continue;
+            };
+            let slot = match kind {
+                MobKind::Zombie => 0,
+                MobKind::Skeleton => 1,
+                MobKind::Creeper => 2,
+                _ => continue,
+            };
+            if found[slot].is_none() {
+                found[slot] = Some(seed);
+            }
+        }
+        assert_eq!(found, [Some(2), Some(5), Some(1)]);
+        for (seed, expected) in [
+            (2, MobKind::Zombie),
+            (5, MobKind::Skeleton),
+            (1, MobKind::Creeper),
+        ] {
             let mut server = joined_with_seed(GameMode::Survival, seed);
             server.set_time(199, 18199);
             server.tick();
@@ -3143,5 +3430,444 @@ mod tests {
         server.mobs.remove(&id);
         server.sync_mobs();
         assert_eq!(packets(&mut server), [(2, S2C::EntityRemove { id })]);
+    }
+
+    fn grounded(kind: MobKind, pos: [f64; 3]) -> Mob {
+        let mut mob = Mob::new(kind, pos);
+        mob.body.on_ground = true;
+        mob
+    }
+
+    fn decoded(server: &mut Server) -> Vec<(u32, S2C)> {
+        server
+            .take_outbox()
+            .into_iter()
+            .map(|(client, bytes)| (client, S2C::decode(&bytes).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn creeper_does_not_burn_and_ignites_only_with_a_close_clear_view() {
+        assert!(!spec(MobKind::Creeper).burns_in_sunlight);
+        assert!(spec(MobKind::Zombie).burns_in_sunlight);
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, grounded(MobKind::Zombie, pos));
+        server.spawn_mob(MobKind::Creeper, [pos[0] + 2.0, pos[1], pos[2]]);
+        server.set_time(0, 6000);
+        for _ in 0..40 {
+            server.tick();
+        }
+        let creeper = server
+            .mobs
+            .values()
+            .find(|mob| mob.kind == MobKind::Creeper)
+            .unwrap();
+        assert_eq!(creeper.health, 20);
+        assert_eq!(creeper.hostile.as_ref().unwrap().sunlight_ticks, 0);
+        assert_eq!(server.mobs[&id].health, 16);
+
+        let world = arena(16);
+        let start = [5.5, 1.0, 5.5];
+        let mut creeper = grounded(MobKind::Creeper, start);
+        creeper.tick(&world, 1, 7, 1, Some([2.5, 1.0, 5.5]));
+        assert_eq!(creeper.pos(), start);
+        assert_eq!(creeper.yaw, 90.0);
+        assert_eq!(creeper.fuse_ticks(), Some(1));
+        assert!(!creeper.attacks([2.5, 1.0, 5.5]));
+
+        let mut edge = grounded(MobKind::Creeper, start);
+        edge.body.velocity[0] = 0.4;
+        edge.hurt_ticks = HURT_TICKS;
+        edge.tick(&world, 1, 7, 1, Some([5.5 + 3.0, 1.0, 5.5]));
+        assert_eq!(edge.pos(), start);
+        assert_eq!(edge.fuse_ticks(), Some(1));
+
+        let mut far = grounded(MobKind::Creeper, start);
+        far.tick(&world, 1, 7, 1, Some([5.5 + 3.01, 1.0, 5.5]));
+        assert_eq!(far.fuse_ticks(), Some(0));
+        assert!(far.pos()[0] > start[0]);
+
+        let mut high = grounded(MobKind::Creeper, start);
+        high.tick(&world, 1, 7, 1, Some([8.5, 1.5, 5.5]));
+        assert_eq!(high.fuse_ticks(), Some(0));
+
+        let mut cooling = grounded(MobKind::Creeper, start);
+        cooling.hostile.as_mut().unwrap().fuse = Some(5);
+        cooling.tick(&world, 1, 7, 2, Some([15.5, 1.0, 5.5]));
+        assert_eq!(cooling.fuse_ticks(), Some(4));
+        assert!(cooling.pos()[0] > start[0]);
+
+        let mut wall = arena(16);
+        wall.set_block(4, 2, 5, blocks::STONE);
+        let mut hidden = grounded(MobKind::Creeper, start);
+        hidden.hostile.as_mut().unwrap().fuse = Some(4);
+        hidden.tick(&wall, 1, 7, 3, Some([2.5, 1.0, 5.5]));
+        assert_eq!(hidden.fuse_ticks(), Some(3));
+        assert!(hidden.pos()[0] < start[0]);
+    }
+
+    #[test]
+    fn creeper_explodes_at_fuse_30_without_its_own_drop() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let start = [5.5, 1.0, 5.5];
+        server.mobs.insert(id, grounded(MobKind::Creeper, start));
+        server.take_outbox();
+        for fuse in 1..30 {
+            server.tick();
+            assert_eq!(server.mobs[&id].fuse_ticks(), Some(fuse));
+            assert_eq!(server.mobs[&id].pos(), start);
+            assert!(decoded(&mut server).contains(&(1, S2C::MobFuse { id, ticks: fuse })));
+        }
+        server.tick();
+        assert!(!server.mobs.contains_key(&id));
+        let gunpowder = items::by_name("gunpowder").unwrap();
+        assert!(server.entities.values().all(|drop| drop.item != gunpowder));
+        assert!(decoded(&mut server).iter().any(|(_, packet)| {
+            matches!(packet, S2C::MobFuse { id: fuse_id, ticks: 30 } if *fuse_id == id)
+        }));
+    }
+
+    #[test]
+    fn explosion_breaks_the_block_ball_except_fluids_bedrock_and_obsidian() {
+        let center = [5.5, 1.85, 5.5];
+        let mut server = blast_server();
+        let mut before = Vec::new();
+        for y in 0..6 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    before.push(([x, y, z], server.world.get_block(x, y, z).unwrap()));
+                }
+            }
+        }
+        server.apply_explosion(center);
+        for ([x, y, z], old) in before {
+            let now = server.world.get_block(x, y, z).unwrap();
+            let dist = spatial_distance(center, [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5]);
+            let wheat = [x, y, z] == [7, 3, 7];
+            if dist <= EXPLOSION_BLOCK_RADIUS && !explosion_spares(old) {
+                assert_eq!(now, blocks::AIR, "broken {x} {y} {z} dist {dist}");
+            } else if wheat {
+                assert_eq!(now, blocks::AIR);
+            } else {
+                assert_eq!(now, old, "kept {x} {y} {z} dist {dist}");
+            }
+        }
+        assert_eq!(server.world.get_block(5, 1, 5), Some(blocks::WATER));
+        assert_eq!(server.world.get_block(6, 1, 5), Some(blocks::LAVA));
+        assert_eq!(server.world.get_block(4, 1, 5), Some(blocks::FLOWING_WATER));
+        assert_eq!(server.world.get_block(5, 2, 5), Some(blocks::OBSIDIAN));
+        assert_eq!(server.world.get_block(5, 1, 6), Some(blocks::BEDROCK));
+        assert!(server.clients[&1].dig.is_none());
+        assert!(!server.furnaces.contains_key(&[6, 1, 6]));
+        let coal = items::by_name("coal").unwrap();
+        let coal_count: u64 = server
+            .entities
+            .values()
+            .filter(|drop| drop.item == coal)
+            .map(|drop| u64::from(drop.count))
+            .sum();
+        assert_eq!(coal_count, 3);
+        assert!(server
+            .entities
+            .values()
+            .any(|drop| drop.item == items::by_name("wheat_seeds").unwrap()));
+
+        let mut dropped = 0;
+        let mut kept = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                let dist = spatial_distance(center, [x as f64 + 0.5, 0.5, z as f64 + 0.5]);
+                if dist <= EXPLOSION_BLOCK_RADIUS {
+                    if explosion_drops(server.seed, server.game_time, [x, 0, z]) {
+                        dropped += 1;
+                    } else {
+                        kept += 1;
+                    }
+                }
+            }
+        }
+        assert!(dropped > 0 && kept > 0);
+        let cobble = items::by_name("cobblestone").unwrap();
+        let cobble_count: u64 = server
+            .entities
+            .values()
+            .filter(|drop| drop.item == cobble)
+            .map(|drop| u64::from(drop.count))
+            .sum();
+        assert_eq!(cobble_count, dropped);
+
+        let mut again = blast_server();
+        again.apply_explosion(center);
+        let loot = |server: &Server| {
+            let mut stacks: Vec<_> = server
+                .entities
+                .values()
+                .map(|drop| (drop.item, drop.count, drop.pos, drop.velocity))
+                .collect();
+            stacks.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            stacks
+        };
+        assert_eq!(loot(&server), loot(&again));
+        assert_eq!(server.state_hash(), again.state_hash());
+
+        let mut other_ids = blast_server();
+        other_ids.next_entity_id += 100;
+        other_ids.apply_explosion(center);
+        assert_eq!(loot(&server), loot(&other_ids));
+    }
+
+    #[test]
+    fn explosion_breaks_blocks_exactly_three_blocks_from_its_center() {
+        let (mut server, _) = combat(GameMode::Survival);
+        server.apply_explosion([5.5, 0.5, 5.5]);
+        assert_eq!(server.world.get_block(8, 0, 5), Some(blocks::AIR));
+        assert_eq!(server.world.get_block(8, 0, 6), Some(blocks::STONE));
+    }
+
+    fn blast_server() -> Server {
+        let (mut server, _) = combat(GameMode::Survival);
+        server.set_time(10, 18000);
+        server.clients.get_mut(&1).unwrap().pos = [5.5, 1.0, 30.5];
+        let put = |server: &mut Server, x, y, z, state| {
+            assert!(server.world.set_block(x, y, z, state).is_some());
+        };
+        put(&mut server, 5, 1, 5, blocks::WATER);
+        put(&mut server, 6, 1, 5, blocks::LAVA);
+        put(&mut server, 4, 1, 5, blocks::FLOWING_WATER);
+        put(&mut server, 5, 2, 5, blocks::OBSIDIAN);
+        put(&mut server, 5, 1, 6, blocks::BEDROCK);
+        put(&mut server, 6, 1, 6, blocks::FURNACE);
+        put(&mut server, 7, 2, 7, blocks::FARMLAND);
+        put(&mut server, 7, 3, 7, blocks::WHEAT);
+        let coal = items::by_name("coal").unwrap();
+        server.furnaces.insert(
+            [6, 1, 6],
+            crate::furnace::Furnace {
+                slots: [
+                    Some(crate::inventory::Stack {
+                        item: coal,
+                        count: 3,
+                    }),
+                    None,
+                    None,
+                ],
+                ..crate::furnace::Furnace::default()
+            },
+        );
+        server.clients.get_mut(&1).unwrap().dig = Some(crate::Dig {
+            pos: [5, 0, 5],
+            state: blocks::STONE,
+            start: 0,
+            ticks: 4,
+            drops: true,
+            stage: Some(1),
+        });
+        server
+    }
+
+    #[test]
+    fn explosion_damages_survival_players_and_other_mobs_but_not_creative_or_projectiles() {
+        assert_eq!(blast_damage(0.0), 15);
+        assert_eq!(blast_damage(3.0), 7);
+        assert_eq!(blast_damage(5.6), 1);
+        assert_eq!(blast_damage(5.9), 0);
+        assert_eq!(blast_damage(6.0), 0);
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let start = [5.5, 1.0, 5.5];
+        server.clients.get_mut(&1).unwrap().pos = [8.5, 1.0, 5.5];
+        let mut creeper = grounded(MobKind::Creeper, start);
+        creeper.hostile.as_mut().unwrap().fuse = Some(29);
+        server.mobs.insert(id, creeper);
+        server.spawn_cow([7.5, 1.0, 5.5]);
+        let cow = server
+            .mobs
+            .iter()
+            .find(|(_, mob)| mob.kind == MobKind::Cow)
+            .map(|(&cow, _)| cow)
+            .unwrap();
+        server.tick();
+        assert!(!server.mobs.contains_key(&id));
+        assert_eq!(server.clients[&1].health.vitals.health, 13);
+        assert!(!server.clients[&1].health.vitals.dead);
+        assert_eq!(server.clients[&1].health.vitals.cause, DeathCause::None);
+        assert_eq!(server.world.get_block(8, 0, 5), Some(blocks::STONE));
+        let cow_mob = &server.mobs[&cow];
+        assert_eq!(cow_mob.health, 1);
+        assert_eq!(cow_mob.hurt_ticks, HURT_TICKS);
+        assert!(matches!(cow_mob.ai, Wander::Fleeing { .. }));
+        assert!(decoded(&mut server).iter().any(|(_, packet)| {
+            matches!(
+                packet,
+                S2C::PlayerStatus {
+                    health: 13,
+                    cause: 0,
+                    ..
+                }
+            )
+        }));
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        server.clients.get_mut(&1).unwrap().pos = [8.5, 1.0, 5.5];
+        server.clients.get_mut(&1).unwrap().health.vitals.health = 7;
+        hold(&mut server, "raw_beef");
+        let mut creeper = grounded(MobKind::Creeper, start);
+        creeper.hostile.as_mut().unwrap().fuse = Some(29);
+        server.mobs.insert(id, creeper);
+        server.tick();
+        assert!(server.clients[&1].health.vitals.dead);
+        assert_eq!(
+            server.clients[&1].health.vitals.cause,
+            DeathCause::Explosion
+        );
+        let beef = items::by_name("raw_beef").unwrap();
+        assert!(server.entities.values().any(|drop| drop.item == beef));
+        assert!(decoded(&mut server).iter().any(|(_, packet)| {
+            matches!(
+                packet,
+                S2C::PlayerStatus {
+                    health: 0,
+                    cause: 8,
+                    ..
+                }
+            )
+        }));
+
+        let (mut server, cow) = combat(GameMode::Creative);
+        server.set_time(0, 18000);
+        let pos = server.clients[&1].pos;
+        server.spawn_mob(MobKind::Creeper, pos);
+        let creeper = server
+            .mobs
+            .iter()
+            .find(|(_, mob)| mob.kind == MobKind::Creeper)
+            .map(|(&id, _)| id)
+            .unwrap();
+        server.tick();
+        assert_eq!(server.mobs[&creeper].fuse_ticks(), Some(0));
+        let health = server.mobs[&cow].health;
+        server.mobs.get_mut(&cow).unwrap().hurt_ticks = 4;
+        server.take_outbox();
+        server.apply_explosion([pos[0], pos[1] + 0.85, pos[2]]);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        assert_eq!(server.mobs[&cow].health, health);
+        assert!(!decoded(&mut server).contains(&(1, S2C::MobHurt { id: cow })));
+        let cow_pos = server.mobs[&cow].pos();
+        server.mobs.get_mut(&cow).unwrap().hurt_ticks = 0;
+        server.apply_explosion([cow_pos[0], cow_pos[1] + 0.65, cow_pos[2] + 4.0]);
+        assert!(server.mobs[&cow].health < health);
+        assert_eq!(server.mobs[&cow].hurt_ticks, HURT_TICKS);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+
+        let (mut server, _) = combat(GameMode::Survival);
+        let stick = items::by_name("stick").unwrap();
+        server.spawn_item(stick, 1, [5.5, 2.0, 5.5], [0.0, 0.0, 0.0], 40);
+        let item = *server.entities.keys().max().unwrap();
+        let item_pos = server.entities[&item].pos;
+        let arrow = crate::arrow::Arrow::aimed([5.5, 3.0, 5.5], [6.5, 3.0, 5.5]);
+        server.arrows.insert(u32::MAX, arrow.clone());
+        server.apply_explosion([5.5, 1.85, 5.5]);
+        assert_eq!(server.entities[&item].pos, item_pos);
+        assert_eq!(server.entities[&item].item, stick);
+        assert_eq!(server.arrows[&u32::MAX], arrow);
+    }
+
+    #[test]
+    fn creeper_fuse_changes_only_the_creeper_state_hash_and_replays() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Creeper, pos));
+        let hash = server.state_hash();
+        server
+            .mobs
+            .get_mut(&id)
+            .unwrap()
+            .hostile
+            .as_mut()
+            .unwrap()
+            .fuse = Some(1);
+        assert_ne!(server.state_hash(), hash);
+        server
+            .mobs
+            .get_mut(&id)
+            .unwrap()
+            .hostile
+            .as_mut()
+            .unwrap()
+            .fuse = Some(0);
+        assert_eq!(server.state_hash(), hash);
+
+        let run = || {
+            let (mut server, id) = combat(GameMode::Survival);
+            server.set_time(4, 18000);
+            server.clients.get_mut(&1).unwrap().pos = [8.5, 1.0, 5.5];
+            let mut creeper = grounded(MobKind::Creeper, [5.5, 1.0, 5.5]);
+            creeper.hostile.as_mut().unwrap().fuse = Some(29);
+            server.mobs.insert(id, creeper);
+            server.tick();
+            let mut blocks = Vec::new();
+            for x in 4..9 {
+                blocks.push(server.world.get_block(x, 0, 5));
+            }
+            (
+                server.state_hash(),
+                server.clients[&1].health.vitals,
+                blocks,
+                server.mobs.contains_key(&id),
+            )
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn four_mixed_hostiles_fill_the_shared_cap() {
+        let mut server = joined(GameMode::Survival);
+        let pos = server.clients[&1].pos;
+        for kind in [
+            MobKind::Zombie,
+            MobKind::Skeleton,
+            MobKind::Creeper,
+            MobKind::Zombie,
+        ] {
+            server.spawn_mob(kind, pos);
+        }
+        let before = server.mobs.len();
+        server.game_time = 200;
+        server.spawn_hostile(1, pos, &[(1, pos)]);
+        assert_eq!(server.mobs.len(), before);
+        assert_eq!(
+            server
+                .mobs
+                .values()
+                .filter(|mob| mob.hostile.is_some())
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn fuse_is_sent_again_when_a_lit_creeper_becomes_visible() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let mut creeper = grounded(MobKind::Creeper, [5.5, 1.0, 5.5]);
+        creeper.hostile.as_mut().unwrap().fuse = Some(4);
+        server.mobs.insert(id, creeper);
+        server.clients.get_mut(&1).unwrap().visible_mobs.clear();
+        server.sync_mobs();
+        let packets = decoded(&mut server);
+        assert!(packets.iter().any(|(_, packet)| matches!(
+            packet,
+            S2C::MobSpawn {
+                kind: MobKind::Creeper,
+                ..
+            }
+        )));
+        assert!(packets.iter().any(|(_, packet)| {
+            matches!(packet, S2C::MobFuse { id: fuse_id, ticks: 4 } if *fuse_id == id)
+        }));
     }
 }

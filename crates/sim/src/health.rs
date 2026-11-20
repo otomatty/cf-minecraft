@@ -1127,7 +1127,7 @@ mod tests {
             assert_eq!(bytes[bytes.len() - 2], 5);
             assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
             let cause = bytes.len() - 2;
-            bytes[cause] = 8;
+            bytes[cause] = 9;
             assert!(crate::Inventory::from_bytes(&bytes).is_err());
             release_and_reconnect(&mut s);
             assert_eq!(vitals(&s), dead);

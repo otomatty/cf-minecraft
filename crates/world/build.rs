@@ -795,7 +795,9 @@ struct LootEntry {
 
 fn generate_loot(root: &Path, out: &mut String, items: &[Item]) {
     let data: LootTable = read(&root.join("loot.toml"));
-    const MOB_NAMES: &[&str] = &["cow", "pig", "chicken", "sheep", "zombie", "skeleton"];
+    const MOB_NAMES: &[&str] = &[
+        "cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper",
+    ];
     let mut loot = vec![Vec::new(); MOB_NAMES.len()];
     for entry in data.loot {
         let kind = MOB_NAMES
