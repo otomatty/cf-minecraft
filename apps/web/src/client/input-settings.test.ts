@@ -37,9 +37,9 @@ test("old E bindings survive and inventory chooses the first free candidate", ()
 			const expected = { keys: { ...defaultSettings().keys, ...extra, forward: "KeyE", inventory }, sensitivity: 61, fov: 85 };
 			storage.setItem(key, JSON.stringify(withoutInventory(expected)));
 			const loaded = loadSettings(storage);
-			assert.deepEqual(loaded, expected);
+			assert.deepEqual(loaded, { ...expected, audio: defaultSettings().audio });
 			assert.deepEqual(effectiveKeyConflicts(loaded), []);
-			assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+			assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), { ...expected, audio: defaultSettings().audio });
 		}
 	}
 });
@@ -274,4 +274,23 @@ test("key labels shorten letter, digit, modifier and arrow codes and preserve ot
 		ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
 		ControlRight: "ControlRight", AltRight: "AltRight", F8: "F8", Numpad1: "Numpad1", Unknown: "Unknown", KeyWW: "KeyWW", toString: "toString",
 	})) assert.equal(keyLabel(code), label);
+});
+
+test("pre-audio settings preserve controls and get the default volumes", () => {
+	const storage = memory();
+	const keys = { ...defaultSettings().keys, forward: "ArrowUp" };
+	const old = { keys, sensitivity: 54, fov: 85 };
+	storage.setItem(SETTINGS_KEY, JSON.stringify(old));
+	const loaded = loadSettings(storage);
+	assert.deepEqual(loaded, { ...old, audio: { master: 80, effects: 100, music: 60 } });
+	loaded.audio = { master: 50, effects: 76, music: 0 };
+	assert.equal(saveSettings(storage, loaded), true);
+	assert.deepEqual(loadSettings(storage), loaded);
+});
+
+test("invalid individual volumes fall back independently", () => {
+	const storage = memory();
+	const settings = { ...defaultSettings(), sensitivity: 43 };
+	storage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, audio: { master: 101, effects: "10", music: 0 } }));
+	assert.deepEqual(loadSettings(storage), { ...settings, audio: { master: 80, effects: 100, music: 0 } });
 });

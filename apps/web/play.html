@@ -189,7 +189,7 @@
 			#menu-world, #menu-hint, .controls-note { font-size: 12px; color: #c3cedd; }
 			.world-kind { display: inline-block; font-size: 11px; border: 1px solid #6c7686; padding: 0 5px; margin-left: 8px; }
 			#menu-message:empty, #archive-status:empty { display: none; }
-			#key-bindings label, #mouse-tab-panel label { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0; }
+			#key-bindings label, #mouse-tab-panel label, #audio-tab-panel label { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0; }
 			#key-bindings label { margin: 0; }
 			#key-bindings .btn { min-width: 100px; min-height: 36px; padding: 6px 12px; font-size: 14px; }
 			#settings-warning { color: #ffcf80; min-height: 1.7em; }
@@ -289,6 +289,7 @@
 				<div role="tablist" aria-label="設定の種類">
 					<button id="keys-tab" type="button" role="tab" aria-selected="true" aria-controls="keys-tab-panel">キー割り当て</button>
 					<button id="mouse-tab" type="button" role="tab" aria-selected="false" aria-controls="mouse-tab-panel" tabindex="-1">マウス・視点</button>
+					<button id="audio-tab" type="button" role="tab" aria-selected="false" aria-controls="audio-tab-panel" tabindex="-1">音量</button>
 				</div>
 				<div id="keys-tab-panel" role="tabpanel" aria-labelledby="keys-tab">
 					<div id="key-bindings"></div>
@@ -298,6 +299,11 @@
 				<div id="mouse-tab-panel" role="tabpanel" aria-labelledby="mouse-tab" hidden>
 					<label>マウス感度 <span><input id="sensitivity" type="range" min="0" max="200" step="1" /><output id="sensitivity-value"></output></span></label>
 					<label>視野角（縦） <span><input id="fov" type="range" min="30" max="110" step="1" /><output id="fov-value"></output></span></label>
+				</div>
+				<div id="audio-tab-panel" role="tabpanel" aria-labelledby="audio-tab" hidden>
+					<label>全体 <span><input id="volume-master" type="range" min="0" max="100" step="1" /><output id="volume-master-value"></output></span></label>
+					<label>効果音 <span><input id="volume-effects" type="range" min="0" max="100" step="1" /><output id="volume-effects-value"></output></span></label>
+					<label>音楽 <span><input id="volume-music" type="range" min="0" max="100" step="1" /><output id="volume-music-value"></output></span></label>
 				</div>
 				<p id="settings-warning" role="status" aria-live="polite"></p>
 				<div class="panel-actions">
