@@ -51,3 +51,9 @@ mob = "skeleton"
 item = "arrow"
 min = 0
 max = 2
+
+[[loot]]
+mob = "creeper"
+item = "gunpowder"
+min = 0
+max = 2

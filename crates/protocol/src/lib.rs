@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -22,6 +22,7 @@ pub enum MobKind {
     Sheep = 3,
     Zombie = 4,
     Skeleton = 5,
+    Creeper = 6,
 }
 
 impl MobKind {
@@ -37,6 +38,7 @@ impl MobKind {
             3 => Ok(Self::Sheep),
             4 => Ok(Self::Zombie),
             5 => Ok(Self::Skeleton),
+            6 => Ok(Self::Creeper),
             _ => Err(DecodeError),
         }
     }
@@ -53,6 +55,7 @@ pub enum DeathCause {
     Lava = 5,
     Zombie = 6,
     Arrow = 7,
+    Explosion = 8,
 }
 
 /// Fields shared by the status packet and the player save.
@@ -97,6 +100,7 @@ impl PlayerVitals {
             5 => DeathCause::Lava,
             6 => DeathCause::Zombie,
             7 => DeathCause::Arrow,
+            8 => DeathCause::Explosion,
             _ => return Err(DecodeError),
         };
         let food = if has_food { r.u8()? } else { MAX_FOOD };
@@ -281,6 +285,10 @@ pub enum S2C {
     MobHurt {
         id: u32,
     },
+    MobFuse {
+        id: u32,
+        ticks: u8,
+    },
     EntityRemove {
         id: u32,
     },
@@ -352,6 +360,7 @@ pub mod id {
     pub const S2C_MOB_HURT: u8 = 0x0f;
     pub const S2C_ARROW_SPAWN: u8 = 0x10;
     pub const S2C_ARROW_MOVE: u8 = 0x11;
+    pub const S2C_MOB_FUSE: u8 = 0x12;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -675,6 +684,11 @@ impl S2C {
                 w.u8(id::S2C_MOB_HURT);
                 w.i32(*entity as i32);
             }
+            S2C::MobFuse { id: entity, ticks } => {
+                w.u8(id::S2C_MOB_FUSE);
+                w.i32(*entity as i32);
+                w.u8(*ticks);
+            }
             S2C::EntityRemove { id: entity } => {
                 w.u8(id::S2C_ENTITY_REMOVE);
                 w.i32(*entity as i32);
@@ -865,6 +879,14 @@ impl S2C {
             id::S2C_MOB_HURT => S2C::MobHurt {
                 id: entity_id(&mut r)?,
             },
+            id::S2C_MOB_FUSE => {
+                let id = entity_id(&mut r)?;
+                let ticks = r.u8()?;
+                if ticks > 30 {
+                    return Err(DecodeError);
+                }
+                S2C::MobFuse { id, ticks }
+            }
             id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
                 id: entity_id(&mut r)?,
             },
@@ -1099,7 +1121,7 @@ mod tests {
         no_cause[1] = 0;
         no_cause[4] = 1;
         assert!(S2C::decode(&no_cause).is_err());
-        no_cause[5] = 8;
+        no_cause[5] = 9;
         assert!(S2C::decode(&no_cause).is_err());
     }
 
@@ -1307,7 +1329,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 19);
+        assert_eq!(PROTOCOL_VERSION, 20);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1342,7 +1364,7 @@ mod tests {
             if tag == 0x0d {
                 assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
-                bad[5] = 6;
+                bad[5] = 7;
                 assert!(S2C::decode(&bad).is_err());
             }
             let mut trailing = bytes;
@@ -1409,7 +1431,7 @@ mod tests {
         let mut bytes = spawn.encode();
         assert_eq!((bytes.len(), bytes[5]), (34, 4));
         assert_eq!(S2C::decode(&bytes), Ok(spawn));
-        bytes[5] = 6;
+        bytes[5] = 7;
         assert!(S2C::decode(&bytes).is_err());
     }
 
@@ -1464,6 +1486,50 @@ mod tests {
             bytes.push(0);
             assert!(S2C::decode(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn protocol_20_creeper_fuse_and_explosion_round_trip_and_reject_invalid_values() {
+        let spawn = S2C::MobSpawn {
+            id: 12,
+            kind: MobKind::Creeper,
+            x: 4.5,
+            y: -60.0,
+            z: 8.5,
+            yaw: 180.0,
+        };
+        let mut bytes = spawn.encode();
+        assert_eq!((bytes.len(), bytes[5]), (34, 6));
+        assert_eq!(S2C::decode(&bytes), Ok(spawn));
+        bytes[5] = 7;
+        assert!(S2C::decode(&bytes).is_err());
+
+        for ticks in [0, 1, 30] {
+            let packet = S2C::MobFuse { id: 12, ticks };
+            let mut bytes = packet.encode();
+            assert_eq!((bytes[0], bytes.len(), bytes[5]), (0x12, 6, ticks));
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+            for end in 0..bytes.len() {
+                assert!(S2C::decode(&bytes[..end]).is_err());
+            }
+            bytes.push(0);
+            assert!(S2C::decode(&bytes).is_err());
+        }
+        assert!(S2C::decode(&[0x12, 0, 0, 0, 0, 1]).is_err());
+        assert!(S2C::decode(&[0x12, 0, 0, 0, 12, 31]).is_err());
+
+        let status = PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: DeathCause::Explosion,
+            ..PlayerVitals::default()
+        }
+        .packet();
+        let mut bytes = status.encode();
+        assert_eq!(bytes[5], 8);
+        assert_eq!(S2C::decode(&bytes), Ok(status));
+        bytes[5] = 9;
+        assert!(S2C::decode(&bytes).is_err());
     }
 
     #[test]

@@ -427,3 +427,8 @@ texture = "bone"
 name = "arrow"
 id = 75
 texture = "arrow"
+
+[[items]]
+name = "gunpowder"
+id = 76
+texture = "gunpowder"

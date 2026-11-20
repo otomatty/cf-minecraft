@@ -1346,6 +1346,7 @@ async function main(): Promise<void> {
 					yaw: mob.yaw,
 					moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
 					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
+					fuse: mob.fuse,
 					light: core.entityLight(position),
 				};
 			});

@@ -91,6 +91,7 @@ mod tests {
         assert_eq!(by_name("raw_mutton"), Some(71));
         assert_eq!(by_name("cooked_mutton"), Some(72));
         assert_eq!(by_name("rotten_flesh"), Some(73));
+        assert_eq!(by_name("gunpowder"), Some(76));
         assert_eq!(info(66).unwrap().max_stack, 16);
         assert_eq!(info(70).unwrap().block, Some(blocks::WHITE_WOOL));
         for item in ITEMS {

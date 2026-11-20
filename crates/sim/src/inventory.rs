@@ -503,6 +503,16 @@ mod tests {
         let save = inv.to_bytes(vitals);
         assert_eq!(&save[152..], &[0, 0, 42, 1, 4, 9]);
         assert_eq!(Inventory::from_bytes(&save), Ok((inv.clone(), vitals)));
+        let explosion = PlayerVitals {
+            cause: DeathCause::Explosion,
+            ..vitals
+        };
+        let explosion_save = inv.to_bytes(explosion);
+        assert_eq!(explosion_save[156], 8);
+        assert_eq!(
+            Inventory::from_bytes(&explosion_save),
+            Ok((inv.clone(), explosion))
+        );
         let mut v4 = save[..157].to_vec();
         v4[0] = 4;
         assert_eq!(
@@ -516,7 +526,7 @@ mod tests {
             (155, 0),
             (155, 2),
             (156, 0),
-            (156, 8),
+            (156, 9),
             (157, 21),
         ] {
             let mut bad = save.clone();

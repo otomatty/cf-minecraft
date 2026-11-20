@@ -2175,7 +2175,7 @@ async function mobCombat() {
 }
 
 async function zombies() {
-	const { page, errors } = await open(`server=local&world=e2e-zombies-${run}&mode=survival&gen=flat&seed=2026&view=4&time=18000`);
+	const { page, errors } = await open(`server=local&world=e2e-zombies-${run}&mode=survival&gen=flat&seed=2&view=4&time=18000`);
 	try {
 		const stats = await settle(page, "zombies", chunksInView(4));
 		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "zombies: starts in survival Flat");
@@ -2249,8 +2249,8 @@ async function zombies() {
 }
 
 async function skeletons() {
-	// Seed 2027 can spawn a skeleton early when its candidate chunk is loaded.
-	const { page, errors } = await open(`server=local&world=e2e-skeletons-${run}&mode=survival&gen=flat&seed=2027&view=4&time=18000`);
+	// Seed 5 spawns a skeleton on the first night attempt once its column is loaded.
+	const { page, errors } = await open(`server=local&world=e2e-skeletons-${run}&mode=survival&gen=flat&seed=5&view=4&time=18000`);
 	try {
 		const stats = await settle(page, "skeletons", chunksInView(4));
 		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "skeletons: starts in survival Flat");
@@ -2325,6 +2325,90 @@ async function skeletons() {
 	} finally { await page.close(); }
 }
 
+async function creepers() {
+	// Seed 1 spawns a creeper on the first night attempt once its column is loaded.
+	const { page, errors } = await open(`server=local&world=e2e-creepers-${run}&mode=survival&gen=flat&seed=1&view=4&time=18000`);
+	try {
+		const stats = await settle(page, "creepers", chunksInView(4));
+		check(stats.gameMode === "survival" && stats.generatorName === "Flat", "creepers: starts in survival Flat");
+		check(stats.health === 20, "creepers: starts at full health");
+		await resumePointerLock(page, "creepers: initial pointer lock");
+		await page.mouse.move(640, 360);
+		const spawned = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 6),
+			{ timeout: 100000, polling: 100 });
+		const creeper = await spawned.jsonValue();
+		await spawned.dispose();
+		check(creeper.kind === 6, "creepers: a creeper spawned at night", `id ${creeper.id}`);
+		check(creeper.fuse === 0, "creepers: fuse starts at zero", `fuse ${creeper.fuse}`);
+
+		const screenshotSession = await page.createCDPSession();
+		const frames = await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z], yaw } = api.stats().mobs.find(mob => mob.id === id);
+			const angle = yaw * Math.PI / 180;
+			api.setCamera(x - 7 * Math.sin(angle), y + 1.62, z + 7 * Math.cos(angle), yaw + 180, 3);
+			return api.frames;
+		}, creeper.id);
+		await page.waitForFunction(start => window.__mc.frames >= start + 2, { timeout: 5000 }, frames);
+		const file = join(shots, "mobs-creeper.png");
+		const capture = await bounded(() => screenshotSession.send("Page.captureScreenshot", {
+			format: "png", fromSurface: true, captureBeyondViewport: false, optimizeForSpeed: false,
+		}, { timeout: 8000 }), 8000);
+		if (!capture || typeof capture === "string") throw new Error(`creepers: screenshot failed (${capture})`);
+		writeFileSync(file, Buffer.from(capture.data, "base64"));
+		const greenPixels = await page.evaluate(async data => {
+			const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const scale = img.height / 720;
+			const pixels = ctx.getImageData(
+				Math.floor(img.width / 2 - 40 * scale), Math.floor(img.height / 2 - 40 * scale),
+				Math.ceil(80 * scale), Math.ceil(70 * scale),
+			).data;
+			let green = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+				if (g > 18 && g > r && g > b && r > g * 0.4 && b > g * 0.25) green++;
+			}
+			return green;
+		}, capture.data);
+		check(greenPixels > 20, "creepers: green skin is visibly rendered", `${greenPixels} green pixels, creeper ${creeper.id}`);
+
+		const ground = await page.evaluate(id => {
+			const api = window.__mc;
+			const { position: [x, y, z] } = api.stats().mobs.find(mob => mob.id === id);
+			const block = [Math.floor(x), Math.floor(y) - 1, Math.floor(z)];
+			api.setCamera(x + 1.5, y + 1.62, z, 90, 0);
+			return { block, before: api.getBlock(...block), healthBefore: api.stats().health };
+		}, creeper.id);
+		check(ground.before !== 0, "creepers: the ground under the creeper starts solid", `block ${ground.before} at ${ground.block.join(", ")}`);
+		const ignited = await page.waitForFunction(id => {
+			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
+			return mob && mob.fuse > 0 && { fuse: mob.fuse };
+		}, { timeout: 5000, polling: 50 }, creeper.id);
+		const { fuse } = await ignited.jsonValue();
+		await ignited.dispose();
+		check(fuse > 0, "creepers: fuse climbs while the player is close", `fuse ${fuse}`);
+		const blasted = await page.waitForFunction((id, { block, healthBefore }) => {
+			const api = window.__mc;
+			const mob = api.stats().mobs.find(mob => mob.id === id);
+			const health = api.stats().health;
+			const after = api.getBlock(...block);
+			if (mob || health >= healthBefore || after !== 0) return false;
+			return { health, after };
+		}, { timeout: 10000, polling: 50 }, creeper.id, ground);
+		const result = await blasted.jsonValue();
+		await blasted.dispose();
+		check(result.health < ground.healthBefore, "creepers: the explosion hurt the player", `${result.health} health remaining`);
+		check(result.after === 0, "creepers: the explosion removed the ground block", `block ${result.after}`);
+		check(errors.length === 0, "creepers: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "creepers", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 try {
 	await sectionCulling();
 	await biomeTints();
@@ -2336,6 +2420,7 @@ try {
 	await mobCombat();
 	await zombies();
 	await skeletons();
+	await creepers();
 	await swimming();
 	await partialModels();
 	await survivalInventory();

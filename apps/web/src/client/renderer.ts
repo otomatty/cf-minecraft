@@ -164,15 +164,21 @@ fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
 	var color = pixel.rgb;
+	var shade = in.shade;
 	if (entityPass == 2u) {
-		if (in.shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
+		// |shade| above 1.5 is the creeper's white flash, stacked on the red hurt tint.
+		if (abs(shade) > 1.5) {
+			color = mix(color, vec3<f32>(1.0), 0.5);
+			shade = shade - sign(shade) * 2.0;
+		}
+		if (shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
 	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
 		color += pixel.a * in.tintColor;
 	} else {
 		color = color * in.tintColor;
 	}
-	color = color * abs(in.shade) * textureSample(lightTex, lightSampler, in.light).rgb;
+	color = color * abs(shade) * textureSample(lightTex, lightSampler, in.light).rgb;
 	if (renderLayer == 1u && select(pixel.a < 0.5, __DROP_ALPHA_TEST__, entityPass == 1u)) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
