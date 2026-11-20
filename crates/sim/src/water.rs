@@ -448,6 +448,53 @@ mod tests {
     }
 
     #[test]
+    fn water_and_lava_flow_around_floor_and_wall_torches() {
+        for (fluid, wait) in [
+            (blocks::WATER, WATER_FLOW_DELAY),
+            (blocks::LAVA, LAVA_FLOW_DELAY),
+        ] {
+            for (surface, torch) in [
+                (offset(SOURCE, HORIZONTAL[3]), blocks::TORCH),
+                (offset(SOURCE, HORIZONTAL[3]), blocks::WALL_TORCH + 2),
+                (SOURCE, blocks::TORCH),
+                (SOURCE, blocks::WALL_TORCH + 2),
+            ] {
+                let mut server = setup(GameMode::Survival);
+                let source = if surface == SOURCE {
+                    offset(SOURCE, ABOVE)
+                } else {
+                    SOURCE
+                };
+                put(&mut server, offset(surface, HORIZONTAL[3]), blocks::STONE);
+                put(&mut server, surface, torch);
+                server.change_block_naturally(source, fluid);
+                advance(&mut server, wait);
+                assert_eq!(at(&server, surface), torch);
+                assert!(blocks::is_fluid(at(&server, offset(source, HORIZONTAL[0]))));
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_a_support_with_water_through_the_natural_update_drops_its_torch() {
+        let mut server = setup(GameMode::Survival);
+        let torch_pos = offset(SOURCE, HORIZONTAL[3]);
+        let support = offset(torch_pos, HORIZONTAL[3]);
+        put(&mut server, support, blocks::STONE);
+        put(&mut server, torch_pos, blocks::WALL_TORCH + 2);
+        // Flow never replaces solid blocks on its own. Exercise the same
+        // mutation path a fluid tick uses with a direct transition to water.
+        server.change_block_naturally(support, blocks::WATER);
+        assert_eq!(at(&server, torch_pos), blocks::AIR);
+        assert_eq!(server.entities.len(), 1);
+        let drop = server.entities.values().next().unwrap();
+        assert_eq!(Some(drop.item), items::by_name("torch"));
+        assert_eq!(drop.count, 1);
+        advance(&mut server, WATER_FLOW_DELAY);
+        assert_eq!(at(&server, torch_pos), blocks::FLOWING_WATER);
+    }
+
+    #[test]
     fn a_water_state_change_supersedes_an_old_tick_and_waits_five_more_ticks() {
         let mut server = setup(GameMode::Creative);
         put(&mut server, offset(SOURCE, ABOVE), blocks::WATER);

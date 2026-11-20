@@ -30,6 +30,10 @@ const PLANT: [Box16; 1] = [Box16 {
     min: [5, 0, 5],
     max: [11, 10, 11],
 }];
+const TORCH_BOX: Box16 = Box16 {
+    min: [7, 0, 7],
+    max: [9, 10, 9],
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
@@ -38,6 +42,7 @@ pub enum Model {
     Cross,
     Stairs,
     Fence,
+    Torch,
 }
 
 #[derive(Clone, Copy)]
@@ -49,7 +54,7 @@ pub struct BlockInfo {
     pub layer: RenderLayer,
     /// Full opaque cube: hides adjacent faces and blocks AO/light samples.
     pub occludes: bool,
-    /// Collides with players and can be selected by raycast.
+    /// Collides with players.
     pub solid: bool,
     /// Suppress internal faces against the same block state.
     pub cull_same: bool,
@@ -180,6 +185,78 @@ pub enum ShapePurpose {
 // keeps prediction, server validation and padded-section meshing in agreement.
 // Rules: https://minecraft.wiki/w/Stairs and https://minecraft.wiki/w/Fence
 const CARDINAL: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+
+/// Outward normals in face order: down, up, north, south, west, east.
+pub const FACE_NORMALS: [[i32; 3]; 6] = [
+    [0, -1, 0],
+    [0, 1, 0],
+    [0, 0, -1],
+    [0, 0, 1],
+    [-1, 0, 0],
+    [1, 0, 0],
+];
+
+pub fn torch_for_face(face: usize) -> Option<BlockState> {
+    match face {
+        1 => Some(TORCH),
+        2..=5 => Some(WALL_TORCH + (face - 2) as u16),
+        _ => None,
+    }
+}
+
+/// The face of the supporting block that the torch is attached to.
+pub fn torch_face(state: BlockState) -> Option<usize> {
+    match state {
+        TORCH => Some(1),
+        WALL_TORCH..=WALL_TORCH_EAST => Some(2 + usize::from(state - WALL_TORCH)),
+        _ => None,
+    }
+}
+
+const WALL_TORCH_EAST: BlockState = WALL_TORCH + 3;
+
+/// Deform a vertex from the upright torch box, keeping its UV coordinates.
+pub fn torch_vertex(state: BlockState, [x, y, z]: [i32; 3]) -> [i32; 3] {
+    let Some(face @ 2..=5) = torch_face(state) else {
+        return [x, y, z];
+    };
+    let [dx, _, dz] = FACE_NORMALS[face];
+    let offset = -7 + y * 6 / 10;
+    [x + dx * offset, y + 3, z + dz * offset]
+}
+
+/// Whether solid geometry covers the entire outer face. Adjacent stairs can
+/// change the shape of a supporting stair without changing its state ID.
+pub fn has_full_face(
+    state: BlockState,
+    face: usize,
+    neighbor: impl Fn(i32, i32, i32) -> BlockState,
+) -> bool {
+    let Some(normal) = FACE_NORMALS.get(face) else {
+        return false;
+    };
+    if !is_solid(state) {
+        return false;
+    }
+    if info(state).model == Model::Cube {
+        return true;
+    }
+    let axis = face / 2;
+    // Face order is Y, Z, X.
+    let [depth, u, v] = [[1, 0, 2], [2, 0, 1], [0, 1, 2]][axis];
+    let mut rows = [0u16; 16];
+    shape_boxes(state, neighbor, ShapePurpose::Collision, |b| {
+        if (normal[depth] < 0 && b.min[depth] != 0) || (normal[depth] > 0 && b.max[depth] < 16) {
+            return;
+        }
+        let mask = (u16::MAX << b.min[u]) & (u16::MAX >> (16 - b.max[u].min(16)));
+        for row in &mut rows[b.min[v] as usize..b.max[v].min(16) as usize] {
+            *row |= mask;
+        }
+    });
+    rows == [u16::MAX; 16]
+}
+
 fn stair(state: BlockState) -> Option<(usize, bool)> {
     (info(state).model == Model::Stairs).then(|| {
         let index = state - block(state).unwrap().first;
@@ -214,6 +291,18 @@ pub fn shape_boxes(
         Model::Cube => visit(FULL_BOX),
         Model::Boxes(boxes) => boxes.iter().copied().for_each(visit),
         Model::Cross => PLANT.iter().copied().for_each(visit),
+        Model::Torch => {
+            let mut bounds = TORCH_BOX;
+            if purpose == ShapePurpose::Selection {
+                let low = torch_vertex(state, bounds.min.map(i32::from));
+                let high = torch_vertex(state, bounds.max.map(i32::from));
+                let other_low = torch_vertex(state, [7, 10, 7]);
+                let other_high = torch_vertex(state, [9, 0, 9]);
+                bounds.min = std::array::from_fn(|a| low[a].min(other_low[a]) as u8);
+                bounds.max = std::array::from_fn(|a| high[a].max(other_high[a]) as u8);
+            }
+            visit(bounds);
+        }
         Model::Stairs => {
             let (facing, top) = stair(state).unwrap();
             visit(if top { TOP[0] } else { BOTTOM[0] });
@@ -393,10 +482,9 @@ mod tests {
                 PLACED_OAK_LEAVES,
                 FARMLAND,
                 WHEAT,
-                FLOWING_WATER,
-                COUNT
+                FLOWING_WATER
             ),
-            (23, 31, 39, 51, 52, 54, 62, 77)
+            (23, 31, 39, 51, 52, 54, 62)
         );
         assert_eq!(FURNACE, 50);
         assert_eq!(block(FURNACE).unwrap().count, 1);
@@ -423,6 +511,44 @@ mod tests {
                     4
                 })
             );
+        }
+    }
+
+    #[test]
+    fn torch_states_emit_light_and_have_only_selection_bounds() {
+        assert_eq!((TORCH, WALL_TORCH, COUNT), (77, 78, 82));
+        assert_eq!(block(TORCH).unwrap().count, 1);
+        assert_eq!(block(WALL_TORCH).unwrap().count, 4);
+        assert_eq!(torch_for_face(0), None);
+        assert_eq!(torch_for_face(6), None);
+        for (face, state) in (1..6).zip(TORCH..COUNT) {
+            let torch = info(state);
+            assert_eq!(torch_for_face(face), Some(state));
+            assert_eq!(torch_face(state), Some(face));
+            assert_eq!(
+                (torch.model, torch.layer),
+                (Model::Torch, RenderLayer::Cutout)
+            );
+            assert_eq!(
+                (torch.emission, torch.opacity, torch.dig_ticks),
+                (14, 0, Some(0))
+            );
+            assert!(!torch.solid && !torch.occludes);
+            assert!(collision_boxes(state, |_, _, _| AIR).is_empty());
+        }
+        assert_eq!(boxes_at(TORCH, &[]), vec![TORCH_BOX]);
+        for (i, (facing, min, max)) in [
+            ("north", [7, 3, 8], [9, 13, 16]),
+            ("south", [7, 3, 0], [9, 13, 8]),
+            ("west", [8, 3, 7], [16, 13, 9]),
+            ("east", [0, 3, 7], [8, 13, 9]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let state = WALL_TORCH + i as u16;
+            assert_eq!(properties(state), &[("facing", facing)]);
+            assert_eq!(boxes_at(state, &[]), vec![Box16 { min, max }]);
         }
     }
 

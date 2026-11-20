@@ -258,6 +258,7 @@ fn model(s: &str) -> &'static str {
         "cross" => "Model::Cross",
         "stairs" => "Model::Stairs",
         "fence" => "Model::Fence",
+        "torch" => "Model::Torch",
         _ => panic!("blocks.toml: unknown model {s:?}"),
     }
 }

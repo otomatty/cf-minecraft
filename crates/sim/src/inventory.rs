@@ -747,6 +747,24 @@ mod crafting_tests {
         }
     }
     #[test]
+    fn coal_above_a_stick_crafts_four_torches_in_the_personal_grid() {
+        let coal = stack(items::by_name("coal").unwrap(), 2);
+        let stick = stack(items::by_name("stick").unwrap(), 1);
+        let mut inv = Inventory {
+            crafting: [None, stick, None, coal],
+            ..Inventory::default()
+        };
+        assert_eq!(inv.result(), None);
+        inv.crafting.swap(1, 3);
+        inv.click(40, 0, false).unwrap();
+        assert_eq!(inv.cursor, stack(items::by_name("torch").unwrap(), 4));
+        assert_eq!(
+            inv.crafting,
+            [None, stack(items::by_name("coal").unwrap(), 1), None, None]
+        );
+    }
+
+    #[test]
     fn table_crafts_bow_and_arrows_from_their_ingredients() {
         let stick = stack(items::by_name("stick").unwrap(), 1);
         let wool = stack(items::by_name("white_wool").unwrap(), 1);

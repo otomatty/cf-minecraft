@@ -1101,6 +1101,13 @@ pub extern "C" fn client_get_block(x: i32, y: i32, z: i32) -> u32 {
         .map_or(u32::MAX, |b| b as u32)
 }
 
+#[no_mangle]
+pub extern "C" fn client_torch_placement(x: i32, y: i32, z: i32, face: usize) -> u32 {
+    blocks::torch_for_face(face)
+        .filter(|_| state().world.has_full_face([x, y, z], face))
+        .map_or(0, u32::from)
+}
+
 /// Output: local min XYZ then max XYZ, six u8 in sixteenths; zero bytes if absent.
 #[no_mangle]
 pub extern "C" fn client_selection_bounds(x: i32, y: i32, z: i32) -> usize {
@@ -1347,6 +1354,7 @@ pub extern "C" fn client_block_registry() -> usize {
             blocks::Model::Cross => "cross",
             blocks::Model::Stairs => "stairs",
             blocks::Model::Fence => "fence",
+            blocks::Model::Torch => "torch",
         };
         let faces = info.tex.map(|id| blocks::TEXTURES[id as usize]);
         let boxes = if info.model == blocks::Model::Fence {
@@ -2078,6 +2086,51 @@ mod tests {
             f64::from_le_bytes(state().out[40..48].try_into().unwrap()),
             0.75
         );
+    }
+
+    #[test]
+    fn client_torches_are_targetable_and_updates_add_and_remove_light() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        let mut chunk = Chunk::empty(0, 0);
+        chunk.set(8, 0, 8, blocks::STONE);
+        receive(&chunk);
+        while client_light_step(0.0, 0.0) != 0 {}
+        assert_eq!(client_torch_placement(8, 0, 8, 0), 0);
+        assert_eq!(client_torch_placement(8, 0, 8, 1), u32::from(blocks::TORCH));
+        for (face, state) in (2..6).zip(blocks::WALL_TORCH..blocks::COUNT) {
+            assert_eq!(client_torch_placement(8, 0, 8, face), u32::from(state));
+        }
+        assert_eq!(state().world.block_light(9, 1, 8), 0);
+        for (x, y, torch) in [(8, 1, blocks::TORCH), (7, 0, blocks::WALL_TORCH + 2)] {
+            for (block, emission) in [(torch, 14), (blocks::AIR, 0)] {
+                let packet = S2C::BlockUpdate {
+                    x,
+                    y,
+                    z: 8,
+                    state: block,
+                }
+                .encode();
+                unsafe { client_packet(packet.as_ptr(), packet.len()) };
+                assert_eq!(state().world.block_light(x, y, 8), emission);
+                assert_eq!(
+                    state().world.block_light(x, y, 9),
+                    emission.saturating_sub(1)
+                );
+                assert_eq!(
+                    client_raycast(
+                        f64::from(x) + if torch == blocks::TORCH { 0.5 } else { 0.75 },
+                        f64::from(y) + 2.0,
+                        8.5,
+                        0.0,
+                        -1.0,
+                        0.0,
+                        1.9
+                    ),
+                    u32::from(block == torch)
+                );
+            }
+        }
     }
 
     #[test]

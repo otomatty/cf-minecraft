@@ -438,3 +438,10 @@ name = "bow"
 id = 77
 texture = "bow"
 max_stack = 1
+
+[[items]]
+name = "torch"
+id = 78
+block = "torch"
+texture = "torch_item"
+max_stack = 64

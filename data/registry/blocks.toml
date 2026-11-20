@@ -11,7 +11,7 @@ textures = [
   "furnace_front", "furnace_side", "furnace_top",
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
-  "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool",
+  "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
 ]
 legacy_count = 14
 
@@ -439,3 +439,33 @@ name = "white_wool"
 id = 76
 dig_ticks = 16
 texture = "white_wool"
+
+[[blocks]]
+name = "torch"
+id = 77
+drop = "torch"
+dig_ticks = 0
+model = "torch"
+layer = "cutout"
+texture = "torch"
+solid = false
+opacity = 0
+emission = 14
+
+[[blocks]]
+name = "wall_torch"
+id = 78
+drop = "torch"
+dig_ticks = 0
+model = "torch"
+layer = "cutout"
+texture = "torch"
+solid = false
+opacity = 0
+emission = 14
+states = [
+  { properties = [["facing", "north"]] },
+  { properties = [["facing", "south"]] },
+  { properties = [["facing", "west"]] },
+  { properties = [["facing", "east"]] },
+]

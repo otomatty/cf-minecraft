@@ -8,5 +8,6 @@ export function pickBlockItem<T extends { name: string; block: number | null }>(
 ): T | undefined {
 	if (!block || block.first === 0) return undefined;
 	return items.find(item => item.block === block.first)
+		?? (block.name === "wall_torch" ? items.find(item => item.name === "torch") : undefined)
 		?? (block.name === "oak_leaves" ? items.find(item => item.name === block.name) : undefined);
 }
