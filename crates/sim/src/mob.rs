@@ -146,6 +146,9 @@ const MAX_EGG_TICKS: u16 = 12000;
 const HOSTILE_SPAWN_INTERVAL: i64 = 200;
 const HOSTILE_COLUMN_SALT: u64 = 23;
 const HOSTILE_KIND_SALT: u64 = 24;
+const HOSTILE_DARK_COLUMN_SALT: u64 = 26;
+const HOSTILE_DARK_KIND_SALT: u64 = 27;
+const HOSTILE_DARK_DESCENT: i32 = 16;
 const SKELETON_STOP_RANGE: f64 = 10.0;
 const SKELETON_INITIAL_SHOT_TICKS: u8 = 20;
 const SKELETON_SHOT_INTERVAL: u8 = 40;
@@ -994,6 +997,14 @@ fn hostile_kind(seed: i64, player: u32, time: i64) -> MobKind {
     }
 }
 
+fn hostile_dark_kind(seed: i64, player: u32, time: i64) -> MobKind {
+    match sample(seed, player, time, HOSTILE_DARK_KIND_SALT) % 3 {
+        0 => MobKind::Zombie,
+        1 => MobKind::Skeleton,
+        _ => MobKind::Creeper,
+    }
+}
+
 fn spatial_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -1084,6 +1095,41 @@ fn hostile_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
         f64::from(ground + 1),
         f64::from(z) + 0.5,
     ])
+}
+
+fn hostile_dark_feet(world: &World, x: i32, z: i32, start_y: i32) -> Option<[f64; 3]> {
+    let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
+    let top = MIN_Y + HEIGHT - 1;
+    let get = |y: i32| chunk.get((x & 15) as usize, y, (z & 15) as usize);
+    for step in 0..HOSTILE_DARK_DESCENT {
+        let solid_y = start_y - step;
+        if solid_y < MIN_Y {
+            break;
+        }
+        if solid_y > top {
+            continue;
+        }
+        let state = get(solid_y);
+        if !blocks::is_solid(state) || blocks::is_oak_leaves(state) || blocks::is_fluid(state) {
+            continue;
+        }
+        if solid_y + 2 > top || get(solid_y + 1) != blocks::AIR || get(solid_y + 2) != blocks::AIR {
+            continue;
+        }
+        let mut full = false;
+        mob_collisions(world).collision_boxes(x, solid_y, z, &mut |bounds| {
+            full |= bounds == physics::Aabb::block(x, solid_y, z);
+        });
+        if !full {
+            continue;
+        }
+        return Some([
+            f64::from(x) + 0.5,
+            f64::from(solid_y + 1),
+            f64::from(z) + 0.5,
+        ]);
+    }
+    None
 }
 
 // Distinct columns inside a radius of two blocks, ordered around the center.
@@ -1226,6 +1272,39 @@ impl Server {
         self.spawn_mob(hostile_kind(self.seed, id, self.game_time), candidate);
     }
 
+    fn spawn_hostile_dark(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
+        let nearby = self
+            .mobs
+            .values()
+            .filter(|mob| mob.hostile.is_some() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0);
+        if nearby.take(HOSTILE_LOCAL_LIMIT).count() == HOSTILE_LOCAL_LIMIT {
+            return;
+        }
+        let roll = sample(self.seed, id, self.game_time, HOSTILE_DARK_COLUMN_SALT);
+        let [dx, dz] = direction(roll);
+        // Same ring as the night surface attempt, from a separate salt.
+        let radius = 24.75 + ((roll >> 16) % 2251) as f64 / 100.0;
+        let x = (pos[0] + dx * radius).floor() as i32;
+        let z = (pos[2] + dz * radius).floor() as i32;
+        let feet_y = pos[1].floor() as i32;
+        let start_y = feet_y + ((roll >> 32) % 33) as i32 - 16;
+        let Some(candidate) = hostile_dark_feet(&self.world, x, z, start_y) else {
+            return;
+        };
+        if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate))
+            || players
+                .iter()
+                .any(|&(other, p)| other != id && distance_squared(p, candidate) <= 24.0 * 24.0)
+        {
+            return;
+        }
+        let feet = [x, candidate[1] as i32, z];
+        if self.world.local_sky_light(feet) != 0 || self.world.local_block_light(feet) != 0 {
+            return;
+        }
+        self.spawn_mob(hostile_dark_kind(self.seed, id, self.game_time), candidate);
+    }
+
     pub(crate) fn tick_mobs(&mut self) {
         let players: Vec<_> = self
             .clients
@@ -1242,6 +1321,11 @@ impl Server {
         if (13000..23000).contains(&day) && self.game_time % HOSTILE_SPAWN_INTERVAL == 0 {
             for &(id, pos) in &players {
                 self.spawn_hostile(id, pos, &players);
+            }
+        }
+        if self.game_time % HOSTILE_SPAWN_INTERVAL == 0 {
+            for &(id, pos) in &players {
+                self.spawn_hostile_dark(id, pos, &players);
             }
         }
         let mut hits = Vec::new();
@@ -4164,5 +4248,309 @@ mod tests {
         assert!(packets.iter().any(|(_, packet)| {
             matches!(packet, S2C::MobFuse { id: fuse_id, ticks: 4 } if *fuse_id == id)
         }));
+    }
+
+    fn ring_column(roll: u64, pos: [f64; 3]) -> (i32, i32) {
+        let [dx, dz] = direction(roll);
+        let radius = 24.75 + ((roll >> 16) % 2251) as f64 / 100.0;
+        (
+            (pos[0] + dx * radius).floor() as i32,
+            (pos[2] + dz * radius).floor() as i32,
+        )
+    }
+
+    fn column_in_ring(pos: [f64; 3], x: i32, z: i32) -> bool {
+        let center = [f64::from(x) + 0.5, 0.0, f64::from(z) + 0.5];
+        (24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, center))
+    }
+
+    fn dark_start_y(roll: u64, pos: [f64; 3]) -> i32 {
+        pos[1].floor() as i32 + ((roll >> 32) % 33) as i32 - 16
+    }
+
+    fn tick_spawn(server: &mut Server, time: i64, day: i64) {
+        server.mobs.clear();
+        server.set_time(time - 1, day - 1);
+        server.tick();
+    }
+
+    fn hostiles(server: &Server) -> Vec<(MobKind, [f64; 3])> {
+        server
+            .mobs
+            .values()
+            .filter(|mob| mob.hostile.is_some())
+            .map(|mob| (mob.kind, mob.pos()))
+            .collect()
+    }
+
+    fn seal_dark_room(world: &mut World, x: i32, floor: i32, z: i32) {
+        for dz in -2i32..=2 {
+            for dx in -2i32..=2 {
+                for dy in 0i32..=3 {
+                    let state = if (1..=2).contains(&dy) && dx.abs() <= 1 && dz.abs() <= 1 {
+                        blocks::AIR
+                    } else {
+                        blocks::STONE
+                    };
+                    assert!(
+                        world.set_block(x + dx, floor + dy, z + dz, state).is_some(),
+                        "unloaded {}, {dy}, {}",
+                        x + dx,
+                        z + dz
+                    );
+                }
+            }
+        }
+    }
+
+    fn column_would_dark_spawn(world: &World, id: u32, time: i64, pos: [f64; 3]) -> bool {
+        let roll = sample(2026, id, time, HOSTILE_DARK_COLUMN_SALT);
+        let (x, z) = ring_column(roll, pos);
+        if !column_in_ring(pos, x, z) {
+            return false;
+        }
+        let Some(candidate) = hostile_dark_feet(world, x, z, dark_start_y(roll, pos)) else {
+            return false;
+        };
+        if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate)) {
+            return false;
+        }
+        let feet = [x, candidate[1] as i32, z];
+        world.local_sky_light(feet) == 0 && world.local_block_light(feet) == 0
+    }
+
+    fn join_at(server: &mut Server, id: u32, pos: [f64; 3]) {
+        server.connect_at(id, false, Some(pos), None);
+        server.handle_packet(
+            id,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+    }
+
+    #[test]
+    fn dark_feet_search_skips_partial_blocks_and_stops_after_sixteen() {
+        let mut world = World::new();
+        world.chunks.insert((0, 0), Chunk::empty(0, 0));
+        world.set_block(4, 20, 4, blocks::OAK_LEAVES);
+        world.set_block(4, 18, 4, blocks::OAK_SLAB);
+        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), None);
+        world.set_block(4, 14, 4, blocks::STONE);
+        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), Some([4.5, 15.0, 4.5]));
+        world.set_block(4, 15, 4, blocks::WATER);
+        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), None);
+        world.set_block(4, 15, 4, blocks::AIR);
+        world.set_block(4, 14, 4, blocks::GLASS);
+        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), Some([4.5, 15.0, 4.5]));
+        world.set_block(4, 14, 4, blocks::AIR);
+        world.set_block(6, 20 - 15, 6, blocks::STONE);
+        assert_eq!(
+            hostile_dark_feet(&world, 6, 6, 20),
+            Some([6.5, f64::from(20 - 15 + 1), 6.5])
+        );
+        world.set_block(6, 20 - 15, 6, blocks::AIR);
+        world.set_block(6, 20 - 16, 6, blocks::STONE);
+        assert_eq!(hostile_dark_feet(&world, 6, 6, 20), None);
+
+        let top = MIN_Y + HEIGHT - 1;
+        world.set_block(4, top - 2, 4, blocks::STONE);
+        assert_eq!(
+            hostile_dark_feet(&world, 4, 4, top + 4),
+            Some([4.5, f64::from(top - 1), 4.5])
+        );
+        assert_eq!(hostile_dark_feet(&world, 4, 4, MIN_Y - 4), None);
+        assert_eq!(hostile_dark_feet(&world, 32, 4, 20), None);
+    }
+
+    #[test]
+    fn dark_hostiles_spawn_by_day_only_under_unlit_cover() {
+        let mut server = joined(GameMode::Creative);
+        assert!(!server.world.lighting_enabled());
+        let pos = server.clients[&1].pos;
+        let (time, x, floor, z) = (200..40_000)
+            .step_by(200)
+            .filter(|time| time % 400 != 0)
+            .find_map(|time| {
+                let roll = sample(2026, 1, time, HOSTILE_DARK_COLUMN_SALT);
+                let (x, z) = ring_column(roll, pos);
+                let floor = dark_start_y(roll, pos);
+                if !column_in_ring(pos, x, z) || !(-60..=-46).contains(&floor) {
+                    return None;
+                }
+                let natural = hostile_dark_feet(&server.world, x, z, floor)?;
+                let sky = server.world.local_sky_light([x, natural[1] as i32, z]);
+                (sky > 0).then_some((time, x, floor, z))
+            })
+            .expect("daytime dark column");
+
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty(), "open ground spawns by day");
+
+        seal_dark_room(&mut server.world, x, floor, z);
+        let feet = [x, floor + 1, z];
+        assert_eq!(server.world.local_sky_light(feet), 0);
+        assert_eq!(server.world.local_block_light(feet), 0);
+        tick_spawn(&mut server, time, 6000);
+        let spawned = hostiles(&server);
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].0, hostile_dark_kind(2026, 1, time));
+        assert!(column_in_ring(pos, x, z));
+        assert!((24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(spawned[0].1, pos)));
+        let [mx, _, mz] = spawned[0].1.map(|v| v.floor() as i32);
+        assert_eq!((mx, mz), (x, z));
+        let health = server.mobs.values().next().unwrap().health;
+        for _ in 0..20 {
+            server.tick();
+        }
+        assert_eq!(server.mobs.values().next().unwrap().health, health);
+        assert_eq!(hostiles(&server).len(), 1);
+
+        server.world.set_block(x + 2, floor + 1, z, blocks::AIR);
+        server.world.set_block(x + 2, floor + 2, z, blocks::AIR);
+        assert!(server.world.local_sky_light(feet) > 0);
+        tick_spawn(&mut server, time, 6000);
+        assert!(
+            hostiles(&server).is_empty(),
+            "sky light from the entrance still spawns"
+        );
+
+        server.world.set_block(x + 2, floor + 1, z, blocks::STONE);
+        server.world.set_block(x + 2, floor + 2, z, blocks::STONE);
+        server.world.set_block(x + 2, floor + 1, z, blocks::AIR);
+        for dz in -1..=1 {
+            for dy in 0..=2 {
+                server
+                    .world
+                    .set_block(x + 3, floor + dy, z + dz, blocks::STONE);
+            }
+        }
+        server.world.set_block(x + 4, floor + 1, z, blocks::STONE);
+        server.world.set_block(x + 3, floor + 1, z, blocks::TORCH);
+        assert_eq!(server.world.local_sky_light(feet), 0);
+        assert!(server.world.local_block_light(feet) > 0);
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty(), "torch still spawns");
+
+        server.world.set_block(x + 3, floor + 1, z, blocks::STONE);
+        server.world.set_block(x + 2, floor + 1, z, blocks::STONE);
+        assert_eq!(server.world.local_block_light(feet), 0);
+        tick_spawn(&mut server, time, 6000);
+        assert_eq!(hostiles(&server).len(), 1);
+
+        server.mobs.clear();
+        for _ in 0..8 {
+            server.spawn_mob(MobKind::Cow, pos);
+        }
+        server.set_time(time - 1, 5999);
+        server.tick();
+        assert_eq!(hostiles(&server).len(), 1);
+        assert_eq!(server.mobs.len(), 9);
+
+        server.mobs.clear();
+        for _ in 0..HOSTILE_LOCAL_LIMIT {
+            server.spawn_mob(MobKind::Zombie, pos);
+        }
+        server.set_time(time - 1, 5999);
+        server.tick();
+        assert_eq!(hostiles(&server).len(), HOSTILE_LOCAL_LIMIT);
+        server.mobs.pop_first();
+        server.set_time(time - 1, 5999);
+        server.tick();
+        assert_eq!(hostiles(&server).len(), HOSTILE_LOCAL_LIMIT);
+        assert!(hostiles(&server).iter().any(|(_, p)| {
+            let [hx, _, hz] = p.map(|v| v.floor() as i32);
+            (hx, hz) == (x, z)
+        }));
+
+        let blocked = [f64::from(x) + 0.5, f64::from(floor + 1), f64::from(z) + 0.5];
+        assert!(!column_would_dark_spawn(&server.world, 2, time, blocked));
+        join_at(&mut server, 2, blocked);
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty(), "nearby player still spawns");
+
+        let edge = [(24, 0), (-24, 0), (0, 24), (0, -24)]
+            .into_iter()
+            .map(|(dx, dz)| {
+                [
+                    blocked[0] + f64::from(dx),
+                    blocked[1],
+                    blocked[2] + f64::from(dz),
+                ]
+            })
+            .find(|pos| !column_would_dark_spawn(&server.world, 2, time, *pos))
+            .expect("observer at 24 blocks");
+        server.clients.get_mut(&2).unwrap().pos = edge;
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty(), "24 blocks away still spawns");
+
+        server.clients.get_mut(&2).unwrap().pos = [blocked[0] + 200.0, blocked[1], blocked[2]];
+        tick_spawn(&mut server, time, 6000);
+        let far = hostiles(&server);
+        assert_eq!(far.len(), 1);
+        assert_eq!(far[0].0, hostile_dark_kind(2026, 1, time));
+    }
+
+    #[test]
+    fn dark_and_surface_spawns_share_the_cap_and_use_separate_kinds() {
+        let mut server = joined(GameMode::Creative);
+        let pos = server.clients[&1].pos;
+        let (time, x, floor, z, sx, sz) = (200..80_000)
+            .step_by(200)
+            .filter(|time| time % 400 != 0)
+            .find_map(|time| {
+                let roll = sample(2026, 1, time, HOSTILE_DARK_COLUMN_SALT);
+                let (x, z) = ring_column(roll, pos);
+                let floor = dark_start_y(roll, pos);
+                if !column_in_ring(pos, x, z) || !(-60..=-46).contains(&floor) {
+                    return None;
+                }
+                let surface = sample(2026, 1, time, HOSTILE_COLUMN_SALT);
+                let (sx, sz) = ring_column(surface, pos);
+                if !column_in_ring(pos, sx, sz) {
+                    return None;
+                }
+                if (sx - x).abs().max((sz - z).abs()) <= 6 {
+                    return None;
+                }
+                if hostile_kind(2026, 1, time) == hostile_dark_kind(2026, 1, time) {
+                    return None;
+                }
+                Some((time, x, floor, z, sx, sz))
+            })
+            .expect("split night column");
+
+        seal_dark_room(&mut server.world, x, floor, z);
+        tick_spawn(&mut server, time, 18000);
+        let spawned = hostiles(&server);
+        assert_eq!(spawned.len(), 2, "{spawned:?}");
+        let dark_at = |p: [f64; 3]| {
+            let [hx, _, hz] = p.map(|v| v.floor() as i32);
+            (hx, hz) == (x, z)
+        };
+        let surface_at = |p: [f64; 3]| {
+            let [hx, _, hz] = p.map(|v| v.floor() as i32);
+            (hx, hz) == (sx, sz)
+        };
+        let dark = spawned.iter().find(|(_, p)| dark_at(*p)).expect("dark mob");
+        let surface = spawned
+            .iter()
+            .find(|(_, p)| surface_at(*p))
+            .expect("surface mob");
+        assert_eq!(dark.0, hostile_dark_kind(2026, 1, time));
+        assert_eq!(surface.0, hostile_kind(2026, 1, time));
+        assert_ne!(dark.0, surface.0);
+
+        server.mobs.clear();
+        for _ in 0..HOSTILE_LOCAL_LIMIT - 1 {
+            server.spawn_mob(MobKind::Zombie, pos);
+        }
+        server.set_time(time - 1, 17999);
+        server.tick();
+        assert_eq!(hostiles(&server).len(), HOSTILE_LOCAL_LIMIT);
+        assert!(hostiles(&server).iter().any(|(_, p)| surface_at(*p)));
+        assert!(hostiles(&server).iter().all(|(_, p)| !dark_at(*p)));
     }
 }
