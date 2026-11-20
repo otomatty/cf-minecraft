@@ -5,6 +5,7 @@ pub struct Recipe {
     pub width: usize,
     pub height: usize,
     pub ingredients: &'static [u16],
+    pub table_only: bool,
     pub item: u16,
     pub count: u8,
 }

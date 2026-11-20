@@ -40,6 +40,7 @@ const EYE_HEIGHT = 1.62;
 const REACH = 5;
 const LEFT_REPEAT_MS = 250;
 const MOB_HURT_MS = 500;
+const BOW_MAX_DRAW = 20;
 const DOUBLE_TAP_TICKS = 7;
 const MESH_BUDGET_MS = 4;
 
@@ -326,7 +327,7 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
-			stopEating();
+			endUsingItem();
 			picker.hidden = true;
 			hideInventoryScreens();
 			deathScreen.close();
@@ -340,7 +341,7 @@ async function main(): Promise<void> {
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
-			stopEating();
+			endUsingItem();
 			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
 			closed = reason;
@@ -430,12 +431,25 @@ async function main(): Promise<void> {
 	const icons = new Map<number, ImageData>();
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
-	let eating: { item: number; count: number; startedAt: number } | null = null;
-	function stopEating(): void {
-		if (!eating) return;
-		eating = null;
+	const arrowItemId = items.find(item => item.name === "arrow")?.id;
+	let usingItem: { kind: "food" | "bow"; item: number; count: number; startedAt: number } | null = null;
+	function endUsingItem(release = false): void {
+		if (!usingItem) return;
+		const bow = usingItem.kind === "bow";
+		usingItem = null;
 		eatProgress.hidden = true;
-		if (connection === "open") transport.send(core.encodeStopUsingItem());
+		if (connection !== "open") return;
+		if (bow && !release) {
+			transport.send(core.encodeCancelUsingItem());
+		} else {
+			if (bow) sendPosition();
+			transport.send(core.encodeStopUsingItem());
+		}
+	}
+	function bowDraw(now: number): number {
+		return usingItem?.kind === "bow"
+			? Math.max(0, Math.min(BOW_MAX_DRAW, Math.floor((now - usingItem.startedAt) / (PLAYER_TICK_SECONDS * 1000))))
+			: 0;
 	}
 	let dig = newDigState();
 	let heldInventory = "";
@@ -459,7 +473,7 @@ async function main(): Promise<void> {
 		slots.push(c);
 	}
 	function selectSlot(slot: number, send = true): void {
-		if (slot !== selectedSlot) stopEating();
+		if (slot !== selectedSlot) endUsingItem();
 		const next = updateDigSelection(dig, heldInventory, slot, core.inventory[slot]);
 		dig = next.state;
 		heldInventory = next.selection;
@@ -500,16 +514,16 @@ async function main(): Promise<void> {
 		}
 		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
 		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
-		if (eating) {
+		if (usingItem) {
 			const stack = inventory[selectedSlot];
-			if (stack?.item !== eating.item) {
-				stopEating();
-			} else {
-				if (stack.count < eating.count) {
-					eating.startedAt = performance.now();
+			if (stack?.item !== usingItem.item) {
+				endUsingItem();
+			} else if (usingItem.kind === "food") {
+				if (stack.count < usingItem.count) {
+					usingItem.startedAt = performance.now();
 					eatProgress.value = 0;
 				}
-				eating.count = stack.count;
+				usingItem.count = stack.count;
 			}
 		}
 	}
@@ -551,7 +565,7 @@ async function main(): Promise<void> {
 		pendingJump = pendingFlightToggle = false;
 		heldButtons.clear();
 		stopDig();
-		stopEating();
+		endUsingItem();
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
@@ -1053,20 +1067,22 @@ async function main(): Promise<void> {
 	}
 	function interact(button: number, repeat = false, shift = keys.has("ShiftLeft") || keys.has("ShiftRight")): void {
 		// Recast each time: prediction and camera motion can change the target between repeats.
-		const held = button === 2 ? items.find(item => item.id === core.inventory[selectedSlot]?.item) : undefined;
+		const inventory = button === 2 ? core.inventory : [];
+		const stack = inventory[selectedSlot];
+		const held = stack && items.find(item => item.id === stack.item);
 		const hit = aimedBlock(usesFluidSourceRay(held?.name));
-		if (button === 2 && !repeat && !eating && core.gameMode === "survival" && !core.dead
-			&& core.food < MAX_FOOD && connection === "open"
-			&& inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) {
-			const stack = core.inventory[selectedSlot];
+		if (button === 2 && !repeat && !usingItem && canInteract()) {
 			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
-			if (stack && items.find(item => item.id === stack.item)?.food
-				&& blockInteraction(targetBlock?.name, false) !== "open") {
+			const survival = core.gameMode === "survival";
+			const canDraw = held?.name === "bow" && (!survival || inventory.some(slot => slot !== null && slot.item === arrowItemId));
+			const canEat = held?.food && survival && core.food < MAX_FOOD;
+			const kind = canDraw ? "bow" : canEat ? "food" : null;
+			if (stack && kind && blockInteraction(targetBlock?.name, kind === "bow" && shift) !== "open") {
 				heldButtons.delete(2);
 				transport.send(core.encodeUseItem());
-				eating = { item: stack.item, count: stack.count, startedAt: performance.now() };
+				usingItem = { kind, item: stack.item, count: stack.count, startedAt: performance.now() };
 				eatProgress.value = 0;
-				eatProgress.hidden = false;
+				eatProgress.hidden = kind !== "food";
 				return;
 			}
 		}
@@ -1124,7 +1140,7 @@ async function main(): Promise<void> {
 	window.addEventListener("mouseup", e => {
 		heldButtons.delete(e.button);
 		if (e.button === 0) stopDig();
-		if (e.button === 2) stopEating();
+		if (e.button === 2) endUsingItem(Boolean(canInteract()));
 	});
 	let closedOnHide = false;
 	const runPageCacheAction = (action: PageCacheAction): void => {
@@ -1219,7 +1235,7 @@ async function main(): Promise<void> {
 
 	function syncVitals(): void {
 		const { health, air, food, dead, deathCause, gameMode } = core;
-		if (food === MAX_FOOD || dead || gameMode !== "survival") stopEating();
+		if (dead || (usingItem?.kind === "food" && (food === MAX_FOOD || gameMode !== "survival"))) endUsingItem();
 		vitals.hidden = gameMode !== "survival";
 		if (!vitals.hidden) {
 			healthMeter.setAttribute("aria-valuenow", String(health));
@@ -1357,7 +1373,7 @@ async function main(): Promise<void> {
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
-		if (eating) eatProgress.value = Math.min(eatProgress.max, now - eating.startedAt);
+		if (usingItem?.kind === "food") eatProgress.value = Math.min(eatProgress.max, now - usingItem.startedAt);
 		if (core.gameMode === "survival" && !core.dead) {
 			const hit = mob === null ? block : null;
 			const blockState = hit ? core.getBlock(hit.x, hit.y, hit.z) : 0;
@@ -1403,7 +1419,8 @@ async function main(): Promise<void> {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];
 		});
-		frame = renderer.render(camera, viewDistance, target, settings.fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
+		const fov = settings.fov * (1 - 0.1 * bowDraw(now) / BOW_MAX_DRAW);
+		frame = renderer.render(camera, viewDistance, target, fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
 		window.__mc.frames++;
 
 		frames++;
@@ -1432,6 +1449,7 @@ async function main(): Promise<void> {
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,
+			bowDraw: bowDraw(performance.now()),
 			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),
 			dig: dig.active,
 			inventory: core.inventory,

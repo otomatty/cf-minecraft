@@ -1277,6 +1277,11 @@ pub extern "C" fn client_enc_stop_using_item() -> usize {
     emit(state(), C2S::StopUsingItem.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_cancel_using_item() -> usize {
+    emit(state(), C2S::CancelUsingItem.encode())
+}
+
 /// Authoritative feet position, including the most recent correction.
 #[no_mangle]
 pub extern "C" fn client_player_position(axis: usize) -> f64 {

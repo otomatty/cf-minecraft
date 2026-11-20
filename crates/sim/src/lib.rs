@@ -158,6 +158,7 @@ struct Client {
     view: i32,
     pos: [f64; 3],
     yaw: f32,
+    pitch: f32,
     sent: BTreeSet<ChunkPos>,
     allow_teleport: bool,
     accepted_tick: i64,
@@ -654,6 +655,7 @@ impl Server {
                 view: DEFAULT_VIEW_DISTANCE,
                 pos,
                 yaw: 0.0,
+                pitch: 0.0,
                 sent: BTreeSet::new(),
                 allow_teleport,
                 accepted_tick: self.game_time,
@@ -808,6 +810,10 @@ impl Server {
         if before != after {
             self.abort_dig(id);
         }
+        let client = self.clients.get_mut(&id).unwrap();
+        if before != after || client.inventory.screen != inventory::Screen::None {
+            client.health.bow = None;
+        }
     }
 
     fn apply_packet(&mut self, id: u32, packet: C2S) {
@@ -815,6 +821,12 @@ impl Server {
             C2S::Respawn => self.respawn(id),
             C2S::UseItem => self.use_item(id),
             C2S::StopUsingItem => self.stop_using_item(id),
+            C2S::CancelUsingItem => self
+                .clients
+                .get_mut(&id)
+                .unwrap()
+                .health
+                .cancel_using_item(),
             C2S::Attack { id: target } => self.attack(id, target),
             C2S::DigAbort => {
                 if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
@@ -1004,8 +1016,14 @@ impl Server {
                 }
                 client.inventory_dirty |= before != client.inventory;
             }
-            C2S::PlayerPos { x, y, z, yaw, .. } => {
-                self.move_player(id, [x, y, z], Some(yaw));
+            C2S::PlayerPos {
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+            } => {
+                self.move_player(id, [x, y, z], Some([yaw, pitch]));
             }
             C2S::Teleport { x, y, z } => {
                 self.move_player(id, [x, y, z], None);
@@ -1237,7 +1255,11 @@ impl Server {
         if self.game_mode == GameMode::Survival {
             client.health.add_exhaustion(40);
         }
-        if mob.health == 0 {
+        self.finish_mob_hit(id);
+    }
+
+    fn finish_mob_hit(&mut self, id: u32) {
+        if self.mobs[&id].health == 0 {
             let mob = self.mobs.remove(&id).unwrap();
             self.drop_mob_loot(id, mob, false);
         } else {
@@ -1334,7 +1356,7 @@ impl Server {
             .push((id, S2C::PlayerCorrect { x, y, z }.encode()));
     }
 
-    fn move_player(&mut self, id: u32, pos: [f64; 3], yaw: Option<f32>) {
+    fn move_player(&mut self, id: u32, pos: [f64; 3], view: Option<[f32; 2]>) {
         let Some(client) = self.clients.get_mut(&id) else {
             return;
         };
@@ -1354,11 +1376,11 @@ impl Server {
         // Bound Y too: collision cell iteration must remain finite and bounded.
         let finite = valid_position(pos);
         let survival = self.game_mode == GameMode::Survival;
-        if finite && yaw.is_none() && client.allow_teleport {
+        if finite && view.is_none() && client.allow_teleport {
             client.relocate(pos, self.game_time);
             return;
         }
-        if let Some(yaw) = yaw.filter(|_| {
+        if let Some([yaw, pitch]) = view.filter(|_| {
             finite && horizontal <= client.horizontal_budget && vertical <= client.vertical_budget
         }) {
             let movement = if survival {
@@ -1375,6 +1397,9 @@ impl Server {
                 client.pos = pos;
                 if yaw.is_finite() {
                     client.yaw = yaw;
+                }
+                if pitch.is_finite() {
+                    client.pitch = pitch.clamp(-90.0, 90.0);
                 }
                 client.accepted_tick = self.game_time;
                 client.horizontal_budget -= horizontal;
@@ -1896,6 +1921,13 @@ impl Server {
                 h.bytes(&client.yaw.to_bits().to_be_bytes());
             }
             client.health.hash_into(&mut h);
+            if let Some(bow) = client.health.bow {
+                h.bytes(b"bow");
+                h.u8(bow.slot);
+                h.u8(bow.ticks);
+                h.bytes(&client.yaw.to_bits().to_be_bytes());
+                h.bytes(&client.pitch.to_bits().to_be_bytes());
+            }
             client.survival_movement.hash_into(&mut h);
             h.u8(client.dig.is_some() as u8);
             if let Some(dig) = client.dig {

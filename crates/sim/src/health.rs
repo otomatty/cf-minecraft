@@ -3,7 +3,7 @@
 use protocol::{DeathCause, PlayerVitals, MAX_AIR, MAX_FOOD, MAX_HEALTH};
 use world::{blocks, items, Fnv64, World, MIN_Y};
 
-use crate::{inventory::Screen, Client, GameMode, Server};
+use crate::{arrow::Arrow, inventory::Screen, Client, GameMode, Server};
 
 const FALL_DAMAGE_OFFSET: f64 = 3.0;
 pub(crate) const SUFFOCATION_INTERVAL: u8 = 10;
@@ -24,6 +24,14 @@ const REGEN_FOOD: u8 = 18;
 const STARVE_INTERVAL: u8 = 80;
 const EXHAUSTION_PER_FOOD: u16 = 1200;
 const EAT_TICKS: u8 = 32;
+const BOW_MAX_DRAW: u8 = 20;
+const BOW_MIN_DRAW: u8 = 3;
+
+#[derive(Clone, Copy)]
+pub(crate) struct BowDraw {
+    pub slot: u8,
+    pub ticks: u8,
+}
 
 #[derive(Clone, Copy)]
 struct EatState {
@@ -46,6 +54,7 @@ pub(crate) struct Health {
     walked: f64,
     starve_ticks: u8,
     eating: Option<EatState>,
+    pub bow: Option<BowDraw>,
 }
 
 impl Health {
@@ -161,10 +170,15 @@ impl Health {
     pub(crate) fn damage(&mut self, amount: u8, cause: DeathCause) {
         self.vitals.health = self.vitals.health.saturating_sub(amount);
         if self.vitals.health == 0 {
-            self.eating = None;
+            self.cancel_using_item();
             self.vitals.dead = true;
             self.vitals.cause = cause;
         }
+    }
+
+    pub(crate) fn cancel_using_item(&mut self) {
+        self.eating = None;
+        self.bow = None;
     }
 
     pub fn hash_into(&self, h: &mut Fnv64) {
@@ -259,6 +273,25 @@ impl Client {
             .and_then(|stack| items::food(stack.item))
     }
 
+    fn bow_selected(&self) -> bool {
+        self.inventory.screen == Screen::None
+            && self
+                .inventory
+                .selected_stack()
+                .is_some_and(|stack| Some(stack.item) == items::by_name("bow"))
+    }
+
+    fn tick_bow(&mut self) {
+        let Some(mut bow) = self.health.bow.take() else {
+            return;
+        };
+        if !self.health.vitals.dead && bow.slot == self.inventory.selected() && self.bow_selected()
+        {
+            bow.ticks = (bow.ticks + 1).min(BOW_MAX_DRAW);
+            self.health.bow = Some(bow);
+        }
+    }
+
     fn tick_eating(&mut self) {
         let Some(mut eating) = self.health.eating.take() else {
             return;
@@ -283,7 +316,19 @@ impl Client {
 impl Server {
     pub(crate) fn use_item(&mut self, id: u32) {
         let client = self.clients.get_mut(&id).unwrap();
-        if client.health.eating.is_some() {
+        if client.health.eating.is_some() || client.health.bow.is_some() {
+            return;
+        }
+        if client.joined && client.bow_selected() {
+            let arrow = items::by_name("arrow").unwrap();
+            if self.game_mode == GameMode::Creative
+                || client.inventory.first_slot_with(arrow).is_some()
+            {
+                client.health.bow = Some(BowDraw {
+                    slot: client.inventory.selected(),
+                    ticks: 0,
+                });
+            }
             return;
         }
         if self.game_mode != GameMode::Survival
@@ -300,7 +345,33 @@ impl Server {
     }
 
     pub(crate) fn stop_using_item(&mut self, id: u32) {
-        self.clients.get_mut(&id).unwrap().health.eating = None;
+        let client = self.clients.get_mut(&id).unwrap();
+        client.health.eating = None;
+        let Some(bow) = client.health.bow.take() else {
+            return;
+        };
+        if bow.ticks < BOW_MIN_DRAW
+            || bow.slot != client.inventory.selected()
+            || !client.bow_selected()
+            || self.next_entity_id == 0
+        {
+            return;
+        }
+
+        let survival = self.game_mode == GameMode::Survival;
+        if survival {
+            let arrow = items::by_name("arrow").unwrap();
+            let Some(slot) = client.inventory.first_slot_with(arrow) else {
+                return;
+            };
+            client.inventory.take_one(slot);
+            client.inventory_dirty = true;
+            client.health.add_exhaustion(50);
+        }
+        let power = f64::from(bow.ticks) / f64::from(BOW_MAX_DRAW);
+        let arrow = Arrow::from_bow(id, survival, power, client.pos, client.yaw, client.pitch);
+        let arrow_id = self.allocate_entity_id().unwrap();
+        self.arrows.insert(arrow_id, arrow);
     }
 
     pub(crate) fn tick_health(&mut self) {
@@ -314,6 +385,7 @@ impl Server {
                     client.tick_eating();
                 }
             }
+            client.tick_bow();
             let health = &mut client.health;
             if health.last_sent != Some(health.vitals) {
                 health.last_sent = Some(health.vitals);
@@ -796,6 +868,147 @@ mod tests {
             .set(0, Some(Stack { item, count: 2 }))
             .unwrap();
         s
+    }
+
+    fn with_bow(mode: GameMode, ammo: &[(u8, u8)]) -> Server {
+        let mut s = joined(mode);
+        let inventory = &mut s.clients.get_mut(&1).unwrap().inventory;
+        inventory
+            .set(
+                0,
+                Some(Stack {
+                    item: items::by_name("bow").unwrap(),
+                    count: 1,
+                }),
+            )
+            .unwrap();
+        for &(slot, count) in ammo {
+            inventory
+                .set(
+                    slot,
+                    Some(Stack {
+                        item: items::by_name("arrow").unwrap(),
+                        count,
+                    }),
+                )
+                .unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn bow_requires_ammo_only_in_survival_and_a_minimum_draw_in_both_modes() {
+        let mut s = with_bow(GameMode::Survival, &[]);
+        send(&mut s, C2S::UseItem);
+        advance(&mut s, 20);
+        assert!(s.clients[&1].health.bow.is_none());
+        send(&mut s, C2S::StopUsingItem);
+        s.tick();
+        assert!(s.arrows.is_empty());
+
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let mut s = with_bow(mode, &[(1, 2)]);
+            send(&mut s, C2S::UseItem);
+            advance(&mut s, 2);
+            assert_eq!(s.clients[&1].health.bow.unwrap().ticks, 2);
+            send(&mut s, C2S::StopUsingItem);
+            s.tick();
+            assert!(s.arrows.is_empty());
+            assert!(s.clients[&1].health.bow.is_none());
+            assert_eq!(s.clients[&1].inventory.slots()[1].unwrap().count, 2);
+        }
+    }
+
+    #[test]
+    fn bow_caps_draw_and_consumes_the_first_carried_arrow_only_in_survival() {
+        for (mode, ammo) in [
+            (GameMode::Creative, vec![]),
+            (GameMode::Creative, vec![(1, 2)]),
+            (GameMode::Survival, vec![(30, 2), (9, 2), (8, 1), (4, 1)]),
+        ] {
+            let mut s = with_bow(mode, &ammo);
+            let before = s.clients[&1].inventory.clone();
+            s.world.set_block(2, 81, 6, blocks::STONE);
+            let shots = if mode == GameMode::Survival { 3 } else { 1 };
+            for _ in 0..shots {
+                send(&mut s, C2S::UseItem);
+                advance(&mut s, 23);
+                assert_eq!(s.clients[&1].health.bow.unwrap().ticks, 20);
+                let exhaustion = s.clients[&1].health.exhaustion;
+                send(&mut s, C2S::StopUsingItem);
+                s.tick();
+                assert_eq!(
+                    s.clients[&1].health.exhaustion,
+                    exhaustion + if mode == GameMode::Survival { 51 } else { 0 }
+                );
+            }
+            assert_eq!(s.arrows.len(), shots);
+            let inventory = &s.clients[&1].inventory;
+            if mode == GameMode::Survival {
+                assert_eq!(inventory.slots()[4], None);
+                assert_eq!(inventory.slots()[8], None);
+                assert_eq!(inventory.slots()[9].unwrap().count, 1);
+                assert_eq!(inventory.slots()[30], before.slots()[30]);
+            } else {
+                assert_eq!(*inventory, before);
+            }
+        }
+    }
+
+    #[test]
+    fn changing_slot_item_opening_screen_and_cancelling_end_draw_before_release() {
+        for (mode, cancels) in [
+            (
+                GameMode::Creative,
+                vec![
+                    C2S::CreativeSetSlot {
+                        slot: 0,
+                        item: 0,
+                        count: 0,
+                    },
+                    C2S::CreativeSetSlot {
+                        slot: 0,
+                        item: items::by_name("bow").unwrap(),
+                        count: 1,
+                    },
+                ],
+            ),
+            (
+                GameMode::Survival,
+                vec![C2S::SelectSlot { slot: 1 }, C2S::SelectSlot { slot: 0 }],
+            ),
+            (
+                GameMode::Survival,
+                vec![C2S::UseBlock { x: 3, y: 80, z: 2 }, C2S::CloseInventory],
+            ),
+            (GameMode::Survival, vec![C2S::CancelUsingItem]),
+        ] {
+            let mut s = with_bow(mode, &[(1, 2)]);
+            s.world.set_block(3, 80, 2, blocks::CRAFTING_TABLE);
+            send(&mut s, C2S::UseItem);
+            advance(&mut s, 5);
+            assert_eq!(s.clients[&1].health.bow.unwrap().ticks, 5);
+            for cancel in cancels {
+                send(&mut s, cancel);
+            }
+            send(&mut s, C2S::StopUsingItem);
+            s.tick();
+            assert!(s.clients[&1].health.bow.is_none());
+            assert!(s.arrows.is_empty());
+            assert_eq!(s.clients[&1].inventory.slots()[1].unwrap().count, 2);
+        }
+        let mut s = with_bow(GameMode::Survival, &[(1, 2)]);
+        send(&mut s, C2S::UseItem);
+        advance(&mut s, 5);
+        teleport(&mut s, [FEET[0], FEET[1] + 23.0, FEET[2]]);
+        send(&mut s, movement(FEET));
+        s.tick();
+        assert!(vitals(&s).dead);
+        assert!(s.clients[&1].health.bow.is_none());
+        send(&mut s, C2S::Respawn);
+        send(&mut s, C2S::StopUsingItem);
+        s.tick();
+        assert!(s.arrows.is_empty());
     }
 
     #[test]

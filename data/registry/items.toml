@@ -432,3 +432,9 @@ texture = "arrow"
 name = "gunpowder"
 id = 76
 texture = "gunpowder"
+
+[[items]]
+name = "bow"
+id = 77
+texture = "bow"
+max_stack = 1

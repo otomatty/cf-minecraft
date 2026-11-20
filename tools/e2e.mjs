@@ -2052,6 +2052,87 @@ async function mobs() {
 	} finally { await page.close(); }
 }
 
+async function bow() {
+	const { page, errors } = await open(`server=local&world=e2e-bow-${run}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
+	try {
+		const stats = await settle(page, "bow", chunksInView(4));
+		check(stats.gameMode === "creative" && stats.generatorName === "Flat", "bow: starts in creative Flat");
+		await resumePointerLock(page, "bow: initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="bow"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "bow");
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "bow: resume after selecting bow");
+		await page.mouse.move(640, 360);
+		await page.evaluate(() => {
+			const api = window.__mc;
+			const { x, y, z } = api.stats().camera;
+			api.setCamera(x, y, z, 0, -15);
+		});
+		await page.mouse.down({ button: "right" });
+		await page.waitForFunction(() => window.__mc.stats().bowDraw === 20);
+		await page.mouse.up({ button: "right" });
+		const shot = await page.waitForFunction(() => {
+			const { arrows, bowDraw } = window.__mc.stats();
+			return bowDraw === 0 && arrows.find(arrow => Math.hypot(...arrow.velocity) >= 2);
+		});
+		await shot.dispose();
+		check(true, "bow: releasing a full draw fires an arrow at least two blocks per tick");
+
+		const cow = await page.waitForFunction(() => window.__mc.stats().mobs.find(mob => mob.kind === 0),
+			{ timeout: 100000, polling: 100 });
+		await cow.dispose();
+		await page.mouse.down({ button: "right" });
+		let id;
+		try {
+			await page.waitForFunction(() => window.__mc.stats().bowDraw === 20);
+			const target = await page.waitForFunction(async () => {
+				const api = window.__mc;
+				const initial = api.stats().mobs.filter(mob => mob.kind === 0 && mob.hurt === 0);
+				await new Promise(resolve => setTimeout(resolve, 150));
+				const { mobs } = api.stats();
+				for (const before of initial) {
+					const cow = mobs.find(mob => mob.id === before.id);
+					if (!cow || cow.hurt !== 0 || cow.yaw !== before.yaw
+						|| !cow.position.every((value, axis) => value === before.position[axis])) continue;
+					const [x, y, z] = cow.position;
+					const distance = 2.25, eye = 1.62, body = 0.785;
+					const length = Math.hypot(distance, eye - body);
+					for (const [dx, dz, yaw] of [[-1, 0, 90], [0, 1, 0], [1, 0, 270], [0, -1, 180]]) {
+						const blocked = mobs.some(other => {
+							if (other.id === cow.id) return false;
+							const ox = other.position[0] - x, oz = other.position[2] - z;
+							const towardCamera = -(ox * dx + oz * dz);
+							return towardCamera > -0.45 && towardCamera < distance + 0.45 && Math.abs(ox * dz - oz * dx) < 0.65;
+						});
+						if (blocked) continue;
+						const origin = [x - dx * distance, y + eye, z - dz * distance];
+						const direction = [dx * distance / length, (body - eye) / length, dz * distance / length];
+						if (api.raycast(origin, direction, length)) continue;
+						api.setCamera(...origin, yaw, Math.atan2(eye - body, distance) * 180 / Math.PI);
+						return cow.id;
+					}
+				}
+				return false;
+			}, { timeout: 30000, polling: 200 });
+			id = await target.jsonValue();
+			await target.dispose();
+		} finally {
+			await page.mouse.up({ button: "right" });
+		}
+		await page.waitForFunction(id => {
+			const cow = window.__mc.stats().mobs.find(mob => mob.id === id);
+			return !cow || cow.hurt !== 0;
+		}, { timeout: 3000, polling: 50 }, id);
+		check(true, "bow: the arrow hits the targeted cow", `id ${id}`);
+		check(errors.length === 0, "bow: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "bow", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function mobCombat() {
 	const { page, errors } = await open(`server=local&world=e2e-mob-combat-${run}&mode=survival&gen=flat&seed=2026&view=4&time=6000`);
 	try {
@@ -2418,6 +2499,7 @@ try {
 	await lavaFlow();
 	await mobs();
 	await mobCombat();
+	await bow();
 	await zombies();
 	await skeletons();
 	await creepers();
