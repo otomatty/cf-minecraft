@@ -55,6 +55,11 @@ impl Writer {
         }
     }
 
+    pub fn string(&mut self, value: &str) {
+        self.varint(u32::try_from(value.len()).expect("string length fits in a VarInt"));
+        self.raw(value.as_bytes());
+    }
+
     pub fn raw(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }
@@ -119,12 +124,23 @@ impl<'a> Reader<'a> {
         let mut out: u32 = 0;
         for i in 0..5 {
             let b = self.u8()?;
+            if i == 4 && b > 0x0f {
+                return Err(DecodeError);
+            }
             out |= ((b & 0x7F) as u32) << (7 * i);
             if b & 0x80 == 0 {
                 return Ok(out);
             }
         }
         Err(DecodeError)
+    }
+
+    pub fn string(&mut self, max_bytes: usize) -> Result<&'a str, DecodeError> {
+        let len = self.varint()? as usize;
+        if len > max_bytes {
+            return Err(DecodeError);
+        }
+        std::str::from_utf8(self.take(len)?).map_err(|_| DecodeError)
     }
 
     pub fn rest(&mut self) -> &'a [u8] {

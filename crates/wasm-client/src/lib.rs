@@ -44,6 +44,7 @@ struct State {
     mobs: BTreeMap<u32, MobEntity>,
     arrows: BTreeMap<u32, ArrowEntity>,
     mob_hurt_sequence: u32,
+    chat: Option<(protocol::ChatKind, String, String)>,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -200,6 +201,7 @@ pub extern "C" fn client_new() {
         mobs: BTreeMap::new(),
         arrows: BTreeMap::new(),
         mob_hurt_sequence: 0,
+        chat: None,
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -304,6 +306,9 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         return u32::MAX;
     };
     match packet {
+        S2C::Chat { kind, sender, text } => {
+            st.chat = Some((kind, sender, text));
+        }
         S2C::EntitySpawn {
             id,
             item,
@@ -515,6 +520,21 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
     }
     mark_light_dirty(st);
     bytes[0] as u32
+}
+
+/// Output: kind, sender byte length, sender UTF-8, then text UTF-8.
+#[no_mangle]
+pub extern "C" fn client_take_chat() -> usize {
+    let st = state();
+    let Some((kind, sender, text)) = st.chat.take() else {
+        return 0;
+    };
+    st.out.clear();
+    st.out.push(kind as u8);
+    st.out.push(sender.len() as u8);
+    st.out.extend_from_slice(sender.as_bytes());
+    st.out.extend_from_slice(text.as_bytes());
+    st.out.len()
 }
 
 fn set_block(st: &mut State, x: i32, y: i32, z: i32, block: u16) -> bool {
@@ -1246,6 +1266,22 @@ fn raycast(origin: [f64; 3], dir: [f64; 3], max: f64, include_sources: bool) -> 
 fn emit(st: &mut State, bytes: Vec<u8>) -> usize {
     st.out = bytes;
     st.out.len()
+}
+
+/// # Safety
+/// `ptr..ptr+len` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn client_enc_chat(ptr: *const u8, len: usize) -> usize {
+    let Ok(text) = std::str::from_utf8(input(ptr, len)) else {
+        return 0;
+    };
+    emit(
+        state(),
+        C2S::Chat {
+            text: text.to_owned(),
+        }
+        .encode(),
+    )
 }
 
 #[no_mangle]

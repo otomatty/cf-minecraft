@@ -1,6 +1,7 @@
 import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
+import type { ChatLine } from "./chat.ts";
 import type { DigBounds } from "./dig.ts";
 
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
@@ -58,6 +59,8 @@ export interface ClientExports {
 	client_mesh_ptr(): number;
 	client_mesh_count(layer: number): number;
 	client_packet(ptr: number, len: number): number;
+	client_take_chat(): number;
+	client_enc_chat(ptr: number, len: number): number;
 	client_predict_block(x: number, y: number, z: number, block: number): number;
 	client_seed(): bigint;
 	client_spawn(axis: number): number;
@@ -106,7 +109,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -216,6 +219,7 @@ export class ClientCore {
 
 	private readonly x: ClientExports;
 	private readonly decoder = new TextDecoder();
+	private readonly chatDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
 	observeLight: ((change: LightMutation) => void) | undefined;
 
 	constructor(instance: WebAssembly.Instance) {
@@ -414,6 +418,28 @@ export class ClientCore {
 		const changed = this.x.client_predict_block(x, y, z, block) === 1;
 		if (changed) this.observeLight?.({ type: "predict", x, y, z, block });
 		return changed;
+	}
+
+	takeChat(): ChatLine | null {
+		const bytes = this.out(this.x.client_take_chat());
+		if (bytes.length === 0) return null;
+		const textStart = 2 + bytes[1];
+		return {
+			kind: bytes[0] as ChatLine["kind"],
+			sender: this.chatDecoder.decode(bytes.subarray(2, textStart)),
+			text: this.chatDecoder.decode(bytes.subarray(textStart)),
+		};
+	}
+
+	encodeChat(text: string): Uint8Array<ArrayBuffer> {
+		const bytes = new TextEncoder().encode(text);
+		const ptr = this.x.mc_alloc(bytes.length);
+		try {
+			new Uint8Array(this.x.memory.buffer).set(bytes, ptr);
+			return this.out(this.x.client_enc_chat(ptr, bytes.length));
+		} finally {
+			this.x.mc_free(ptr, bytes.length);
+		}
 	}
 
 	encodeHello(viewDistance: number): Uint8Array<ArrayBuffer> {

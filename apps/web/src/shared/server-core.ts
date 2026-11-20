@@ -15,6 +15,7 @@ interface ServerExports {
 	server_client_biome(client: number): number;
 	server_client_position(client: number): number;
 	server_return_crafting(client: number): void;
+	server_set_display_name(client: number, ptr: number, len: number): void;
 	server_disconnect(client: number): void;
 	server_packet(client: number, ptr: number, len: number): void;
 	server_tick(): void;
@@ -111,8 +112,11 @@ export class ServerCore {
 		this.x.server_set_time(gameTime, dayTime);
 	}
 
-	connect(client: number, allowTeleport = false, position?: readonly [number, number, number], inventory?: Uint8Array): void {
+	connect(client: number, allowTeleport = false, position?: readonly [number, number, number], inventory?: Uint8Array, displayName?: string): void {
 		this.withInput(inventory ?? new Uint8Array(), (ptr, len) => this.x.server_connect(client, Number(allowTeleport), Number(position !== undefined), ...(position ?? [0, 0, 0] as const), ptr, len));
+		if (displayName !== undefined) {
+			this.withInput(new TextEncoder().encode(displayName), (ptr, len) => this.x.server_set_display_name(client, ptr, len));
+		}
 	}
 
 	setGameMode(mode: "creative" | "survival"): void {

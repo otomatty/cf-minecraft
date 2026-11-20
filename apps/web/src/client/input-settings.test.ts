@@ -100,12 +100,13 @@ test("migration does not repair invalid old preferences or explicit invalid inve
 	}
 });
 
-test("defaults cover nine actions and are independent copies", () => {
+test("defaults cover all actions and are independent copies", () => {
 	const settings = defaultSettings();
 	assert.equal(Object.keys(settings.keys).length, ACTIONS.length);
 	assert.equal(settings.keys.sprint, "KeyR");
 	assert.equal(settings.keys.fullscreen, "KeyF");
 	assert.equal(settings.keys.inventory, "KeyE");
+	assert.equal(settings.keys.chat, "KeyT");
 	assert.equal(settings.sensitivity, 100);
 	assert.equal(settings.fov, 70);
 	settings.keys.forward = "ArrowUp";
@@ -247,7 +248,7 @@ test("assignment validation rejects sprint fallback conflicts in either lock sta
 	settings.keys.forward = "ControlRight";
 	assert.deepEqual(duplicateKeys(settings.keys), []);
 	assert.deepEqual(effectiveKeyConflicts(settings), ["ControlLeft"]);
-	settings.keys.sprint = "KeyT";
+	settings.keys.sprint = "KeyY";
 	assert.deepEqual(effectiveKeyConflicts(settings), []);
 });
 test("saved sprint fallback conflicts reset to defaults; safe custom bindings still load", () => {
@@ -293,4 +294,19 @@ test("invalid individual volumes fall back independently", () => {
 	const settings = { ...defaultSettings(), sensitivity: 43 };
 	storage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, audio: { master: 101, effects: "10", music: 0 } }));
 	assert.deepEqual(loadSettings(storage), { ...settings, audio: { master: 80, effects: 100, music: 0 } });
+});
+
+test("pre-chat settings preserve custom bindings and select a free chat key", () => {
+	for (const storageKey of [SETTINGS_KEY, "maincraft.input-settings.v1"]) {
+		for (const forward of ["ArrowUp", "KeyT"]) {
+			const storage = memory();
+			const expected = { ...defaultSettings(), sensitivity: 73, fov: 89 };
+			expected.keys.forward = forward;
+			expected.keys.chat = forward === "KeyT" ? "KeyB" : "KeyT";
+			const { chat, ...keys } = expected.keys;
+			storage.setItem(storageKey, JSON.stringify({ ...expected, keys }));
+			assert.deepEqual(loadSettings(storage), expected);
+			assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+		}
+	}
 });
