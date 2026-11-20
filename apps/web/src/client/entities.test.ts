@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderSprite } from "./entities.ts";
+import { aimedMob, flameVertices, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderSprite } from "./entities.ts";
+import { flameFrames } from "./mobs/flame.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -174,6 +175,29 @@ test("mobs stand on the ground at gameplay height and use their protocol skin la
 	}
 });
 
+test("burning mobs draw two hitbox-sized planes with independently staggered cutout frames", () => {
+	const camera = [29999998, 1, -29999998];
+	const zombie: RenderMob = { kind: 4, position: [29999998.5, 2, -29999997.5], yaw: 0, moving: false, hurt: false, light: [0, 0] };
+	assert.equal(flameVertices([zombie], camera, 0, 100).length, 0);
+	const burning = [{ ...zombie, burning: true }];
+	const vertices = flameVertices(burning, camera, 0, 100);
+	assert.equal(vertices.length, 24 * 9);
+	assert.equal(vertices[1], 1);
+	assert.equal(vertices[2 * 9 + 1], Math.fround(1 + 1.95));
+	assert.ok(vertices[2] > 0.5 && vertices[12 * 9 + 2] < 0.5);
+	const layers = [0, 90, 180, 270].map(now => {
+		const data = flameVertices(burning, camera, now, 100);
+		return [data[6], data[12 * 9 + 6]];
+	});
+	assert.deepEqual(layers, [[100, 101], [101, 102], [102, 100], [100, 101]]);
+	assert.equal(new Set(flameFrames.map(frame => frame.join(","))).size, 3);
+	for (const frame of flameFrames) {
+		assert.equal(frame.length, 16 * 16 * 4);
+		const alpha = frame.filter((_, i) => i % 4 === 3);
+		assert.ok(alpha.includes(0) && alpha.includes(255));
+	}
+});
+
 test("aiming across the top of a rendered mob's head selects it from the front and the side", () => {
 	for (const [kind, headBox] of [[0, 0], [1, 0], [2, 1], [4, 1], [5, 1]] as const) {
 		for (const yaw of [0, 45, 90]) {
@@ -305,29 +329,37 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	const position = [29999998.25, 1, -3.5], moved = [29999998.5, 1, -3.5];
 	const spawn = packet(S2C.MobSpawn, position, 0, 0);
 	assert.equal(core.packet(spawn), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0, fuse: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0, fuse: 0, burning: false }]);
 	const entityPacket = new Uint8Array(5);
 	new DataView(entityPacket.buffer).setUint32(1, id);
 	entityPacket[0] = S2C.MobHurt;
 	assert.equal(core.packet(entityPacket), S2C.MobHurt);
 	assert.equal(core.packet(packet(S2C.MobMove, moved, 270)), S2C.MobMove);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1, fuse: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1, fuse: 0, burning: false }]);
 	assert.deepEqual([...core.encodeAttack(id)], [0x10, 0x80, 0, 0, 2]);
 	entityPacket[0] = S2C.EntityRemove;
 	core.packet(entityPacket);
 	assert.deepEqual(core.mobs, []);
 	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 1)), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0, fuse: 0 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0, fuse: 0, burning: false }]);
 	core.resetWorld();
 	assert.deepEqual(core.mobs, []);
 
 	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 6)), S2C.MobSpawn);
 	const fusePacket = Uint8Array.of(S2C.MobFuse, ...entityPacket.subarray(1), 12);
 	assert.equal(core.packet(fusePacket), S2C.MobFuse);
-	assert.deepEqual(core.mobs, [{ id, kind: 6, position, previous: position, yaw: 90, hurt: 0, fuse: 12 }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 6, position, previous: position, yaw: 90, hurt: 0, fuse: 12, burning: false }]);
 	fusePacket[5] = 0;
 	assert.equal(core.packet(fusePacket), S2C.MobFuse);
 	assert.equal(core.mobs[0].fuse, 0);
+	const burning = Uint8Array.of(S2C.MobBurning, ...entityPacket.subarray(1), 1);
+	assert.equal(core.packet(burning), S2C.MobBurning);
+	assert.equal(core.mobs[0].burning, true);
+	burning[5] = 0;
+	assert.equal(core.packet(burning), S2C.MobBurning);
+	assert.equal(core.mobs[0].burning, false);
+	burning[5] = 2;
+	assert.equal(core.packet(burning), -1);
 });
 
 test("zombie head uses the front of the 64×32 skin and the legs swing in opposite directions", () => {

@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -321,6 +321,19 @@ pub enum S2C {
         id: u32,
         ticks: u8,
     },
+    /// Impulse added to the receiving player's velocity. The server does not move them.
+    /// For walking prediction, halve each horizontal velocity before adding its
+    /// impulse component. On dry ground, halve the vertical velocity, add the
+    /// vertical impulse and cap the result at 0.4 blocks/tick. In air or fluid,
+    /// keep the vertical velocity. Flying prediction applies direct addition.
+    PlayerKnockback {
+        velocity: [f64; 3],
+    },
+    /// Visual flame on a mob. Values other than 0 or 1 are rejected.
+    MobBurning {
+        id: u32,
+        burning: bool,
+    },
     EntityRemove {
         id: u32,
     },
@@ -396,6 +409,8 @@ pub mod id {
     pub const S2C_ARROW_MOVE: u8 = 0x11;
     pub const S2C_MOB_FUSE: u8 = 0x12;
     pub const S2C_CHAT: u8 = 0x13;
+    pub const S2C_PLAYER_KNOCKBACK: u8 = 0x14;
+    pub const S2C_MOB_BURNING: u8 = 0x15;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -743,6 +758,20 @@ impl S2C {
                 w.i32(*entity as i32);
                 w.u8(*ticks);
             }
+            S2C::PlayerKnockback { velocity } => {
+                w.u8(id::S2C_PLAYER_KNOCKBACK);
+                for value in velocity {
+                    w.f64(*value);
+                }
+            }
+            S2C::MobBurning {
+                id: entity,
+                burning,
+            } => {
+                w.u8(id::S2C_MOB_BURNING);
+                w.i32(*entity as i32);
+                w.u8(u8::from(*burning));
+            }
             S2C::EntityRemove { id: entity } => {
                 w.u8(id::S2C_ENTITY_REMOVE);
                 w.i32(*entity as i32);
@@ -950,6 +979,18 @@ impl S2C {
                     return Err(DecodeError);
                 }
                 S2C::MobFuse { id, ticks }
+            }
+            id::S2C_PLAYER_KNOCKBACK => S2C::PlayerKnockback {
+                velocity: entity_pos(&mut r)?,
+            },
+            id::S2C_MOB_BURNING => {
+                let id = entity_id(&mut r)?;
+                let burning = match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError),
+                };
+                S2C::MobBurning { id, burning }
             }
             id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
                 id: entity_id(&mut r)?,
@@ -1483,7 +1524,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+        assert_eq!(PROTOCOL_VERSION, 25);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1709,6 +1750,44 @@ mod tests {
         assert_eq!(S2C::decode(&bytes), Ok(status));
         bytes[5] = 9;
         assert!(S2C::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
+        assert_eq!(PROTOCOL_VERSION, 25);
+        let packet = S2C::PlayerKnockback {
+            velocity: [0.4, 0.36, -0.2],
+        };
+        let bytes = packet.encode();
+        assert_eq!((bytes[0], bytes.len()), (0x14, 25));
+        assert_eq!(S2C::decode(&bytes), Ok(packet));
+        for end in 0..bytes.len() {
+            assert!(S2C::decode(&bytes[..end]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(S2C::decode(&trailing).is_err());
+        for offset in (1..25).step_by(8) {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut bad = bytes.clone();
+                bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+                assert!(S2C::decode(&bad).is_err());
+            }
+        }
+
+        for (burning, flag) in [(false, 0), (true, 1)] {
+            let packet = S2C::MobBurning { id: 12, burning };
+            let mut bytes = packet.encode();
+            assert_eq!((bytes[0], bytes.len(), bytes[5]), (0x15, 6, flag));
+            assert_eq!(S2C::decode(&bytes), Ok(packet.clone()));
+            for end in 0..bytes.len() {
+                assert!(S2C::decode(&bytes[..end]).is_err());
+            }
+            bytes.push(0);
+            assert!(S2C::decode(&bytes).is_err());
+        }
+        assert!(S2C::decode(&[0x15, 0, 0, 0, 0, 1]).is_err());
+        assert!(S2C::decode(&[0x15, 0, 0, 0, 12, 2]).is_err());
     }
 
     #[test]

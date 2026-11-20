@@ -157,6 +157,8 @@ const HOSTILE_TARGET_RANGE: f64 = 16.0;
 const ZOMBIE_ATTACK_RANGE: f64 = 0.8;
 const ZOMBIE_ATTACK_DAMAGE: u8 = 3;
 const ZOMBIE_ATTACK_INTERVAL: u8 = 20;
+const ZOMBIE_KNOCKBACK_HORIZONTAL: f64 = 0.4;
+const ZOMBIE_KNOCKBACK_VERTICAL: f64 = 0.36;
 const SUNLIGHT_DAMAGE: u8 = 2;
 const SUNLIGHT_INTERVAL: u8 = 20;
 const CREEPER_IGNITE_RANGE: f64 = 3.0;
@@ -167,6 +169,24 @@ const EXPLOSION_DAMAGE: f64 = 15.0;
 const PLAYER_BODY_CENTER: f64 = 0.9;
 const EXPLOSION_DROP_SALT: u64 = 25;
 const EXPLOSION_TOUGH_DIG_TICKS: u16 = 250;
+
+/// Horizontal unit from the zombie's feet to the player's feet, scaled to the
+/// knockback speed. A zero horizontal distance leaves only the upward component.
+/// Arithmetic is limited to addition, subtraction, multiplication, division and sqrt.
+fn zombie_knockback(from: [f64; 3], to: [f64; 3]) -> [f64; 3] {
+    let dx = to[0] - from[0];
+    let dz = to[2] - from[2];
+    let horizontal = (dx * dx + dz * dz).sqrt();
+    if horizontal == 0.0 {
+        [0.0, ZOMBIE_KNOCKBACK_VERTICAL, 0.0]
+    } else {
+        [
+            dx / horizontal * ZOMBIE_KNOCKBACK_HORIZONTAL,
+            ZOMBIE_KNOCKBACK_VERTICAL,
+            dz / horizontal * ZOMBIE_KNOCKBACK_HORIZONTAL,
+        ]
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Hostile {
@@ -206,6 +226,8 @@ pub struct Mob {
     last_dry_pos: [f64; 3],
     egg_ticks: Option<u16>,
     hostile: Option<Hostile>,
+    /// Visual flame. Derived each tick from sunlight and lava, so it is not hashed or saved.
+    burning: bool,
 }
 
 impl Mob {
@@ -229,6 +251,7 @@ impl Mob {
                 fuse: (kind == MobKind::Creeper).then_some(0),
                 ..Hostile::default()
             }),
+            burning: false,
         }
     }
 
@@ -479,19 +502,33 @@ impl Mob {
         damage
     }
 
-    fn sunlight_hit(&mut self, world: &World, daytime: bool) -> bool {
-        if !spec(self.kind).burns_in_sunlight {
+    fn sun_exposed(&self, world: &World, daytime: bool) -> bool {
+        if !spec(self.kind).burns_in_sunlight || self.hostile.is_none() {
             return false;
         }
         let pos = self.pos();
-        let head_offset = spec(self.kind).head_offset;
+        daytime
+            && self.health != 0
+            && pos[1] >= VOID_Y
+            && sees_sunlight(world, pos, spec(self.kind).head_offset)
+    }
+
+    fn touches_lava(&self, world: &World) -> bool {
+        let pos = self.pos();
+        block_at(world, pos, spec(self.kind).head_offset).is_some_and(blocks::is_lava)
+            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava)
+    }
+
+    /// Same sunlight exposure as `sunlight_hit`, or the lava contact used for damage.
+    fn burning_now(&self, world: &World, daytime: bool) -> bool {
+        self.sun_exposed(world, daytime) || self.touches_lava(world)
+    }
+
+    fn sunlight_hit(&mut self, world: &World, daytime: bool) -> bool {
+        let exposed = self.sun_exposed(world, daytime);
         let Some(hostile) = &mut self.hostile else {
             return false;
         };
-        let exposed = daytime
-            && self.health != 0
-            && pos[1] >= VOID_Y
-            && sees_sunlight(world, pos, head_offset);
         interval(&mut hostile.sunlight_ticks, exposed, SUNLIGHT_INTERVAL)
             && self.take_damage(SUNLIGHT_DAMAGE)
     }
@@ -1334,6 +1371,9 @@ impl Server {
         let mut fuse_updates = Vec::new();
         let mut explosions = Vec::new();
         let mut changed = Vec::new();
+        let mut knockbacks = Vec::new();
+        let mut burning_updates = Vec::new();
+        let daytime = day < 12000;
         for (&id, mob) in &mut self.mobs {
             let from = mob.chunk();
             if !self.world.chunks.contains_key(&from) || mob.pos()[1] < VOID_Y {
@@ -1385,9 +1425,16 @@ impl Server {
                 explosions.push(id);
                 continue;
             }
-            let sunlight = mob.sunlight_hit(&self.world, day < 12000);
+            let sunlight = mob.sunlight_hit(&self.world, daytime);
             if damage.is_some() || sunlight {
                 hits.push((id, damage == Some(DeathCause::Lava)));
+            }
+            if mob.health != 0 && mob.pos()[1] >= VOID_Y {
+                let burning = mob.burning_now(&self.world, daytime);
+                if burning != mob.burning {
+                    mob.burning = burning;
+                    burning_updates.push((id, burning));
+                }
             }
             if let Some((player, pos)) = target {
                 if mob.health == 0 || mob.pos()[1] < VOID_Y {
@@ -1396,10 +1443,13 @@ impl Server {
                 if let Some(arrow) = mob.shoot(&self.world, pos) {
                     shots.push(arrow);
                 } else if mob.attacks(pos) {
+                    let velocity = zombie_knockback(mob.pos(), pos);
                     let health = &mut self.clients.get_mut(&player).unwrap().health;
                     health.damage(ZOMBIE_ATTACK_DAMAGE, DeathCause::Zombie);
                     if health.vitals.dead {
                         player_deaths.push(player);
+                    } else {
+                        knockbacks.push((player, velocity));
                     }
                 }
             }
@@ -1411,6 +1461,15 @@ impl Server {
         }
         for &(id, ticks) in &fuse_updates {
             self.send_mob_fuse(id, ticks);
+        }
+        for (player, velocity) in knockbacks {
+            self.outbox
+                .push((player, S2C::PlayerKnockback { velocity }.encode()));
+        }
+        for &(id, burning) in &burning_updates {
+            if self.mobs.contains_key(&id) {
+                self.send_mob_burning(id, burning);
+            }
         }
         let blasts: Vec<[f64; 3]> = explosions
             .iter()
@@ -1501,6 +1560,10 @@ impl Server {
                         self.outbox
                             .push((client, S2C::MobFuse { id, ticks }.encode()));
                     }
+                    if self.mobs[&id].burning {
+                        self.outbox
+                            .push((client, S2C::MobBurning { id, burning: true }.encode()));
+                    }
                 }
             }
             c.visible_mobs = visible;
@@ -1511,6 +1574,15 @@ impl Server {
         let packet = S2C::MobFuse { id, ticks }.encode();
         for (&viewer, client) in &self.clients {
             if client.visible_mobs.contains_key(&id) {
+                self.outbox.push((viewer, packet.clone()));
+            }
+        }
+    }
+
+    fn send_mob_burning(&mut self, id: u32, burning: bool) {
+        let packet = S2C::MobBurning { id, burning }.encode();
+        for (&viewer, client) in &self.clients {
+            if client.joined && client.visible_mobs.contains_key(&id) {
                 self.outbox.push((viewer, packet.clone()));
             }
         }
@@ -3380,6 +3452,333 @@ mod tests {
                     })
                 )
         }));
+    }
+
+    fn knockback_packets(server: &mut Server) -> Vec<(u32, [f64; 3])> {
+        decoded(server)
+            .into_iter()
+            .filter_map(|(client, packet)| match packet {
+                S2C::PlayerKnockback { velocity } => Some((client, velocity)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zombie_attack_knockback_uses_the_horizontal_direction_and_skips_death() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let player = server.clients[&1].pos;
+        let zombie_at = [player[0] + 0.8, player[1], player[2]];
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, zombie_at));
+        server.take_outbox();
+        server.tick();
+        let zombie = server.mobs[&id].pos();
+        let player = server.clients[&1].pos;
+        assert!(zombie[0] > player[0]);
+        let expected = zombie_knockback(zombie, player);
+        assert_eq!(knockback_packets(&mut server), [(1, expected)]);
+        assert!(expected[0] < 0.0);
+        assert_eq!(expected[1], ZOMBIE_KNOCKBACK_VERTICAL);
+        let horizontal = (expected[0] * expected[0] + expected[2] * expected[2]).sqrt();
+        assert_eq!(horizontal, ZOMBIE_KNOCKBACK_HORIZONTAL);
+        assert_eq!(server.clients[&1].health.vitals.health, 17);
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let player = server.clients[&1].pos;
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, player));
+        server.take_outbox();
+        server.tick();
+        assert_eq!(server.mobs[&id].pos()[0], player[0]);
+        assert_eq!(server.mobs[&id].pos()[2], player[2]);
+        assert_eq!(
+            knockback_packets(&mut server),
+            [(1, [0.0, ZOMBIE_KNOCKBACK_VERTICAL, 0.0])]
+        );
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let player = server.clients[&1].pos;
+        server.clients.get_mut(&1).unwrap().health.vitals.health = ZOMBIE_ATTACK_DAMAGE;
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, player));
+        server.take_outbox();
+        server.tick();
+        assert!(server.clients[&1].health.vitals.dead);
+        assert!(knockback_packets(&mut server).is_empty());
+    }
+
+    fn report_knockback_prediction(server: &mut Server, position: [f64; 3]) -> Vec<(u32, S2C)> {
+        let rejected = server.stats.positions_rejected;
+        let [x, y, z] = position;
+        server.handle_packet(
+            1,
+            &C2S::PlayerPos {
+                x,
+                y,
+                z,
+                yaw: 0.0,
+                pitch: 0.0,
+            }
+            .encode(),
+        );
+        server.tick();
+        let packets = decoded(server);
+        let tick = server.game_time;
+        assert_eq!(
+            server.stats.positions_rejected, rejected,
+            "tick={tick} pos={position:?}"
+        );
+        assert_eq!(
+            server.client_position(1),
+            Some(position),
+            "tick={tick} pos={position:?}"
+        );
+        assert!(
+            packets
+                .iter()
+                .all(|(_, packet)| !matches!(packet, S2C::PlayerCorrect { .. })),
+            "tick={tick} pos={position:?}"
+        );
+        packets
+    }
+
+    #[test]
+    fn zombie_knockback_prediction_is_accepted_on_open_ground_and_against_a_wall() {
+        fn launch(wall: bool) {
+            let (mut server, id) = combat(GameMode::Survival);
+            server.set_time(0, 18000);
+            let origin = server.clients[&1].pos;
+            server.mobs.insert(
+                id,
+                Mob::new(MobKind::Zombie, [origin[0] + 0.8, origin[1], origin[2]]),
+            );
+            if wall {
+                let block_x = origin[0].floor() as i32 - 1;
+                let block_z = origin[2].floor() as i32;
+                for y in 1..=3 {
+                    for z in block_z - 1..=block_z + 1 {
+                        server.world.set_block(block_x, y, z, blocks::STONE);
+                    }
+                }
+            }
+            server.take_outbox();
+            server.tick();
+            let (_, velocity) = knockback_packets(&mut server)
+                .into_iter()
+                .next()
+                .expect("knockback");
+            server.mobs.remove(&id);
+            let mut body = physics::Player::new(server.client_position(1).unwrap());
+            body.on_ground = true;
+            body.apply_knockback(
+                velocity,
+                false,
+                &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+            );
+            let mut left_ground = false;
+            let mut landed = false;
+            for _ in 0..30 {
+                body.tick(
+                    physics::Input::default(),
+                    &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+                );
+                left_ground |= !body.on_ground;
+                report_knockback_prediction(&mut server, body.position);
+                if left_ground && body.on_ground {
+                    landed = true;
+                    break;
+                }
+            }
+            assert!(left_ground && landed, "wall={wall} body={body:?}");
+            if wall {
+                let face = origin[0].floor();
+                assert!(
+                    body.position[0] - physics::WIDTH / 2.0 >= face - 1e-6,
+                    "entered the wall: {body:?}"
+                );
+                assert!(body.position[0] < origin[0], "{body:?}");
+            } else {
+                assert!(origin[0] - body.position[0] > 0.5, "{body:?}");
+            }
+        }
+        launch(false);
+        launch(true);
+    }
+
+    fn assert_knockback_trajectory_lands(jump: bool, attack_ticks: &[usize]) {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let origin = server.client_position(1).unwrap();
+        let mut body = Player::new(origin);
+        body.on_ground = true;
+        let mut left_ground = false;
+        let mut hits = 0;
+        for tick in 0..30 {
+            // At tick 0 the player can receive attacks before taking the first step.
+            if tick > 0 {
+                body.tick(
+                    physics::Input {
+                        jump: jump && tick == 1,
+                        ..Default::default()
+                    },
+                    &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+                );
+            }
+            let attackers = attack_ticks.iter().filter(|&&when| when == tick).count();
+            let zombie_ids = (id + hits as u32..).take(attackers);
+            let [x, _, z] = body.position;
+            for zombie_id in zombie_ids.clone() {
+                server.mobs.insert(
+                    zombie_id,
+                    grounded(MobKind::Zombie, [x + 0.8, origin[1], z]),
+                );
+            }
+            let packets = report_knockback_prediction(&mut server, body.position);
+            let mut received = 0;
+            for (client, packet) in packets {
+                if let S2C::PlayerKnockback { velocity } = packet {
+                    assert_eq!(client, 1);
+                    if jump {
+                        assert!(!body.on_ground, "hit on jump tick {tick}");
+                    }
+                    let vy = body.velocity[1];
+                    body.apply_knockback(
+                        velocity,
+                        false,
+                        &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+                    );
+                    if !body.on_ground {
+                        assert_eq!(body.velocity[1], vy, "airborne hit on tick {tick}");
+                    }
+                    received += 1;
+                }
+            }
+            assert_eq!(received, attackers, "knockback packets on tick {tick}");
+            hits += received;
+            for zombie_id in zombie_ids {
+                server.mobs.remove(&zombie_id);
+            }
+            if left_ground && body.on_ground {
+                assert_eq!(hits, attack_ticks.len(), "landed before all attacks");
+                assert_eq!(body.position[1], origin[1]);
+                return;
+            }
+            left_ground |= !body.on_ground;
+        }
+        panic!("player did not land after attacks at {attack_ticks:?}: {body:?}");
+    }
+
+    #[test]
+    fn zombie_knockback_prediction_is_accepted_at_each_airborne_tick_of_a_jump() {
+        // A flat-ground jump is airborne for ticks 1–11, with its apex on tick 6.
+        for tick in 1..=11 {
+            assert_knockback_trajectory_lands(true, &[tick]);
+        }
+    }
+
+    #[test]
+    fn zombie_knockback_prediction_is_accepted_for_same_and_consecutive_tick_attacks() {
+        assert_knockback_trajectory_lands(false, &[0, 0]);
+        assert_knockback_trajectory_lands(false, &[0, 1]);
+    }
+
+    #[test]
+    fn excessive_rise_without_knockback_still_gets_a_position_correction() {
+        let (mut server, _) = combat(GameMode::Survival);
+        let [x, y, z] = server.client_position(1).unwrap();
+        for rise in [0.5, 1.0, 1.5] {
+            let packets = report_knockback_prediction(&mut server, [x, y + rise, z]);
+            assert!(packets
+                .iter()
+                .all(|(_, packet)| !matches!(packet, S2C::PlayerKnockback { .. })));
+        }
+        let rejected = server.stats.positions_rejected;
+        server.handle_packet(
+            1,
+            &C2S::PlayerPos {
+                x,
+                y: y + 1.625,
+                z,
+                yaw: 0.0,
+                pitch: 0.0,
+            }
+            .encode(),
+        );
+        server.tick();
+        assert_eq!(server.client_position(1), Some([x, y + 1.5, z]));
+        assert_eq!(server.stats.positions_rejected, rejected + 1);
+        let packets = decoded(&mut server);
+        assert!(packets.contains(&(1, S2C::PlayerCorrect { x, y: y + 1.5, z })));
+        assert!(packets
+            .iter()
+            .all(|(_, packet)| !matches!(packet, S2C::PlayerKnockback { .. })));
+    }
+
+    #[test]
+    fn burning_follows_sunlight_and_lava_and_is_sent_after_a_new_spawn() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, Mob::new(MobKind::Zombie, pos));
+        server.set_time(0, 6000);
+        server.take_outbox();
+        server.tick();
+        assert!(server.mobs[&id].burning);
+        assert!(decoded(&mut server).contains(&(1, S2C::MobBurning { id, burning: true })));
+
+        server.connect(2);
+        {
+            let viewer = server.clients.get_mut(&2).unwrap();
+            viewer.joined = true;
+            viewer.sent.insert(server.mobs[&id].chunk());
+        }
+        server.sync_mobs();
+        let spawned: Vec<_> = decoded(&mut server)
+            .into_iter()
+            .filter(|(client, _)| *client == 2)
+            .map(|(_, packet)| packet)
+            .collect();
+        assert!(matches!(
+            spawned.as_slice(),
+            [
+                S2C::MobSpawn { id: spawn_id, .. },
+                S2C::MobBurning {
+                    id: burn_id,
+                    burning: true,
+                },
+            ] if *spawn_id == id && *burn_id == id
+        ));
+
+        for x in 0..16 {
+            for z in 0..16 {
+                server.world.set_block(x, 4, z, blocks::STONE);
+            }
+        }
+        server.tick();
+        assert!(!server.mobs[&id].burning);
+        let shaded = decoded(&mut server);
+        assert!(shaded.contains(&(1, S2C::MobBurning { id, burning: false })));
+        assert!(shaded.contains(&(2, S2C::MobBurning { id, burning: false })));
+
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        let [x, _, z] = pos.map(|value| value.floor() as i32);
+        server.world.set_block(x, 1, z, blocks::LAVA);
+        for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+            for y in 1..=3 {
+                server.world.set_block(nx, y, nz, blocks::STONE);
+            }
+        }
+        server.take_outbox();
+        server.tick();
+        assert!(server.mobs[&id].burning);
+        assert_eq!(server.mobs[&id].kind, MobKind::Cow);
+        assert!(decoded(&mut server).contains(&(1, S2C::MobBurning { id, burning: true })));
+        server.tick();
+        assert!(server.mobs[&id].burning);
+        assert!(!decoded(&mut server)
+            .iter()
+            .any(|(_, packet)| matches!(packet, S2C::MobBurning { .. })));
     }
 
     #[test]

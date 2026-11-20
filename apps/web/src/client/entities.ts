@@ -1,6 +1,7 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
+import { flameFrames } from "./mobs/flame.ts";
 import { creeper, skeleton, zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
 
@@ -153,7 +154,30 @@ export interface RenderMob {
 	moving: boolean;
 	hurt: boolean;
 	fuse?: number;
+	burning?: boolean;
 	light: RenderItem["light"];
+}
+
+/** Cross two cutout sprites through the hitbox, leaving the upper body visible between tongues. */
+export function flameVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number, firstFrame: number): Float32Array {
+	const out: number[] = [];
+	const frame = Math.floor(timeMs / 90);
+	for (const { burning, kind, position } of mobs) {
+		if (!burning) continue;
+		const [x, y, z] = position.map((value, axis) => value - camera[axis]);
+		const { width, height } = mobHitboxes[kind];
+		const half = width * 0.62;
+		for (const direction of [-1, 1]) {
+			const dz = direction * half;
+			writeSprite(out, {
+				corners: [[x - half, y, z - dz], [x + half, y, z + dz],
+					[x + half, y + height, z + dz], [x - half, y + height, z - dz]],
+				texture: firstFrame + (frame + (direction === 1 ? 1 : 0)) % flameFrames.length,
+				light: [0, 0], // The flame pass uses the sprite color directly.
+			});
+		}
+	}
+	return new Float32Array(out);
 }
 
 // Protocol kinds index both this table and the GPU skin array. The 64×32 skins
