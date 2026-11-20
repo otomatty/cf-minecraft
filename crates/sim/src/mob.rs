@@ -3508,6 +3508,41 @@ mod tests {
         assert!(knockback_packets(&mut server).is_empty());
     }
 
+    fn report_knockback_prediction(server: &mut Server, position: [f64; 3]) -> Vec<(u32, S2C)> {
+        let rejected = server.stats.positions_rejected;
+        let [x, y, z] = position;
+        server.handle_packet(
+            1,
+            &C2S::PlayerPos {
+                x,
+                y,
+                z,
+                yaw: 0.0,
+                pitch: 0.0,
+            }
+            .encode(),
+        );
+        server.tick();
+        let packets = decoded(server);
+        let tick = server.game_time;
+        assert_eq!(
+            server.stats.positions_rejected, rejected,
+            "tick={tick} pos={position:?}"
+        );
+        assert_eq!(
+            server.client_position(1),
+            Some(position),
+            "tick={tick} pos={position:?}"
+        );
+        assert!(
+            packets
+                .iter()
+                .all(|(_, packet)| !matches!(packet, S2C::PlayerCorrect { .. })),
+            "tick={tick} pos={position:?}"
+        );
+        packets
+    }
+
     #[test]
     fn zombie_knockback_prediction_is_accepted_on_open_ground_and_against_a_wall() {
         fn launch(wall: bool) {
@@ -3536,48 +3571,20 @@ mod tests {
             server.mobs.remove(&id);
             let mut body = physics::Player::new(server.client_position(1).unwrap());
             body.on_ground = true;
-            for (slot, value) in body.velocity.iter_mut().zip(velocity) {
-                *slot += value;
-            }
-            let rejected = server.stats.positions_rejected;
+            body.apply_knockback(
+                velocity,
+                false,
+                &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+            );
             let mut left_ground = false;
             let mut landed = false;
-            for tick in 0..30 {
+            for _ in 0..30 {
                 body.tick(
                     physics::Input::default(),
                     &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
                 );
                 left_ground |= !body.on_ground;
-                let [x, y, z] = body.position;
-                server.handle_packet(
-                    1,
-                    &C2S::PlayerPos {
-                        x,
-                        y,
-                        z,
-                        yaw: 0.0,
-                        pitch: 0.0,
-                    }
-                    .encode(),
-                );
-                server.tick();
-                assert_eq!(
-                    server.stats.positions_rejected, rejected,
-                    "wall={wall} tick={tick} pos={:?}",
-                    body.position
-                );
-                assert_eq!(
-                    server.client_position(1),
-                    Some(body.position),
-                    "wall={wall} tick={tick}"
-                );
-                assert!(
-                    decoded(&mut server)
-                        .iter()
-                        .all(|(_, packet)| !matches!(packet, S2C::PlayerCorrect { .. })),
-                    "wall={wall} tick={tick} pos={:?}",
-                    body.position
-                );
+                report_knockback_prediction(&mut server, body.position);
                 if left_ground && body.on_ground {
                     landed = true;
                     break;
@@ -3597,6 +3604,115 @@ mod tests {
         }
         launch(false);
         launch(true);
+    }
+
+    fn assert_knockback_trajectory_lands(jump: bool, attack_ticks: &[usize]) {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.set_time(0, 18000);
+        let origin = server.client_position(1).unwrap();
+        let mut body = Player::new(origin);
+        body.on_ground = true;
+        let mut left_ground = false;
+        let mut hits = 0;
+        for tick in 0..30 {
+            // At tick 0 the player can receive attacks before taking the first step.
+            if tick > 0 {
+                body.tick(
+                    physics::Input {
+                        jump: jump && tick == 1,
+                        ..Default::default()
+                    },
+                    &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+                );
+            }
+            let attackers = attack_ticks.iter().filter(|&&when| when == tick).count();
+            let zombie_ids = (id + hits as u32..).take(attackers);
+            let [x, _, z] = body.position;
+            for zombie_id in zombie_ids.clone() {
+                server.mobs.insert(
+                    zombie_id,
+                    grounded(MobKind::Zombie, [x + 0.8, origin[1], z]),
+                );
+            }
+            let packets = report_knockback_prediction(&mut server, body.position);
+            let mut received = 0;
+            for (client, packet) in packets {
+                if let S2C::PlayerKnockback { velocity } = packet {
+                    assert_eq!(client, 1);
+                    if jump {
+                        assert!(!body.on_ground, "hit on jump tick {tick}");
+                    }
+                    let vy = body.velocity[1];
+                    body.apply_knockback(
+                        velocity,
+                        false,
+                        &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+                    );
+                    if !body.on_ground {
+                        assert_eq!(body.velocity[1], vy, "airborne hit on tick {tick}");
+                    }
+                    received += 1;
+                }
+            }
+            assert_eq!(received, attackers, "knockback packets on tick {tick}");
+            hits += received;
+            for zombie_id in zombie_ids {
+                server.mobs.remove(&zombie_id);
+            }
+            if left_ground && body.on_ground {
+                assert_eq!(hits, attack_ticks.len(), "landed before all attacks");
+                assert_eq!(body.position[1], origin[1]);
+                return;
+            }
+            left_ground |= !body.on_ground;
+        }
+        panic!("player did not land after attacks at {attack_ticks:?}: {body:?}");
+    }
+
+    #[test]
+    fn zombie_knockback_prediction_is_accepted_at_each_airborne_tick_of_a_jump() {
+        // A flat-ground jump is airborne for ticks 1–11, with its apex on tick 6.
+        for tick in 1..=11 {
+            assert_knockback_trajectory_lands(true, &[tick]);
+        }
+    }
+
+    #[test]
+    fn zombie_knockback_prediction_is_accepted_for_same_and_consecutive_tick_attacks() {
+        assert_knockback_trajectory_lands(false, &[0, 0]);
+        assert_knockback_trajectory_lands(false, &[0, 1]);
+    }
+
+    #[test]
+    fn excessive_rise_without_knockback_still_gets_a_position_correction() {
+        let (mut server, _) = combat(GameMode::Survival);
+        let [x, y, z] = server.client_position(1).unwrap();
+        for rise in [0.5, 1.0, 1.5] {
+            let packets = report_knockback_prediction(&mut server, [x, y + rise, z]);
+            assert!(packets
+                .iter()
+                .all(|(_, packet)| !matches!(packet, S2C::PlayerKnockback { .. })));
+        }
+        let rejected = server.stats.positions_rejected;
+        server.handle_packet(
+            1,
+            &C2S::PlayerPos {
+                x,
+                y: y + 1.625,
+                z,
+                yaw: 0.0,
+                pitch: 0.0,
+            }
+            .encode(),
+        );
+        server.tick();
+        assert_eq!(server.client_position(1), Some([x, y + 1.5, z]));
+        assert_eq!(server.stats.positions_rejected, rejected + 1);
+        let packets = decoded(&mut server);
+        assert!(packets.contains(&(1, S2C::PlayerCorrect { x, y: y + 1.5, z })));
+        assert!(packets
+            .iter()
+            .all(|(_, packet)| !matches!(packet, S2C::PlayerKnockback { .. })));
     }
 
     #[test]

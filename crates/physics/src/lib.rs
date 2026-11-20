@@ -6,6 +6,7 @@ pub const WIDTH: f64 = 0.6_f32 as f64;
 pub const HEIGHT: f64 = 1.8_f32 as f64;
 pub const EYE_HEIGHT: f64 = 1.62;
 pub const STEP_HEIGHT: f64 = 0.6_f32 as f64;
+const KNOCKBACK_MAX_VY: f64 = 0.4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
@@ -206,6 +207,26 @@ impl Player {
             grounded |= b.max[1] <= feet && probe.intersects(b)
         });
         grounded
+    }
+    /// Compose a received impulse before the next prediction tick.
+    pub fn apply_knockback(
+        &mut self,
+        [kx, ky, kz]: [f64; 3],
+        flying: bool,
+        world: &impl CollisionWorld,
+    ) {
+        if flying {
+            self.velocity[0] += kx;
+            self.velocity[1] += ky;
+            self.velocity[2] += kz;
+            return;
+        }
+        self.velocity[0] = self.velocity[0] / 2.0 + kx;
+        self.velocity[2] = self.velocity[2] / 2.0 + kz;
+        // Horizontal movement and block updates can change contact between ticks.
+        if self.on_ground && !in_water(world, self.position) && self.is_grounded(world) {
+            self.velocity[1] = (self.velocity[1] / 2.0 + ky).min(KNOCKBACK_MAX_VY);
+        }
     }
     pub fn tick(&mut self, input: Input, world: &impl CollisionWorld) {
         self.in_water = in_water(world, self.position);

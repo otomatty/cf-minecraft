@@ -406,9 +406,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             }
         }
         S2C::PlayerKnockback { velocity } => {
-            for (axis, value) in velocity.into_iter().enumerate() {
-                st.player.velocity[axis] += value;
-            }
+            st.player
+                .apply_knockback(velocity, st.flying, &Collisions(&st.world));
         }
         S2C::MobBurning { id, burning } => {
             if let Some(mob) = st.mobs.get_mut(&id) {
@@ -1818,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn player_knockback_adds_to_velocity_while_flying_and_walking() {
+    fn player_knockback_packets_add_in_flight_and_compose_when_walking() {
         let _guard = CLIENT_LOCK.lock().unwrap();
         client_new();
         client_player_reset(1.0, 64.0, 2.0);
@@ -1851,12 +1850,29 @@ mod tests {
         .encode();
         assert_eq!(unsafe { client_packet(welcome.as_ptr(), welcome.len()) }, 0);
         assert!(!state().flying);
+        let st = state();
+        st.world.chunks.insert((0, 0), Chunk::empty(0, 0));
+        st.world.set_block(1, 63, 2, blocks::STONE);
+        st.player.on_ground = true;
+        st.player.velocity = [0.5, -0.08, -0.125];
         let third = S2C::PlayerKnockback {
-            velocity: [0.0, 0.36, 0.0],
+            velocity: [0.125, 0.36, 0.125],
         }
         .encode();
         assert_eq!(unsafe { client_packet(third.as_ptr(), third.len()) }, 0x14);
-        assert_eq!(state().player.velocity, [0.5, 0.72, -0.1]);
+        assert_eq!(state().player.position, [1.0, 64.0, 2.0]);
+        assert_eq!(state().player.velocity, [0.375, 0.36 - 0.04, 0.0625]);
+        assert_eq!(unsafe { client_packet(third.as_ptr(), third.len()) }, 0x14);
+        assert_eq!(state().player.velocity, [0.3125, 0.4, 0.15625]);
+
+        // A flooded floor still supports the player. Fluid contact can change
+        // before prediction samples it on the next tick.
+        let st = state();
+        st.world.set_block(1, 64, 2, blocks::WATER);
+        st.player.velocity[1] = -0.02;
+        assert!(st.player.on_ground && !st.player.in_water);
+        assert_eq!(unsafe { client_packet(third.as_ptr(), third.len()) }, 0x14);
+        assert_eq!(state().player.velocity, [0.28125, -0.02, 0.203125]);
     }
 
     #[test]

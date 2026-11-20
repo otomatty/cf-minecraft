@@ -322,6 +322,10 @@ pub enum S2C {
         ticks: u8,
     },
     /// Impulse added to the receiving player's velocity. The server does not move them.
+    /// For walking prediction, halve each horizontal velocity before adding its
+    /// impulse component. On dry ground, halve the vertical velocity, add the
+    /// vertical impulse and cap the result at 0.4 blocks/tick. In air or fluid,
+    /// keep the vertical velocity. Flying prediction applies direct addition.
     PlayerKnockback {
         velocity: [f64; 3],
     },
