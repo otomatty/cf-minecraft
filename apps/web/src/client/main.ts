@@ -23,7 +23,7 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
-import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, visibleChatLines, type TimedChatLine } from "./chat.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
@@ -703,6 +703,8 @@ async function main(): Promise<void> {
 			return element;
 		};
 		const key = (action: Action) => kbd(action === "sprint" ? sprintKey(settings, keyboardLocked) : settings.keys[action]);
+		const chatKeys: Array<Node | string> = [key("chat")];
+		if (implicitEnterOpensChat(settings.keys)) chatKeys.push(" / ", kbd("Enter"));
 		const groups: Array<[string, Array<[string, Array<Node | string>]>]> = [
 			["移動", [
 				["前後左右", [key("forward"), " / ", key("left"), " / ", key("backward"), " / ", key("right")]],
@@ -713,7 +715,7 @@ async function main(): Promise<void> {
 				["壊す", ["左クリック"]], ["置く", ["右クリック"]], ["見ているブロックを持つ", ["中クリック"]],
 				["ブロック一覧", [key("inventory")]], ["ホットバーの切替", ["1〜9 / ホイール"]],
 			]],
-			["画面", [["メニュー", [kbd("Esc")]], ["全画面", [key("fullscreen")]], ["チャット", [key("chat"), " / ", kbd("Enter")]]]],
+			["画面", [["メニュー", [kbd("Esc")]], ["全画面", [key("fullscreen")]], ["チャット", chatKeys]]],
 			["開発者向け", [["決定論チェック", [kbd("F8")]]]],
 		];
 		$("controls-groups").replaceChildren(...groups.map(([title, rows]) => {
@@ -1088,7 +1090,7 @@ async function main(): Promise<void> {
 			if (menuView === "controls") showMenuView("menu");
 			return;
 		}
-		if (canInteract() && (matchesKey(e.code, settings.keys.chat) || e.key === "Enter")) {
+		if (canInteract() && keyOpensChat(settings.keys, e.code, e.key)) {
 			e.preventDefault();
 			if (e.repeat) return;
 			chatOpen = true;

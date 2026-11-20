@@ -667,7 +667,8 @@ async function chat() {
 		check(await page.$eval("#chat-log", log => log.textContent.includes("<あなた> local chat <b>text</b>")
 			&& !log.querySelector("b")), "chat local: the message is rendered as literal text");
 
-		await resumePointerLock(page, "chat local after send");
+		// Enter is a user gesture, so closeChat(true) must restore the lock without a click.
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
 		await page.keyboard.press("Enter");
 		await page.waitForFunction(() => window.__mc.stats().chat.open
 			&& document.activeElement?.id === "chat-input" && !document.pointerLockElement);
@@ -688,6 +689,7 @@ async function chat() {
 		await page.waitForFunction(() => !window.__mc.stats().chat.open);
 		await page.waitForFunction(time => window.__mc.stats().gameTime > time, {}, gameTime);
 		check(await page.evaluate(() => window.__mc.stats().chat.lines.length === 1), "chat local: Escape discards the draft");
+		// Chrome does not treat Escape as a user gesture, so closeChat cannot restore pointer lock on its own.
 		await resumePointerLock(page, "chat local after cancel");
 		check(errors.length === 0, "chat local: no page errors", errors.join(" | "));
 	} catch (err) {

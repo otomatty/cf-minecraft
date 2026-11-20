@@ -26,6 +26,14 @@ function normalizedKey(code: string): string {
 export function matchesKey(code: string, assigned: string): boolean {
 	return normalizedKey(code) === normalizedKey(assigned);
 }
+/** Enter and NumpadEnter both report key "Enter", so either binding blocks the unlabeled shortcut. */
+export function implicitEnterOpensChat(keys: Record<Action, string>): boolean {
+	return !ACTIONS.some(action => action !== "chat" && (matchesKey(keys[action], "Enter") || matchesKey(keys[action], "NumpadEnter")));
+}
+/** The assigned chat key opens chat. Enter does too, unless Enter or NumpadEnter is used elsewhere. */
+export function keyOpensChat(keys: Record<Action, string>, code: string, key: string): boolean {
+	return matchesKey(code, keys.chat) || (key === "Enter" && implicitEnterOpensChat(keys));
+}
 export function duplicateKeys(keys: Record<Action, string>): string[] {
 	return [...new Set(ACTIONS.map(action => keys[action]).filter(code => typeof code === "string").map(normalizedKey).filter((code, i, codes) => codes.indexOf(code) !== i))];
 }

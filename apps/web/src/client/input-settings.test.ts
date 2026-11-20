@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
+import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
 
 const memory = () => {
 	const values = new Map<string, string>();
@@ -211,6 +211,27 @@ test("assignments preserve reserved keys and Keyboard Lock excludes Escape", () 
 	for (const code of ["KeyW", "ControlLeft", "ControlRight"]) assert.ok(LOCKABLE_CODES.includes(code));
 });
 
+test("implicit Enter opens chat only when Enter and NumpadEnter are free", () => {
+	const keys = defaultSettings().keys;
+	assert.equal(implicitEnterOpensChat(keys), true);
+	assert.equal(keyOpensChat(keys, "Enter", "Enter"), true);
+	assert.equal(keyOpensChat(keys, "NumpadEnter", "Enter"), true);
+	assert.equal(keyOpensChat(keys, "KeyT", "t"), true);
+	for (const inventory of ["Enter", "NumpadEnter"]) {
+		const assigned = { ...keys, inventory };
+		assert.equal(implicitEnterOpensChat(assigned), false);
+		assert.equal(keyOpensChat(assigned, "Enter", "Enter"), false);
+		assert.equal(keyOpensChat(assigned, "NumpadEnter", "Enter"), false);
+		assert.equal(keyOpensChat(assigned, "KeyT", "t"), true);
+	}
+	const chatEnter = { ...keys, chat: "Enter" };
+	assert.equal(keyOpensChat(chatEnter, "Enter", "Enter"), true);
+	assert.equal(implicitEnterOpensChat(chatEnter), true);
+	const chatEnterInventoryNumpad = { ...keys, chat: "Enter", inventory: "NumpadEnter" };
+	assert.equal(keyOpensChat(chatEnterInventoryNumpad, "Enter", "Enter"), true);
+	assert.equal(keyOpensChat(chatEnterInventoryNumpad, "NumpadEnter", "Enter"), false);
+	assert.equal(implicitEnterOpensChat(chatEnterInventoryNumpad), false);
+});
 test("both sides of each modifier match the assigned key", () => {
 	assert.equal(matchesKey("ShiftRight", defaultSettings().keys.down), true);
 	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {
