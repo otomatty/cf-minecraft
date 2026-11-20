@@ -1851,6 +1851,58 @@ async function survivalHunger() {
 	} finally { await page.close(); }
 }
 
+async function entitySave() {
+	const world = `e2e-entity-save-${run}`;
+	const { page, errors } = await open(`server=local&world=${world}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
+	const reopen = phase => page.goto(`${edge}/play.html?server=local&world=${world}&view=4&phase=${phase}`, { waitUntil: "load" });
+	try {
+		const { spawn } = await settle(page, "entity save", chunksInView(4));
+		await page.waitForFunction(() => window.__mc.stats().mobs.some(mob => mob.kind <= 3),
+			{ timeout: 90000, polling: 100 });
+		const saved = await page.evaluate(async () => {
+			const { mobs, gameTime } = window.__mc.stats();
+			const animal = mobs.find(mob => mob.kind <= 3);
+			await window.__mc.exportWorld();
+			return { animal, gameTime };
+		});
+		await reopen("animal");
+		const restored = await page.waitForFunction(({ animal, gameTime }) => {
+			const stats = window.__mc?.stats();
+			if (stats?.joinedGameTime == null || stats.joinedGameTime < gameTime) return false;
+			return stats.mobs.find(mob => mob.kind === animal.kind
+				&& Math.hypot(mob.position[0] - animal.position[0], mob.position[2] - animal.position[2]) <= 2);
+		}, { timeout: 30000, polling: 50 }, saved);
+		const animal = await restored.jsonValue();
+		await restored.dispose();
+		check(animal.kind === saved.animal.kind, "entity save: the same kind of animal reappears within two blocks", animal.position.join(", "));
+
+		await settle(page, "entity save after reopening", chunksInView(4));
+		await resumePointerLock(page, "entity save: pointer lock before dropping");
+		await page.keyboard.press("Digit1");
+		const item = await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			api.setCamera(x + 8, y + 1.62, z, 0, 0);
+			return api.stats().inventory[0].item;
+		}, spawn);
+		await page.keyboard.press("KeyQ");
+		await page.waitForFunction(item => window.__mc.stats().entities.some(e => e.item === item && e.count === 1), {}, item);
+		await page.evaluate(async ([x, y, z]) => {
+			window.__mc.setCamera(x, y + 1.62, z, 0, 0);
+			await window.__mc.exportWorld();
+		}, spawn);
+		await reopen("item");
+		const dropped = await page.waitForFunction(item => window.__mc?.stats().entities?.find(e => e.item === item && e.count === 1),
+			{ timeout: 30000, polling: 50 }, item);
+		const entity = await dropped.jsonValue();
+		await dropped.dispose();
+		check(entity.item === item && entity.count === 1, "entity save: the dropped item survived reopening", entity.position.join(", "));
+		check(errors.length === 0, "entity save: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "entity-save", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function mobs() {
 	const { page, errors } = await open(`server=local&world=e2e-mobs-${run}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
 	try {
@@ -2498,6 +2550,7 @@ try {
 	await waterFlow();
 	await lavaFlow();
 	await mobs();
+	await entitySave();
 	await mobCombat();
 	await bow();
 	await zombies();

@@ -314,7 +314,7 @@ function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 		tick() {}, takeOutbox() { return []; }, takeRequests() { return requests.splice(0); },
 		loadChunk(cx, cz, data) { loaded.push([cx, cz, data]); },
 		chunkMissing(cx, cz) { missing.push([cx, cz]); },
-		takeDirty() { return dirty.shift() ?? null; }, gameTime: 1n, dayTime: 1n,
+		flushEntityChanges() {}, takeDirty() { return dirty.shift() ?? null; }, gameTime: 1n, dayTime: 1n,
 	};
 	return { loaded, missing };
 }
@@ -784,6 +784,47 @@ test("DO keeps each user's inventory across socket replacement", async t => {
 	assert.deepEqual(core.inventoryData(2), saved);
 	assert.equal((await f.join("another-user")).status, 101);
 	assert.notDeepEqual(core.inventoryData(3), saved);
+});
+
+test("DO eviction saves animals and dropped items and the recreated world streams them", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.env.GEN_OFFLOAD = "0";
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	f.world.lastAccessCheck = Date.now();
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const join = async () => {
+		assert.equal((await f.join("player")).status, 101);
+		const [id, socket] = [...f.world.sockets.entries()][0];
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		f.world.core.packet(id, client.encodeHello(4));
+		let consumed = 0;
+		const step = () => {
+			f.world.step();
+			for (const data of socket.sent.slice(consumed)) if (typeof data !== "string") client.packet(data);
+			consumed = socket.sent.length;
+		};
+		return { id, client, step, core: f.world.core };
+	};
+	const before = await join();
+	for (let i = 0; i < 20; i++) before.step();
+	before.core.setTime(399n, 6000n);
+	const item = before.client.inventory[0]!.item;
+	before.core.packet(before.id, before.client.encodeDropItem([1, 0, 0]));
+	before.step();
+	const animal = before.client.mobs[0];
+	assert.ok(animal);
+	assert.deepEqual(before.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
+	assert.equal(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n, 0);
+
+	f.world.evict();
+	assert.ok(f.sqlite.prepare("SELECT count(*) AS n FROM chunks").get().n > 0);
+	const restored = await join();
+	for (let i = 0; i < 20; i++) restored.step();
+	assert.ok(restored.client.mobs.some(mob => mob.kind === animal.kind
+		&& Math.hypot(mob.position[0] - animal.position[0], mob.position[2] - animal.position[2]) <= 2));
+	assert.deepEqual(restored.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
 });
 
 test("DO restores the saved mode and persists creative for a missing gamemode", t => {

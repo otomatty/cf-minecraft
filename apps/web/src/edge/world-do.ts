@@ -440,7 +440,7 @@ export class WorldDO extends DurableObject<Env> {
 			core.loadChunk(cx, cz, data);
 		}
 
-		if (core.gameTime % BigInt(AUTOSAVE_TICKS) === 0n) this.save();
+		if (core.gameTime % BigInt(AUTOSAVE_TICKS) === 0n) this.save(false);
 
 		if (this.sockets.size === 0) {
 			if (++this.idleTicks >= IDLE_STOP_TICKS) {
@@ -452,9 +452,10 @@ export class WorldDO extends DurableObject<Env> {
 		}
 	}
 
-	private save(): number {
+	private save(includeEntityChanges = true): number {
 		const core = this.core;
 		if (!core) return 0;
+		if (includeEntityChanges) core.flushEntityChanges();
 		let saved = 0;
 		// One transaction: a crash leaves either the old or the new snapshot.
 		this.ctx.storage.transactionSync(() => {

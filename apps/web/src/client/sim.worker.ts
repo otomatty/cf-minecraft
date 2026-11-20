@@ -118,10 +118,11 @@ let saving: Promise<void> | null = null;
 let lastSaveTick = 0;
 const reads = new PendingChunkReads((cx, cz) => persistence ? persistence.readChunk(cx, cz) : Promise.resolve(null));
 
-function save(): Promise<void> {
+function save(includeEntityChanges = true): Promise<void> {
 	const c = core;
 	const s = persistence;
 	if (!c || !s) return Promise.resolve();
+	if (includeEntityChanges) c.flushEntityChanges();
 	// Drain synchronously so the snapshot is consistent, then write in order.
 	const chunks: DirtyChunk[] = [];
 	for (let d = c.takeDirty(); d !== null; d = c.takeDirty()) chunks.push(d);
@@ -201,7 +202,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 			const sinceSave = t - lastSaveTick;
 			// Explicit saves use the store's serial queue. Avoid queuing periodic
 			// snapshots while any save is still pending.
-			if (persistence && !saving && (sinceSave >= AUTOSAVE_TICKS || (sinceSave >= DIRTY_SAVE_TICKS && c.dirtyChunks > 0))) void save();
+			if (persistence && !saving && (sinceSave >= AUTOSAVE_TICKS || (sinceSave >= DIRTY_SAVE_TICKS && c.dirtyChunks > 0))) void save(false);
 			if (t % STATS_TICKS === 0) {
 				const stats: ServerStats = {
 					generation: generation?.stats() ?? null,

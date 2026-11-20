@@ -1,4 +1,4 @@
-//! Transient entities, processed in ascending world-local ID order.
+//! Dropped item entities, processed in ascending world-local ID order.
 use physics::{Aabb, BlockWorld, CollisionWorld};
 use world::World;
 
@@ -33,7 +33,7 @@ impl Entity {
         )
     }
     pub fn tick(&mut self, world: &World) {
-        self.age += 1;
+        self.age = self.age.saturating_add(1);
         self.pickup_delay = self.pickup_delay.saturating_sub(1);
         let bounds = self.bounds();
         // Below/above world bounds are empty, while unknown neighboring chunks are solid.
@@ -192,7 +192,11 @@ mod tests {
         item(&mut s, [2.5, 1.0, 2.5], [0.0; 3], 0);
         s.world.chunks.get_mut(&(0, 0)).unwrap().dirty = false;
         s.unload_far_chunks();
+        assert_eq!(s.entities.len(), 1);
+        let (cx, cz, bytes) = s.take_dirty().unwrap();
         assert!(s.entities.is_empty());
+        assert!(s.load_chunk(cx, cz, &bytes));
+        assert_eq!(s.entities.len(), 1);
     }
     fn joined() -> Server {
         let mut s = Server::new(5, Generator::Flat);

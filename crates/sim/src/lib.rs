@@ -18,6 +18,7 @@
 
 mod arrow;
 pub mod entity;
+mod entity_storage;
 pub mod furnace;
 mod health;
 pub mod inventory;
@@ -54,6 +55,7 @@ const DEFAULT_VIEW_DISTANCE: i32 = 6;
 /// Chunks further than view distance + this margin from every player are dropped.
 const UNLOAD_MARGIN: i32 = 2;
 const UNLOAD_INTERVAL: i64 = 100;
+const ENTITY_SAVE_INTERVAL: i64 = 600;
 /// Generous interaction range; real reach rules arrive with survival mode.
 const MAX_REACH: f64 = 8.0;
 
@@ -216,6 +218,7 @@ struct SavedChunk {
     chunk: Chunk,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
     scheduled_blocks: Vec<(u16, [i32; 3])>,
+    entities: Vec<entity_storage::SavedEntity>,
 }
 
 pub struct Server {
@@ -226,6 +229,8 @@ pub struct Server {
     mobs: BTreeMap<u32, mob::Mob>,
     arrows: BTreeMap<u32, arrow::Arrow>,
     next_entity_id: u32,
+    entity_changes: BTreeSet<ChunkPos>,
+    entity_unloads: BTreeSet<ChunkPos>,
     game_mode: GameMode,
     seed: i64,
     generator: Generator,
@@ -262,6 +267,8 @@ impl Server {
             mobs: BTreeMap::new(),
             arrows: BTreeMap::new(),
             next_entity_id: 1,
+            entity_changes: BTreeSet::new(),
+            entity_unloads: BTreeSet::new(),
             game_mode: GameMode::Creative,
             seed,
             generator,
@@ -359,21 +366,21 @@ impl Server {
             return;
         };
         if self.entities.len() >= 1024 {
-            self.entities.pop_first();
+            let (_, removed) = self.entities.pop_first().unwrap();
+            self.mark_entity_chunk(removed.chunk());
         }
-        self.entities.insert(
-            id,
-            entity::Entity {
-                kind: entity::EntityKind::Item,
-                pos,
-                velocity,
-                item,
-                count,
-                age: 0,
-                pickup_delay,
-                on_ground: false,
-            },
-        );
+        let entity = entity::Entity {
+            kind: entity::EntityKind::Item,
+            pos,
+            velocity,
+            item,
+            count,
+            age: 0,
+            pickup_delay,
+            on_ground: false,
+        };
+        self.mark_entity_chunk(entity.chunk());
+        self.entities.insert(id, entity);
     }
     fn tick_entities(&mut self) {
         let held: Vec<_> = self
@@ -725,6 +732,8 @@ impl Server {
     }
 
     pub fn tick(&mut self) {
+        // Mark both ends of the tick so moves and removals also save the old chunk.
+        self.mark_entity_chunks();
         // Expire immunity before processing attacks, so a new hit keeps all ten ticks.
         for mob in self.mobs.values_mut() {
             mob.hurt_ticks = mob.hurt_ticks.saturating_sub(1);
@@ -760,8 +769,12 @@ impl Server {
                 self.outbox.push((id, bytes.clone()));
             }
         }
+        self.mark_entity_chunks();
         if self.game_time % UNLOAD_INTERVAL == 0 {
             self.unload_far_chunks();
+        }
+        if self.game_time % ENTITY_SAVE_INTERVAL == 0 {
+            self.flush_entity_changes();
         }
         self.tick_furnaces();
         self.tick_random_blocks();
@@ -1683,22 +1696,41 @@ impl Server {
     }
 
     fn unload_far_chunks(&mut self) {
-        let clients = &self.clients;
-        let removed: Vec<_> = self
-            .world
-            .chunks
-            .iter()
-            .filter_map(|(&(cx, cz), chunk)| {
-                let keep = chunk.dirty || players_keep_chunk(clients, cx, cz);
-                (!keep).then_some((cx, cz))
-            })
-            .collect();
+        let mut removed = Vec::new();
+        let mut waiting_for_save = Vec::new();
+        for (&(cx, cz), chunk) in &mut self.world.chunks {
+            let c = (cx, cz);
+            if players_keep_chunk(&self.clients, cx, cz) {
+                continue;
+            }
+            if self.entity_changes.contains(&c) {
+                if !chunk.dirty {
+                    waiting_for_save.push(c);
+                }
+                chunk.dirty = true;
+                self.entity_unloads.insert(c);
+            } else if !chunk.dirty {
+                removed.push(c);
+            }
+        }
+        // Transient entities in otherwise unloadable chunks despawn on schedule.
+        if !waiting_for_save.is_empty() {
+            self.mobs.retain(|_, mob| {
+                mob.is_animal() || waiting_for_save.binary_search(&mob.chunk()).is_err()
+            });
+            self.arrows
+                .retain(|_, arrow| waiting_for_save.binary_search(&arrow.chunk()).is_err());
+        }
+        self.unload_chunks(&removed);
+    }
+
+    fn unload_chunks(&mut self, removed: &[ChunkPos]) {
         if !removed.is_empty() {
             let keep = |[x, _, z]: [i32; 3]| removed.binary_search(&(x >> 4, z >> 4)).is_err();
             self.scheduled_blocks.retain(|&(_, pos)| keep(pos));
             self.scheduled_block_times.retain(|&pos, _| keep(pos));
         }
-        for (cx, cz) in removed {
+        for &(cx, cz) in removed {
             self.world.remove_chunk(cx, cz);
             self.furnaces
                 .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
@@ -1737,16 +1769,28 @@ impl Server {
                 chunk,
                 furnaces,
                 scheduled_blocks,
-            }) => {
+                entities,
+            }) if entities.len() as u64 <= self.remaining_entity_ids() => {
                 for (delay, pos) in scheduled_blocks {
                     self.queue_scheduled_tick(pos, self.game_time.saturating_add(i64::from(delay)));
                 }
                 self.furnaces.extend(furnaces);
                 self.world.insert_chunk(chunk);
+                for entity in entities {
+                    let id = self.allocate_entity_id().unwrap();
+                    match entity {
+                        entity_storage::SavedEntity::Animal(mob) => {
+                            self.mobs.insert(id, mob);
+                        }
+                        entity_storage::SavedEntity::Item(item) => {
+                            self.entities.insert(id, item);
+                        }
+                    }
+                }
                 self.stats.chunks_loaded_from_storage += 1;
                 true
             }
-            Err(_) => {
+            _ => {
                 self.stored.remove(&c);
                 false
             }
@@ -1794,6 +1838,12 @@ impl Server {
                 time.saturating_sub(self.game_time)
                     .clamp(0, i64::from(u16::MAX)) as u16,
             );
+        }
+        let c = (cx, cz);
+        self.write_saved_entities(c, &mut w);
+        self.entity_changes.remove(&c);
+        if self.entity_unloads.remove(&c) && !players_keep_chunk(&self.clients, cx, cz) {
+            self.unload_chunks(&[c]);
         }
         Some((cx, cz, w.finish()))
     }
@@ -1844,7 +1894,7 @@ impl Server {
         let mut scheduled_blocks = Vec::new();
         if r.remaining() > 0 {
             let count = r.varint()? as usize;
-            if !r.remaining().is_multiple_of(8) || count != r.remaining() / 8 {
+            if count > r.remaining() / 8 {
                 return Err(DecodeError);
             }
             for _ in 0..count {
@@ -1867,6 +1917,7 @@ impl Server {
             chunk,
             furnaces,
             scheduled_blocks,
+            entities: entity_storage::read_saved_entities((cx, cz), &mut r)?,
         })
     }
     pub fn dirty_chunks(&self) -> usize {
@@ -5343,9 +5394,12 @@ mod furnace_server_tests {
         let old = Server::read_saved_chunk(c.0, c.1, &bytes[..old_end]).unwrap();
         assert_eq!(old.furnaces[&pos], f);
         assert!(old.scheduled_blocks.is_empty());
-        for end in (prefix.len() + 1..old_end).chain(old_end + 1..bytes.len()) {
+        for end in prefix.len() + 1..old_end {
             assert!(Server::read_saved_chunk(c.0, c.1, &bytes[..end]).is_err());
         }
+        let old = Server::read_saved_chunk(c.0, c.1, &bytes[..old_end + 1]).unwrap();
+        assert_eq!(old.furnaces[&pos], f);
+        assert!(old.entities.is_empty());
         for (offset, value) in [(0, 2), (1, 16), (6, 16), (7, 255), (9, 0)] {
             let mut bad = bytes.clone();
             bad[prefix.len() + offset] = value;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { Generator, ServerCore } from "../shared/server-core.ts";
+import { ClientCore } from "./client-core.ts";
 import { OpfsStore, PendingChunkReads, PendingChunkSaves } from "./opfs-store.ts";
 import { decodeArchive, encodeArchive } from "./world-archive.ts";
 import { CorruptRegionError, RegionCodec } from "../shared/region-codec.ts";
@@ -235,6 +236,51 @@ test("OPFS preserves empty chunks on read, listing, and migration", async () => 
 	assert.deepEqual(await store.readChunk(-1, 0), empty);
 	assert.equal(dir.files.has("c.0.0"), false);
 	assert.equal(dir.files.has("c.-1.0"), false);
+});
+
+test("OPFS saves entity-only chunks and a fresh core streams the restored entities", async () => {
+	const store = await open(new MemoryDirectory());
+	const saves = new PendingChunkSaves(store);
+	const reads = new PendingChunkReads((cx, cz) => store.readChunk(cx, cz));
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const join = () => {
+		const core = ServerCore.fromModule(module);
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		core.start(2026n, Generator.Flat);
+		core.connect(1);
+		core.packet(1, client.encodeHello(4));
+		const tick = () => {
+			core.tick();
+			for (const { data } of core.takeOutbox()) client.packet(data);
+		};
+		return { core, client, tick };
+	};
+	const before = join();
+	for (let i = 0; i < 20; i++) before.tick();
+	before.core.setTime(399n, 6000n);
+	const item = before.client.inventory[0]!.item;
+	before.core.packet(1, before.client.encodeDropItem([1, 0, 0]));
+	before.tick();
+	const animal = before.client.mobs[0];
+	assert.ok(animal);
+	assert.deepEqual(before.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
+	assert.equal(before.core.takeDirty(), null);
+	before.core.flushEntityChanges();
+	const chunks = [];
+	for (let d = before.core.takeDirty(); d !== null; d = before.core.takeDirty()) chunks.push(d);
+	await saves.save(chunks, { gameMode: "creative", generator: Generator.Flat, seed: "2026", gameTime: "400", dayTime: "6001" });
+	assert.equal(saves.retrying, false);
+
+	const restored = join();
+	restored.core.setTime(400n, 6001n);
+	restored.core.setStored(await store.list());
+	for (let i = 0; i < 20; i++) {
+		restored.tick();
+		await reads.serve(restored.core.takeRequests(), restored.core);
+	}
+	assert.ok(restored.client.mobs.some(mob => mob.kind === animal.kind
+		&& Math.hypot(mob.position[0] - animal.position[0], mob.position[2] - animal.position[2]) <= 2));
+	assert.deepEqual(restored.client.entities.map(({ item, count }) => [item, count]), [[item, 1]]);
 });
 
 test("regenerating a missing stored chunk in the real core does not make it dirty", () => {
