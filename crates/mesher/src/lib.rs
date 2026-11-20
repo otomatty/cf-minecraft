@@ -180,6 +180,7 @@ pub fn mesh_section_layers(
                     continue;
                 }
                 let info = blocks::info(state);
+                let torch = info.model == blocks::Model::Torch;
                 let fluid_top =
                     blocks::is_fluid(state).then(|| FluidTop::at(padded, x, y, z, state));
                 let out = &mut layers[info.layer as usize];
@@ -240,8 +241,8 @@ pub fn mesh_section_layers(
                             bounds.min[axis] == 0
                         } else {
                             bounds.max[axis] == 16
-                        }) && !(f == UP
-                            && fluid_top.is_some_and(|top| top.height() < 144));
+                        }) && !(torch && state != blocks::TORCH)
+                            && !(f == UP && fluid_top.is_some_and(|top| top.height() < 144));
                         let same = state == neighbor
                             || joins_fluid
                             || (blocks::is_oak_leaves(state) && blocks::is_oak_leaves(neighbor));
@@ -297,7 +298,16 @@ pub fn mesh_section_layers(
                             if let Some(top) = edge {
                                 p[1] = top.y;
                             }
-                            let (u, v) = uv(f, p);
+                            let (u, mut v) = uv(f, p);
+                            if torch {
+                                // Caps sample the flame and wood at the ends of the side texture.
+                                match f {
+                                    UP => v -= 1,
+                                    DOWN => v += 7,
+                                    _ => {}
+                                }
+                                p = blocks::torch_vertex(state, p);
+                            }
                             let mut sums = [0u32; 2];
                             let mut count = 0;
                             for db in [0, si] {
@@ -394,6 +404,44 @@ mod tests {
 
     fn position(v: &[u32]) -> [u32; 3] {
         [v[0] & 511, (v[0] >> 9) & 511, (v[0] >> 18) & 511]
+    }
+
+    #[test]
+    fn torches_use_cutout_quads_with_upright_uvs_and_tilt_away_from_walls() {
+        for (state, (base, top)) in (blocks::TORCH..blocks::COUNT).zip([
+            ([7, 0, 7], [7, 10, 7]),
+            ([7, 3, 14], [7, 13, 8]),
+            ([7, 3, 0], [7, 13, 6]),
+            ([14, 3, 7], [8, 13, 7]),
+            ([0, 3, 7], [6, 13, 7]),
+        ]) {
+            let mut p = empty();
+            let mut light = vec![0; PADDED_LEN];
+            p[padded_index(0, 0, 0)] = state;
+            light[padded_index(0, 0, 0)] = 14;
+            let mut out = Vec::new();
+            assert_eq!(
+                mesh_section_layers(&p, Some((&light, &light)), &mut out),
+                [0, 6, 0]
+            );
+            for (face, quad) in out.as_chunks::<WORDS_PER_QUAD>().0.iter().enumerate() {
+                for vertex in quad.as_chunks::<2>().0 {
+                    let [x, y, z] = position(vertex);
+                    let corner = if y == base[1] { base } else { top };
+                    assert_eq!(y, corner[1]);
+                    assert!([corner[0], corner[0] + 2].contains(&x));
+                    assert!([corner[2], corner[2] + 2].contains(&z));
+                    assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[face]));
+                    let v = (vertex[1] >> 26) & 31;
+                    if face == UP {
+                        assert!([6, 8].contains(&v));
+                    } else if face >= NORTH {
+                        assert_eq!(v, if y == top[1] { 6 } else { 16 });
+                        assert_eq!((vertex[1] >> 17) & 15, 14);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -145,6 +145,7 @@ mod tests {
                 blocks::OAK_LEAVES | blocks::PLACED_OAK_LEAVES => "oak_leaves",
                 state if blocks::is_farmland(state) => "dirt",
                 state if blocks::is_wheat(state) => "wheat_seeds",
+                state if blocks::torch_face(state).is_some() => "torch",
                 _ => blocks::info(state).name,
             };
             assert_eq!(info(id).unwrap().name, name);

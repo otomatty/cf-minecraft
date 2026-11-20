@@ -119,3 +119,8 @@ pattern = ["|", "F"]
 key = { "|" = "stick", "F" = "feather" }
 table_only = true
 result = { item = "arrow", count = 2 }
+
+[[recipes]]
+pattern = ["c", "|"]
+key = { c = "coal", "|" = "stick" }
+result = { item = "torch", count = 4 }

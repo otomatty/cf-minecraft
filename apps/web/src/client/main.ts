@@ -1112,7 +1112,8 @@ async function main(): Promise<void> {
 				return;
 			}
 			if (!selected) return;
-			const edit = placementState(registry, selected, hit, camera.yaw, (x, y, z) => core.getBlock(x, y, z));
+			const edit = placementState(registry, selected, hit, camera.yaw,
+				(x, y, z) => core.getBlock(x, y, z), target => core.torchPlacement(target));
 			if (edit) setBlock(edit.x, edit.y, edit.z, edit.state);
 		} else if (button === 1) {
 			const item = pickBlockItem(registry[core.getBlock(hit.x, hit.y, hit.z)], items);

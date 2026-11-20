@@ -94,7 +94,7 @@ impl Server {
     fn tick_wheat(&mut self, [x, y, z]: [i32; 3], state: u16, hash: u64) {
         let below = self.world.get_block(x, y - 1, z).unwrap_or(blocks::AIR);
         if !blocks::is_farmland(below) {
-            self.break_unsupported_wheat([x, y, z], state, false);
+            self.break_unsupported_block([x, y, z], state, false);
         } else if state < blocks::RIPE_WHEAT
             && (below == blocks::MOIST_FARMLAND
                 || JavaRandom::new((hash >> 12) as i64).next_int_bound(3) == 0)
@@ -110,12 +110,12 @@ impl Server {
                 .get_block(x, y + 1, z)
                 .filter(|&s| blocks::is_wheat(s))
             {
-                self.break_unsupported_wheat([x, y + 1, z], wheat, exploded);
+                self.break_unsupported_block([x, y + 1, z], wheat, exploded);
             }
         }
     }
 
-    fn break_unsupported_wheat(&mut self, pos: [i32; 3], state: u16, exploded: bool) {
+    pub(super) fn break_unsupported_block(&mut self, pos: [i32; 3], state: u16, exploded: bool) {
         self.change_block_naturally_inner(pos, blocks::AIR, exploded);
         if self.game_mode == GameMode::Survival {
             self.spawn_mining_drops(pos, state, exploded);

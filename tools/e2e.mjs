@@ -173,6 +173,77 @@ async function dayNight() {
 	check(night.brightness < day.brightness * 0.65, "sky: midnight frame is darker than noon", `${night.brightness.toFixed(1)} / ${day.brightness.toFixed(1)}`);
 }
 
+async function torches() {
+	const view = 2;
+	const { page, errors } = await open(`server=local&world=e2e-torches-${run}&mode=creative&gen=flat&view=${view}&time=18000`);
+	const waitForBlock = (pos, name) => page.waitForFunction(
+		(pos, name) => window.__mc.getBlock(...pos) === window.__mc.stateId(name), {}, pos, name,
+	);
+	const measure = async label => {
+		const file = join(shots, `torches-${label}.png`);
+		await page.screenshot({ path: file });
+		return page.evaluate(async dataUrl => {
+			const img = new Image();
+			img.src = dataUrl;
+			await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const pixels = ctx.getImageData(img.width / 2 - 100, img.height / 2 - 100, 200, 200).data;
+			let brightness = 0, samples = 0, flame = 0;
+			for (let y = 0; y < 200; y++) for (let x = 0; x < 200; x++) {
+				const i = (y * 200 + x) * 4;
+				const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+				if (Math.abs(x - 100) < 38 && Math.abs(y - 100) < 38) {
+					if (r > 100 && g > 65 && r > g * 1.06 && g > b * 1.45) flame++;
+				} else {
+					brightness += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+					samples++;
+				}
+			}
+			return { brightness: brightness / samples, flame };
+		}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
+	};
+	try {
+		const stats = await settle(page, "torches night", chunksInView(view));
+		check(stats.skyBrightness < 0.1, "torches: flat world is at night");
+		const [x, y, z] = stats.spawn.map(Math.floor);
+		const torch = [x, y, z];
+		await resumePointerLock(page, "torches initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="torch"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "torch");
+		await page.mouse.move(640, 360);
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "torches after picker");
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), torch);
+		await settle(page, "torches unlit ground", chunksInView(view));
+		const before = await measure("before");
+		await page.mouse.click(640, 360, { button: "right" });
+		await waitForBlock(torch, "torch");
+		await page.waitForFunction(() => document.getElementById("hud").textContent.includes("  torch"));
+		await settle(page, "torches lit ground", chunksInView(view));
+		const after = await measure("placed");
+		check(after.brightness > before.brightness + 10, "torches: nearby ground brightens", `${before.brightness.toFixed(1)} → ${after.brightness.toFixed(1)}`);
+		check(after.flame > before.flame + 10, "torches: flame colors appear at the torch tip", `${after.flame} vs ${before.flame}`);
+
+		// Aim at the edge of the same ground block, outside the torch's selection box.
+		await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.85, y + 3, z + 0.5, 0, 90), torch);
+		await page.waitForFunction(([x, y, z]) => document.getElementById("hud").textContent.includes(`Target: ${x} ${y - 1} ${z}  `), {}, torch);
+		await page.mouse.click(640, 360, { button: "left" });
+		await waitForBlock([x, y - 1, z], "air");
+		await waitForBlock(torch, "air");
+		check(true, "torches: breaking the ground block also removes the torch");
+		check(errors.length === 0, "torches: no page errors", errors.slice(0, 3).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "torches", err);
+		throw err;
+	} finally {
+		await page.close();
+	}
+}
+
 /** A sealed underground chamber removes all sky paths; the lamp must relight it. */
 async function undergroundLighting() {
 	const { page, errors } = await open(`server=local&world=e2e-light-${run}&seed=2026&view=3&time=6000`);
@@ -2513,6 +2584,7 @@ try {
 	await farming();
 	await furnaceSmelting();
 	await dayNight();
+	await torches();
 	await undergroundLighting();
 	await transparentMaterials();
 	const fallback = await open(`server=local&world=e2e-gen-off-${run}&seed=2026&view=2&genworkers=0`);

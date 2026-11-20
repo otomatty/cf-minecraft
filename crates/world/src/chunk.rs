@@ -203,6 +203,15 @@ impl World {
             .map(|c| c.get((x & 15) as usize, y, (z & 15) as usize))
     }
 
+    pub fn has_full_face(&self, [x, y, z]: [i32; 3], face: usize) -> bool {
+        self.get_block(x, y, z).is_some_and(|state| {
+            blocks::has_full_face(state, face, |dx, dy, dz| {
+                self.get_block(x + dx, y + dy, z + dz)
+                    .unwrap_or(blocks::AIR)
+            })
+        })
+    }
+
     /// Returns the previous state; `None` when the chunk is not loaded or y is out of range.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> Option<BlockState> {
         let chunk = self.chunks.get_mut(&(x >> 4, z >> 4))?;
@@ -314,5 +323,16 @@ mod tests {
         let mut long = bytes.clone();
         long.push(0);
         assert!(Chunk::read(3, -7, &mut Reader::new(&long)).is_err());
+    }
+
+    #[test]
+    fn chunk_palettes_round_trip_appended_torch_states() {
+        let mut chunk = Chunk::empty(3, -7);
+        for (x, state) in (blocks::TORCH..blocks::COUNT).enumerate() {
+            chunk.set(x, 0, 0, state);
+        }
+        chunk.set(5, 0, 0, blocks::WHITE_WOOL);
+        let bytes = chunk.to_bytes();
+        assert_eq!(Chunk::read(3, -7, &mut Reader::new(&bytes)).unwrap(), chunk);
     }
 }

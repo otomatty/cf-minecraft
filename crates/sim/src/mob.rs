@@ -3646,6 +3646,33 @@ mod tests {
         assert_eq!(server.world.get_block(8, 0, 6), Some(blocks::STONE));
     }
 
+    #[test]
+    fn explosion_removes_torches_outside_the_blast_when_their_support_breaks() {
+        let run = |mode| {
+            let (mut server, _) = combat(mode);
+            server.world.set_block(5, 3, 5, blocks::STONE);
+            server.world.set_block(5, 4, 5, blocks::TORCH);
+            server.world.set_block(8, 0, 5, blocks::STONE);
+            server.world.set_block(9, 0, 5, blocks::WALL_TORCH + 3);
+            server.apply_explosion([5.5, 0.5, 5.5]);
+            assert_eq!(server.get_block(5, 3, 5), Some(blocks::AIR));
+            assert_eq!(server.get_block(5, 4, 5), Some(blocks::AIR));
+            assert_eq!(server.get_block(8, 0, 5), Some(blocks::AIR));
+            assert_eq!(server.get_block(9, 0, 5), Some(blocks::AIR));
+            let torch = items::by_name("torch").unwrap();
+            let drops: Vec<_> = server
+                .entities
+                .values()
+                .filter(|drop| drop.item == torch)
+                .collect();
+            assert_eq!(drops.len(), if mode == GameMode::Survival { 2 } else { 0 });
+            assert!(drops.iter().all(|drop| drop.count == 1));
+            server.state_hash()
+        };
+        assert_eq!(run(GameMode::Survival), run(GameMode::Survival));
+        run(GameMode::Creative);
+    }
+
     fn blast_server() -> Server {
         let (mut server, _) = combat(GameMode::Survival);
         server.set_time(10, 18000);
