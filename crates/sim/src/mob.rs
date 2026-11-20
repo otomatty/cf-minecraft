@@ -3398,15 +3398,15 @@ mod tests {
             let packets = a.take_outbox();
             assert_eq!(packets, b.take_outbox(), "tick {tick}");
             let expected = match tick {
-                20 => Some(first_arrow),
-                60 => Some(first_arrow + 1),
+                20 => Some((first_arrow, true)),
+                60 => Some((first_arrow + 1, true)),
                 _ => None,
             };
             assert_eq!(
                 packets
                     .iter()
                     .find_map(|(_, bytes)| match S2C::decode(bytes).unwrap() {
-                        S2C::ArrowSpawn { id, .. } => Some(id),
+                        S2C::ArrowSpawn { id, fresh, .. } => Some((id, fresh)),
                         _ => None,
                     }),
                 expected,

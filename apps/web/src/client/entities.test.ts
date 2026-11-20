@@ -413,29 +413,32 @@ test("arrow sprite aligns its diagonal with velocity and stays camera relative",
 	assert.ok(component(vertices, 6).every(layer => layer === 7));
 });
 
-test("WASM arrow records carry velocity and interpolate from the last received position", async () => {
+test("WASM arrow records carry freshness and velocity and interpolate from the last received position", async () => {
 	const { readFileSync } = await import("node:fs");
 	const { ClientCore, S2C } = await import("./client-core.ts");
 	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
 	const core = new ClientCore(instance);
 	const id = 0xffff_ffff;
-	const arrow = (tag: number, position: number[], velocity: number[]) => {
-		const bytes = new Uint8Array(53), view = new DataView(bytes.buffer);
+	const arrow = (tag: number, position: number[], velocity: number[], fresh = false) => {
+		const spawn = tag === S2C.ArrowSpawn;
+		const bytes = new Uint8Array(spawn ? 54 : 53), view = new DataView(bytes.buffer);
 		bytes[0] = tag;
 		view.setUint32(1, id);
 		[...position, ...velocity].forEach((value, i) => view.setFloat64(5 + i * 8, value));
+		if (spawn) bytes[53] = Number(fresh);
 		return bytes;
 	};
 	const position = [29999998.25, 1, -3.5], next = [29999998.5, 1, -3.5];
 	const velocity = [0.25, 0, 0], nextVelocity = [0.2475, -0.05, 0];
-	assert.equal(core.packet(arrow(S2C.ArrowSpawn, position, velocity)), S2C.ArrowSpawn);
-	assert.deepEqual(core.arrows, [{ id, position, previous: position, velocity }]);
+	assert.equal(core.packet(arrow(S2C.ArrowSpawn, position, velocity, true)), S2C.ArrowSpawn);
+	assert.deepEqual(core.arrows, [{ id, position, previous: position, velocity, fresh: true }]);
 	assert.equal(core.packet(arrow(S2C.ArrowMove, next, nextVelocity)), S2C.ArrowMove);
-	assert.deepEqual(core.arrows, [{ id, position: next, previous: position, velocity: nextVelocity }]);
+	assert.deepEqual(core.arrows, [{ id, position: next, previous: position, velocity: nextVelocity, fresh: false }]);
 	const remove = new Uint8Array([S2C.EntityRemove, 255, 255, 255, 255]);
 	assert.equal(core.packet(remove), S2C.EntityRemove);
 	assert.deepEqual(core.arrows, []);
-	core.packet(arrow(S2C.ArrowSpawn, position, velocity));
+	assert.equal(core.packet(arrow(S2C.ArrowSpawn, position, velocity)), S2C.ArrowSpawn);
+	assert.deepEqual(core.arrows, [{ id, position, previous: position, velocity, fresh: false }]);
 	core.resetWorld();
 	assert.deepEqual(core.arrows, []);
 });

@@ -648,6 +648,79 @@ async function inputs() {
 }
 
 /** Real placement/UI input plus resolved physics; debug edits prepare and clear fixtures. */
+async function audio() {
+	const { page, errors } = await open(`server=local&world=e2e-audio-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const stats = await settle(page, "audio", chunksInView(2));
+		check(stats.gameMode === "creative" && stats.generatorName === "Flat", "audio: starts in creative Flat");
+		await resumePointerLock(page, "audio: initial click");
+		const ready = await page.waitForFunction(() => {
+			const audio = window.__mc.stats().audio;
+			return audio.state === "running" || audio.state === "unavailable" ? audio : false;
+		}, { timeout: 5000 });
+		const initial = await ready.jsonValue();
+		await ready.dispose();
+
+		const [sx, sy, sz] = stats.spawn;
+		const cell = [Math.floor(sx) + 2, sy - 1, Math.floor(sz)];
+		const aim = async () => {
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 4, z + 0.5, 0, 90), cell);
+		};
+		const expectCount = async (kind, before) => {
+			if (initial.state === "unavailable") return;
+			try {
+				await page.waitForFunction((kind, before) => (window.__mc.stats().audio.counts[kind] ?? 0) > before,
+					{ timeout: 5000 }, kind, before);
+				check(true, `audio: ${kind} count increases`);
+			} catch (err) {
+				if (err.name !== "TimeoutError") throw err;
+				const audio = await page.evaluate(() => window.__mc.stats().audio);
+				check(false, `audio: ${kind} count increases`, JSON.stringify(audio));
+			}
+		};
+		await aim();
+		await page.mouse.down();
+		await page.mouse.up();
+		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, { timeout: 5000 }, cell);
+		await expectCount("break", initial.counts.break ?? 0);
+
+		await page.keyboard.press("Digit3");
+		await aim();
+		await page.mouse.down({ button: "right" });
+		await page.mouse.up({ button: "right" });
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("oak_planks");
+		}, { timeout: 5000 }, cell);
+		await expectCount("place", initial.counts.place ?? 0);
+
+		await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			// Teleport above the Flat surface so reaching spawn Y requires landing.
+			api.setCamera(x, y + 1 + 1.62, z, 0, 0);
+			if (api.toggleFlight()) throw new Error("audio: player is still flying after teleport");
+		}, stats.spawn);
+		await page.waitForFunction(y => Math.abs(window.__mc.playerPosition()[1] - y) < 0.001, { timeout: 5000 }, sy);
+		const { start, beforeSteps } = await page.evaluate(() => ({
+			start: window.__mc.playerPosition(),
+			beforeSteps: window.__mc.stats().audio.counts.step ?? 0,
+		}));
+		await page.keyboard.down("KeyW");
+		try {
+			await page.waitForFunction(z => window.__mc.playerPosition()[2] - z >= 3, { timeout: 5000 }, start[2]);
+		} finally { await page.keyboard.up("KeyW"); }
+		await expectCount("step", beforeSteps);
+
+		const final = await page.evaluate(() => window.__mc.stats().audio);
+		check(final.state === initial.state, "audio: playback state stays stable", final.state);
+		const fallback = initial.state === "unavailable" ? "AudioContext unavailable, skipped break/place/step counter assertions" : "";
+		check(errors.length === 0, "audio: no page errors", [...errors, fallback].filter(Boolean).join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "audio", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function partialModels() {
 	const view = 3;
 	const { page, errors } = await open(`world=e2e-models-${run}&view=${view}&seed=2026&time=6000`);
@@ -2643,6 +2716,7 @@ try {
 	await entitySave();
 	await mobCombat();
 	await bow();
+	await audio();
 	await zombies();
 	await skeletons();
 	await creepers();

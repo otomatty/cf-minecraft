@@ -98,6 +98,16 @@ impl Arrow {
         (x >> 4, z >> 4)
     }
 
+    fn was_fired_this_tick(&self) -> bool {
+        // Player releases run before tick_arrows, which advances age even on impact.
+        // Skeletons shoot after tick_arrows.
+        let launch_age = match self.shooter {
+            Shooter::Player { .. } => 1,
+            Shooter::Skeleton => 0,
+        };
+        self.age == launch_age
+    }
+
     fn ready_for_pickup(&self) -> bool {
         matches!(
             self.shooter,
@@ -361,7 +371,12 @@ impl Server {
             }
             for (&id, &ArrowMotion { pos, velocity }) in &visible {
                 let packet = match c.visible_arrows.get(&id) {
-                    None => S2C::ArrowSpawn { id, pos, velocity },
+                    None => S2C::ArrowSpawn {
+                        id,
+                        pos,
+                        velocity,
+                        fresh: self.arrows[&id].was_fired_this_tick(),
+                    },
                     Some(old) if *old != visible[&id] => S2C::ArrowMove { id, pos, velocity },
                     Some(_) => continue,
                 };
@@ -596,6 +611,76 @@ mod tests {
             );
         }
         server
+    }
+
+    #[test]
+    fn bow_spawn_is_fresh_only_on_the_release_tick_even_on_impact() {
+        let feet = [5.0, 2.0, 5.0];
+        let mut server = with_players(GameMode::Creative, &[(1, feet), (2, [5.0, 2.0, 160.0])]);
+        server.apply(
+            1,
+            C2S::CreativeSetSlot {
+                slot: 0,
+                item: items::by_name("bow").unwrap(),
+                count: 1,
+            },
+        );
+        server.apply(1, C2S::UseItem);
+        for _ in 0..3 {
+            server.tick_health();
+        }
+
+        let embedded = server.allocate_entity_id().unwrap();
+        server.world.set_block(8, 1, 9, blocks::STONE);
+        server.arrows.insert(
+            embedded,
+            Arrow::from_bow(1, false, 0.15, [8.5, 0.0, 8.5], 0.0, 0.0),
+        );
+        let shot = server.next_entity_id;
+        server.handle_packet(1, &C2S::StopUsingItem.encode());
+        let spawns = |server: &mut Server| {
+            server
+                .take_outbox()
+                .into_iter()
+                .filter_map(|(viewer, packet)| match S2C::decode(&packet).unwrap() {
+                    S2C::ArrowSpawn { id, fresh, .. } => Some((viewer, id, fresh)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        server.tick();
+        assert_eq!(server.arrows[&shot].age, 1);
+        assert_eq!(server.arrows[&shot].embedded_ticks, None);
+        assert_eq!(server.arrows[&embedded].age, 1);
+        assert_eq!(server.arrows[&embedded].embedded_ticks, Some(0));
+        assert_eq!(spawns(&mut server), [(1, embedded, true), (1, shot, true)]);
+
+        server.disconnect(1);
+        server.connect_at(1, true, Some(feet), None);
+        server.handle_packet(
+            1,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        // Viewer 2 is still connected and has just moved the arrows into view.
+        server.clients.get_mut(&2).unwrap().pos = feet;
+        server.tick();
+        assert_eq!(server.arrows[&shot].age, 2);
+        assert_eq!(server.arrows[&shot].embedded_ticks, None);
+        assert_eq!(server.arrows[&embedded].age, 2);
+        assert_eq!(server.arrows[&embedded].embedded_ticks, Some(1));
+        assert_eq!(
+            spawns(&mut server),
+            [
+                (1, embedded, false),
+                (1, shot, false),
+                (2, embedded, false),
+                (2, shot, false),
+            ]
+        );
     }
 
     #[test]

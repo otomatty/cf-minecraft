@@ -1,4 +1,7 @@
 import { bindInventorySlot, containerScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, type InventoryScreenKind } from "./inventory-screen.ts";
+import { GameAudio } from "./audio/engine.ts";
+import { VOLUME_CONTROLS } from "./audio/events.ts";
+import { WorldAudio } from "./audio/world-audio.ts";
 import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBlockUpdate, type DigOverlay } from "./dig.ts";
 // Client entry point: wires the WebAssembly mirror, the renderer, a transport
 // and input together: fixed-step player prediction, interpolated rendering,
@@ -172,6 +175,8 @@ async function main(): Promise<void> {
 	}
 
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
+	const audio = new GameAudio(camera);
+	const worldAudio = new WorldAudio(core, registry, audio);
 	let position: [number, number, number] = [camera.x, camera.y - EYE_HEIGHT, camera.z];
 	let previousPosition = [...position];
 	let movementTime = 0;
@@ -186,6 +191,7 @@ async function main(): Promise<void> {
 		lastJumpTap = -Infinity;
 		pendingJump = pendingFlightToggle = false;
 		core.resetPlayer(...position);
+		worldAudio.resetMovement();
 	}
 	let joined = false;
 	let joinedGameTime: number | null = null;
@@ -219,6 +225,7 @@ async function main(): Promise<void> {
 			closePending = false;
 			seedReady = false;
 			previousHealth = null;
+			worldAudio.reset();
 			if (transport.kind !== "local") generator = null;
 			tintMap.setWorld(null, null);
 			if (opened) {
@@ -235,7 +242,7 @@ async function main(): Promise<void> {
 			transport.send(core.encodeHello(viewDistance));
 		},
 		onPacket: (data: Uint8Array) => {
-			const id = core.packet(data);
+			const id = worldAudio.packet(data, position, mobHurtAt);
 			removeUnloaded();
 			if (id === S2C.Inventory) {
 				syncInventory();
@@ -310,6 +317,7 @@ async function main(): Promise<void> {
 				syncVitals();
 			} else if (id === S2C.PlayerCorrect) {
 				positionsCorrected++;
+				worldAudio.resetMovement();
 				position = core.playerPosition;
 				previousPosition = [...position];
 				movementTime = 0;
@@ -543,6 +551,16 @@ async function main(): Promise<void> {
 	let settings = defaultSettings();
 	// Accessing localStorage itself may throw (for example when storage is disabled).
 	try { settings = loadSettings(localStorage); } catch { /* Keep defaults. */ }
+	audio.updateVolumes(settings.audio);
+	audio.setVisible(!document.hidden);
+	document.addEventListener("click", event => {
+		if (!event.isTrusted) return;
+		const button = event.target instanceof Element && event.target.closest("button, a.btn");
+		audio.activate(Boolean(button));
+	}, { capture: true });
+	document.addEventListener("keydown", event => {
+		if (event.isTrusted && !event.repeat) audio.activate(false);
+	}, { capture: true });
 	const keys = new Set<string>();
 	const pressed = (assigned: string) => [...keys].some(code => matchesKey(code, assigned));
 	let sprinting = false;
@@ -579,8 +597,13 @@ async function main(): Promise<void> {
 			$<HTMLInputElement>(name).value = String(settings[name]);
 			$(name + "-value").textContent = `${settings[name]}${name === "sensitivity" ? "%" : "°"}`;
 		}
+		for (const channel of VOLUME_CONTROLS) {
+			$<HTMLInputElement>(`volume-${channel}`).value = String(settings.audio[channel]);
+			$(`volume-${channel}-value`).textContent = `${settings.audio[channel]}%`;
+		}
 	}
 	function persistSettings(): void {
+		audio.updateVolumes(settings.audio);
 		try {
 			warning.textContent = saveSettings(localStorage, settings) ? "" : "設定を保存できません。再読み込みまで適用します。";
 		} catch { warning.textContent = "設定を保存できません。再読み込みまで適用します。"; }
@@ -600,21 +623,24 @@ async function main(): Promise<void> {
 		$("key-bindings").append(label);
 		bindingButtons.set(action, button);
 	}
-	function selectSettingsTab(tab: "keys" | "mouse"): void {
+	const settingsTabs = ["keys", "mouse", "audio"] as const;
+	function selectSettingsTab(tab: typeof settingsTabs[number]): void {
 		capturing = null;
 		refreshSettings();
-		for (const name of ["keys", "mouse"] as const) {
+		for (const name of settingsTabs) {
 			$(name + "-tab").setAttribute("aria-selected", String(name === tab));
 			$(name + "-tab").tabIndex = name === tab ? 0 : -1;
 			$(name + "-tab-panel").hidden = name !== tab;
 		}
 	}
-	for (const name of ["keys", "mouse"] as const) {
+	for (const name of settingsTabs) {
 		$(name + "-tab").addEventListener("click", () => selectSettingsTab(name));
 		$(name + "-tab").addEventListener("keydown", event => {
 			if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
 			event.preventDefault();
-			const next = event.key === "Home" ? "keys" : event.key === "End" ? "mouse" : name === "keys" ? "mouse" : "keys";
+			const direction = event.key === "ArrowLeft" ? -1 : 1;
+			const index = (settingsTabs.indexOf(name) + direction + settingsTabs.length) % settingsTabs.length;
+			const next = event.key === "Home" ? settingsTabs[0] : event.key === "End" ? settingsTabs.at(-1)! : settingsTabs[index];
 			selectSettingsTab(next);
 			$(next + "-tab").focus();
 		});
@@ -682,6 +708,12 @@ async function main(): Promise<void> {
 	for (const name of ["sensitivity", "fov"] as const) {
 		$<HTMLInputElement>(name).addEventListener("input", event => {
 			settings[name] = Number((event.target as HTMLInputElement).value);
+			persistSettings();
+		});
+	}
+	for (const channel of VOLUME_CONTROLS) {
+		$<HTMLInputElement>(`volume-${channel}`).addEventListener("input", event => {
+			settings.audio[channel] = Number((event.target as HTMLInputElement).value);
 			persistSettings();
 		});
 	}
@@ -1040,7 +1072,7 @@ async function main(): Promise<void> {
 		if (core.gameMode === "survival") {
 			if (block === 0 || !hotbarBlocks[selectedSlot]) return false;
 		}
-		if (!core.predictBlock(x, y, z, block)) return false;
+		if (!worldAudio.predictBlock(x, y, z, block)) return false;
 		// The server checks reach against the last position it knows.
 		sendPosition();
 		transport.send(core.encodeSetBlock(x, y, z, block));
@@ -1161,14 +1193,20 @@ async function main(): Promise<void> {
 				return;
 		}
 	};
+	let pageHidden = false;
 	window.addEventListener("pagehide", (event) => {
+		pageHidden = true;
+		audio.setVisible(false);
 		const persistence = transport instanceof LocalTransport ? transport.persistence : undefined;
 		for (const action of pageCacheActions("pagehide", event.persisted, transport.kind, { persistence })) runPageCacheAction(action);
 	});
 	window.addEventListener("pageshow", (event) => {
+		pageHidden = false;
+		audio.setVisible(!document.hidden);
 		for (const action of pageCacheActions("pageshow", event.persisted, transport.kind, { closedOnHide })) runPageCacheAction(action);
 	});
 	document.addEventListener("visibilitychange", () => {
+		audio.setVisible(!pageHidden && !document.hidden);
 		if (document.visibilityState === "hidden") transport.flush();
 	});
 
@@ -1198,7 +1236,9 @@ async function main(): Promise<void> {
 			const strafe = (pressed(settings.keys.right) ? 1 : 0) - (pressed(settings.keys.left) ? 1 : 0);
 			const sprint = (core.gameMode !== "survival" || core.food > 6)
 				&& (sprinting || pressed(sprintKey(settings, keyboardLocked && document.fullscreenElement === document.documentElement)));
-			const state = core.tickPlayer(fwd, strafe, camera.yaw, pendingJump || pressed(settings.keys.up), sprint, pressed(settings.keys.down));
+			const jump = pendingJump || pressed(settings.keys.up);
+			const state = core.tickPlayer(fwd, strafe, camera.yaw, jump, sprint, pressed(settings.keys.down));
+			worldAudio.walk(position, state, connection === "open" && Boolean(fwd || strafe || jump));
 			pendingJump = false;
 			position = state.position;
 			movementTick++;
@@ -1390,6 +1430,7 @@ async function main(): Promise<void> {
 				else { const t = command.target; sendPosition(); transport.send(core.encodeDigStart(t.x,t.y,t.z)); }
 			}
 		}
+		worldAudio.dig(mining ? dig.active : null, now);
 		if (interactive) {
 			for (const [button, next] of heldButtons) {
 				if (now < next) continue;
@@ -1421,7 +1462,9 @@ async function main(): Promise<void> {
 			return bounds ? [{ ...d, bounds }] : [];
 		});
 		const fov = settings.fov * (1 - 0.1 * bowDraw(now) / BOW_MAX_DRAW);
-		frame = renderer.render(camera, viewDistance, target, fov, core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open"), [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
+		const dayTime = core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open");
+		if (joined) audio.updateMusic(dayTime);
+		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
 		window.__mc.frames++;
 
 		frames++;
@@ -1443,6 +1486,7 @@ async function main(): Promise<void> {
 		frames: 0,
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
+			audio: audio.stats(),
 			gameMode: core.gameMode,
 			health: core.health,
 			food: core.food,

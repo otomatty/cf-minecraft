@@ -37,6 +37,7 @@ struct ArrowEntity {
     pos: [f64; 3],
     previous: [f64; 3],
     velocity: [f64; 3],
+    fresh: bool,
 }
 struct State {
     entities: BTreeMap<u32, ItemEntity>,
@@ -362,13 +363,19 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.yaw = yaw;
             }
         }
-        S2C::ArrowSpawn { id, pos, velocity } => {
+        S2C::ArrowSpawn {
+            id,
+            pos,
+            velocity,
+            fresh,
+        } => {
             st.arrows.insert(
                 id,
                 ArrowEntity {
                     pos,
                     previous: pos,
                     velocity,
+                    fresh,
                 },
             );
         }
@@ -377,6 +384,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 arrow.previous = arrow.pos;
                 arrow.pos = pos;
                 arrow.velocity = velocity;
+                arrow.fresh = false;
             }
         }
         S2C::MobHurt { id } => {
@@ -1561,7 +1569,7 @@ pub extern "C" fn client_mobs() -> usize {
     st.out = w.finish();
     st.out.len()
 }
-/// Sorted packed records: ID u32, current/previous position and velocity as f64 triples.
+/// Sorted packed records: ID u32, current/previous position and velocity as f64 triples, fresh u8.
 #[no_mangle]
 pub extern "C" fn client_arrows() -> usize {
     let st = state();
@@ -1576,6 +1584,7 @@ pub extern "C" fn client_arrows() -> usize {
         {
             w.f64(v);
         }
+        w.u8(u8::from(arrow.fresh));
     }
     st.out = w.finish();
     st.out.len()

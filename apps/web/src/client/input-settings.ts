@@ -1,3 +1,5 @@
+import { DEFAULT_VOLUMES, VOLUME_CONTROLS, type Volumes } from "./audio/events.ts";
+
 /** Input preferences and key policy, independent of browser/DOM globals. */
 export const ACTIONS = ["forward", "backward", "left", "right", "up", "down", "sprint", "fullscreen", "inventory", "drop"] as const;
 export type Action = typeof ACTIONS[number];
@@ -5,6 +7,7 @@ export interface InputSettings {
 	keys: Record<Action, string>;
 	sensitivity: number; // Percent: 0..200, mapped to the game's 0..1 range.
 	fov: number;
+	audio: Volumes;
 }
 export const SETTINGS_KEY = "cf-minecraft.input-settings.v1";
 const LEGACY_SETTINGS_KEY = "maincraft.input-settings.v1";
@@ -13,6 +16,7 @@ export function defaultSettings(): InputSettings {
 		keys: { forward: "KeyW", backward: "KeyS", left: "KeyA", right: "KeyD", up: "Space", down: "ShiftLeft", sprint: "KeyR", fullscreen: "KeyF", inventory: "KeyE", drop: "KeyQ" },
 		sensitivity: 100,
 		fov: 70,
+		audio: { ...DEFAULT_VOLUMES },
 	};
 }
 /** Treat the two physical keys of each modifier as one binding. */
@@ -64,7 +68,12 @@ export function loadSettings(storage: StorageReader & StorageWriter & StorageRem
 				&& effectiveKeyConflicts({ ...value, keys: { ...value.keys, inventory: code } }).length === 0);
 		}
 		if (!validKey(value.keys.drop) || !validKey(value.keys.inventory) || duplicateKeys(value.keys).length > 0 || effectiveKeyConflicts(value).length > 0) return defaultSettings();
-		const settings = { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov };
+		const audio = { ...DEFAULT_VOLUMES };
+		for (const channel of VOLUME_CONTROLS) {
+			const volume = value.audio?.[channel];
+			if (Number.isFinite(volume) && volume >= 0 && volume <= 100) audio[channel] = volume;
+		}
+		const settings: InputSettings = { keys: Object.fromEntries(ACTIONS.map(action => [action, value.keys[action]])) as Record<Action, string>, sensitivity: value.sensitivity, fov: value.fov, audio };
 		if (current === null || missingInventory || missingDrop) {
 			try {
 				storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
