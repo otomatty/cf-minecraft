@@ -605,9 +605,13 @@ mod tests {
         server.schedule_tick(SOURCE, 5);
         let (_, _, bytes) = server.take_dirty().unwrap();
         let new_tail = prefix.len() + 1;
-        for end in new_tail + 1..bytes.len() {
+        let legacy_end = new_tail + 1 + 8;
+        for end in new_tail + 1..legacy_end {
             assert!(Server::read_saved_chunk(0, 0, &bytes[..end]).is_err());
         }
+        let legacy = Server::read_saved_chunk(0, 0, &bytes[..legacy_end]).unwrap();
+        assert_eq!(legacy.scheduled_blocks, [(5, SOURCE)]);
+        assert!(legacy.entities.is_empty());
         for (offset, value) in [(0, 2), (1, 16), (2, 0xff), (6, 16)] {
             let mut bad = bytes.clone();
             bad[new_tail + offset] = value;

@@ -238,6 +238,68 @@ impl Mob {
         (x >> 4, z >> 4)
     }
 
+    pub(super) fn is_animal(&self) -> bool {
+        self.hostile.is_none()
+    }
+
+    pub(super) fn velocity(&self) -> [f64; 3] {
+        self.body.velocity
+    }
+
+    pub(super) fn write_saved(&self, w: &mut world::io::Writer) {
+        w.u8(self.kind.wire_id());
+        for value in self.pos().into_iter().chain(self.velocity()) {
+            w.f64(value);
+        }
+        w.f32(self.yaw);
+        w.u8(self.health);
+        w.i32(self.age as i32);
+        w.u8(u8::from(self.body.on_ground));
+        w.u16(self.egg_ticks.unwrap_or(0));
+    }
+
+    pub(super) fn read_saved(
+        chunk: crate::ChunkPos,
+        r: &mut world::io::Reader,
+    ) -> Result<Self, world::io::DecodeError> {
+        use crate::entity_storage::read_motion;
+        use world::io::DecodeError;
+
+        let kind = match r.u8()? {
+            0 => MobKind::Cow,
+            1 => MobKind::Pig,
+            2 => MobKind::Chicken,
+            3 => MobKind::Sheep,
+            _ => return Err(DecodeError),
+        };
+        let (pos, velocity) = read_motion(chunk, r)?;
+        let mut mob = Self::new(kind, pos);
+        let yaw = r.f32()?;
+        let health = r.u8()?;
+        let age = r.i32()? as u32;
+        let on_ground = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DecodeError),
+        };
+        let egg_ticks = match (kind, r.u16()?) {
+            (MobKind::Chicken, ticks @ 1..=12000) => Some(ticks),
+            (kind, 0) if kind != MobKind::Chicken => None,
+            _ => return Err(DecodeError),
+        };
+        if !yaw.is_finite() || health == 0 || health > mob.health {
+            return Err(DecodeError);
+        }
+        mob.body.velocity = velocity;
+        mob.body.on_ground = on_ground;
+        mob.yaw = yaw;
+        mob.health = health;
+        mob.age = age;
+        mob.fall_start_y = Some(pos[1]);
+        mob.egg_ticks = egg_ticks;
+        Ok(mob)
+    }
+
     pub(crate) fn bounds(&self) -> physics::Aabb {
         self.body.bounds()
     }
@@ -1046,6 +1108,9 @@ impl Server {
     }
 
     pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob, burned: bool) {
+        if mob.is_animal() {
+            self.dirty_entity_chunk(mob.chunk());
+        }
         let spec = spec(mob.kind);
         let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
         for (index, &(item, min, max)) in spec.loot.iter().enumerate() {
@@ -1072,11 +1137,14 @@ impl Server {
         }
     }
 
-    fn spawn_mob(&mut self, kind: MobKind, pos: [f64; 3]) {
+    pub(super) fn spawn_mob(&mut self, kind: MobKind, pos: [f64; 3]) {
         if let Some(id) = self.allocate_entity_id() {
             let mut mob = Mob::new(kind, pos);
             if kind == MobKind::Chicken {
                 mob.egg_ticks = Some(egg_interval(self.seed, id, self.game_time));
+            }
+            if mob.is_animal() {
+                self.dirty_entity_chunk(mob.chunk());
             }
             self.mobs.insert(id, mob);
         }
@@ -1181,8 +1249,10 @@ impl Server {
         let mut shots = Vec::new();
         let mut fuse_updates = Vec::new();
         let mut explosions = Vec::new();
+        let mut changed = Vec::new();
         for (&id, mob) in &mut self.mobs {
-            if !self.world.chunks.contains_key(&mob.chunk()) || mob.pos()[1] < VOID_Y {
+            let from = mob.chunk();
+            if !self.world.chunks.contains_key(&from) || mob.pos()[1] < VOID_Y {
                 continue;
             }
             let target = if mob.hostile.is_some() && self.game_mode == GameMode::Survival {
@@ -1201,6 +1271,7 @@ impl Server {
             } else {
                 None
             };
+            let before = mob.pos();
             let before_fuse = mob.fuse_ticks();
             let damage = mob.tick(
                 &self.world,
@@ -1209,6 +1280,17 @@ impl Server {
                 self.game_time,
                 target.map(|(_, pos)| pos),
             );
+            // Outside the build height, the collision world has no chunk walls.
+            if mob.is_animal() && !self.world.chunks.contains_key(&mob.chunk()) {
+                for axis in [0, 2] {
+                    mob.body.position[axis] = before[axis];
+                    mob.body.velocity[axis] = 0.0;
+                }
+            }
+            let to = mob.chunk();
+            if self.entity_persistence && mob.is_animal() && from != to {
+                changed.extend([from, to]);
+            }
             let after_fuse = mob.fuse_ticks();
             if before_fuse != after_fuse {
                 if let Some(ticks) = after_fuse {
@@ -1279,9 +1361,10 @@ impl Server {
         self.mobs.retain(|&id, mob| {
             let stays = mob.pos()[1] >= VOID_Y
                 && self.world.chunks.contains_key(&mob.chunk())
-                && players
-                    .iter()
-                    .any(|&(_, pos)| distance_squared(mob.pos(), pos) <= 128.0 * 128.0);
+                && (mob.is_animal()
+                    || players
+                        .iter()
+                        .any(|&(_, pos)| distance_squared(mob.pos(), pos) <= 128.0 * 128.0));
             if let Some(ticks) = mob.egg_ticks.as_mut().filter(|_| stays && mob.health != 0) {
                 *ticks -= 1;
                 if *ticks == 0 {
@@ -1289,8 +1372,14 @@ impl Server {
                     eggs.push(mob.pos());
                 }
             }
+            if self.entity_persistence && mob.is_animal() && !stays {
+                changed.push(mob.chunk());
+            }
             stays
         });
+        for chunk in changed {
+            self.dirty_entity_chunk(chunk);
+        }
         for pos in eggs {
             self.spawn_item(items::by_name("egg").unwrap(), 1, pos, [0.0, 0.1, 0.0], 10);
         }
@@ -3401,7 +3490,98 @@ mod tests {
     }
 
     #[test]
-    fn despawns_beyond_128_in_missing_chunks_and_below_void() {
+    fn reload_restores_persistent_animal_state_before_resuming_ticks() {
+        let mut server = Server::new(5, Generator::Flat);
+        server.generate_now(0, 0);
+        let pos = [2.5, 4.125, 3.5];
+        server.spawn_mob(MobKind::Chicken, pos);
+        server.spawn_item(1, 5, pos, [0.0; 3], 40);
+        let chicken = server.mobs.get_mut(&1).unwrap();
+        chicken.body.velocity = [-0.0, -0.25, 0.125];
+        chicken.body.on_ground = true;
+        chicken.yaw = -0.0;
+        chicken.health = 2;
+        chicken.age = 234;
+        chicken.egg_ticks = Some(901);
+        chicken.hurt_ticks = 8;
+        chicken.fall_start_y = Some(50.0);
+        chicken.suffocation_ticks = 7;
+        chicken.lava_ticks = 6;
+        chicken.last_dry_pos = [1.0; 3];
+        chicken.ai = Wander::Fleeing {
+            target: [5.0, 6.0],
+            ticks_left: 42,
+            blocked: 1,
+        };
+
+        server.unload_far_chunks();
+        assert!(server.world.chunks.contains_key(&(0, 0)));
+        assert_eq!(server.mobs.len(), 1);
+        assert_eq!(server.entities.len(), 1);
+        let (cx, cz, bytes) = server.take_dirty().unwrap();
+        assert!(server.mobs.is_empty());
+        assert!(server.entities.is_empty());
+        assert!(!server.world.chunks.contains_key(&(0, 0)));
+
+        assert!(server.load_chunk(cx, cz, &bytes));
+        let chicken = &server.mobs[&3];
+        assert_eq!(chicken.pos(), pos);
+        assert_eq!(
+            chicken.body.velocity.map(f64::to_bits),
+            [-0.0, -0.25, 0.125].map(f64::to_bits)
+        );
+        assert!(chicken.body.on_ground);
+        assert_eq!(chicken.yaw.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            (chicken.health, chicken.age, chicken.egg_ticks),
+            (2, 234, Some(901))
+        );
+        assert_eq!(chicken.ai, Wander::Idle);
+        assert_eq!(chicken.fall_start_y, Some(pos[1]));
+        assert_eq!(chicken.last_dry_pos, pos);
+        assert_eq!(
+            (
+                chicken.hurt_ticks,
+                chicken.suffocation_ticks,
+                chicken.lava_ticks
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(server.entities[&4].count, 5);
+    }
+
+    #[test]
+    fn animal_crossing_and_void_despawn_dirty_the_affected_chunks_immediately() {
+        let mut server = Server::new(5, Generator::Flat);
+        for cx in [0, 1] {
+            server.world.insert_chunk(world::Chunk::empty(cx, 0));
+        }
+        server.spawn_cow([15.8, 80.0, 3.5]);
+        let (cx, cz, _) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        server.mobs.get_mut(&1).unwrap().body.velocity[0] = 0.5;
+
+        server.tick();
+        assert_eq!(server.mobs[&1].chunk(), (1, 0));
+        for expected in [(0, 0), (1, 0)] {
+            let (cx, cz, _) = server.take_dirty().unwrap();
+            assert_eq!((cx, cz), expected);
+        }
+        assert!(server.take_dirty().is_none());
+
+        server.mobs.get_mut(&1).unwrap().body.position[1] = VOID_Y - 1.0;
+        server.tick();
+        assert!(server.mobs.is_empty());
+        let (cx, cz, bytes) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (1, 0));
+        assert!(Server::read_saved_chunk(cx, cz, &bytes)
+            .unwrap()
+            .entities
+            .is_empty());
+    }
+
+    #[test]
+    fn animals_stay_beyond_128_and_despawn_in_missing_chunks_and_below_void() {
         let mut server = joined(GameMode::Creative);
         let [x, y, z] = server.spawn();
         for dx in [128.0, 129.0] {
@@ -3414,9 +3594,20 @@ mod tests {
         }
         server.spawn_cow([x, VOID_Y - 1.0, z]);
         server.spawn_cow([x, y, z]);
+        server.spawn_mob(MobKind::Zombie, [x + 128.0, y, z]);
+        server.spawn_mob(MobKind::Zombie, [x + 129.0, y, z]);
         server.tick_mobs();
-        assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [1, 4]);
+        assert_eq!(
+            server.mobs.keys().copied().collect::<Vec<_>>(),
+            [1, 2, 4, 5]
+        );
         server.unload_far_chunks();
+        assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [1, 2, 4]);
+        let (cx, cz, _) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [1, 2, 4]);
+        let (cx, cz, _) = server.take_dirty().unwrap();
+        assert_eq!((cx, cz), (8, 0));
         assert_eq!(server.mobs.keys().copied().collect::<Vec<_>>(), [4]);
         server.world.remove_chunk(0, 0);
         server.tick_mobs();

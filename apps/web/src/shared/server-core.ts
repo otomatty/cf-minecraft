@@ -31,6 +31,8 @@ interface ServerExports {
 	server_load_chunk(cx: number, cz: number, ptr: number, len: number): number;
 	server_chunk_missing(cx: number, cz: number): void;
 	server_take_dirty(): number;
+	server_set_entity_persistence(enabled: number): void;
+	server_flush_entity_changes(): void;
 	server_dirty_chunks(): number;
 	server_state_hash(): bigint;
 	server_game_time(): bigint;
@@ -206,6 +208,15 @@ export class ServerCore {
 
 	chunkMissing(cx: number, cz: number): void {
 		this.x.server_chunk_missing(cx, cz);
+	}
+
+	setEntityPersistence(enabled: boolean): void {
+		this.x.server_set_entity_persistence(Number(enabled));
+	}
+
+	/** Include marked chunks in an explicit save. */
+	flushEntityChanges(): void {
+		this.x.server_flush_entity_changes();
 	}
 
 	/** One chunk that needs saving, or null. The core considers it saved once returned. */

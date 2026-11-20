@@ -220,6 +220,16 @@ pub extern "C" fn server_chunk_missing(cx: i32, cz: i32) {
     server().chunk_missing(cx, cz);
 }
 
+#[no_mangle]
+pub extern "C" fn server_set_entity_persistence(enabled: u32) {
+    server().set_entity_persistence(enabled != 0);
+}
+
+#[no_mangle]
+pub extern "C" fn server_flush_entity_changes() {
+    server().flush_entity_changes();
+}
+
 /// Output: `[cx i32 LE][cz i32 LE][chunk bytes]` for one chunk that needs
 /// saving, or returns 0 when nothing is dirty.
 #[no_mangle]

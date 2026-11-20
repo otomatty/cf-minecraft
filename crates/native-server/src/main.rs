@@ -58,6 +58,7 @@ fn main() {
 /// Chunks are generated, sent and unloaded throughout the run.
 fn bench(players: u32, view: u8, ticks: u32, generator: Generator) {
     let mut server = Server::new(2026, generator);
+    server.set_entity_persistence(false);
     let flight_y = if generator == Generator::Terrain {
         240.0
     } else {
