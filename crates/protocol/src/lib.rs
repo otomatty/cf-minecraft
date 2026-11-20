@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -161,6 +161,7 @@ pub enum C2S {
     Respawn,
     UseItem,
     StopUsingItem,
+    CancelUsingItem,
     ClickSlot {
         slot: u8,
         button: u8,
@@ -346,6 +347,7 @@ pub mod id {
     pub const C2S_USE_BLOCK: u8 = 0x0b;
     pub const C2S_USE_BUCKET: u8 = 0x0f;
     pub const C2S_ATTACK: u8 = 0x10;
+    pub const C2S_CANCEL_USING_ITEM: u8 = 0x11;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -385,6 +387,7 @@ impl C2S {
             C2S::Respawn => w.u8(id::C2S_RESPAWN),
             C2S::UseItem => w.u8(id::C2S_USE_ITEM),
             C2S::StopUsingItem => w.u8(id::C2S_STOP_USING_ITEM),
+            C2S::CancelUsingItem => w.u8(id::C2S_CANCEL_USING_ITEM),
             C2S::ClickSlot {
                 slot,
                 button,
@@ -502,6 +505,7 @@ impl C2S {
             id::C2S_RESPAWN => C2S::Respawn,
             id::C2S_USE_ITEM => C2S::UseItem,
             id::C2S_STOP_USING_ITEM => C2S::StopUsingItem,
+            id::C2S_CANCEL_USING_ITEM => C2S::CancelUsingItem,
             id::C2S_CLOSE_INVENTORY => C2S::CloseInventory,
             id::C2S_DIG_START => C2S::DigStart {
                 x: r.i32()?,
@@ -1073,6 +1077,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancel_using_item_round_trips_and_rejects_payloads() {
+        let packet = C2S::CancelUsingItem;
+        assert_eq!(packet.encode(), [0x11]);
+        assert_eq!(C2S::decode(&[0x11]), Ok(packet));
+        assert!(C2S::decode(&[0x11, 0]).is_err());
+        assert!(C2S::decode(&[0x11, 255]).is_err());
+    }
+
+    #[test]
     fn player_status_and_respawn_round_trip_and_reject_invalid_bytes() {
         assert_eq!(C2S::Respawn.encode(), [id::C2S_RESPAWN]);
         assert_eq!(C2S::decode(&[id::C2S_RESPAWN]), Ok(C2S::Respawn));
@@ -1329,7 +1342,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+        assert_eq!(PROTOCOL_VERSION, 21);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,

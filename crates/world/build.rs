@@ -635,6 +635,8 @@ struct Recipe {
     pattern: Option<Vec<String>>,
     key: Option<std::collections::BTreeMap<String, String>>,
     ingredients: Option<Vec<String>>,
+    #[serde(default)]
+    table_only: bool,
     result: RecipeResult,
 }
 #[derive(Deserialize)]
@@ -740,7 +742,7 @@ fn generate_recipes(root: &Path, dest: &Path, items: &[Item]) {
             seen.insert((width, height, cells.clone())),
             "recipes.toml: duplicate recipe"
         );
-        writeln!(out,"Recipe {{ width: {width}, height: {height}, ingredients: &{cells:?}, item: {}, count: {} }},", result.id, recipe.result.count).unwrap();
+        writeln!(out,"Recipe {{ width: {width}, height: {height}, ingredients: &{cells:?}, table_only: {}, item: {}, count: {} }},", recipe.table_only, result.id, recipe.result.count).unwrap();
     }
     out.push_str("];\n");
     fs::write(dest.join("recipes.rs"), out).unwrap();

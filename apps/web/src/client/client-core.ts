@@ -33,6 +33,7 @@ export interface ClientExports {
 	client_enc_respawn(): number;
 	client_enc_use_item(): number;
 	client_enc_stop_using_item(): number;
+	client_enc_cancel_using_item(): number;
 	client_enc_click_slot(slot: number, button: number, shift: number): number;
 	client_enc_close_inventory(): number;
 	client_enc_use_block(x: number, y: number, z: number): number;
@@ -461,6 +462,7 @@ export class ClientCore {
 	encodeRespawn(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_respawn()); }
 	encodeUseItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_item()); }
 	encodeStopUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_stop_using_item()); }
+	encodeCancelUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_cancel_using_item()); }
 	get screen(): number { return this.x.client_screen(); }
 	get table(): Array<InventorySlot | null> { return this.inventorySlots.slice(42, 51); }
 	get craftingResult(): InventorySlot | null { return this.inventorySlots[40]; }

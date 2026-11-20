@@ -99,6 +99,16 @@ impl Inventory {
         }
         Some(item)
     }
+    pub(crate) fn first_slot_with(&self, item: u16) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.is_some_and(|stack| stack.item == item))
+    }
+
+    pub(crate) fn take_one(&mut self, slot: usize) {
+        subtract(&mut self.slots[slot], 1);
+    }
+
     pub fn add(&mut self, item: u16, count: u32) -> u32 {
         add_slots(&mut self.slots, item, count)
     }
@@ -602,6 +612,9 @@ pub fn matching_recipe<'a>(
     let mut multiset: Vec<_> = grid.iter().flatten().map(|s| s.item).collect();
     multiset.sort_unstable();
     recipes.iter().find(|r| {
+        if r.table_only && (width < 3 || height < 3) {
+            return false;
+        }
         if r.width == 0 {
             return r.ingredients == multiset;
         }
@@ -653,6 +666,7 @@ mod crafting_tests {
         )
         .is_none());
         let wide = [world::recipes::Recipe {
+            table_only: false,
             width: 3,
             height: 1,
             ingredients: &[5, 5, 5],
@@ -662,6 +676,7 @@ mod crafting_tests {
         assert!(matching_recipe(&[stack(5, 1); 4], 2, 2, &wide).is_none());
         assert!(matching_recipe(&[stack(5, 1); 3], 3, 1, &wide).is_some());
         let mixed = [world::recipes::Recipe {
+            table_only: false,
             width: 0,
             height: 0,
             ingredients: &[5, 5, 8],
@@ -679,6 +694,7 @@ mod crafting_tests {
             matching_recipe(&[stack(8, 1), stack(8, 1), None, stack(5, 2)], 2, 2, &mixed).is_none()
         );
         let asymmetric = [world::recipes::Recipe {
+            table_only: false,
             width: 2,
             height: 1,
             ingredients: &[5, 8],
@@ -730,6 +746,39 @@ mod crafting_tests {
             }
         }
     }
+    #[test]
+    fn table_crafts_bow_and_arrows_from_their_ingredients() {
+        let stick = stack(items::by_name("stick").unwrap(), 1);
+        let wool = stack(items::by_name("white_wool").unwrap(), 1);
+        let feather = stack(items::by_name("feather").unwrap(), 1);
+        for (table, result, count) in [
+            (
+                [None, stick, wool, stick, None, wool, None, stick, wool],
+                "bow",
+                1,
+            ),
+            (
+                [None, None, None, None, stick, None, None, feather, None],
+                "arrow",
+                2,
+            ),
+        ] {
+            let mut inv = Inventory {
+                screen: Screen::CraftingTable { pos: [0; 3] },
+                table,
+                ..Inventory::default()
+            };
+            inv.click(50, 0, false).unwrap();
+            assert_eq!(inv.cursor, stack(items::by_name(result).unwrap(), count));
+            assert_eq!(inv.table, [None; 9]);
+        }
+        let inv = Inventory {
+            crafting: [stick, None, feather, None],
+            ..Inventory::default()
+        };
+        assert_eq!(inv.result(), None);
+    }
+
     #[test]
     fn table_crafts_hoes_and_bread_from_their_ingredients() {
         let stick = stack(items::by_name("stick").unwrap(), 1);

@@ -206,7 +206,7 @@ pub struct Mob {
 }
 
 impl Mob {
-    fn new(kind: MobKind, pos: [f64; 3]) -> Self {
+    pub(crate) fn new(kind: MobKind, pos: [f64; 3]) -> Self {
         let spec = spec(kind);
         Self {
             kind,
@@ -238,6 +238,10 @@ impl Mob {
         (x >> 4, z >> 4)
     }
 
+    pub(crate) fn bounds(&self) -> physics::Aabb {
+        self.body.bounds()
+    }
+
     pub(crate) fn within_attack_reach(&self, mut eye: [f64; 3]) -> bool {
         eye[1] += physics::EYE_HEIGHT;
         let bounds = self.body.bounds();
@@ -256,10 +260,6 @@ impl Mob {
         id: u32,
         time: i64,
     ) {
-        if !self.take_damage(damage) || self.health == 0 {
-            return;
-        }
-
         let [x, _, z] = self.pos();
         let (dx, dz) = (x - attacker[0], z - attacker[2]);
         let same_position = dx == 0.0 && dz == 0.0;
@@ -272,12 +272,32 @@ impl Mob {
         } else {
             (dx, dz)
         };
+        self.hurt_with_knockback(world, damage, ([dx, dz], !same_position), seed, id, time);
+    }
+
+    pub(crate) fn hurt_with_knockback(
+        &mut self,
+        world: &World,
+        damage: u8,
+        ([dx, dz], flee_along_hit): ([f64; 2], bool),
+        seed: i64,
+        id: u32,
+        time: i64,
+    ) {
+        if !self.take_damage(damage) || self.health == 0 {
+            return;
+        }
+
         // Scale the components first so that very small offsets do not underflow.
         let largest = dx.abs().max(dz.abs());
-        let (dx, dz) = (dx / largest, dz / largest);
-        let length = (dx * dx + dz * dz).sqrt();
+        let (dx, dz) = if largest == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (dx / largest, dz / largest)
+        };
+        let length = (dx * dx + dz * dz).sqrt().max(1.0);
         if self.hostile.is_none() {
-            let away = (!same_position).then(|| [dx / length, dz / length]);
+            let away = (flee_along_hit && largest != 0.0).then(|| [dx / length, dz / length]);
             self.start_fleeing(seed, id, time, away);
         }
 

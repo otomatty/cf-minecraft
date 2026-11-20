@@ -107,3 +107,15 @@ result = { item = "bread", count = 1 }
 pattern = ["# #", " # "]
 key = { "#" = "iron_ingot" }
 result = { item = "bucket", count = 1 }
+
+[[recipes]]
+pattern = [" |W", "| W", " |W"]
+key = { "|" = "stick", "W" = "white_wool" }
+table_only = true
+result = { item = "bow", count = 1 }
+
+[[recipes]]
+pattern = ["|", "F"]
+key = { "|" = "stick", "F" = "feather" }
+table_only = true
+result = { item = "arrow", count = 2 }
