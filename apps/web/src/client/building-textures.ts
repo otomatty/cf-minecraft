@@ -7,6 +7,27 @@ interface MaterialTile {
 }
 
 const materials = new Map<string, MaterialTile>([
+	["torch", {
+		palette: { a: 0x64351d, b: 0x946039, c: 0xbc8850, d: 0x4c2b1e, f: 0xff7927, g: 0xffbc42, h: 0xffe88c },
+		rows: [
+			"ggghhhgggghhhggg",
+			"ggghhhgggghhhggg",
+			"ggghhhgggghhhggg",
+			"ggghhhgggghhhggg",
+			"ggghhhgggghhhggg",
+			"ggghhhgggghhhggg",
+			"gghhghghgghhhggg",
+			"fffggfffgfgffggf",
+			"daaddaddaddaddad",
+			"aabbbaaabbbabbaa",
+			"abbcbabcbabbcbab",
+			"bccbbcbbcbbcccbb",
+			"bbcbacbbcbbabbbb",
+			"aabcbabbbabbabaa",
+			"aabacaabaababaab",
+			"daabdaabdaadbaad",
+		],
+	}],
 	["obsidian", {
 		palette: { a: 0x17131f, b: 0x201929, c: 0x2a2138, d: 0x362944, e: 0x4b395a, f: 0x665171 },
 		rows: [

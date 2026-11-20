@@ -524,6 +524,28 @@ const sprites = new Map<string, Sprite>([
 	] }],
 ]);
 
+sprites.set("torch_item", {
+	palette: { a: 0x64351d, b: 0x946039, c: 0xbc8850, d: 0x4c2b1e, f: 0xf46a24, g: 0xffbc42, h: 0xffe88c },
+	rows: [
+		"................",
+		"...........h....",
+		"..........hg....",
+		".........ghgf...",
+		"........fhhgf...",
+		"........fggff...",
+		".......afgfa....",
+		"......acdda.....",
+		".....acba.......",
+		"....acba........",
+		"...acba.........",
+		"..abba..........",
+		"..aba...........",
+		"..da............",
+		"................",
+		"................",
+	],
+});
+
 for (const [material, palette] of Object.entries(materials)) {
 	for (const [kind, rows] of Object.entries(tools)) {
 		sprites.set(`${material}_${kind}`, { palette, rows });

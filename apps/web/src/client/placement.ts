@@ -7,7 +7,7 @@ export interface BlockStateInfo {
 	stateName: string;
 	first: number;
 	count: number;
-	model: "cube" | "boxes" | "cross" | "stairs" | "fence";
+	model: "cube" | "boxes" | "cross" | "stairs" | "fence" | "torch";
 	occludes: boolean;
 	texture: string;
 	/** Texture names in mesher order: down, up, north, south, west, east. */
@@ -26,6 +26,7 @@ export interface BlockStateInfo {
 export function placementState(
 	registry: readonly BlockStateInfo[], selected: number, hit: RayHit, yaw: number,
 	getBlock: (x: number, y: number, z: number) => number,
+	torchPlacement?: (hit: RayHit) => number,
 ): { x: number; y: number; z: number; state: number } | null {
 	const block = registry[selected];
 	const normal = FACE_NORMALS[hit.face];
@@ -39,6 +40,13 @@ export function placementState(
 		return { x: hit.x, y: hit.y, z: hit.z, state: block.first + 2 };
 	}
 	const [x, y, z] = [hit.x + normal[0], hit.y + normal[1], hit.z + normal[2]];
+	const current = getBlock(x, y, z);
+	const currentName = registry[current]?.name;
+	if (block.model === "torch") {
+		if (!["air", "short_grass", "water", "flowing_water"].includes(currentName)) return null;
+		const state = torchPlacement?.(hit);
+		return state ? { x, y, z, state } : null;
+	}
 	let state = block.first;
 	if (stairs) {
 		const normalized = ((yaw % 360) + 360) % 360;
@@ -46,10 +54,9 @@ export function placementState(
 		state += [2, 4, 0, 6][Math.floor((normalized + 45) / 90) % 4];
 	}
 	if (slab || stairs) state += hit.face === 0 || (hit.face > 1 && hit.hitY >= 0.5) ? 1 : 0;
-	const current = getBlock(x, y, z);
 	if (slab && registry[current]?.first === block.first && current < block.first + 2 && current !== state) {
 		state = block.first + 2;
-	} else if (!["air", "water", "flowing_water"].includes(registry[current]?.name)) {
+	} else if (!["air", "water", "flowing_water"].includes(currentName)) {
 		return null;
 	}
 	if (block.model === "cross") {

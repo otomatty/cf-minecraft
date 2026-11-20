@@ -1045,6 +1045,8 @@ impl Server {
                             .and_then(|item| item.block)
                             .is_some_and(|block| {
                                 blocks::info(block).name == blocks::info(state).name
+                                    || (block == blocks::TORCH
+                                        && blocks::torch_face(state).is_some())
                             })
                     };
                 if !self.can_edit(id, x, y, z, state) || !survival_ok {
@@ -1122,6 +1124,31 @@ impl Server {
         self.broadcast_block(x, y, z, state);
         self.schedule_fluid_neighbors([x, y, z]);
         self.check_wheat_above([x, y, z], state, exploded);
+        self.check_torches_supported_by([x, y, z], exploded);
+        for [dx, _, dz] in blocks::FACE_NORMALS[2..].iter().copied() {
+            let neighbor = [x + dx, y, z + dz];
+            // A horizontal neighbor can change a stair's corner geometry.
+            if self
+                .world
+                .get_block(x + dx, y, z + dz)
+                .is_some_and(|s| blocks::info(s).model == blocks::Model::Stairs)
+            {
+                self.check_torches_supported_by(neighbor, exploded);
+            }
+        }
+    }
+
+    fn check_torches_supported_by(&mut self, [x, y, z]: [i32; 3], exploded: bool) {
+        for (face, [dx, dy, dz]) in blocks::FACE_NORMALS.iter().copied().enumerate().skip(1) {
+            let pos = [x + dx, y + dy, z + dz];
+            let Some(torch) = self.world.get_block(pos[0], pos[1], pos[2]) else {
+                continue;
+            };
+            if blocks::torch_face(torch) == Some(face) && !self.world.has_full_face([x, y, z], face)
+            {
+                self.break_unsupported_block(pos, torch, exploded);
+            }
+        }
     }
 
     fn block_drop_random(&self, pos: [i32; 3]) -> jmath::JavaRandom {
@@ -1492,6 +1519,12 @@ impl Server {
         }
         self.within_reach(client.pos, [x, y, z])
             && self.world.get_block(x, y, z).is_some_and(|old| {
+                if let Some(face) = blocks::torch_face(state) {
+                    let [dx, dy, dz] = blocks::FACE_NORMALS[face];
+                    return (matches!(old, blocks::AIR | blocks::SHORT_GRASS)
+                        || blocks::is_water(old))
+                        && self.world.has_full_face([x - dx, y - dy, z - dz], face);
+                }
                 blocks::can_place(
                     old,
                     state,
@@ -2245,6 +2278,129 @@ mod tests {
             .filter_map(|(_, p)| matches!(p, S2C::Inventory { .. }).then_some(p))
             .collect()
     }
+
+    #[test]
+    fn torches_place_only_against_full_faces_and_consume_the_held_item() {
+        let torch = items::by_name("torch").unwrap();
+        let run = || {
+            let (mut s, [x, y, z]) = survival();
+            let pos @ [x, y, z] = [x + 2, y + 1, z + 2];
+            let mut stack = Stack {
+                item: torch,
+                count: 8,
+            };
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(stack))
+                .unwrap();
+            for (face, [dx, dy, dz]) in blocks::FACE_NORMALS.into_iter().enumerate() {
+                let state = blocks::torch_for_face(face).unwrap_or(blocks::TORCH);
+                let [sx, sy, sz] = [x - dx, y - dy, z - dz];
+                s.world.set_block(x, y, z, blocks::AIR);
+                s.world.set_block(sx, sy, sz, blocks::OAK_FENCE);
+                edit(&mut s, pos, state);
+                s.tick();
+                assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+                assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+
+                // A transparent cube, a top slab, and solid cube sides can all support torches.
+                let support = match face {
+                    1 => blocks::OAK_SLAB + 1,
+                    3 => blocks::GLASS,
+                    _ => blocks::STONE,
+                };
+                s.world.set_block(sx, sy, sz, support);
+                if face == 0 {
+                    // None of the supported states can attach to the underside.
+                    for state in blocks::TORCH..blocks::COUNT {
+                        edit(&mut s, pos, state);
+                    }
+                    s.tick();
+                    assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+                    assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+                } else {
+                    s.world.set_block(x, y, z, blocks::DIRT);
+                    edit(&mut s, pos, state);
+                    s.tick();
+                    assert_eq!(s.get_block(x, y, z), Some(blocks::DIRT));
+                    assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+                    s.world.set_block(x, y, z, blocks::SHORT_GRASS);
+                    edit(&mut s, pos, state);
+                    s.tick();
+                    stack.count -= 1;
+                    assert_eq!(s.get_block(x, y, z), Some(state));
+                    assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+                }
+                s.world.set_block(sx, sy, sz, blocks::AIR);
+            }
+            s.state_hash()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn mining_a_floor_or_wall_support_drops_one_torch() {
+        for (face, [dx, dy, dz]) in blocks::FACE_NORMALS.into_iter().enumerate().skip(1) {
+            let (mut s, [x, y, z]) = survival();
+            let support @ [x, y, z] = [x + 2, y + 1, z + 2];
+            let target = [x + dx, y + dy, z + dz];
+            let torch = items::by_name("torch").unwrap();
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(
+                    0,
+                    Some(Stack {
+                        item: torch,
+                        count: 1,
+                    }),
+                )
+                .unwrap();
+            s.world.set_block(x, y, z, blocks::DIRT);
+            edit(&mut s, target, blocks::torch_for_face(face).unwrap());
+            dig_start(&mut s, 1, support);
+            for _ in 0..=12 {
+                s.tick();
+            }
+            assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+            assert_eq!(
+                s.world.get_block(target[0], target[1], target[2]),
+                Some(blocks::AIR)
+            );
+            let drops: Vec<_> = s
+                .entities
+                .values()
+                .filter(|entity| entity.item == torch)
+                .collect();
+            assert_eq!(drops.len(), 1);
+            assert_eq!(drops[0].count, 1);
+        }
+    }
+
+    #[test]
+    fn a_stair_corner_can_remove_a_wall_torch_support() {
+        let (mut s, [x, y, z]) = survival();
+        let [x, y, z] = [x + 2, y + 1, z + 2];
+        s.set_game_mode(GameMode::Creative);
+        s.world.set_block(x, y, z, blocks::OAK_STAIRS);
+        edit(&mut s, [x, y, z - 1], blocks::WALL_TORCH);
+        s.tick();
+        assert_eq!(s.get_block(x, y, z - 1), Some(blocks::WALL_TORCH));
+        // The rear neighbor creates an inner corner with a full west face.
+        edit(&mut s, [x, y, z + 1], blocks::OAK_STAIRS + 4);
+        edit(&mut s, [x - 1, y, z], blocks::WALL_TORCH + 2);
+        s.tick();
+        assert_eq!(s.get_block(x - 1, y, z), Some(blocks::WALL_TORCH + 2));
+        edit(&mut s, [x, y, z + 1], blocks::AIR);
+        s.tick();
+        assert_eq!(s.get_block(x - 1, y, z), Some(blocks::AIR));
+        assert_eq!(s.get_block(x, y, z - 1), Some(blocks::WALL_TORCH));
+        assert!(s.entities.is_empty());
+    }
+
     #[test]
     fn survival_breaks_collect_and_placements_consume_all_block_states() {
         let (mut s, pos) = survival();
