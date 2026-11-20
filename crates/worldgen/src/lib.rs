@@ -292,4 +292,108 @@ mod tests {
             assert_eq!(s.non_air as usize, s.states.count(|v| v != blocks::AIR));
         }
     }
+
+    #[test]
+    fn local_sky_light_matches_lit_terrain_caves() {
+        use world::World;
+
+        let terrain = TerrainGenerator::new(2026);
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        // One chunk. Unloaded neighbors are closed on both sides, so the
+        // comparison still holds, and debug stays within tens of seconds.
+        let chunk = terrain.generate(0, 0);
+        lit.insert_chunk(chunk.clone());
+        unlit.insert_chunk(chunk);
+        let mut caves = 0usize;
+        for z in 0..16 {
+            for x in 0..16 {
+                let surface = terrain.surface_y(x, z);
+                for y in (surface - 48)..surface {
+                    if unlit.get_block(x, y, z) != Some(blocks::AIR) {
+                        continue;
+                    }
+                    assert_eq!(
+                        unlit.local_sky_light([x, y, z]),
+                        lit.sky_light(x, y, z),
+                        "cave {x},{y},{z}"
+                    );
+                    caves += 1;
+                }
+            }
+        }
+        assert!(caves > 30, "only {caves} cave cells");
+        let surface = terrain.surface_y(8, 8);
+        assert_eq!(
+            unlit.local_sky_light([8, surface + 2, 8]),
+            lit.sky_light(8, surface + 2, 8),
+            "open air"
+        );
+        let top = world::MIN_Y + world::HEIGHT;
+        assert_eq!(unlit.local_sky_light([0, top, 0]), 15);
+        assert_eq!(lit.sky_light(0, top, 0), 15);
+        assert_eq!(unlit.local_sky_light([0, world::MIN_Y - 1, 0]), 0);
+        assert_eq!(unlit.local_sky_light([4_000, 64, 4_000]), 0);
+    }
+
+    /// Hand-built room and shaft. Chunk (0, 0) of seed 2026 has cave air, but
+    /// that air sits under a solid roof, so a scan there does not find a lit cell.
+    fn sealed_room_and_shaft() -> (world::World, [[i32; 3]; 2]) {
+        use world::{Chunk, World};
+
+        let mut world = World::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut chunk = Chunk::empty(cx, cz);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        for y in 0..=32 {
+                            chunk.set(x, y, z, blocks::STONE);
+                        }
+                    }
+                }
+                world.insert_chunk(chunk);
+            }
+        }
+        for y in 8..=12 {
+            for z in 6..=10 {
+                for x in 6..=10 {
+                    world.set_block(x, y, z, blocks::AIR);
+                }
+            }
+        }
+        for y in 12..=40 {
+            world.set_block(20, y, 8, blocks::AIR);
+        }
+        for x in 14..=20 {
+            world.set_block(x, 12, 8, blocks::AIR);
+        }
+        (world, [[8, 10, 8], [14, 12, 8]])
+    }
+
+    #[test]
+    #[ignore = "release timing: cargo test --release -p worldgen local_sky_light_timings -- --ignored --nocapture"]
+    fn local_sky_light_timings() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let (world, samples) = sealed_room_and_shaft();
+        let dark = samples[0];
+        let glow = samples[1];
+        assert_eq!(world.local_sky_light(dark), 0, "sealed room {dark:?}");
+        let glow_level = world.local_sky_light(glow);
+        assert!(glow_level > 0, "open shaft {glow:?}");
+        let runs = 300;
+        for (name, sample, expected) in [("dark", dark, 0), ("entrance", glow, glow_level)] {
+            let start = Instant::now();
+            for _ in 0..runs {
+                let level = black_box(&world).local_sky_light(black_box(sample));
+                assert_eq!(level, expected);
+            }
+            let mean = start.elapsed() / runs;
+            println!(
+                "local sky light terrain {name} {sample:?} level {expected}: mean={mean:?} ({runs} calls)"
+            );
+        }
+    }
 }

@@ -116,6 +116,100 @@ fn attenuate(value: u8, opacity: u8) -> u8 {
     value.saturating_sub(opacity.max(1))
 }
 
+/// Straight down from full sun through a clear cell keeps level 15.
+fn transmit_down(light: u8, opacity: u8) -> u8 {
+    if light == 15 && opacity == 0 {
+        light
+    } else {
+        attenuate(light, opacity)
+    }
+}
+
+fn apply_vertical(mut light: u8, opacity: u8, count: u8) -> u8 {
+    if count == 0 || light == 0 || opacity >= 15 {
+        return if opacity >= 15 { 0 } else { light };
+    }
+    if opacity == 0 {
+        return if light == 15 {
+            15
+        } else {
+            light.saturating_sub(count)
+        };
+    }
+    let mut left = count;
+    if light == 15 {
+        light = 15 - opacity;
+        left -= 1;
+    }
+    let loss = u16::from(opacity.max(1)) * u16::from(left);
+    u16::from(light).saturating_sub(loss).min(15) as u8
+}
+
+/// True when any cell at or above `y` has opacity 15, so vertical sun cannot arrive.
+fn column_blocks_sun(chunk: &Chunk, lx: usize, lz: usize, y: i32) -> bool {
+    let world_top = MIN_Y + HEIGHT - 1;
+    if !(MIN_Y..=world_top).contains(&y) {
+        return y < MIN_Y;
+    }
+    let mut cy = y;
+    while cy <= world_top {
+        let s = section_index(cy).expect("y is inside the build height");
+        let section_top = MIN_Y + s as i32 * 16 + 15;
+        let section = &chunk.sections[s];
+        if let Some(state) = section.states.uniform() {
+            if blocks::info(state).opacity >= 15 {
+                return true;
+            }
+        } else {
+            for by in cy..=section_top {
+                let local_y = ((by - MIN_Y) & 15) as usize;
+                if blocks::info(section.get(lx, local_y, lz)).opacity >= 15 {
+                    return true;
+                }
+            }
+        }
+        cy = section_top + 1;
+    }
+    false
+}
+
+/// Vertical sunlight at one cell: 15 above the build height, else filtered from the sky.
+fn vertical_sky_light(chunk: &Chunk, lx: usize, lz: usize, y: i32) -> u8 {
+    let world_top = MIN_Y + HEIGHT - 1;
+    if y > world_top {
+        return 15;
+    }
+    if y < MIN_Y || column_blocks_sun(chunk, lx, lz, y) {
+        return 0;
+    }
+    let mut light = 15u8;
+    let mut cy = world_top;
+    while cy >= y {
+        let s = section_index(cy).expect("y is inside the build height");
+        let base = MIN_Y + s as i32 * 16;
+        let section = &chunk.sections[s];
+        let stop = base.max(y);
+        if let Some(state) = section.states.uniform() {
+            light = apply_vertical(light, blocks::info(state).opacity, (cy - stop + 1) as u8);
+            if light == 0 {
+                return 0;
+            }
+            cy = stop - 1;
+        } else {
+            while cy >= stop {
+                let opacity =
+                    blocks::info(section.get(lx, ((cy - MIN_Y) & 15) as usize, lz)).opacity;
+                light = transmit_down(light, opacity);
+                if light == 0 {
+                    return 0;
+                }
+                cy -= 1;
+            }
+        }
+    }
+    light
+}
+
 impl World {
     /// Opt-in mesh invalidation tracking; simulation worlds need no tracking.
     pub fn track_light_changes(&mut self) {
@@ -409,6 +503,93 @@ impl World {
                 }
                 let cell = local_index(n);
                 let next = attenuate(value, opacity[cell]);
+                if next > distance.max(levels[cell]) {
+                    levels[cell] = next;
+                    queue.push_back(n);
+                }
+            }
+        }
+        levels[local_index((0, 0, 0))]
+    }
+
+    /// Compute sky light at one cell without updating the world's lighting.
+    /// When lighting is enabled, chunks awaiting deferred lighting are closed boundaries.
+    /// `y` above the build height is 15, matching [`Self::sky_light`] on a lit world.
+    pub fn local_sky_light(&self, [x, y, z]: [i32; 3]) -> u8 {
+        if y >= MIN_Y + HEIGHT {
+            return 15;
+        }
+        let loaded_chunk = |x: i32, z: i32| {
+            self.chunks
+                .get(&(x >> 4, z >> 4))
+                .filter(|c| !self.lighting_enabled || c.lighting.is_some())
+        };
+        let top = MIN_Y + HEIGHT - 1;
+        if y < MIN_Y || loaded_chunk(x, z).is_none() {
+            return 0;
+        }
+
+        let mut opacity = [15u8; LOCAL_VOLUME];
+        let mut levels = [0u8; LOCAL_VOLUME];
+        let mut queue = VecDeque::new();
+        for dz in -LOCAL_RADIUS..=LOCAL_RADIUS {
+            let Some(world_z) = z.checked_add(dz) else {
+                continue;
+            };
+            let reach_z = LOCAL_RADIUS - dz.abs();
+            for dx in -reach_z..=reach_z {
+                let Some(world_x) = x.checked_add(dx) else {
+                    continue;
+                };
+                let Some(chunk) = loaded_chunk(world_x, world_z) else {
+                    continue;
+                };
+                let reach = reach_z - dx.abs();
+                let y0 = (y - reach).max(MIN_Y);
+                let y1 = (y + reach).min(top);
+                let lx = (world_x & 15) as usize;
+                let lz = (world_z & 15) as usize;
+                // One scan per column, reused for every cell of that column in the diamond.
+                let mut incoming = if y1 >= top {
+                    15
+                } else {
+                    vertical_sky_light(chunk, lx, lz, y1 + 1)
+                };
+                for world_y in (y0..=y1).rev() {
+                    let dy = world_y - y;
+                    let cell = local_index((dx, dy, dz));
+                    let opacity_here = blocks::info(chunk.get(lx, world_y, lz)).opacity;
+                    opacity[cell] = opacity_here;
+                    incoming = transmit_down(incoming, opacity_here);
+                    levels[cell] = incoming;
+                    let distance = (dx.abs() + dy.abs() + dz.abs()) as u8;
+                    if incoming > distance {
+                        queue.push_back((dx, dy, dz));
+                    }
+                }
+            }
+        }
+
+        while let Some(p) = queue.pop_front() {
+            let value = levels[local_index(p)];
+            for d in DIRS {
+                let n = neighbor(p, d);
+                let distance_i = n.0.abs() + n.1.abs() + n.2.abs();
+                if distance_i > LOCAL_RADIUS {
+                    continue;
+                }
+                let distance = distance_i as u8;
+                // Full sun falling straight down does not pay the usual step, so keep it.
+                let downward = d.1 < 0;
+                if value <= distance + 1 && !(value == 15 && downward) {
+                    continue;
+                }
+                let cell = local_index(n);
+                let next = if value == 15 && downward && opacity[cell] == 0 {
+                    value
+                } else {
+                    attenuate(value, opacity[cell])
+                };
                 if next > distance.max(levels[cell]) {
                     levels[cell] = next;
                     queue.push_back(n);
@@ -1189,6 +1370,269 @@ mod tests {
             }
             let mean = start.elapsed() / runs;
             println!("local block light: target level {expected}, mean={mean:?} ({runs} calls)");
+        }
+    }
+
+    fn assert_local_sky(lit: &World, unlit: &World, cells: impl IntoIterator<Item = [i32; 3]>) {
+        let mut count = 0usize;
+        for p @ [x, y, z] in cells {
+            assert_eq!(unlit.local_sky_light(p), lit.sky_light(x, y, z), "{p:?}");
+            count += 1;
+        }
+        assert!(count > 0, "no cells compared");
+    }
+
+    #[test]
+    fn local_sky_light_matches_upper_boundary_and_does_not_mutate() {
+        for material in [
+            blocks::AIR,
+            blocks::GLASS,
+            blocks::STONE,
+            blocks::OAK_LEAVES,
+            blocks::WATER,
+        ] {
+            let mut lit = World::with_lighting(true);
+            let mut unlit = World::new();
+            let chunk = upper_boundary_shaft(material);
+            lit.insert_chunk(chunk.clone());
+            unlit.insert_chunk(chunk);
+            let mut before = Fnv64::new();
+            unlit.hash_into(&mut before);
+            let top = MIN_Y + HEIGHT - 1;
+            for y in [MIN_Y, MIN_Y + 1, 0, 64, 200, top - 1, top] {
+                assert_eq!(
+                    unlit.local_sky_light([8, y, 8]),
+                    lit.sky_light(8, y, 8),
+                    "material {material} shaft y {y}"
+                );
+                assert_eq!(
+                    unlit.local_sky_light([7, y, 8]),
+                    lit.sky_light(7, y, 8),
+                    "material {material} side y {y}"
+                );
+            }
+            assert_eq!(unlit.local_sky_light([8, top + 1, 8]), 15);
+            assert_eq!(lit.sky_light(8, top + 1, 8), 15);
+            assert_eq!(unlit.local_sky_light([8, MIN_Y - 1, 8]), 0);
+            assert_eq!(lit.sky_light(8, MIN_Y - 1, 8), 0);
+            let _ = unlit.local_sky_light([8, 0, 8]);
+            let mut after = Fnv64::new();
+            unlit.hash_into(&mut after);
+            assert_eq!(before.finish(), after.finish());
+            assert!(unlit.chunks.values().all(|c| c.lighting.is_none()));
+            assert!(!unlit.lighting_enabled());
+        }
+    }
+
+    #[test]
+    fn local_sky_light_matches_openings_shafts_tunnels_water_and_leaves() {
+        let mut carved = Chunk::empty(0, 0);
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..=24 {
+                    carved.set(x, y, z, blocks::STONE);
+                }
+            }
+        }
+        for y in 20..=23 {
+            for z in 6..=10 {
+                for x in 4..=12 {
+                    carved.set(x, y, z, blocks::AIR);
+                }
+            }
+        }
+        carved.set(8, 24, 8, blocks::AIR);
+        for y in 1..=24 {
+            carved.set(2, y, 2, blocks::AIR);
+        }
+        carved.set(2, 15, 2, blocks::GLASS);
+        for x in 2..=14 {
+            carved.set(x, 8, 2, blocks::AIR);
+        }
+        for y in 1..=8 {
+            carved.set(14, y, 2, blocks::AIR);
+        }
+        carved.set(6, 24, 14, blocks::AIR);
+        for y in 18..=23 {
+            carved.set(6, y, 14, blocks::WATER);
+        }
+        for y in 16..=19 {
+            carved.set(10, y, 14, blocks::AIR);
+        }
+        for y in 20..=24 {
+            carved.set(10, y, 14, blocks::OAK_LEAVES);
+        }
+        for y in 4..=5 {
+            carved.set(1, y, 8, blocks::AIR);
+        }
+        for x in 12..=15 {
+            carved.set(x, 21, 8, blocks::AIR);
+        }
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        lit.insert_chunk(carved.clone());
+        unlit.insert_chunk(carved);
+        lit.insert_chunk(Chunk::empty(1, 0));
+        unlit.insert_chunk(Chunk::empty(1, 0));
+
+        let expect = |lit: &World, unlit: &World, p: [i32; 3], level: u8| {
+            assert_eq!(lit.sky_light(p[0], p[1], p[2]), level, "lit {p:?}");
+            assert_eq!(unlit.local_sky_light(p), level, "local {p:?}");
+        };
+        for y in 1..=24 {
+            expect(&lit, &unlit, [2, y, 2], 15);
+        }
+        expect(&lit, &unlit, [2, 0, 2], 0);
+        expect(&lit, &unlit, [2, 14, 2], 15);
+        expect(&lit, &unlit, [2, 16, 2], 15);
+        expect(&lit, &unlit, [8, 8, 2], 9);
+        expect(&lit, &unlit, [14, 8, 2], 3);
+        expect(&lit, &unlit, [14, 7, 2], 2);
+        expect(&lit, &unlit, [14, 6, 2], 1);
+        expect(&lit, &unlit, [14, 5, 2], 0);
+        expect(&lit, &unlit, [8, 24, 8], 15);
+        expect(&lit, &unlit, [8, 23, 8], 15);
+        expect(&lit, &unlit, [7, 23, 8], 14);
+        expect(&lit, &unlit, [1, 4, 8], 0);
+        expect(&lit, &unlit, [1, 5, 8], 0);
+        expect(&lit, &unlit, [6, 24, 14], 15);
+        expect(&lit, &unlit, [6, 23, 14], 14);
+        expect(&lit, &unlit, [6, 18, 14], 9);
+        expect(&lit, &unlit, [6, 17, 14], 0);
+        expect(&lit, &unlit, [10, 24, 14], 14);
+        expect(&lit, &unlit, [10, 20, 14], 10);
+        expect(&lit, &unlit, [10, 19, 14], 9);
+        expect(&lit, &unlit, [10, 16, 14], 6);
+        expect(&lit, &unlit, [10, 15, 14], 0);
+        expect(&lit, &unlit, [16, 21, 8], 15);
+        expect(&lit, &unlit, [15, 21, 8], 14);
+        expect(&lit, &unlit, [14, 21, 8], 13);
+
+        let cells =
+            (0..16).flat_map(|x| (0..16).flat_map(move |z| (0..=24).map(move |y| [x, y, z])));
+        assert_local_sky(&lit, &unlit, cells);
+        let border =
+            (16..=18).flat_map(|x| (6..=10).flat_map(move |z| (18..=24).map(move |y| [x, y, z])));
+        assert_local_sky(&lit, &unlit, border);
+
+        lit.set_block(8, 24, 8, blocks::OAK_LEAVES);
+        unlit.set_block(8, 24, 8, blocks::OAK_LEAVES);
+        assert_local_sky(
+            &lit,
+            &unlit,
+            (6..=10).flat_map(|x| (20..=24).map(move |y| [x, y, 8])),
+        );
+        lit.set_block(4, 8, 2, blocks::STONE);
+        unlit.set_block(4, 8, 2, blocks::STONE);
+        assert_eq!(lit.sky_light(8, 8, 2), 0);
+        assert_eq!(unlit.local_sky_light([8, 8, 2]), 0);
+        assert_eq!(unlit.local_sky_light([14, 8, 2]), 0);
+        lit.set_block(4, 8, 2, blocks::AIR);
+        unlit.set_block(4, 8, 2, blocks::AIR);
+        assert_eq!(unlit.local_sky_light([14, 8, 2]), lit.sky_light(14, 8, 2));
+    }
+
+    #[test]
+    fn local_sky_light_treats_missing_and_deferred_chunks_as_closed() {
+        let mut roof = Chunk::empty(0, 0);
+        for z in 0..16 {
+            for x in 0..16 {
+                roof.set(x, 10, z, blocks::STONE);
+            }
+        }
+        let open = Chunk::empty(-1, 0);
+        let mut lit = World::with_lighting(true);
+        let mut unlit = World::new();
+        lit.insert_chunk(roof.clone());
+        unlit.insert_chunk(roof);
+        assert_eq!(lit.sky_light(0, 9, 8), 0);
+        assert_eq!(unlit.local_sky_light([0, 9, 8]), 0);
+        assert_eq!(unlit.local_sky_light([16, 9, 8]), 0);
+
+        lit.insert_chunk_unlit(open.clone());
+        assert_eq!(lit.local_sky_light([0, 9, 8]), lit.sky_light(0, 9, 8));
+        lit.light_chunk(-1, 0);
+        unlit.insert_chunk(open);
+        assert_eq!(lit.sky_light(0, 9, 8), 14);
+        assert_eq!(unlit.local_sky_light([0, 9, 8]), 14);
+        assert_eq!(lit.sky_light(13, 9, 8), 1);
+        assert_eq!(unlit.local_sky_light([13, 9, 8]), 1);
+        lit.remove_chunk(-1, 0);
+        unlit.remove_chunk(-1, 0);
+        assert_eq!(lit.sky_light(0, 9, 8), 0);
+        assert_eq!(unlit.local_sky_light([0, 9, 8]), 0);
+    }
+
+    /// Stone plateau with a sealed room and a sky shaft.
+    /// The tunnel starts at x = 14, so x = 11..=13 stay stone and the room
+    /// (x = 6..=10) does not open into the shaft.
+    fn sealed_room_and_shaft() -> (World, [[i32; 3]; 2]) {
+        let mut world = World::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut chunk = Chunk::empty(cx, cz);
+                for z in 0..16 {
+                    for x in 0..16 {
+                        for y in 0..=32 {
+                            chunk.set(x, y, z, blocks::STONE);
+                        }
+                    }
+                }
+                world.insert_chunk(chunk);
+            }
+        }
+        for y in 8..=12 {
+            for z in 6..=10 {
+                for x in 6..=10 {
+                    world.set_block(x, y, z, blocks::AIR);
+                }
+            }
+        }
+        for y in 12..=40 {
+            world.set_block(20, y, 8, blocks::AIR);
+        }
+        for x in 14..=20 {
+            world.set_block(x, 12, 8, blocks::AIR);
+        }
+        (world, [[8, 10, 8], [14, 12, 8]])
+    }
+
+    #[test]
+    fn local_sky_light_sealed_room_and_open_shaft_match() {
+        let (unlit, samples) = sealed_room_and_shaft();
+        assert_eq!(unlit.local_sky_light(samples[0]), 0);
+        assert!(unlit.local_sky_light(samples[1]) > 0);
+        let mut lit = World::with_lighting(true);
+        for chunk in unlit.chunks.values() {
+            lit.insert_chunk(chunk.clone());
+        }
+        for sample in samples {
+            assert_eq!(
+                unlit.local_sky_light(sample),
+                lit.sky_light(sample[0], sample[1], sample[2]),
+                "{sample:?}"
+            );
+        }
+        assert!(!unlit.lighting_enabled());
+    }
+
+    #[test]
+    #[ignore = "release timing: cargo test --release -p world local_sky_light_timings -- --ignored --nocapture"]
+    fn local_sky_light_timings() {
+        use std::hint::black_box;
+
+        let (world, samples) = sealed_room_and_shaft();
+        assert_eq!(world.local_sky_light(samples[0]), 0);
+        assert!(world.local_sky_light(samples[1]) > 0);
+        let runs = 300;
+        for sample in samples {
+            let start = Instant::now();
+            let mut level = 0;
+            for _ in 0..runs {
+                level = black_box(&world).local_sky_light(black_box(sample));
+            }
+            let mean = start.elapsed() / runs;
+            println!("local sky light cave {sample:?} level {level}: mean={mean:?} ({runs} calls)");
         }
     }
 }
