@@ -648,6 +648,98 @@ async function inputs() {
 }
 
 /** Real placement/UI input plus resolved physics; debug edits prepare and clear fixtures. */
+async function chat() {
+	const local = await open(`server=local&world=e2e-chat-local-${run}&gen=flat&mode=creative&view=2`);
+	try {
+		const { page, errors } = local;
+		await settle(page, "chat local", chunksInView(2));
+		await resumePointerLock(page, "chat local start");
+		await page.keyboard.press("KeyT");
+		await page.waitForFunction(() => window.__mc.stats().chat.open
+			&& document.activeElement?.id === "chat-input" && !document.pointerLockElement);
+		check(await page.$eval("#chat-input", input => input.value === ""), "chat local: T opens an empty input");
+		await page.keyboard.type("local chat <b>text</b>");
+		await page.keyboard.press("Enter");
+		await page.waitForFunction(() => {
+			const { open, lines } = window.__mc.stats().chat;
+			return !open && lines.some(({ kind, sender, text }) => kind === 0 && sender === "あなた" && text === "local chat <b>text</b>");
+		});
+		check(await page.$eval("#chat-log", log => log.textContent.includes("<あなた> local chat <b>text</b>")
+			&& !log.querySelector("b")), "chat local: the message is rendered as literal text");
+
+		// Enter is a user gesture, so closeChat(true) must restore the lock without a click.
+		await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+		await page.keyboard.press("Enter");
+		await page.waitForFunction(() => window.__mc.stats().chat.open
+			&& document.activeElement?.id === "chat-input" && !document.pointerLockElement);
+		const before = await page.evaluate(() => window.__mc.playerPosition());
+		const startFrame = await page.evaluate(() => window.__mc.frames);
+		await page.keyboard.down("KeyW");
+		try {
+			await page.waitForFunction(frame => window.__mc.frames >= frame + 5, {}, startFrame);
+			await new Promise(resolve => setTimeout(resolve, 400));
+		} finally {
+			await page.keyboard.up("KeyW");
+		}
+		const after = await page.evaluate(() => window.__mc.playerPosition());
+		check(before[0] === after[0] && before[2] === after[2], "chat local: W does not move the player while typing");
+		await page.keyboard.type(" cancel this message");
+		const gameTime = await page.evaluate(() => window.__mc.stats().gameTime);
+		await page.keyboard.press("Escape");
+		await page.waitForFunction(() => !window.__mc.stats().chat.open);
+		await page.waitForFunction(time => window.__mc.stats().gameTime > time, {}, gameTime);
+		check(await page.evaluate(() => window.__mc.stats().chat.lines.length === 1), "chat local: Escape discards the draft");
+		// Chrome does not treat Escape as a user gesture, so closeChat cannot restore pointer lock on its own.
+		await resumePointerLock(page, "chat local after cancel");
+		check(errors.length === 0, "chat local: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(local.page, "chat-local", err);
+		throw err;
+	} finally { await local.page.close(); }
+
+	const query = `server=ws&world=e2e-chat-ws-${run}&view=2`;
+	const first = await open(query);
+	let second;
+	try {
+		await settle(first.page, "chat first multiplayer page", chunksInView(2));
+		second = await open(query);
+		await second.page.waitForFunction(() => window.__mc.stats().joined);
+		const joined = await first.page.waitForFunction(() => {
+			const line = window.__mc.stats().chat.lines.find(line => line.kind === 1);
+			return line?.sender;
+		}, { polling: 50 });
+		const secondName = await joined.jsonValue();
+		await joined.dispose();
+		check(await first.page.$eval("#chat-log", (log, name) => log.textContent.includes(`${name} が参加しました`), secondName),
+			"chat multiplayer: the first page displays the second player's join");
+
+		await first.page.bringToFront();
+		await resumePointerLock(first.page, "chat multiplayer start");
+		await first.page.keyboard.press("KeyT");
+		await first.page.waitForFunction(() => window.__mc.stats().chat.open
+			&& document.activeElement?.id === "chat-input" && !document.pointerLockElement);
+		await first.page.keyboard.type("hello from the first page");
+		await first.page.keyboard.press("Enter");
+		await second.page.waitForFunction(() => window.__mc.stats().chat.lines.some(
+			line => line.kind === 0 && line.sender && line.text === "hello from the first page"), { polling: 50 });
+		check(true, "chat multiplayer: the second page receives the first player's message");
+
+		check(second.errors.length === 0, "chat multiplayer second page: no page errors", second.errors.join(" | "));
+		await second.page.close();
+		await first.page.waitForFunction(sender => window.__mc.stats().chat.lines.some(
+			line => line.kind === 2 && line.sender === sender), {}, secondName);
+		check(await first.page.$eval("#chat-log", (log, name) => log.textContent.includes(`${name} が退出しました`), secondName),
+			"chat multiplayer: the first page displays the second player's departure");
+		check(first.errors.length === 0, "chat multiplayer first page: no page errors", first.errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(first.page, "chat-multiplayer", err);
+		throw err;
+	} finally {
+		if (second && !second.page.isClosed()) await second.page.close();
+		await first.page.close();
+	}
+}
+
 async function audio() {
 	const { page, errors } = await open(`server=local&world=e2e-audio-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -2717,6 +2809,7 @@ try {
 	await mobCombat();
 	await bow();
 	await audio();
+	await chat();
 	await zombies();
 	await skeletons();
 	await creepers();

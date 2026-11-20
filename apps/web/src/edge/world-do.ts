@@ -24,6 +24,9 @@ import serverWasm from "../wasm/server.wasm";
 const MAX_GENERATION_IN_FLIGHT = 8;
 const MAX_PLAYERS = 16;
 const MAX_PACKET_BYTES = 256;
+// Protocol 24 C2S Chat: one tag byte, a two-byte VarInt and up to 1024 UTF-8 bytes.
+const CHAT_TAG = 0x12;
+const MAX_CHAT_PACKET_BYTES = 1 + 2 + 1024;
 /** Packets accepted per client per tick before the connection is dropped. */
 const MAX_PACKETS_PER_TICK = 100;
 const AUTOSAVE_TICKS = 100;
@@ -218,7 +221,13 @@ export class WorldDO extends DurableObject<Env> {
 		server.binaryType = "arraybuffer";
 
 		const id = this.nextClient++;
-		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user));
+		let displayName: string | undefined;
+		const encodedName = request.headers.get("X-MC-Name");
+		if (encodedName !== null) {
+			try { displayName = decodeURIComponent(encodedName); }
+			catch { /* Use the core's default name when decoding fails. */ }
+		}
+		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user), displayName);
 		this.sockets.set(id, server);
 		this.users.set(id, user);
 		const session = request.headers.get("X-MC-Session");
@@ -231,8 +240,9 @@ export class WorldDO extends DurableObject<Env> {
 		};
 		server.addEventListener("message", (event) => {
 			if (!this.sockets.has(id)) return;
-			const data = event.data;
-			if (!(data instanceof ArrayBuffer) || data.byteLength > MAX_PACKET_BYTES) {
+			const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
+			const limit = data?.[0] === CHAT_TAG ? MAX_CHAT_PACKET_BYTES : MAX_PACKET_BYTES;
+			if (!data || data.byteLength > limit) {
 				server.close(BAD_PACKET, "binary packets only");
 				drop();
 				return;
@@ -244,7 +254,7 @@ export class WorldDO extends DurableObject<Env> {
 				drop();
 				return;
 			}
-			core.packet(id, new Uint8Array(data));
+			core.packet(id, data);
 		});
 		server.addEventListener("close", drop);
 		server.addEventListener("error", drop);

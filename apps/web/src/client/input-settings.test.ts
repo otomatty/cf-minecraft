@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
+import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
 
 const memory = () => {
 	const values = new Map<string, string>();
@@ -100,12 +100,13 @@ test("migration does not repair invalid old preferences or explicit invalid inve
 	}
 });
 
-test("defaults cover nine actions and are independent copies", () => {
+test("defaults cover all actions and are independent copies", () => {
 	const settings = defaultSettings();
 	assert.equal(Object.keys(settings.keys).length, ACTIONS.length);
 	assert.equal(settings.keys.sprint, "KeyR");
 	assert.equal(settings.keys.fullscreen, "KeyF");
 	assert.equal(settings.keys.inventory, "KeyE");
+	assert.equal(settings.keys.chat, "KeyT");
 	assert.equal(settings.sensitivity, 100);
 	assert.equal(settings.fov, 70);
 	settings.keys.forward = "ArrowUp";
@@ -210,6 +211,27 @@ test("assignments preserve reserved keys and Keyboard Lock excludes Escape", () 
 	for (const code of ["KeyW", "ControlLeft", "ControlRight"]) assert.ok(LOCKABLE_CODES.includes(code));
 });
 
+test("implicit Enter opens chat only when Enter and NumpadEnter are free", () => {
+	const keys = defaultSettings().keys;
+	assert.equal(implicitEnterOpensChat(keys), true);
+	assert.equal(keyOpensChat(keys, "Enter", "Enter"), true);
+	assert.equal(keyOpensChat(keys, "NumpadEnter", "Enter"), true);
+	assert.equal(keyOpensChat(keys, "KeyT", "t"), true);
+	for (const inventory of ["Enter", "NumpadEnter"]) {
+		const assigned = { ...keys, inventory };
+		assert.equal(implicitEnterOpensChat(assigned), false);
+		assert.equal(keyOpensChat(assigned, "Enter", "Enter"), false);
+		assert.equal(keyOpensChat(assigned, "NumpadEnter", "Enter"), false);
+		assert.equal(keyOpensChat(assigned, "KeyT", "t"), true);
+	}
+	const chatEnter = { ...keys, chat: "Enter" };
+	assert.equal(keyOpensChat(chatEnter, "Enter", "Enter"), true);
+	assert.equal(implicitEnterOpensChat(chatEnter), true);
+	const chatEnterInventoryNumpad = { ...keys, chat: "Enter", inventory: "NumpadEnter" };
+	assert.equal(keyOpensChat(chatEnterInventoryNumpad, "Enter", "Enter"), true);
+	assert.equal(keyOpensChat(chatEnterInventoryNumpad, "NumpadEnter", "Enter"), false);
+	assert.equal(implicitEnterOpensChat(chatEnterInventoryNumpad), false);
+});
 test("both sides of each modifier match the assigned key", () => {
 	assert.equal(matchesKey("ShiftRight", defaultSettings().keys.down), true);
 	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {
@@ -247,7 +269,7 @@ test("assignment validation rejects sprint fallback conflicts in either lock sta
 	settings.keys.forward = "ControlRight";
 	assert.deepEqual(duplicateKeys(settings.keys), []);
 	assert.deepEqual(effectiveKeyConflicts(settings), ["ControlLeft"]);
-	settings.keys.sprint = "KeyT";
+	settings.keys.sprint = "KeyY";
 	assert.deepEqual(effectiveKeyConflicts(settings), []);
 });
 test("saved sprint fallback conflicts reset to defaults; safe custom bindings still load", () => {
@@ -293,4 +315,19 @@ test("invalid individual volumes fall back independently", () => {
 	const settings = { ...defaultSettings(), sensitivity: 43 };
 	storage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, audio: { master: 101, effects: "10", music: 0 } }));
 	assert.deepEqual(loadSettings(storage), { ...settings, audio: { master: 80, effects: 100, music: 0 } });
+});
+
+test("pre-chat settings preserve custom bindings and select a free chat key", () => {
+	for (const storageKey of [SETTINGS_KEY, "maincraft.input-settings.v1"]) {
+		for (const forward of ["ArrowUp", "KeyT"]) {
+			const storage = memory();
+			const expected = { ...defaultSettings(), sensitivity: 73, fov: 89 };
+			expected.keys.forward = forward;
+			expected.keys.chat = forward === "KeyT" ? "KeyB" : "KeyT";
+			const { chat, ...keys } = expected.keys;
+			storage.setItem(storageKey, JSON.stringify({ ...expected, keys }));
+			assert.deepEqual(loadSettings(storage), expected);
+			assert.deepEqual(JSON.parse(storage.getItem(SETTINGS_KEY)!), expected);
+		}
+	}
 });

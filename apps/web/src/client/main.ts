@@ -23,7 +23,8 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
-import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, visibleChatLines, type TimedChatLine } from "./chat.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -218,6 +219,46 @@ async function main(): Promise<void> {
 	const mobHurtAt = new Map<number, number>();
 	let renderMobs: Array<RenderMob & { id: number }> = [];
 
+	const chatPanel = $("chat");
+	const chatLog = $("chat-log");
+	const chatInput = $<HTMLInputElement>("chat-input");
+	let chatOpen = false;
+	let chatOpeningKey = "";
+	let chatHistory: TimedChatLine[] = [];
+	let chatExpiry: ReturnType<typeof setTimeout> | undefined;
+	function renderChat(): void {
+		clearTimeout(chatExpiry);
+		const now = performance.now();
+		const visible = visibleChatLines(chatHistory, chatOpen, now);
+		const atBottom = chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 1;
+		const scrollTop = chatLog.scrollTop;
+		chatPanel.hidden = !chatOpen && visible.length === 0;
+		chatLog.replaceChildren(...visible.map(({ line, receivedAt }) => {
+			const row = document.createElement("div");
+			row.textContent = formatChatLine(line);
+			if (!chatOpen) row.style.animationDelay = `-${now - receivedAt}ms`;
+			return row;
+		}));
+		chatLog.scrollTop = chatOpen && !atBottom ? scrollTop : chatLog.scrollHeight;
+		if (!chatOpen && visible.length > 0) {
+			chatExpiry = setTimeout(renderChat, visible[0].receivedAt + CHAT_VISIBLE_MS - now);
+		}
+	}
+
+	function closeChat(resume: boolean): void {
+		if (!chatOpen) return;
+		chatOpen = false;
+		chatOpeningKey = "";
+		chatInput.hidden = true;
+		chatInput.value = "";
+		chatPanel.classList.remove("open");
+		renderChat();
+		if (resume) {
+			showMenuView("menu");
+			void requestPointerLock();
+		}
+	}
+
 	// ---- transport ---------------------------------------------------------
 	const handlers = {
 		onGenerator: (id: number) => { generator = id; },
@@ -243,6 +284,14 @@ async function main(): Promise<void> {
 		},
 		onPacket: (data: Uint8Array) => {
 			const id = worldAudio.packet(data, position, mobHurtAt);
+			if (id === S2C.Chat) {
+				const line = core.takeChat();
+				if (line) {
+					chatHistory = appendChatLine(chatHistory, line, performance.now());
+					renderChat();
+				}
+				return;
+			}
 			removeUnloaded();
 			if (id === S2C.Inventory) {
 				syncInventory();
@@ -335,6 +384,7 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
 			connection = "reconnecting";
+			closeChat(false);
 			endUsingItem();
 			picker.hidden = true;
 			hideInventoryScreens();
@@ -349,6 +399,7 @@ async function main(): Promise<void> {
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
+			closeChat(false);
 			endUsingItem();
 			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
 			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
@@ -587,7 +638,7 @@ async function main(): Promise<void> {
 	};
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
-	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択", drop: "アイテムを捨てる" };
+	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択", drop: "アイテムを捨てる", chat: "チャット" };
 	const bindingButtons = new Map<Action, HTMLButtonElement>();
 	function refreshSettings(): void {
 		for (const [action, button] of bindingButtons) {
@@ -652,6 +703,8 @@ async function main(): Promise<void> {
 			return element;
 		};
 		const key = (action: Action) => kbd(action === "sprint" ? sprintKey(settings, keyboardLocked) : settings.keys[action]);
+		const chatKeys: Array<Node | string> = [key("chat")];
+		if (implicitEnterOpensChat(settings.keys)) chatKeys.push(" / ", kbd("Enter"));
 		const groups: Array<[string, Array<[string, Array<Node | string>]>]> = [
 			["移動", [
 				["前後左右", [key("forward"), " / ", key("left"), " / ", key("backward"), " / ", key("right")]],
@@ -662,7 +715,7 @@ async function main(): Promise<void> {
 				["壊す", ["左クリック"]], ["置く", ["右クリック"]], ["見ているブロックを持つ", ["中クリック"]],
 				["ブロック一覧", [key("inventory")]], ["ホットバーの切替", ["1〜9 / ホイール"]],
 			]],
-			["画面", [["メニュー", [kbd("Esc")]], ["全画面", [key("fullscreen")]]]],
+			["画面", [["メニュー", [kbd("Esc")]], ["全画面", [key("fullscreen")]], ["チャット", chatKeys]]],
 			["開発者向け", [["決定論チェック", [kbd("F8")]]]],
 		];
 		$("controls-groups").replaceChildren(...groups.map(([title, rows]) => {
@@ -840,6 +893,7 @@ async function main(): Promise<void> {
 		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
 	}
 	function openInventoryScreen(kind: InventoryScreenKind = 0): void {
+		closeChat(false);
 		clearInput();
 		inventoryScreen.hidden = kind !== 0;
 		tableScreen.hidden = kind !== 1;
@@ -929,7 +983,7 @@ async function main(): Promise<void> {
 		}
 	}
 	async function requestPointerLock(): Promise<void> {
-		if (failed || core.dead) return;
+		if (failed || core.dead || chatOpen) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
@@ -957,18 +1011,44 @@ async function main(): Promise<void> {
 			if (locked()) document.exitPointerLock();
 			return;
 		}
+		if (chatOpen) {
+			overlay.hidden = true;
+			if (!locked()) chatInput.focus();
+			return;
+		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
 		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
-		if (!locked() || core.dead) return;
+		if (!locked() || core.dead || chatOpen) return;
 		const degrees = mouseDegrees(settings.sensitivity);
 		camera.yaw = (camera.yaw + e.movementX * degrees) % 360;
 		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
 	});
+	const limitInput = () => {
+		const limited = limitChatInput(chatInput.value);
+		if (chatInput.value !== limited) chatInput.value = limited;
+	};
+	chatInput.addEventListener("input", event => {
+		if (!(event as InputEvent).isComposing) limitInput();
+	});
+	chatInput.addEventListener("compositionend", limitInput);
+
 	window.addEventListener("keydown", (e) => {
+		if (chatOpen) {
+			if (e.isComposing) return;
+			if (e.repeat && e.code === chatOpeningKey) e.preventDefault();
+			if (e.key === "Enter" || e.key === "Escape") {
+				e.preventDefault();
+				if (e.repeat) return;
+				const text = limitChatInput(chatInput.value).trim();
+				if (e.key === "Enter" && text && connection === "open") transport.send(core.encodeChat(text));
+				closeChat(true);
+			}
+			return;
+		}
 		if (core.dead && connection === "open" && !failed) {
 			if (e.code === "Escape") e.preventDefault();
 			return;
@@ -1008,6 +1088,20 @@ async function main(): Promise<void> {
 		if (e.code === "Escape" && !locked() && !overlay.hidden) {
 			e.preventDefault();
 			if (menuView === "controls") showMenuView("menu");
+			return;
+		}
+		if (canInteract() && keyOpensChat(settings.keys, e.code, e.key)) {
+			e.preventDefault();
+			if (e.repeat) return;
+			chatOpen = true;
+			chatOpeningKey = e.code;
+			clearInput();
+			chatInput.hidden = false;
+			chatPanel.classList.add("open");
+			renderChat();
+			chatLog.scrollTop = chatLog.scrollHeight;
+			document.exitPointerLock();
+			chatInput.focus();
 			return;
 		}
 		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {
@@ -1056,7 +1150,7 @@ async function main(): Promise<void> {
 	});
 	window.addEventListener("blur", clearInput);
 	canvas.addEventListener("wheel", (e) => {
-		if (!locked() || core.dead) return;
+		if (!locked() || core.dead || chatOpen) return;
 		e.preventDefault();
 		selectSlot((selectedSlot + Math.sign(e.deltaY) + slots.length) % slots.length);
 	}, { passive: false });
@@ -1082,7 +1176,7 @@ async function main(): Promise<void> {
 		return core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, includeSources);
 	}
 	// Pointer lock can take effect before pointerlockchange hides the overlay.
-	const canInteract = () => locked() && joined && connection === "open" && !core.dead
+	const canInteract = () => locked() && joined && connection === "open" && !core.dead && !chatOpen && !failed
 		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden;
 	function aimedMobId(block: RayHit | null): number | null {
 		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderMobs, REACH, block);
@@ -1297,6 +1391,7 @@ async function main(): Promise<void> {
 
 		if (failed) return;
 		if (dead && !deathScreen.open) {
+			closeChat(false);
 			clearInput();
 			hideInventoryScreens();
 			picker.hidden = true;
@@ -1355,6 +1450,7 @@ async function main(): Promise<void> {
 	let fpsAt = last;
 	function tick(now: number): void {
 		if (renderer.lost) {
+			closeChat(false);
 			fail(`GPUデバイスが失われました: ${renderer.lost}`);
 			return;
 		}
@@ -1487,6 +1583,7 @@ async function main(): Promise<void> {
 		tint: (x, z) => tintMap.tint(x, z),
 		stats: () => ({
 			audio: audio.stats(),
+			chat: { open: chatOpen, lines: chatHistory.map(({ line }) => ({ ...line })) },
 			gameMode: core.gameMode,
 			health: core.health,
 			food: core.food,

@@ -4,7 +4,7 @@ import { registerHooks } from "node:module";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { testDB } from "./d1-shim.test.ts";
-import { ClientCore } from "../client/client-core.ts";
+import { ClientCore, S2C } from "../client/client-core.ts";
 import { ChunkGenCore, Generator, ServerCore } from "../shared/server-core.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
 
@@ -129,12 +129,13 @@ function fixture(t, synchronousClose = false, legacy = false) {
 		},
 	});
 	world.startTicking = () => {};
-	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string) =>
+	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string) =>
 		world.fetch(
 			new Request("https://game.example/ws/lobby", {
 				headers: {
 					Upgrade: "websocket",
 					...(session ? { "X-MC-Session": session } : {}),
+					...(encodedName !== undefined ? { "X-MC-Name": encodedName } : {}),
 					...(user ? { "X-MC-User": user } : {}),
 					...(authorizedAt === null ? {} : { "X-MC-Authorized-At": authorizedAt }),
 				},
@@ -285,6 +286,7 @@ for (const synchronousClose of [false, true]) {
 for (const [data, code, reason] of [
 	["text", 4003, "binary packets only"],
 	[new ArrayBuffer(257), 4003, "binary packets only"],
+	[new Uint8Array(1028).fill(0x12, 0, 1).buffer, 4003, "binary packets only"],
 ]) {
 	test(`bad packet closes without reconnect: ${typeof data}`, async t => {
 		const f = fixture(t);
@@ -791,6 +793,35 @@ test("DO disables unresponsive generation and streams synchronous fallback chunk
 	assert.equal(pending.length, 8, "no RPCs issued after timeout");
 	assert.equal(f.world.metrics().generation.delivered, 0);
 	assert.equal(warnings.mock.callCount(), 1);
+});
+
+test("DO decodes display names and sends presence and messages through the WASM codecs", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	const core = f.world.ensureCore();
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	const chat = () => core.takeOutbox().flatMap(({ client: id, data }) =>
+		client.packet(data) === S2C.Chat ? [{ id, line: client.takeChat() }] : [],
+	);
+	const sender = "\ufeff空 🙂 %";
+	assert.equal((await f.join("first", undefined, undefined, encodeURIComponent(sender))).status, 101);
+	assert.equal((await f.join("second", undefined, undefined, "%FF")).status, 101);
+	core.packet(1, client.encodeHello(2));
+	core.packet(2, client.encodeHello(2));
+	core.tick();
+	assert.deepEqual(chat(), [{ id: 1, line: { kind: 1, sender: "プレイヤー", text: "" } }]);
+
+	const text = "🙂".repeat(256);
+	f.world.sockets.get(1).dispatchEvent(new MessageEvent("message", { data: client.encodeChat(text).buffer }));
+	core.tick();
+	assert.deepEqual(chat(), [1, 2].map(id => ({ id, line: { kind: 0, sender, text } })));
+	assert.equal(client.takeChat(), null);
+
+	assert.equal(f.world.revoke("first"), 1);
+	assert.deepEqual(chat(), [{ id: 2, line: { kind: 2, sender, text: "" } }]);
 });
 
 test("DO keeps each user's inventory across socket replacement", async t => {

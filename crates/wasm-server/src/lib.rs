@@ -122,6 +122,15 @@ pub unsafe extern "C" fn server_connect(
     );
 }
 
+/// # Safety
+/// `ptr..ptr+len` must be readable.
+#[no_mangle]
+pub unsafe extern "C" fn server_set_display_name(client: u32, ptr: *const u8, len: usize) {
+    if let Ok(name) = std::str::from_utf8(input(ptr, len)) {
+        server().set_display_name(client, name);
+    }
+}
+
 /// Output: last accepted feet [x, y, z] as f64 LE, or length 0 for an unknown id.
 #[no_mangle]
 pub extern "C" fn server_client_position(client: u32) -> usize {

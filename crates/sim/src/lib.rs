@@ -38,7 +38,7 @@ pub enum GameMode {
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use protocol::{C2S, MAX_FURNACE_DISPLAY_TICKS, S2C};
+use protocol::{ChatKind, C2S, MAX_FURNACE_DISPLAY_TICKS, S2C};
 use world::io::Reader;
 use world::{blocks, items, Chunk, Fnv64, World, HEIGHT, MIN_Y};
 use worldgen::Generator;
@@ -148,7 +148,14 @@ impl SurvivalMovement {
     }
 }
 
+const CHAT_CAPACITY: i64 = 5;
+const CHAT_REFILL_TICKS: i64 = 20;
+const DEFAULT_DISPLAY_NAME: &str = "プレイヤー";
+
 struct Client {
+    display_name: String,
+    chat_tokens: i64,
+    chat_refill_tick: i64,
     dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
@@ -678,6 +685,9 @@ impl Server {
         self.clients.insert(
             id,
             Client {
+                display_name: DEFAULT_DISPLAY_NAME.to_owned(),
+                chat_tokens: CHAT_CAPACITY,
+                chat_refill_tick: self.game_time,
                 dig: None,
                 visible_entities: BTreeMap::new(),
                 visible_mobs: BTreeMap::new(),
@@ -701,6 +711,59 @@ impl Server {
             },
         );
         self.return_crafting(id);
+    }
+
+    /// Sets the trusted host's display name for this connection.
+    pub fn set_display_name(&mut self, id: u32, name: &str) {
+        if let Some(client) = self.clients.get_mut(&id) {
+            let filtered: String = name.chars().filter(|ch| !ch.is_control()).collect();
+            let name: String = filtered.trim().chars().take(16).collect();
+            let name = name.trim_end();
+            client.display_name = if name.is_empty() {
+                DEFAULT_DISPLAY_NAME
+            } else {
+                name
+            }
+            .to_owned();
+        }
+    }
+
+    fn broadcast_chat(
+        &mut self,
+        kind: ChatKind,
+        sender: String,
+        text: String,
+        exclude: Option<u32>,
+    ) {
+        let bytes = S2C::Chat { kind, sender, text }.encode();
+        for (&id, client) in &self.clients {
+            if client.joined && exclude != Some(id) {
+                self.outbox.push((id, bytes.clone()));
+            }
+        }
+    }
+
+    fn chat(&mut self, id: u32, text: &str) {
+        let trimmed = text.trim();
+        let client = self.clients.get_mut(&id).unwrap();
+        if !client.joined
+            || trimmed.is_empty()
+            || trimmed.chars().count() > 256
+            || text.chars().any(char::is_control)
+        {
+            return;
+        }
+        let refill = self.game_time.saturating_sub(client.chat_refill_tick) / CHAT_REFILL_TICKS;
+        if refill > 0 {
+            client.chat_tokens = (client.chat_tokens + refill).min(CHAT_CAPACITY);
+            client.chat_refill_tick += refill * CHAT_REFILL_TICKS;
+        }
+        if client.chat_tokens == 0 {
+            return;
+        }
+        client.chat_tokens -= 1;
+        let sender = client.display_name.clone();
+        self.broadcast_chat(ChatKind::Player, sender, trimmed.to_owned(), None);
     }
 
     /// Last accepted position, never a queued or rejected client report.
@@ -730,7 +793,9 @@ impl Server {
     pub fn disconnect(&mut self, id: u32) {
         self.return_crafting(id);
         self.abort_dig(id);
-        self.clients.remove(&id);
+        if let Some(client) = self.clients.remove(&id).filter(|client| client.joined) {
+            self.broadcast_chat(ChatKind::Leave, client.display_name, String::new(), None);
+        }
         self.pending.retain(|(c, _)| *c != id);
         self.outbox.retain(|(c, _)| *c != id);
     }
@@ -822,6 +887,10 @@ impl Server {
     }
 
     fn apply(&mut self, id: u32, packet: C2S) {
+        if let C2S::Chat { text } = packet {
+            self.chat(id, &text);
+            return;
+        }
         if self.clients[&id].health.vitals.dead
             && !matches!(
                 packet,
@@ -857,6 +926,7 @@ impl Server {
 
     fn apply_packet(&mut self, id: u32, packet: C2S) {
         match packet {
+            C2S::Chat { .. } => unreachable!("chat is handled before gameplay"),
             C2S::Respawn => self.respawn(id),
             C2S::UseItem => self.use_item(id),
             C2S::StopUsingItem => self.stop_using_item(id),
@@ -1030,8 +1100,10 @@ impl Server {
                     view_distance: client.view as u8,
                     game_mode: self.game_mode as u8,
                 };
+                let sender = client.display_name.clone();
                 self.outbox.push((id, welcome.encode()));
                 self.send_inventory(id);
+                self.broadcast_chat(ChatKind::Join, sender, String::new(), Some(id));
             }
             C2S::SelectSlot { slot } => {
                 let client = self.clients.get_mut(&id).unwrap();
@@ -2231,6 +2303,143 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    fn chat_outbox(server: &mut Server) -> Vec<(u32, S2C)> {
+        server
+            .take_outbox()
+            .into_iter()
+            .filter_map(|(id, bytes)| {
+                let packet = S2C::decode(&bytes).unwrap();
+                matches!(packet, S2C::Chat { .. }).then_some((id, packet))
+            })
+            .collect()
+    }
+
+    fn chat_packet(kind: ChatKind, sender: &str, text: &str) -> S2C {
+        S2C::Chat {
+            kind,
+            sender: sender.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    fn queue_chat(server: &mut Server, id: u32, text: &str) {
+        server.handle_packet(
+            id,
+            &C2S::Chat {
+                text: text.to_owned(),
+            }
+            .encode(),
+        );
+    }
+
+    #[test]
+    fn chat_notifies_joined_players_and_uses_sanitized_names() {
+        let mut s = joined(2);
+        s.connect(2);
+        s.connect(3);
+        s.set_display_name(1, " 　\n\t ");
+        s.set_display_name(2, "　空\0\u{85}\t🙂あいうえおかきくけこさしすせそ　");
+        let hello = C2S::Hello {
+            protocol: PROTOCOL_VERSION,
+            view_distance: 2,
+        }
+        .encode();
+        queue_chat(&mut s, 3, "先走り");
+        s.handle_packet(2, &hello);
+        s.handle_packet(2, &hello);
+        s.tick();
+        let name = "空🙂あいうえおかきくけこさしすせ";
+        assert_eq!(
+            chat_outbox(&mut s),
+            [(1, chat_packet(ChatKind::Join, name, ""))]
+        );
+
+        s.clients.get_mut(&2).unwrap().health.vitals = protocol::PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: protocol::DeathCause::Fall,
+            ..Default::default()
+        };
+        queue_chat(&mut s, 2, "　こんにちは🙂  ");
+        queue_chat(&mut s, 1, "ようこそ");
+        s.tick();
+        assert_eq!(
+            chat_outbox(&mut s),
+            [
+                (1, chat_packet(ChatKind::Player, name, "こんにちは🙂")),
+                (2, chat_packet(ChatKind::Player, name, "こんにちは🙂")),
+                (
+                    1,
+                    chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "ようこそ")
+                ),
+                (
+                    2,
+                    chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "ようこそ")
+                ),
+            ]
+        );
+
+        s.connect(4);
+        s.disconnect(4);
+        assert!(chat_outbox(&mut s).is_empty());
+        s.disconnect(2);
+        assert_eq!(
+            chat_outbox(&mut s),
+            [(1, chat_packet(ChatKind::Leave, name, ""))]
+        );
+    }
+
+    #[test]
+    fn chat_validates_text_and_refills_each_connection_at_integer_ticks() {
+        let mut s = joined(2);
+        s.connect(2);
+        s.handle_packet(
+            2,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+        for text in ["", "　 ", "a\nb", "\tabc", "a\u{85}b", &"あ".repeat(257)] {
+            queue_chat(&mut s, 1, text);
+        }
+        let max_text = "🙂".repeat(256);
+        for _ in 0..6 {
+            queue_chat(&mut s, 1, &max_text);
+        }
+        queue_chat(&mut s, 2, "別の接続");
+        s.tick();
+        let received = chat_outbox(&mut s);
+        let mut expected = vec![(1, chat_packet(ChatKind::Join, DEFAULT_DISPLAY_NAME, ""))];
+        for text in std::iter::repeat_n(max_text.as_str(), 5).chain(["別の接続"]) {
+            for id in [1, 2] {
+                expected.push((
+                    id,
+                    chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, text),
+                ));
+            }
+        }
+        assert_eq!(received, expected);
+        while s.game_time() < 19 {
+            s.tick();
+        }
+        queue_chat(&mut s, 1, "19");
+        s.tick();
+        assert!(chat_outbox(&mut s).is_empty());
+
+        queue_chat(&mut s, 1, "20");
+        queue_chat(&mut s, 1, "21");
+        s.tick();
+        assert_eq!(
+            chat_outbox(&mut s),
+            [
+                (1, chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "20")),
+                (2, chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "20")),
+            ]
+        );
     }
 
     #[test]

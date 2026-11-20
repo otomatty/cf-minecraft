@@ -175,7 +175,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 	if (epoch !== initEpoch) return;
 	if (msg.genworkers !== false) await startGeneration(msg.wasmUrl, c);
 	if (epoch !== initEpoch) return;
-	c.connect(CLIENT, import.meta.env.DEV, undefined, player ?? undefined);
+	c.connect(CLIENT, import.meta.env.DEV, undefined, player ?? undefined, "あなた");
 	saving = null;
 	lastSaveTick = Number(c.gameTime);
 	core = c;

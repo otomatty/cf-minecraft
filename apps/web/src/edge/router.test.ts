@@ -162,6 +162,25 @@ test("membership uses verified lowercase email; forwarded identity overwrites cl
 	assert.deepEqual(f.calls, ["lobby", "lobby"]);
 });
 
+test("Worker replaces spoofed chat names with the verified session, operator or dev display name", async t => {
+	const f = await setup(t);
+	const name = "空 🙂 %";
+	const headers = { "x-mc-name": "spoofed" };
+	f.login({ ...player, name });
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, headers)).status, 200);
+	assert.equal(f.forwarded[0].headers.get("X-MC-Name"), encodeURIComponent(name));
+
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, { ...headers, Authorization: "Bearer operator-secret" })).status, 200);
+	assert.equal(f.forwarded[1].headers.get("X-MC-Name"), "operator");
+
+	f.login(null);
+	f.deps.env.DEBUG = "1";
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, headers)).status, 200);
+	const identity = f.forwarded[2].headers.get("X-MC-User");
+	assert.match(identity, /^dev:[0-9a-f]{8}-/);
+	assert.equal(f.forwarded[2].headers.get("X-MC-Name"), `dev-${identity.slice(4, 8)}`);
+});
+
 test("operator Bearer bypasses registration; cookie does not; failures consume AUTH_LIMIT", async t => {
 	const f = await setup(t);
 	for (const path of ["/ws/missing", "/api/worlds/missing/metrics"]) {

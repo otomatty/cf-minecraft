@@ -276,12 +276,13 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		headers.delete("X-MC-User");
 		headers.delete("X-MC-Authorized-At");
 		headers.delete("X-MC-Session");
+		headers.delete("X-MC-Name");
 		if (!ops && session) headers.set("X-MC-Session", session.session.id);
 		headers.set("X-MC-Authorized-At", String(authorizedAt));
-		headers.set(
-			"X-MC-User",
-			ops ? `ops:${crypto.randomUUID()}` : user ? user.id : `dev:${crypto.randomUUID()}`,
-		);
+		const identity = ops ? `ops:${crypto.randomUUID()}` : user ? user.id : `dev:${crypto.randomUUID()}`;
+		const displayName = ops ? "operator" : user ? user.name : `dev-${identity.slice(4, 8)}`;
+		headers.set("X-MC-User", identity);
+		headers.set("X-MC-Name", encodeURIComponent(displayName.toWellFormed()));
 		return worlds.getByName(name).fetch(new Request(request, { headers }));
 	}
 

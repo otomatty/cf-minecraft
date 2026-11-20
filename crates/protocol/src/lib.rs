@@ -8,10 +8,32 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
+
+const MAX_CHAT_TEXT_BYTES: usize = 1024;
+const MAX_CHAT_SENDER_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ChatKind {
+    Player = 0,
+    Join = 1,
+    Leave = 2,
+}
+
+impl ChatKind {
+    fn from_wire_id(value: u8) -> Result<Self, DecodeError> {
+        match value {
+            0 => Ok(Self::Player),
+            1 => Ok(Self::Join),
+            2 => Ok(Self::Leave),
+            _ => Err(DecodeError),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -158,6 +180,9 @@ pub const MAX_FURNACE_DISPLAY_TICKS: u16 = 1600;
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum C2S {
+    Chat {
+        text: String,
+    },
     Respawn,
     UseItem,
     StopUsingItem,
@@ -225,6 +250,11 @@ pub enum C2S {
 /// Server to client.
 #[derive(Clone, Debug, PartialEq)]
 pub enum S2C {
+    Chat {
+        kind: ChatKind,
+        sender: String,
+        text: String,
+    },
     PlayerStatus {
         health: u8,
         air: u16,
@@ -349,6 +379,7 @@ pub mod id {
     pub const C2S_USE_BUCKET: u8 = 0x0f;
     pub const C2S_ATTACK: u8 = 0x10;
     pub const C2S_CANCEL_USING_ITEM: u8 = 0x11;
+    pub const C2S_CHAT: u8 = 0x12;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -364,6 +395,7 @@ pub mod id {
     pub const S2C_ARROW_SPAWN: u8 = 0x10;
     pub const S2C_ARROW_MOVE: u8 = 0x11;
     pub const S2C_MOB_FUSE: u8 = 0x12;
+    pub const S2C_CHAT: u8 = 0x13;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -385,6 +417,10 @@ impl C2S {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match *self {
+            Self::Chat { ref text } => {
+                w.u8(id::C2S_CHAT);
+                w.string(text);
+            }
             C2S::Respawn => w.u8(id::C2S_RESPAWN),
             C2S::UseItem => w.u8(id::C2S_USE_ITEM),
             C2S::StopUsingItem => w.u8(id::C2S_STOP_USING_ITEM),
@@ -482,6 +518,9 @@ impl C2S {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::C2S_CHAT => Self::Chat {
+                text: r.string(MAX_CHAT_TEXT_BYTES)?.to_owned(),
+            },
             id::C2S_CLICK_SLOT => {
                 let (slot, button, shift) = (r.u8()?, r.u8()?, r.u8()?);
                 if slot > 53 || button > 1 || shift > 1 {
@@ -586,6 +625,12 @@ impl S2C {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         match self {
+            Self::Chat { kind, sender, text } => {
+                w.u8(id::S2C_CHAT);
+                w.u8(*kind as u8);
+                w.string(sender);
+                w.string(text);
+            }
             S2C::DigProgress {
                 player,
                 x,
@@ -1061,6 +1106,11 @@ impl S2C {
                 game_time: r.i64()?,
                 day_time: r.i64()?,
             },
+            id::S2C_CHAT => Self::Chat {
+                kind: ChatKind::from_wire_id(r.u8()?)?,
+                sender: r.string(MAX_CHAT_SENDER_BYTES)?.to_owned(),
+                text: r.string(MAX_CHAT_TEXT_BYTES)?.to_owned(),
+            },
             _ => return Err(DecodeError),
         };
         if r.remaining() != 0 {
@@ -1090,6 +1140,82 @@ fn entity_pos(r: &mut Reader<'_>) -> Result<[f64; 3], DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_packets_round_trip_and_reject_truncation() {
+        let packet = C2S::Chat {
+            text: "🙂".repeat(256),
+        };
+        let mut bytes = packet.encode();
+        assert_eq!(&bytes[..3], &[0x12, 0x80, 0x08]);
+        assert_eq!(C2S::decode(&bytes), Ok(packet));
+        for end in 0..bytes.len() {
+            assert_eq!(C2S::decode(&bytes[..end]), Err(DecodeError));
+        }
+        bytes.push(0);
+        assert_eq!(C2S::decode(&bytes), Err(DecodeError));
+
+        for kind in [ChatKind::Player, ChatKind::Join, ChatKind::Leave] {
+            let packet = S2C::Chat {
+                kind,
+                sender: "🙂".repeat(16),
+                text: if kind == ChatKind::Player {
+                    "🙂".repeat(256)
+                } else {
+                    String::new()
+                },
+            };
+            let mut bytes = packet.encode();
+            assert_eq!(&bytes[..3], &[0x13, kind as u8, 64]);
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+            for end in 0..bytes.len() {
+                assert_eq!(S2C::decode(&bytes[..end]), Err(DecodeError));
+            }
+            bytes.push(0);
+            assert_eq!(S2C::decode(&bytes), Err(DecodeError));
+        }
+    }
+
+    #[test]
+    fn chat_packets_reject_invalid_lengths_utf8_and_kind() {
+        assert_eq!(C2S::decode(&[0x12, 1, 0xff]), Err(DecodeError));
+        assert_eq!(
+            C2S::decode(&[0x12, 0x80, 0x80, 0x80, 0x80, 0x10]),
+            Err(DecodeError)
+        );
+        assert_eq!(
+            C2S::decode(
+                &C2S::Chat {
+                    text: "a".repeat(1025)
+                }
+                .encode()
+            ),
+            Err(DecodeError)
+        );
+        for bytes in [
+            &[0x13, 3, 0, 0][..],
+            &[0x13, 0, 1, 0xff, 0],
+            &[0x13, 0, 0, 1, 0xff],
+        ] {
+            assert_eq!(S2C::decode(bytes), Err(DecodeError));
+        }
+        for (sender, text) in [
+            ("a".repeat(65), String::new()),
+            (String::new(), "a".repeat(1025)),
+        ] {
+            assert_eq!(
+                S2C::decode(
+                    &S2C::Chat {
+                        kind: ChatKind::Player,
+                        sender,
+                        text
+                    }
+                    .encode()
+                ),
+                Err(DecodeError)
+            );
+        }
+    }
 
     #[test]
     fn cancel_using_item_round_trips_and_rejects_payloads() {
@@ -1357,7 +1483,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 23);
+        assert_eq!(PROTOCOL_VERSION, 24);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
