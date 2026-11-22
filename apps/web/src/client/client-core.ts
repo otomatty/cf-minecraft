@@ -60,6 +60,7 @@ export interface ClientExports {
 	client_mesh_count(layer: number): number;
 	client_packet(ptr: number, len: number): number;
 	client_take_chat(): number;
+	client_take_explosion(): number;
 	client_enc_chat(ptr: number, len: number): number;
 	client_predict_block(x: number, y: number, z: number, block: number): number;
 	client_seed(): bigint;
@@ -109,7 +110,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -419,6 +420,13 @@ export class ClientCore {
 		const changed = this.x.client_predict_block(x, y, z, block) === 1;
 		if (changed) this.observeLight?.({ type: "predict", x, y, z, block });
 		return changed;
+	}
+
+	takeExplosion(): [number, number, number] | null {
+		const bytes = this.out(this.x.client_take_explosion());
+		if (bytes.length < 24) return null;
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		return [view.getFloat64(0), view.getFloat64(8), view.getFloat64(16)];
 	}
 
 	takeChat(): ChatLine | null {

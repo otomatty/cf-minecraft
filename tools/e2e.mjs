@@ -2869,19 +2869,63 @@ async function creepers() {
 
 		const ground = await page.evaluate(id => {
 			const api = window.__mc;
-			const { position: [x, y, z] } = api.stats().mobs.find(mob => mob.id === id);
+			const { mobs, health, explosionsReceived } = api.stats();
+			const { position: [x, y, z] } = mobs.find(mob => mob.id === id);
 			const block = [Math.floor(x), Math.floor(y) - 1, Math.floor(z)];
 			api.setCamera(x + 1.5, y + 1.62, z, 90, 0);
-			return { block, before: api.getBlock(...block), healthBefore: api.stats().health };
+			return { block, before: api.getBlock(...block), healthBefore: health, explosionsReceived };
 		}, creeper.id);
 		check(ground.before !== 0, "creepers: the ground under the creeper starts solid", `block ${ground.before} at ${ground.block.join(", ")}`);
 		const ignited = await page.waitForFunction(id => {
-			const mob = window.__mc.stats().mobs.find(mob => mob.id === id);
-			return mob && mob.fuse > 0 && { fuse: mob.fuse };
+			const { mobs, positionsCorrected } = window.__mc.stats();
+			const mob = mobs.find(mob => mob.id === id);
+			return mob && mob.fuse > 0 && { fuse: mob.fuse, positionsCorrected, at: performance.now() };
 		}, { timeout: 5000, polling: 50 }, creeper.id);
-		const { fuse } = await ignited.jsonValue();
+		const ignition = await ignited.jsonValue();
 		await ignited.dispose();
-		check(fuse > 0, "creepers: fuse climbs while the player is close", `fuse ${fuse}`);
+		check(ignition.fuse > 0, "creepers: fuse climbs while the player is close", `fuse ${ignition.fuse}`);
+
+		// Capture the rendered game canvas in the browser's frame callback while the smoke is visible.
+		const smoke = await page.waitForFunction(before => {
+			const { camera, explosionsReceived, lastExplosionCenter, explosionParticles } = window.__mc.stats();
+			if (explosionsReceived <= before || !lastExplosionCenter || !explosionParticles) return false;
+			const view = document.getElementById("view");
+			const [dx, dy, dz] = lastExplosionCenter.map((value, axis) => value - [camera.x, camera.y, camera.z][axis]);
+			const yaw = camera.yaw * Math.PI / 180, pitch = camera.pitch * Math.PI / 180;
+			const horizontal = -dx * Math.sin(yaw) + dz * Math.cos(yaw);
+			const depth = horizontal * Math.cos(pitch) - dy * Math.sin(pitch);
+			if (depth <= 0) return false;
+			const focal = view.height / (2 * Math.tan(70 * Math.PI / 360));
+			const x = view.width / 2 + (-dx * Math.cos(yaw) - dz * Math.sin(yaw)) * focal / depth;
+			const y = view.height / 2 - (horizontal * Math.sin(pitch) + dy * Math.cos(pitch)) * focal / depth;
+			const radius = 1.5 * focal / depth;
+			const left = Math.max(0, Math.floor(x - radius)), top = Math.max(0, Math.floor(y - radius));
+			const right = Math.min(view.width, Math.ceil(x + radius)), bottom = Math.min(view.height, Math.ceil(y + radius));
+			if (right <= left || bottom <= top) return false;
+			const snapshot = document.createElement("canvas");
+			snapshot.width = view.width;
+			snapshot.height = view.height;
+			const ctx = snapshot.getContext("2d");
+			ctx.drawImage(view, 0, 0);
+			const pixels = ctx.getImageData(left, top, right - left, bottom - top).data;
+			const shades = [0x88, 0xae, 0xc5];
+			const counts = [0, 0, 0];
+			for (let i = 0; i < pixels.length; i += 4) {
+				const gray = pixels[i];
+				if (gray !== pixels[i + 1] || gray !== pixels[i + 2]) continue;
+				const shade = shades.indexOf(gray);
+				if (shade !== -1) counts[shade]++;
+			}
+			if (counts.filter(count => count > 10).length < 2) return false;
+			return { explosionsReceived, center: lastExplosionCenter, counts, png: snapshot.toDataURL("image/png").split(",")[1] };
+		}, { timeout: 10000, polling: "raf" }, ground.explosionsReceived);
+		const shot = await smoke.jsonValue();
+		await smoke.dispose();
+		writeFileSync(join(shots, "mobs-creeper-explosion.png"), Buffer.from(shot.png, "base64"));
+		check(shot.explosionsReceived > ground.explosionsReceived, "creepers: received the explosion packet", `center ${shot.center.join(", ")}`);
+		check(shot.counts.filter(count => count > 10).length >= 2, "creepers: gray smoke is visibly rendered around the blast",
+			`gray pixel counts ${shot.counts.join(", ")}`);
+
 		const blasted = await page.waitForFunction((id, { block, healthBefore }) => {
 			const api = window.__mc;
 			const mob = api.stats().mobs.find(mob => mob.id === id);
@@ -2894,6 +2938,28 @@ async function creepers() {
 		await blasted.dispose();
 		check(result.health < ground.healthBefore, "creepers: the explosion hurt the player", `${result.health} health remaining`);
 		check(result.after === 0, "creepers: the explosion removed the ground block", `block ${result.after}`);
+
+		const pushed = await page.waitForFunction((at, [cx, , cz]) => {
+			const api = window.__mc;
+			const { lastKnockback: hit, server } = api.stats();
+			if (!hit || hit.receivedAt < at || !server) return false;
+			const [hx, , hz] = hit.position;
+			const [vx, , vz] = hit.velocity;
+			const dx = hx - cx, dz = hz - cz;
+			if (vx * dx + vz * dz <= 0) return false;
+			const [x, , z] = api.playerPosition();
+			const distance = ((x - hx) * dx + (z - hz) * dz) / Math.hypot(dx, dz);
+			return distance >= 0.3 && { distance, corrections: hit.positionsCorrected, serverTick: server.gameTime };
+		}, { timeout: 10000 }, ignition.at, shot.center);
+		const push = await pushed.jsonValue();
+		await pushed.dispose();
+		check(push.distance >= 0.3, "creepers: moved at least 0.3 blocks horizontally away from the blast", `${push.distance.toFixed(3)} blocks`);
+		// Two stats updates cover at least one second of server-side position validation.
+		await page.waitForFunction(tick => window.__mc.stats().server?.gameTime >= tick + 40,
+			{ timeout: 10000, polling: 50 }, push.serverTick);
+		const corrections = await page.evaluate(() => window.__mc.stats().positionsCorrected);
+		check(corrections === ignition.positionsCorrected && corrections === push.corrections, "creepers: no position correction during or after knockback",
+			`${ignition.positionsCorrected} → ${push.corrections} → ${corrections}`);
 		check(errors.length === 0, "creepers: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "creepers", err);

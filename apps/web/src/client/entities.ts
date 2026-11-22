@@ -1,6 +1,7 @@
 import type { MobKind, RayHit } from "./client-core.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
+import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { creeper, skeleton, zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
@@ -176,6 +177,62 @@ export function flameVertices(mobs: readonly RenderMob[], camera: readonly numbe
 				light: [0, 0], // The flame pass uses the sprite color directly.
 			});
 		}
+	}
+	return new Float32Array(out);
+}
+
+export const MAX_EXPLOSION_PARTICLES = 256;
+
+export interface ExplosionParticle {
+	position: Vec3;
+	velocity: Vec3;
+	startedAt: number;
+	lifetime: number;
+	size: number;
+	smoke: boolean;
+}
+
+export function spawnExplosionParticles(center: Vec3, now: number): ExplosionParticle[] {
+	const particles: ExplosionParticle[] = [];
+	for (const [smoke, count] of [[false, 5], [true, 16]] as const) {
+		for (let i = 0; i < count; i++) {
+			const angle = (i + Math.random()) * 2 * Math.PI / count;
+			const x = Math.cos(angle), z = Math.sin(angle);
+			const offset = 0.15 + Math.random() * 0.45;
+			const speed = 0.35 + Math.random() * (smoke ? 0.65 : 3);
+			particles.push({
+				position: [center[0] + x * offset, center[1] + (Math.random() - 0.3) * 0.65, center[2] + z * offset],
+				velocity: [x * speed, 0.4 + Math.random() * 0.6, z * speed],
+				startedAt: now + (smoke ? 45 + Math.random() * 100 : 0),
+				lifetime: smoke ? 1050 + Math.random() * 300 : 150 + Math.random() * 90,
+				size: smoke ? 0.65 + Math.random() * 0.55 : 1.2 + Math.random() * 0.65,
+				smoke,
+			});
+		}
+	}
+	return particles;
+}
+
+/** Camera-facing cutouts in the same unlit pass as the flames. */
+export function explosionVertices(particles: readonly ExplosionParticle[], camera: Vec3,
+	side: Vec3, up: Vec3, now: number, firstFrame: number): Float32Array {
+	const out: number[] = [];
+	for (const { position, velocity, startedAt, lifetime, size, smoke } of particles) {
+		const age = now - startedAt;
+		const progress = age / lifetime;
+		const half = size * (1 - 0.45 * progress) / 2;
+		const frameCount = smoke ? smokeFrames.length : blastFrames.length;
+		const texture = firstFrame + (smoke ? blastFrames.length : 0) + Math.floor(progress * frameCount);
+		const point = (horizontal: number, vertical: number): Vec3 => {
+			const coordinate = (axis: number) => position[axis] - camera[axis] + velocity[axis] * age / 1000
+				+ half * (side[axis] * horizontal + up[axis] * vertical);
+			return [coordinate(0), coordinate(1), coordinate(2)];
+		};
+		writeSprite(out, {
+			corners: [point(-1, -1), point(1, -1), point(1, 1), point(-1, 1)],
+			texture,
+			light: [0, 0],
+		});
 	}
 	return new Float32Array(out);
 }

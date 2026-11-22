@@ -46,6 +46,7 @@ struct State {
     arrows: BTreeMap<u32, ArrowEntity>,
     mob_hurt_sequence: u32,
     chat: Option<(protocol::ChatKind, String, String)>,
+    explosions: Vec<[f64; 3]>,
     world: World,
     connectivity: BTreeMap<world::visibility::Key, u16>,
     connectivity_work: world::visibility::Connectivity,
@@ -203,6 +204,7 @@ pub extern "C" fn client_new() {
         arrows: BTreeMap::new(),
         mob_hurt_sequence: 0,
         chat: None,
+        explosions: Vec::new(),
         world: World::with_lighting(true),
         connectivity: BTreeMap::new(),
         connectivity_work: Default::default(),
@@ -258,6 +260,7 @@ pub extern "C" fn client_reset_world() {
     st.entities.clear();
     st.mobs.clear();
     st.arrows.clear();
+    st.explosions.clear();
     st.mob_hurt_sequence = 0;
     st.connectivity.clear();
     st.visibility_stale = true;
@@ -414,6 +417,9 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.burning = burning;
             }
         }
+        S2C::Explosion { center } => {
+            st.explosions.push(center);
+        }
         S2C::DigProgress { .. } => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
@@ -545,6 +551,22 @@ pub extern "C" fn client_take_chat() -> usize {
     st.out.push(sender.len() as u8);
     st.out.extend_from_slice(sender.as_bytes());
     st.out.extend_from_slice(text.as_bytes());
+    st.out.len()
+}
+
+/// One queued explosion center, as three big-endian f64 values. Empty when none remain.
+#[no_mangle]
+pub extern "C" fn client_take_explosion() -> usize {
+    let st = state();
+    if st.explosions.is_empty() {
+        return 0;
+    }
+    let center = st.explosions.remove(0);
+    let mut w = world::io::Writer::new();
+    for value in center {
+        w.f64(value);
+    }
+    st.out = w.finish();
     st.out.len()
 }
 
@@ -1873,6 +1895,51 @@ mod tests {
         assert!(st.player.on_ground && !st.player.in_water);
         assert_eq!(unsafe { client_packet(third.as_ptr(), third.len()) }, 0x14);
         assert_eq!(state().player.velocity, [0.28125, -0.02, 0.203125]);
+    }
+
+    #[test]
+    fn explosion_centers_are_taken_one_at_a_time_in_arrival_order() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        assert_eq!(client_take_explosion(), 0);
+        let first = S2C::Explosion {
+            center: [1.5, 2.25, -3.5],
+        };
+        let bytes = first.encode();
+        assert_eq!(unsafe { client_packet(bytes.as_ptr(), bytes.len()) }, 0x16);
+        assert_eq!(client_take_explosion(), 24);
+        assert_eq!(state().out, bytes[1..]);
+        let second = S2C::Explosion {
+            center: [4.0, 5.0, 6.0],
+        }
+        .encode();
+        let third = S2C::Explosion {
+            center: [7.0, 8.0, 9.0],
+        }
+        .encode();
+        for encoded in [&second, &third] {
+            assert_eq!(
+                unsafe { client_packet(encoded.as_ptr(), encoded.len()) },
+                0x16
+            );
+        }
+        assert_eq!(client_take_explosion(), 24);
+        assert_eq!(state().out, second[1..]);
+        assert_eq!(client_take_explosion(), 24);
+        assert_eq!(state().out, third[1..]);
+        assert_eq!(client_take_explosion(), 0);
+
+        let bad = [0x16, 0];
+        assert_eq!(unsafe { client_packet(bad.as_ptr(), bad.len()) }, u32::MAX);
+        assert_eq!(client_take_explosion(), 0);
+        client_reset_world();
+        let encoded = first.encode();
+        assert_eq!(
+            unsafe { client_packet(encoded.as_ptr(), encoded.len()) },
+            0x16
+        );
+        client_reset_world();
+        assert_eq!(client_take_explosion(), 0);
     }
 
     #[test]

@@ -29,8 +29,8 @@ import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity, mobBeforeBlock, type RenderMob } from "./entities.ts";
-import { forward } from "./math.ts";
+import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob } from "./entities.ts";
+import { forward, type Vec3 } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
@@ -204,6 +204,10 @@ async function main(): Promise<void> {
 	let closePending = false;
 	let positionsCorrected = 0;
 	let lastKnockback: { velocity: [number, number, number]; position: readonly number[]; receivedAt: number; positionsCorrected: number } | null = null;
+	let explosionsReceived = 0;
+	let lastExplosionCenter: Vec3 | null = null;
+	let explosionParticles: ExplosionParticle[] = [];
+	let renderedExplosionParticles = 0;
 	let closed: string | null = null;
 	let selected = 1;
 	let lightMs = 0;
@@ -291,6 +295,16 @@ async function main(): Promise<void> {
 				if (line) {
 					chatHistory = appendChatLine(chatHistory, line, performance.now());
 					renderChat();
+				}
+				return;
+			}
+			if (id === S2C.Explosion) {
+				const now = performance.now();
+				for (let center = core.takeExplosion(); center; center = core.takeExplosion()) {
+					explosionsReceived++;
+					lastExplosionCenter = center;
+					explosionParticles.push(...spawnExplosionParticles(center, now));
+					explosionParticles.splice(0, Math.max(0, explosionParticles.length - MAX_EXPLOSION_PARTICLES));
 				}
 				return;
 			}
@@ -1569,7 +1583,10 @@ async function main(): Promise<void> {
 		const fov = settings.fov * (1 - 0.1 * bowDraw(now) / BOW_MAX_DRAW);
 		const dayTime = core.dayTime + partialDayTicks(now, timeReceivedAt, joined && connection === "open");
 		if (joined) audio.updateMusic(dayTime);
-		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs);
+		explosionParticles = explosionParticles.filter(particle => now < particle.startedAt + particle.lifetime);
+		const renderParticles = explosionParticles.filter(particle => now >= particle.startedAt);
+		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs, renderParticles);
+		renderedExplosionParticles = renderParticles.length;
 		window.__mc.frames++;
 
 		frames++;
@@ -1613,6 +1630,9 @@ async function main(): Promise<void> {
 			reconnects,
 			positionsCorrected,
 			lastKnockback,
+			explosionsReceived,
+			lastExplosionCenter,
+			explosionParticles: renderedExplosionParticles,
 			fps,
 			...frame,
 			sections: core.chunkCount * 24,
