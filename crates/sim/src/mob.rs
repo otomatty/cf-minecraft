@@ -167,6 +167,10 @@ const EXPLOSION_BLOCK_RADIUS: f64 = 3.0;
 const EXPLOSION_HURT_RADIUS: f64 = 6.0;
 const EXPLOSION_DAMAGE: f64 = 15.0;
 const PLAYER_BODY_CENTER: f64 = 0.9;
+/// Added before walking prediction halves horizontal velocity.
+/// Grounded prediction also caps the vertical result at 0.4.
+const EXPLOSION_PUSH_HORIZONTAL: f64 = 1.0;
+const EXPLOSION_PUSH_VERTICAL: f64 = 0.5;
 const EXPLOSION_DROP_SALT: u64 = 25;
 const EXPLOSION_TOUGH_DIG_TICKS: u16 = 250;
 
@@ -1049,11 +1053,151 @@ fn spatial_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn blast_damage(distance: f64) -> u8 {
-    if distance >= EXPLOSION_HURT_RADIUS {
+fn blast_damage(distance: f64, exposure: f64) -> u8 {
+    if distance >= EXPLOSION_HURT_RADIUS || exposure == 0.0 {
         return 0;
     }
-    (EXPLOSION_DAMAGE * (EXPLOSION_HURT_RADIUS - distance) / EXPLOSION_HURT_RADIUS).floor() as u8
+    (EXPLOSION_DAMAGE * (EXPLOSION_HURT_RADIUS - distance) / EXPLOSION_HURT_RADIUS * exposure)
+        .floor() as u8
+}
+
+fn bounds_center(bounds: physics::Aabb) -> [f64; 3] {
+    std::array::from_fn(|axis| (bounds.min[axis] + bounds.max[axis]) * 0.5)
+}
+
+/// Fraction of the 3×3×3 hitbox lattice that can see `center` through full cubes.
+fn blast_exposure(world: &World, center: [f64; 3], bounds: physics::Aabb) -> f64 {
+    let mut clear = 0;
+    for step_y in 0..3 {
+        for step_z in 0..3 {
+            for step_x in 0..3 {
+                let steps = [step_x, step_y, step_z];
+                let point = std::array::from_fn(|axis| {
+                    bounds.min[axis]
+                        + (bounds.max[axis] - bounds.min[axis]) * (steps[axis] as f64 * 0.5)
+                });
+                if !full_cube_occludes(world, point, center) {
+                    clear += 1;
+                }
+            }
+        }
+    }
+    clear as f64 / 27.0
+}
+
+fn cell_is_full_cube(world: &World, x: i32, y: i32, z: i32) -> bool {
+    let mut full = false;
+    BlockWorld(|bx, by, bz| world.get_block(bx, by, bz)).collision_boxes(x, y, z, &mut |bounds| {
+        full |= bounds == physics::Aabb::block(x, y, z);
+    });
+    full
+}
+
+/// Positive-length overlap of the segment `start + t * delta`, `t` in [0, 1], with `bounds`.
+/// Touching a face without entering the interior does not count.
+fn segment_overlaps_aabb(start: [f64; 3], delta: [f64; 3], bounds: physics::Aabb) -> bool {
+    let mut tmin = 0.0;
+    let mut tmax = 1.0;
+    for axis in 0..3 {
+        let min = bounds.min[axis];
+        let max = bounds.max[axis];
+        if delta[axis] == 0.0 {
+            if start[axis] <= min || start[axis] >= max {
+                return false;
+            }
+            continue;
+        }
+        let inv = 1.0 / delta[axis];
+        let (mut near, mut far) = ((min - start[axis]) * inv, (max - start[axis]) * inv);
+        if near > far {
+            std::mem::swap(&mut near, &mut far);
+        }
+        if near > tmin {
+            tmin = near;
+        }
+        if far < tmax {
+            tmax = far;
+        }
+        if tmin >= tmax {
+            return false;
+        }
+    }
+    true
+}
+
+/// Same cell walk as arrow block tracing. Only solid full-cell cubes occlude;
+/// fluids, air and partial or empty shapes do not.
+fn full_cube_occludes(world: &World, start: [f64; 3], end: [f64; 3]) -> bool {
+    let delta = std::array::from_fn(|axis| end[axis] - start[axis]);
+    let mut cell = start.map(|value| value.floor() as i32);
+    let goal = end.map(|value| value.floor() as i32);
+    // The walk uses the upper cell on each stationary integer plane. Include the
+    // lower neighbor across each such plane: the seam is interior to the solid
+    // only when both face neighbors (or all four cells around an edge) are full.
+    let seam: [i32; 3] = std::array::from_fn(|axis| {
+        i32::from(start != end && delta[axis] == 0.0 && start[axis] == f64::from(cell[axis]))
+    });
+    let step: [i32; 3] = std::array::from_fn(|axis| if goal[axis] > cell[axis] { 1 } else { -1 });
+    loop {
+        let [x, y, z] = cell;
+        if !world.chunks.contains_key(&(x >> 4, z >> 4)) {
+            return true;
+        }
+        let [min_x, min_y, min_z] = std::array::from_fn(|axis| cell[axis] - seam[axis]);
+        let solid = (min_x..=x).all(|bx| {
+            (min_y..=y).all(|by| (min_z..=z).all(|bz| cell_is_full_cube(world, bx, by, bz)))
+        });
+        if solid {
+            let mut bounds = physics::Aabb::block(x, y, z);
+            bounds.min = [min_x, min_y, min_z].map(f64::from);
+            if segment_overlaps_aabb(start, delta, bounds) {
+                return true;
+            }
+        }
+        if cell == goal {
+            return false;
+        }
+        let mut best = 0.0;
+        let mut chosen = [false; 3];
+        let mut any = false;
+        for axis in 0..3 {
+            if cell[axis] == goal[axis] {
+                continue;
+            }
+            let boundary = f64::from(cell[axis]) + f64::from(step[axis] > 0);
+            let crossing = (boundary - start[axis]) / delta[axis];
+            if !any || crossing < best {
+                best = crossing;
+                chosen = [false; 3];
+                chosen[axis] = true;
+                any = true;
+            } else if crossing == best {
+                chosen[axis] = true;
+            }
+        }
+        if !any {
+            return false;
+        }
+        for axis in 0..3 {
+            if chosen[axis] {
+                cell[axis] += step[axis];
+            }
+        }
+    }
+}
+
+fn explosion_velocity(center: [f64; 3], body: [f64; 3], distance: f64, exposure: f64) -> [f64; 3] {
+    let impact = (1.0 - distance / EXPLOSION_HURT_RADIUS) * exposure;
+    if distance == 0.0 {
+        return [0.0, impact * EXPLOSION_PUSH_VERTICAL, 0.0];
+    }
+    let horizontal = impact * EXPLOSION_PUSH_HORIZONTAL / distance;
+    let vertical = impact * EXPLOSION_PUSH_VERTICAL / distance;
+    [
+        (body[0] - center[0]) * horizontal,
+        (body[1] - center[1]) * vertical,
+        (body[2] - center[2]) * horizontal,
+    ]
 }
 
 fn explosion_spares(state: u16) -> bool {
@@ -1588,25 +1732,22 @@ impl Server {
         }
     }
 
-    fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
-        for y in block_center_range(center[1]) {
-            for z in block_center_range(center[2]) {
-                for x in block_center_range(center[0]) {
-                    let block_center = [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5];
-                    if spatial_distance(center, block_center) > EXPLOSION_BLOCK_RADIUS {
-                        continue;
-                    }
-                    let Some(state) = self.world.get_block(x, y, z) else {
-                        continue;
-                    };
-                    if explosion_spares(state) {
-                        continue;
-                    }
-                    let drops = explosion_drops(self.seed, self.game_time, [x, y, z]);
-                    self.break_exploded_block([x, y, z], drops);
-                }
+    fn send_explosion(&mut self, center: [f64; 3]) {
+        let chunk = (
+            (center[0].floor() as i32) >> 4,
+            (center[2].floor() as i32) >> 4,
+        );
+        let packet = S2C::Explosion { center }.encode();
+        for (&id, client) in &self.clients {
+            if client.joined && client.sent.contains(&chunk) {
+                self.outbox.push((id, packet.clone()));
             }
         }
+    }
+
+    fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
+        let existing_items: Vec<_> = self.entities.keys().copied().collect();
+        self.send_explosion(center);
 
         let mut deaths = Vec::new();
         if self.game_mode == GameMode::Survival {
@@ -1616,18 +1757,33 @@ impl Server {
                 .filter(|(_, client)| client.joined && !client.health.vitals.dead)
                 .map(|(&id, client)| {
                     let [x, y, z] = client.pos;
-                    (id, [x, y + PLAYER_BODY_CENTER, z])
+                    let body = [x, y + PLAYER_BODY_CENTER, z];
+                    (id, body, physics::Player::new(client.pos).bounds())
                 })
                 .collect();
-            for (id, body) in players {
-                let damage = blast_damage(spatial_distance(center, body));
-                if damage == 0 {
+            for (id, body, bounds) in players {
+                let distance = spatial_distance(center, body);
+                if distance >= EXPLOSION_HURT_RADIUS {
                     continue;
                 }
-                let health = &mut self.clients.get_mut(&id).unwrap().health;
-                health.damage(damage, DeathCause::Explosion);
-                if health.vitals.dead {
+                let exposure = blast_exposure(&self.world, center, bounds);
+                if exposure == 0.0 {
+                    continue;
+                }
+                let damage = blast_damage(distance, exposure);
+                let dead = {
+                    let health = &mut self.clients.get_mut(&id).unwrap().health;
+                    if damage != 0 {
+                        health.damage(damage, DeathCause::Explosion);
+                    }
+                    health.vitals.dead
+                };
+                if dead {
                     deaths.push(id);
+                } else {
+                    let velocity = explosion_velocity(center, body, distance, exposure);
+                    self.outbox
+                        .push((id, S2C::PlayerKnockback { velocity }.encode()));
                 }
             }
         }
@@ -1639,9 +1795,17 @@ impl Server {
                 if mob.health == 0 || mob.hurt_ticks != 0 {
                     return None;
                 }
-                let [x, y, z] = mob.pos();
-                let body = [x, y + spec(mob.kind).height / 2.0, z];
-                let damage = blast_damage(spatial_distance(center, body));
+                let bounds = mob.bounds();
+                let body = [
+                    mob.pos()[0],
+                    mob.pos()[1] + spec(mob.kind).height / 2.0,
+                    mob.pos()[2],
+                ];
+                let distance = spatial_distance(center, body);
+                if distance >= EXPLOSION_HURT_RADIUS {
+                    return None;
+                }
+                let damage = blast_damage(distance, blast_exposure(&self.world, center, bounds));
                 (damage != 0).then_some((id, damage))
             })
             .collect();
@@ -1665,6 +1829,42 @@ impl Server {
                 self.drop_mob_loot(id, mob, false);
             } else {
                 self.send_mob_hurt(id);
+            }
+        }
+
+        let removed: Vec<_> = existing_items
+            .into_iter()
+            .filter_map(|id| {
+                let entity = self.entities.get(&id)?;
+                let bounds = entity.bounds();
+                let distance = spatial_distance(center, bounds_center(bounds));
+                if distance >= EXPLOSION_HURT_RADIUS {
+                    return None;
+                }
+                (blast_exposure(&self.world, center, bounds) > 0.0).then_some((id, entity.chunk()))
+            })
+            .collect();
+        for (id, chunk) in removed {
+            self.entities.remove(&id);
+            self.dirty_entity_chunk(chunk);
+        }
+
+        for y in block_center_range(center[1]) {
+            for z in block_center_range(center[2]) {
+                for x in block_center_range(center[0]) {
+                    let block_center = [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5];
+                    if spatial_distance(center, block_center) > EXPLOSION_BLOCK_RADIUS {
+                        continue;
+                    }
+                    let Some(state) = self.world.get_block(x, y, z) else {
+                        continue;
+                    };
+                    if explosion_spares(state) {
+                        continue;
+                    }
+                    let drops = explosion_drops(self.seed, self.game_time, [x, y, z]);
+                    self.break_exploded_block([x, y, z], drops);
+                }
             }
         }
         deaths
@@ -4447,11 +4647,13 @@ mod tests {
 
     #[test]
     fn explosion_damages_survival_players_and_other_mobs_but_not_creative_or_projectiles() {
-        assert_eq!(blast_damage(0.0), 15);
-        assert_eq!(blast_damage(3.0), 7);
-        assert_eq!(blast_damage(5.6), 1);
-        assert_eq!(blast_damage(5.9), 0);
-        assert_eq!(blast_damage(6.0), 0);
+        assert_eq!(blast_damage(0.0, 1.0), 15);
+        assert_eq!(blast_damage(3.0, 1.0), 7);
+        assert_eq!(blast_damage(5.6, 1.0), 1);
+        assert_eq!(blast_damage(5.9, 1.0), 0);
+        assert_eq!(blast_damage(6.0, 1.0), 0);
+        assert_eq!(blast_damage(0.0, 0.0), 0);
+        assert_eq!(blast_damage(3.0, 0.5), 3);
 
         let (mut server, id) = combat(GameMode::Survival);
         server.set_time(0, 18000);
@@ -4545,13 +4747,456 @@ mod tests {
         let stick = items::by_name("stick").unwrap();
         server.spawn_item(stick, 1, [5.5, 2.0, 5.5], [0.0, 0.0, 0.0], 40);
         let item = *server.entities.keys().max().unwrap();
-        let item_pos = server.entities[&item].pos;
         let arrow = crate::arrow::Arrow::aimed([5.5, 3.0, 5.5], [6.5, 3.0, 5.5]);
         server.arrows.insert(u32::MAX, arrow.clone());
         server.apply_explosion([5.5, 1.85, 5.5]);
-        assert_eq!(server.entities[&item].pos, item_pos);
-        assert_eq!(server.entities[&item].item, stick);
+        assert!(!server.entities.contains_key(&item));
+        assert!(server.entities.values().all(|drop| drop.item != stick));
+        let cobble = items::by_name("cobblestone").unwrap();
+        assert!(server.entities.values().any(|drop| drop.item == cobble));
         assert_eq!(server.arrows[&u32::MAX], arrow);
+    }
+
+    fn obsidian_floor(server: &mut Server) {
+        for x in 0..16 {
+            for z in 0..16 {
+                server.world.set_block(x, 0, z, blocks::OBSIDIAN);
+            }
+        }
+    }
+
+    fn player_body(pos: [f64; 3]) -> [f64; 3] {
+        [pos[0], pos[1] + PLAYER_BODY_CENTER, pos[2]]
+    }
+
+    #[test]
+    fn explosion_rays_on_a_face_require_both_adjacent_cubes_to_occlude() {
+        for plane in 0..3 {
+            let axis = (plane + 1) % 3;
+            let mut start = [5.5; 3];
+            start[plane] = 5.0;
+            let mut end = start;
+            end[axis] = 8.5;
+            let mut upper = [5; 3];
+            upper[axis] = 7;
+            let mut lower = upper;
+            lower[plane] -= 1;
+
+            let mut world = arena(16);
+            let [x, y, z] = upper;
+            world.set_block(x, y, z, blocks::STONE);
+            assert!(!full_cube_occludes(&world, start, end), "axis {plane}");
+            let [x, y, z] = lower;
+            world.set_block(x, y, z, blocks::STONE);
+            assert!(full_cube_occludes(&world, start, end), "axis {plane}");
+            let [x, y, z] = upper;
+            world.set_block(x, y, z, blocks::AIR);
+            assert!(!full_cube_occludes(&world, start, end), "axis {plane}");
+        }
+    }
+
+    #[test]
+    fn explosion_rays_along_an_edge_require_all_four_cubes_to_occlude() {
+        let mut world = arena(16);
+        let start = [5.5, 5.0, 5.0];
+        let end = [8.5, 5.0, 5.0];
+        world.set_block(7, 4, 4, blocks::STONE);
+        world.set_block(7, 4, 5, blocks::STONE);
+        world.set_block(7, 5, 4, blocks::STONE);
+        assert!(!full_cube_occludes(&world, start, end));
+        world.set_block(7, 5, 5, blocks::STONE);
+        assert!(full_cube_occludes(&world, start, end));
+    }
+
+    #[test]
+    fn explosion_exposure_counts_a_wall_seam_as_blocked() {
+        let mut world = arena(16);
+        let center = [5.5, 1.85, 5.0];
+        let bounds = Player::new([8.5, 1.0, 5.0]).bounds();
+        assert_eq!(blast_exposure(&world, center, bounds), 1.0);
+        for y in 1..=3 {
+            world.set_block(7, y, 5, blocks::STONE);
+        }
+        assert_eq!(blast_exposure(&world, center, bounds), 18.0 / 27.0);
+        for y in 1..=3 {
+            world.set_block(7, y, 4, blocks::STONE);
+        }
+        assert_eq!(blast_exposure(&world, center, bounds), 0.0);
+    }
+
+    #[test]
+    fn explosion_exposure_is_full_in_the_open_partial_behind_one_stone_and_zero_behind_a_wall() {
+        let center = [5.5, 1.85, 5.5];
+        let pos = [8.5, 1.0, 5.5];
+        let (mut server, cow_id) = combat(GameMode::Survival);
+        server.mobs.remove(&cow_id);
+        server.clients.get_mut(&1).unwrap().pos = pos;
+        let bounds = Player::new(pos).bounds();
+        let body = player_body(pos);
+        let distance = spatial_distance(center, body);
+        assert_eq!(blast_exposure(&server.world, center, bounds), 1.0);
+        assert_eq!(blast_damage(distance, 1.0), 7);
+
+        server.world.set_block(7, 1, 5, blocks::WATER);
+        assert_eq!(blast_exposure(&server.world, center, bounds), 1.0);
+        server.world.set_block(7, 1, 5, blocks::OAK_SLAB);
+        assert_eq!(blast_exposure(&server.world, center, bounds), 1.0);
+        server.world.set_block(7, 1, 5, blocks::AIR);
+
+        server.world.set_block(7, 1, 5, blocks::STONE);
+        assert_eq!(blast_exposure(&server.world, center, bounds), 9.0 / 27.0);
+        assert_eq!(blast_damage(distance, 9.0 / 27.0), 2);
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 18);
+        assert_eq!(server.world.get_block(7, 1, 5), Some(blocks::AIR));
+        let knock = knockback_packets(&mut server);
+        assert_eq!(
+            knock,
+            [(1, explosion_velocity(center, body, distance, 9.0 / 27.0))]
+        );
+        assert!(knock[0].1[0] > 0.0 && knock[0].1[2] == 0.0);
+
+        let (mut server, cow_id) = combat(GameMode::Survival);
+        server.mobs.remove(&cow_id);
+        server.clients.get_mut(&1).unwrap().pos = pos;
+        for x in 6..=7 {
+            for y in 1..=4 {
+                for z in 4..=7 {
+                    server.world.set_block(x, y, z, blocks::STONE);
+                }
+            }
+        }
+        let cow = grounded(MobKind::Cow, [8.5, 1.0, 6.2]);
+        assert_eq!(
+            blast_exposure(&server.world, center, Player::new(pos).bounds()),
+            0.0
+        );
+        assert_eq!(blast_exposure(&server.world, center, cow.bounds()), 0.0);
+        server.mobs.insert(cow_id, cow);
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        assert_eq!(server.mobs[&cow_id].health, 10);
+        assert_eq!(server.mobs[&cow_id].hurt_ticks, 0);
+        assert!(knockback_packets(&mut server).is_empty());
+        assert_eq!(server.world.get_block(6, 2, 5), Some(blocks::AIR));
+        assert_eq!(server.world.get_block(7, 2, 5), Some(blocks::AIR));
+
+        let (mut server, cow_id) = combat(GameMode::Survival);
+        server.mobs.remove(&cow_id);
+        server.clients.get_mut(&1).unwrap().pos = pos;
+        for y in 1..=3 {
+            for z in 4..=6 {
+                server.world.set_block(7, y, z, blocks::DIRT);
+            }
+        }
+        assert_eq!(
+            blast_exposure(&server.world, center, Player::new(pos).bounds()),
+            0.0
+        );
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        assert!(knockback_packets(&mut server).is_empty());
+        assert_eq!(server.world.get_block(7, 1, 5), Some(blocks::AIR));
+        assert_eq!(server.world.get_block(7, 3, 6), Some(blocks::AIR));
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 13);
+    }
+
+    #[test]
+    fn explosion_knockback_uses_impact_and_skips_death_creative_and_zero_damage_still_pushes() {
+        let origin = [8.0, 1.0, 8.0];
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        let center = player_body(origin);
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 5);
+        assert!(!server.clients[&1].health.vitals.dead);
+        assert_eq!(
+            knockback_packets(&mut server),
+            [(1, [0.0, EXPLOSION_PUSH_VERTICAL, 0.0])]
+        );
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        server.clients.get_mut(&1).unwrap().health.vitals.health = 15;
+        server.take_outbox();
+        server.apply_explosion(player_body(origin));
+        assert!(server.clients[&1].health.vitals.dead);
+        assert_eq!(
+            server.clients[&1].health.vitals.cause,
+            DeathCause::Explosion
+        );
+        assert!(knockback_packets(&mut server).is_empty());
+
+        let (mut server, id) = combat(GameMode::Creative);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        server.take_outbox();
+        server.apply_explosion(player_body(origin));
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        assert!(knockback_packets(&mut server).is_empty());
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        let center = [origin[0] + 5.9, origin[1] + PLAYER_BODY_CENTER, origin[2]];
+        let body = player_body(origin);
+        let distance = spatial_distance(center, body);
+        assert!(distance < EXPLOSION_HURT_RADIUS, "{distance}");
+        assert_eq!(
+            blast_exposure(&server.world, center, Player::new(origin).bounds()),
+            1.0
+        );
+        assert_eq!(blast_damage(distance, 1.0), 0);
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+        let velocity = explosion_velocity(center, body, distance, 1.0);
+        assert!(velocity[0] < 0.0);
+        assert_eq!(velocity[1], 0.0);
+        assert_eq!(knockback_packets(&mut server), [(1, velocity)]);
+    }
+
+    fn launch_until_landing(server: &mut Server, mut body: Player) -> Player {
+        let mut left_ground = !body.on_ground;
+        let mut landed = false;
+        for _ in 0..40 {
+            body.tick(
+                Input::default(),
+                &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+            );
+            left_ground |= !body.on_ground;
+            report_knockback_prediction(server, body.position);
+            if left_ground && body.on_ground {
+                landed = true;
+                break;
+            }
+        }
+        assert!(left_ground && landed, "{body:?}");
+        body
+    }
+
+    #[test]
+    fn explosion_knockback_prediction_is_accepted_near_a_wall_and_while_jumping() {
+        let origin = [8.0, 1.0, 8.0];
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        server.take_outbox();
+        server.apply_explosion(player_body(origin));
+        let velocity = knockback_packets(&mut server)[0].1;
+        let mut body = Player::new(origin);
+        body.on_ground = true;
+        body.apply_knockback(
+            velocity,
+            false,
+            &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+        );
+        assert_eq!(body.velocity[1], 0.4);
+        let landed = launch_until_landing(&mut server, body);
+        assert_eq!(landed.position[0], origin[0]);
+        assert_eq!(landed.position[2], origin[2]);
+        assert_eq!(landed.position[1], origin[1]);
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        for y in 1..=3 {
+            for z in 7..=9 {
+                server.world.set_block(6, y, z, blocks::OBSIDIAN);
+            }
+        }
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        let center = [10.5, 1.2, 8.0];
+        assert_eq!(
+            blast_exposure(&server.world, center, Player::new(origin).bounds()),
+            1.0
+        );
+        server.take_outbox();
+        server.apply_explosion(center);
+        let velocity = knockback_packets(&mut server)[0].1;
+        assert!(velocity[0] < 0.0, "{velocity:?}");
+        let mut body = Player::new(origin);
+        body.on_ground = true;
+        body.apply_knockback(
+            velocity,
+            false,
+            &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+        );
+        let landed = launch_until_landing(&mut server, body);
+        assert!(
+            landed.position[0] - physics::WIDTH / 2.0 >= 7.0 - 1e-6,
+            "entered the wall: {landed:?}"
+        );
+        assert!(landed.position[0] < origin[0], "{landed:?}");
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        obsidian_floor(&mut server);
+        server.clients.get_mut(&1).unwrap().pos = origin;
+        let center = [origin[0] + 1.2, origin[1] + PLAYER_BODY_CENTER, origin[2]];
+        server.take_outbox();
+        server.apply_explosion(center);
+        let velocity = knockback_packets(&mut server)[0].1;
+        assert!(velocity[0] < 0.0, "{velocity:?}");
+        let mut body = Player::new(origin);
+        body.on_ground = true;
+        body.tick(
+            Input {
+                jump: true,
+                ..Input::default()
+            },
+            &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+        );
+        assert!(!body.on_ground);
+        report_knockback_prediction(&mut server, body.position);
+        let vy = body.velocity[1];
+        body.apply_knockback(
+            velocity,
+            false,
+            &physics::BlockWorld(|x, y, z| server.world.get_block(x, y, z)),
+        );
+        assert_eq!(body.velocity[1], vy);
+        let landed = launch_until_landing(&mut server, body);
+        assert!(origin[0] - landed.position[0] > 0.2, "{landed:?}");
+        assert_eq!(landed.position[1], origin[1]);
+    }
+
+    #[test]
+    fn explosion_keeps_loot_from_the_cow_it_kills_but_removes_existing_exposed_drops() {
+        let (mut server, cow_id) = combat(GameMode::Survival);
+        let center = [5.5, 1.85, 5.5];
+        let cow = grounded(MobKind::Cow, [6.5, 1.0, 5.5]);
+        assert_eq!(blast_exposure(&server.world, center, cow.bounds()), 1.0);
+        server.mobs.insert(cow_id, cow);
+        let stick = items::by_name("stick").unwrap();
+        let existing = server.next_entity_id;
+        server.spawn_item(stick, 1, [5.5, 2.0, 6.5], [0.0; 3], 40);
+        assert_eq!(
+            blast_exposure(&server.world, center, server.entities[&existing].bounds()),
+            1.0
+        );
+
+        server.apply_explosion(center);
+
+        assert!(!server.mobs.contains_key(&cow_id));
+        assert!(!server.entities.contains_key(&existing));
+        let beef = items::by_name("raw_beef").unwrap();
+        assert!(server.entities.values().any(|drop| drop.item == beef));
+    }
+
+    #[test]
+    fn explosion_removes_exposed_drops_and_keeps_sheltered_items_arrows_and_blast_loot() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        let center = [5.5, 1.85, 5.5];
+        let stick = items::by_name("stick").unwrap();
+        let beef = items::by_name("raw_beef").unwrap();
+        let powder = items::by_name("gunpowder").unwrap();
+        for x in 6..=7 {
+            for y in 1..=3 {
+                for z in 4..=6 {
+                    server.world.set_block(x, y, z, blocks::STONE);
+                }
+            }
+        }
+        let exposed = server.next_entity_id;
+        server.spawn_item(stick, 1, [5.5, 2.0, 5.5], [0.0; 3], 40);
+        let sheltered_pos = [8.5, 1.2, 5.5];
+        let sheltered = server.next_entity_id;
+        server.spawn_item(beef, 1, sheltered_pos, [0.0; 3], 40);
+        assert_eq!(
+            blast_exposure(&server.world, center, server.entities[&sheltered].bounds()),
+            0.0
+        );
+        let far = server.next_entity_id;
+        server.spawn_item(powder, 1, [5.5, 1.0, 14.0], [0.0; 3], 40);
+        let arrow = crate::arrow::Arrow::aimed([5.5, 3.0, 5.5], [6.5, 3.0, 5.5]);
+        server.arrows.insert(u32::MAX, arrow.clone());
+        server.sync_entities();
+        server.take_outbox();
+        server.apply_explosion(center);
+        assert!(!server.entities.contains_key(&exposed));
+        assert!(server.entities.values().all(|drop| drop.item != stick));
+        assert_eq!(server.entities[&sheltered].item, beef);
+        assert_eq!(server.entities[&sheltered].pos, sheltered_pos);
+        assert_eq!(server.entities[&far].item, powder);
+        assert_eq!(server.arrows[&u32::MAX], arrow);
+        let cobble = items::by_name("cobblestone").unwrap();
+        assert!(server.entities.values().any(|drop| drop.item == cobble));
+        server.sync_entities();
+        let removed: Vec<_> = decoded(&mut server)
+            .into_iter()
+            .filter_map(|(client, packet)| match packet {
+                S2C::EntityRemove { id } => Some((client, id)),
+                _ => None,
+            })
+            .collect();
+        assert!(removed.contains(&(1, exposed)));
+        assert!(removed.iter().all(|(_, id)| *id != sheltered && *id != far));
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        while server.take_dirty().is_some() {}
+        let high = [8.0, 40.0, 8.0];
+        let item = server.next_entity_id;
+        server.spawn_item(stick, 1, high, [0.0; 3], 40);
+        while server.take_dirty().is_some() {}
+        server.apply_explosion(high);
+        assert!(!server.entities.contains_key(&item));
+        assert_eq!(
+            server.take_dirty().map(|(cx, cz, _)| (cx, cz)),
+            Some((0, 0))
+        );
+
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        server.set_entity_persistence(false);
+        while server.take_dirty().is_some() {}
+        let item = server.next_entity_id;
+        server.spawn_item(stick, 1, high, [0.0; 3], 40);
+        server.apply_explosion(high);
+        assert!(!server.entities.contains_key(&item));
+        assert_eq!(server.take_dirty(), None);
+    }
+
+    #[test]
+    fn explosion_packet_reaches_only_joined_clients_with_the_center_chunk() {
+        let (mut server, id) = combat(GameMode::Survival);
+        server.mobs.remove(&id);
+        assert!(server.clients[&1].sent.contains(&(0, 0)));
+        server.connect(2);
+        server.clients.get_mut(&2).unwrap().joined = true;
+        server.connect(3);
+        {
+            let client = server.clients.get_mut(&3).unwrap();
+            client.joined = true;
+            client.sent.insert((1, 0));
+        }
+        server.connect(4);
+        server.clients.get_mut(&4).unwrap().sent.insert((0, 0));
+        server.take_outbox();
+        let center = [5.5, 1.85, 5.5];
+        server.apply_explosion(center);
+        let explosions: Vec<_> = decoded(&mut server)
+            .into_iter()
+            .filter_map(|(client, packet)| match packet {
+                S2C::Explosion { center: got } => Some((client, got)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(explosions, vec![(1, center)]);
     }
 
     #[test]

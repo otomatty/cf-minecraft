@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -334,6 +334,10 @@ pub enum S2C {
         id: u32,
         burning: bool,
     },
+    /// Blast center. Sent once on the tick the explosion happens.
+    Explosion {
+        center: [f64; 3],
+    },
     EntityRemove {
         id: u32,
     },
@@ -411,6 +415,7 @@ pub mod id {
     pub const S2C_CHAT: u8 = 0x13;
     pub const S2C_PLAYER_KNOCKBACK: u8 = 0x14;
     pub const S2C_MOB_BURNING: u8 = 0x15;
+    pub const S2C_EXPLOSION: u8 = 0x16;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -772,6 +777,12 @@ impl S2C {
                 w.i32(*entity as i32);
                 w.u8(u8::from(*burning));
             }
+            S2C::Explosion { center } => {
+                w.u8(id::S2C_EXPLOSION);
+                for value in center {
+                    w.f64(*value);
+                }
+            }
             S2C::EntityRemove { id: entity } => {
                 w.u8(id::S2C_ENTITY_REMOVE);
                 w.i32(*entity as i32);
@@ -992,6 +1003,9 @@ impl S2C {
                 };
                 S2C::MobBurning { id, burning }
             }
+            id::S2C_EXPLOSION => S2C::Explosion {
+                center: entity_pos(&mut r)?,
+            },
             id::S2C_ENTITY_REMOVE => S2C::EntityRemove {
                 id: entity_id(&mut r)?,
             },
@@ -1449,6 +1463,9 @@ mod tests {
                 game_time: 1 << 40,
                 day_time: 6000,
             },
+            S2C::Explosion {
+                center: [1.5, 64.25, -2.5],
+            },
         ];
         for p in s2c {
             assert_eq!(S2C::decode(&p.encode()), Ok(p));
@@ -1524,7 +1541,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1754,7 +1771,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -1788,6 +1805,30 @@ mod tests {
         }
         assert!(S2C::decode(&[0x15, 0, 0, 0, 0, 1]).is_err());
         assert!(S2C::decode(&[0x15, 0, 0, 0, 12, 2]).is_err());
+    }
+
+    #[test]
+    fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
+        assert_eq!(PROTOCOL_VERSION, 26);
+        let packet = S2C::Explosion {
+            center: [4.5, 1.85, -8.25],
+        };
+        let bytes = packet.encode();
+        assert_eq!((bytes[0], bytes.len()), (0x16, 25));
+        assert_eq!(S2C::decode(&bytes), Ok(packet));
+        for end in 0..bytes.len() {
+            assert!(S2C::decode(&bytes[..end]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(S2C::decode(&trailing).is_err());
+        for offset in (1..25).step_by(8) {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut bad = bytes.clone();
+                bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+                assert!(S2C::decode(&bad).is_err());
+            }
+        }
     }
 
     #[test]

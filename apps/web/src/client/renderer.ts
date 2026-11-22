@@ -13,13 +13,14 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { flameVertices, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
+import { explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
+import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
-import { boxInFrustum, forward, right, frustumPlanes, viewProjection } from "./math.ts";
+import { boxInFrustum, forward, right, frustumPlanes, viewProjection, type Vec3 } from "./math.ts";
 import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
@@ -145,7 +146,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 }
 
 override renderLayer: u32 = 0u;
-// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins, 3 = flames.
+// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins, 3 = flames and explosion particles.
 override entityPass: u32 = 0u;
 
 @vertex
@@ -416,6 +417,7 @@ export class Renderer {
 	private readonly globalsI32 = new Int32Array(this.globalsData);
 	private readonly firstWaterFrame: number;
 	private readonly firstFlameFrame: number;
+	private readonly firstExplosionFrame: number;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
@@ -468,6 +470,11 @@ export class Renderer {
 		}
 		this.firstFlameFrame = tiles.length;
 		for (const pixels of flameFrames) {
+			cutouts.add(tiles.length);
+			tiles.push(pixels);
+		}
+		this.firstExplosionFrame = tiles.length;
+		for (const pixels of [...blastFrames, ...smokeFrames]) {
 			cutouts.add(tiles.length);
 			tiles.push(pixels);
 		}
@@ -598,8 +605,9 @@ export class Renderer {
 		this.mobs = entityPipeline("mobs");
 		this.flames = entityPipeline("flames");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-		// Each drop uses up to 36 vertices, each burning mob uses two double-sided quads.
-		this.itemBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * (36 + 24) * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		// Each drop uses up to 36 vertices, each burning mob two double-sided quads, and each particle one.
+		const itemVerticesCapacity = MAX_RENDER_ITEMS * (36 + 24) + MAX_EXPLOSION_PARTICLES * 12;
+		this.itemBuffer = device.createBuffer({ size: itemVerticesCapacity * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -741,7 +749,7 @@ export class Renderer {
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], mobs: readonly RenderMob[] = []): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], mobs: readonly RenderMob[] = [], particles: readonly ExplosionParticle[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -768,7 +776,7 @@ export class Renderer {
 		f.set([sky.angle, sky.starBrightness, sky.moonPhase, 0], 44);
 		const look = forward(camera.yaw, camera.pitch);
 		const side = right(camera.yaw);
-		const up = [side[1] * look[2] - side[2] * look[1], side[2] * look[0] - side[0] * look[2], side[0] * look[1] - side[1] * look[0]];
+		const up: Vec3 = [side[1] * look[2] - side[2] * look[1], side[2] * look[0] - side[0] * look[2], side[0] * look[1] - side[1] * look[0]];
 		f.set([...look, 0], 48);
 		f.set([...side, 0], 52);
 		f.set([...up, 0], 56);
@@ -785,12 +793,14 @@ export class Renderer {
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
 		const heldItems: RenderSprite[] = [];
-		const eye = [camera.x, camera.y, camera.z];
+		const eye: Vec3 = [camera.x, camera.y, camera.z];
 		const mobData = mobVertices(visibleMobs, eye, now, { output: heldItems, textures: this.heldItemTextures });
 		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
 		const flameData = flameVertices(visibleMobs, eye, now, this.firstFlameFrame);
+		const explosionData = explosionVertices(particles, eye, side, up, now, this.firstExplosionFrame);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		if (flameData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength, flameData);
+		if (explosionData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength + flameData.byteLength, explosionData);
 		if (mobData.length) {
 			if (!this.mobBuffer || this.mobBuffer.size < mobData.byteLength) {
 				this.mobBuffer?.destroy();
@@ -853,11 +863,12 @@ export class Renderer {
 					pass.setVertexBuffer(0, this.mobBuffer);
 					pass.draw(mobData.length / 9);
 				}
-				if (flameData.length) {
+				const effectVertices = (flameData.length + explosionData.length) / 9;
+				if (effectVertices) {
 					pass.setPipeline(this.flames);
 					pass.setBindGroup(0, this.terrainBind);
 					pass.setVertexBuffer(0, this.itemBuffer);
-					pass.draw(flameData.length / 9, 1, itemData.length / 9);
+					pass.draw(effectVertices, 1, itemData.length / 9);
 				}
 				if (cloudsFirst) drawClouds();
 			}
