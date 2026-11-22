@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { handle } from "./router.ts";
 import type { RouterDeps, User } from "./router.ts";
 import { createDB } from "./db.ts";
+import type { GameMode } from "./db.ts";
 import { testDB } from "./d1-shim.test.ts";
 
 const owner: User = { id: "owner", name: "Owner", email: "Owner@example.com", emailVerified: true };
@@ -29,6 +30,9 @@ async function setup(t) {
 	const revocations: [string, string][] = [];
 	const disconnections: [string, number, string][] = [];
 	const evictions: string[] = [];
+	const modeChanges: [string, GameMode, number | undefined][] = [];
+	const modes = new Map<string, GameMode>();
+	let modeUpdateFails = false;
 	let revokeFailures = 0;
 	const limits: [string, string][] = [];
 	let blocked = "";
@@ -64,6 +68,14 @@ async function setup(t) {
 					async disconnectAll(code, reason) {
 						disconnections.push([name, code, reason]);
 						return 2;
+					},
+					async getGameMode() {
+						return modes.get(name) ?? "creative";
+					},
+					async setGameMode(mode, revision?: number) {
+						modeChanges.push([name, mode, revision]);
+						if (modeUpdateFails) throw new Error("game mode update failed");
+						modes.set(name, mode);
 					},
 					async evict() {
 						evictions.push(name);
@@ -113,6 +125,10 @@ async function setup(t) {
 		revocations,
 		disconnections,
 		evictions,
+		modeChanges,
+		failModeUpdate() {
+			modeUpdateFails = true;
+		},
 		failRevocation(count = Infinity) {
 			revokeFailures = count;
 		},
@@ -160,6 +176,116 @@ test("membership uses verified lowercase email; forwarded identity overwrites cl
 	f.login(owner);
 	assert.equal((await f.request("/api/worlds/lobby/metrics")).status, 200);
 	assert.deepEqual(f.calls, ["lobby", "lobby"]);
+});
+
+test("world creation validates gameMode and exposes it in lists and details", async t => {
+	const f = await setup(t);
+	f.login(owner);
+	const create = (name: string, input = {}) =>
+		f.request("/api/worlds", "POST", { name, turnstileToken: "token", ...input });
+	assert.equal((await create("default")).status, 201);
+	assert.equal((await create("survival", { gameMode: "survival" })).status, 201);
+	for (const gameMode of ["hardcore", null, 1, {}]) {
+		assert.equal((await create("invalid", { gameMode })).status, 400);
+	}
+	assert.equal(await f.db.world("invalid"), null);
+	assert.deepEqual(await (await f.request("/api/worlds")).json(), { worlds: [
+		{ name: "default", role: "operator", owner: true, gameMode: "creative" },
+		{ name: "lobby", role: "operator", owner: true, gameMode: "creative" },
+		{ name: "survival", role: "operator", owner: true, gameMode: "survival" },
+	] });
+	assert.deepEqual(await (await f.request("/api/worlds/survival")).json(), {
+		name: "survival", role: "operator", owner: true, gameMode: "survival",
+	});
+});
+
+test("PATCH requires a world operator, valid mode, same origin, and user rate limit", async t => {
+	const f = await setup(t);
+	const patch = (input = { gameMode: "survival" }, name = "lobby", headers = {}) =>
+		f.request(`/api/worlds/${name}`, "PATCH", input, headers);
+	assert.equal((await patch()).status, 401);
+	for (const user of [player, other]) {
+		f.login(user);
+		assert.equal((await patch()).status, 403);
+	}
+	f.login(owner);
+	assert.equal((await patch(undefined, "missing")).status, 404);
+	for (const input of [{}, { gameMode: null }, { gameMode: "invalid" }]) {
+		assert.equal((await patch(input)).status, 400);
+	}
+	assert.equal((await patch(undefined, "lobby", { Origin: "https://other.example" })).status, 403);
+	f.block("USER_LIMIT");
+	assert.equal((await patch()).status, 429);
+	assert.deepEqual(f.limits.at(-1), ["USER_LIMIT", owner.id]);
+	assert.deepEqual(f.modeChanges, []);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 1);
+
+	f.block("");
+	await f.db.putMember("lobby", player.email.toLowerCase(), "operator");
+	f.login(player);
+	const response = await patch();
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 2);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2]]);
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, {
+		"X-MC-Game-Mode": "creative",
+		"X-MC-Game-Mode-Revision": "9",
+	})).status, 200);
+	assert.equal(f.forwarded[0].headers.get("X-MC-Game-Mode"), "survival");
+	assert.equal(f.forwarded[0].headers.get("X-MC-Game-Mode-Revision"), "2");
+});
+
+test("failed game mode RPC leaves the new D1 value for the next WebSocket", async t => {
+	const f = await setup(t);
+	f.login(owner);
+	f.failModeUpdate();
+	const log = t.mock.method(console, "error", () => {});
+	const response = await f.request("/api/worlds/lobby", "PATCH", { gameMode: "survival" });
+	assert.equal(response.status, 502);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2]]);
+	assert.equal(log.mock.callCount(), 1);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 2);
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, {
+		"X-MC-Game-Mode": "creative",
+		"X-MC-Game-Mode-Revision": "0",
+	})).status, 200);
+	assert.equal(f.forwarded[0].headers.get("X-MC-Game-Mode"), "survival");
+	assert.equal(f.forwarded[0].headers.get("X-MC-Game-Mode-Revision"), "2");
+});
+
+test("open and ops WebSockets strip the untrusted game mode header", async t => {
+	const f = await setup(t);
+	const headers = { "X-MC-Game-Mode": "survival", "X-MC-Game-Mode-Revision": "9" };
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, { ...headers, Authorization: "Bearer operator-secret" })).status, 200);
+	f.deps.env.DEBUG = "1";
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, headers)).status, 200);
+	assert.deepEqual(f.forwarded.map(request => request.headers.get("X-MC-Game-Mode")), [null, null]);
+	assert.deepEqual(f.forwarded.map(request => request.headers.get("X-MC-Game-Mode-Revision")), [null, null]);
+});
+
+test("debug gamemode uses the open debug route guards and updates the DO", async t => {
+	const f = await setup(t);
+	const path = "/api/debug/gamemode?world=lobby&mode=survival";
+	assert.equal((await f.request(path, "POST", undefined, { Authorization: "Bearer operator-secret" })).status, 404);
+	f.deps.env.DEBUG = "1";
+	f.block("IP_LIMIT");
+	assert.equal((await f.request(path)).status, 405);
+	assert.equal((await f.request(path, "POST", undefined, { Origin: "https://other.example" })).status, 403);
+	for (const params of ["world=lobby", "world=lobby&mode=bad", "world=BAD&mode=survival"]) {
+		assert.equal((await f.request(`/api/debug/gamemode?${params}`, "POST")).status, 400);
+	}
+	assert.deepEqual(f.modeChanges, []);
+	const response = await handle(new Request(`https://game.example${path}`, { method: "POST" }), f.deps);
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", undefined]]);
+	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.deepEqual(f.limits, []);
 });
 
 test("Worker replaces spoofed chat names with the verified session, operator or dev display name", async t => {
@@ -359,6 +485,7 @@ test("DEBUG stays open without secrets and bypasses limiters", async t => {
 		name: "unregistered",
 		role: "operator",
 		owner: false,
+		gameMode: "creative",
 	});
 	assert.deepEqual(f.limits, []);
 	assert.equal((await f.request("/api/debug/scenario?seed=-2026&ticks=1")).status, 200);
@@ -373,12 +500,13 @@ test("me, world lists, JSON size, malformed bodies, and response cache headers",
 	assert.equal(me.headers.get("Cache-Control"), "no-store");
 	assert.equal((await me.json()).canCreateWorlds, true);
 	assert.deepEqual(await (await f.request("/api/worlds")).json(), {
-		worlds: [{ name: "lobby", role: "operator", owner: true }],
+		worlds: [{ name: "lobby", role: "operator", owner: true, gameMode: "creative" }],
 	});
 	assert.deepEqual(await (await f.request("/api/worlds/lobby")).json(), {
 		name: "lobby",
 		role: "operator",
 		owner: true,
+		gameMode: "creative",
 	});
 	for (const text of [
 		"{",

@@ -2,7 +2,7 @@ import { SERVICE_RESTART } from "../shared/close-codes.ts";
 import { isOperator, tokenFromRequest } from "./access.ts";
 import { hasAuthSecrets } from "./auth-config.ts";
 import type { AuthSecrets } from "./auth-config.ts";
-import type { WorldDB } from "./db.ts";
+import type { GameMode, WorldDB } from "./db.ts";
 import { clientIP } from "./ratelimit.ts";
 import type { Limiter } from "./ratelimit.ts";
 
@@ -24,6 +24,8 @@ export interface RouterDeps {
 			metrics(): Promise<unknown>;
 			revoke(userId: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
+			getGameMode(): Promise<GameMode>;
+			setGameMode(mode: GameMode, revision?: number): Promise<void>;
 			evict(): Promise<void>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
 		};
@@ -43,6 +45,10 @@ export function json(body: unknown, status = 200): Response {
 
 const error = (message: string, status: number) => json({ error: message }, status);
 const limited = () => error("rate limited", 429);
+
+function isGameMode(value: unknown): value is GameMode {
+	return value === "creative" || value === "survival";
+}
 
 function canCreate(env: RouterDeps["env"], user: User | null): boolean {
 	return (
@@ -116,13 +122,21 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	const ip = clientIP(request);
 	const limit: Limiter = async (name, key) => open || deps.limiter(name, key);
 
-	if (url.pathname === "/api/debug/disconnect" || url.pathname === "/api/debug/evict") {
+	if (url.pathname === "/api/debug/disconnect" || url.pathname === "/api/debug/evict" ||
+		url.pathname === "/api/debug/gamemode") {
 		if (!open) return error("not found", 404);
 		if (request.method !== "POST") return error("method not allowed", 405);
 		const origin = request.headers.get("Origin");
 		if (origin !== null && origin !== url.origin) return error("forbidden origin", 403);
 		const world = url.searchParams.get("world") ?? "";
 		if (!WORLD_NAME.test(world)) return error("invalid world name", 400);
+		if (url.pathname === "/api/debug/gamemode") {
+			const gameMode = url.searchParams.get("mode");
+			if (!isGameMode(gameMode)) return error("invalid game mode", 400);
+			// No D1 row. An omitted revision makes WorldDO use its stored revision plus one.
+			await worlds.getByName(world).setGameMode(gameMode);
+			return json({ gameMode });
+		}
 		if (url.pathname === "/api/debug/evict") {
 			await worlds.getByName(world).evict();
 			return json({ evicted: true });
@@ -160,7 +174,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		}
 	}
 	if (
-		(request.method === "POST" || request.method === "DELETE") &&
+		(request.method === "POST" || request.method === "DELETE" || request.method === "PATCH") &&
 		request.headers.get("Origin") !== url.origin
 	) {
 		return error("forbidden origin", 403);
@@ -257,17 +271,22 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		return error("invalid world name", 400);
 	}
 	if (ws || metrics) {
+		let gameMode: GameMode | undefined;
+		let gameModeRevision: number | undefined;
 		if (!open && !ops) {
 			if (!user) {
 				return error("unauthorized", 401);
 			}
-			if (!(await db.world(name))) {
+			const world = await db.world(name);
+			if (!world) {
 				return error("not found", 404);
 			}
 			const member = user.emailVerified ? await db.member(name, user.email.toLowerCase()) : null;
 			if (!member || (metrics && member.role !== "operator")) {
 				return error("forbidden", 403);
 			}
+			gameMode = world.gameMode;
+			gameModeRevision = world.gameModeRevision;
 		}
 		if (metrics) {
 			return json(await worlds.getByName(name).metrics());
@@ -277,6 +296,12 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		headers.delete("X-MC-Authorized-At");
 		headers.delete("X-MC-Session");
 		headers.delete("X-MC-Name");
+		headers.delete("X-MC-Game-Mode");
+		headers.delete("X-MC-Game-Mode-Revision");
+		if (gameMode !== undefined && gameModeRevision !== undefined) {
+			headers.set("X-MC-Game-Mode", gameMode);
+			headers.set("X-MC-Game-Mode-Revision", String(gameModeRevision));
+		}
 		if (!ops && session) headers.set("X-MC-Session", session.session.id);
 		headers.set("X-MC-Authorized-At", String(authorizedAt));
 		const identity = ops ? `ops:${crypto.randomUUID()}` : user ? user.id : `dev:${crypto.randomUUID()}`;
@@ -287,7 +312,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	}
 
 	if (worldRoute && parts.length === 3 && request.method === "GET" && open) {
-		return json({ name, role: "operator", owner: false });
+		return json({ name, role: "operator", owner: false, gameMode: await worlds.getByName(name).getGameMode() });
 	}
 	if (!user) {
 		return error("unauthorized", 401);
@@ -296,7 +321,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		return error("forbidden", 403);
 	}
 	const email = user.email.toLowerCase();
-	if (request.method === "POST" || request.method === "DELETE") {
+	if (request.method === "POST" || request.method === "DELETE" || request.method === "PATCH") {
 		if (!(await limit("USER_LIMIT", user.id))) {
 			return limited();
 		}
@@ -304,7 +329,10 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 
 	if (parts.length === 2) {
 		if (request.method === "GET") {
-			return json({ worlds: await db.worlds(user.id, email) });
+			const worlds = await db.worlds(user.id, email);
+			return json({
+				worlds: worlds.map(({ name, role, owner, gameMode }) => ({ name, role, owner, gameMode })),
+			});
 		}
 		if (request.method !== "POST") {
 			return error("method not allowed", 405);
@@ -313,11 +341,13 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			return error("forbidden", 403);
 		}
 		const input = await body(request);
+		const gameMode = input?.gameMode === undefined ? "creative" : input.gameMode;
 		if (
 			!input ||
 			typeof input.name !== "string" ||
 			!WORLD_NAME.test(input.name) ||
-			typeof input.turnstileToken !== "string"
+			typeof input.turnstileToken !== "string" ||
+			!isGameMode(gameMode)
 		) {
 			return error("bad request", 400);
 		}
@@ -327,7 +357,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (await db.world(input.name)) {
 			return error("already exists", 409);
 		}
-		const result = await db.createWorld(input.name, user.id, email);
+		const result = await db.createWorld(input.name, user.id, email, gameMode);
 		if (result === "exists") {
 			return error("already exists", 409);
 		}
@@ -350,10 +380,27 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		return error("forbidden", 403);
 	}
 	if (parts.length === 3) {
-		if (request.method !== "GET") {
+		if (request.method === "GET") {
+			return json({ name, role: member.role, owner: world.owner_id === user.id, gameMode: world.gameMode });
+		}
+		if (request.method !== "PATCH") {
 			return error("method not allowed", 405);
 		}
-		return json({ name, role: member.role, owner: world.owner_id === user.id });
+		if (member.role !== "operator") {
+			return error("forbidden", 403);
+		}
+		const gameMode = (await body(request))?.gameMode;
+		if (!isGameMode(gameMode)) {
+			return error("invalid game mode", 400);
+		}
+		const revision = await db.setWorldGameMode(name, gameMode);
+		try {
+			await worlds.getByName(name).setGameMode(gameMode, revision);
+		} catch (cause) {
+			console.error("game mode update failed", name, cause);
+			return error("game mode update failed", 502);
+		}
+		return json({ gameMode });
 	}
 
 	if (member.role !== "operator") {

@@ -1,11 +1,14 @@
 export const MAX_WORLDS_PER_CREATOR = 5;
 export const MAX_MEMBERS_PER_WORLD = 64;
 export type Role = "operator" | "player";
+export type GameMode = "creative" | "survival";
 
 export interface World {
 	name: string;
 	owner_id: string;
 	owner_email: string;
+	gameMode: GameMode;
+	gameModeRevision: number;
 }
 
 export function createDB(db: D1Database) {
@@ -20,12 +23,16 @@ export function createDB(db: D1Database) {
 			}>();
 			return result.results.map(row => row.id);
 		},
-		world: (name: string) =>
-			query(
-				"SELECT w.name, w.owner_id, lower(u.email) AS owner_email FROM world w " +
+		async world(name: string) {
+			const row = await query(
+				"SELECT w.name, w.owner_id, lower(u.email) AS owner_email, w.game_mode AS gameMode, " +
+					"w.game_mode_revision AS gameModeRevision FROM world w " +
 					'JOIN "user" u ON u.id = w.owner_id WHERE w.name = ?',
 				name,
-			).first<World>(),
+			).first<World>();
+			if (!row) return null;
+			return { ...row, gameModeRevision: Number(row.gameModeRevision) };
+		},
 		member: (name: string, email: string) =>
 			query("SELECT role FROM world_member WHERE world = ? AND email = ?", name, email).first<{
 				role: Role;
@@ -33,27 +40,32 @@ export function createDB(db: D1Database) {
 		async worlds(userId: string, email: string) {
 			return (
 				await query(
-					"SELECT w.name, m.role, w.owner_id = ? AS owner FROM world w " +
+					"SELECT w.name, m.role, w.owner_id = ? AS owner, w.game_mode AS gameMode, " +
+						"w.game_mode_revision AS gameModeRevision FROM world w " +
 						"JOIN world_member m ON w.name = m.world WHERE m.email = ? ORDER BY w.name",
 					userId,
 					email,
-				).all<{ name: string; role: Role; owner: number }>()
-			).results.map(row => ({ ...row, owner: !!row.owner }));
+				).all<{ name: string; role: Role; owner: number; gameMode: GameMode; gameModeRevision: number }>()
+			).results.map(row => ({ ...row, owner: !!row.owner, gameModeRevision: Number(row.gameModeRevision) }));
 		},
 		async createWorld(
 			name: string,
 			userId: string,
 			email: string,
+			gameMode: GameMode = "creative",
 		): Promise<"created" | "exists" | "limit"> {
 			// Conditional writes enforce the quota within the D1 batch transaction.
+			// Revision 1 is newer than a WorldDO that has not stored one (0), so the
+			// mode chosen at creation is applied on the first join. Migrated rows stay at 0.
 			try {
 				const results = await db.batch([
 					query(
-						"INSERT INTO world(name, owner_id, created_at) SELECT ?, ?, ? " +
+						"INSERT INTO world(name, owner_id, created_at, game_mode, game_mode_revision) SELECT ?, ?, ?, ?, 1 " +
 							"WHERE (SELECT count(*) FROM world WHERE owner_id = ?) < ?",
 						name,
 						userId,
 						Date.now(),
+						gameMode,
 						userId,
 						MAX_WORLDS_PER_CREATOR,
 					),
@@ -74,6 +86,17 @@ export function createDB(db: D1Database) {
 				}
 				throw error;
 			}
+		},
+		async setWorldGameMode(name: string, gameMode: GameMode): Promise<number> {
+			const row = await query(
+				"UPDATE world SET game_mode = ?, game_mode_revision = game_mode_revision + 1 " +
+					"WHERE name = ? RETURNING game_mode_revision AS gameModeRevision",
+				gameMode,
+				name,
+			).first<{ gameModeRevision: number }>();
+			const revision = Number(row?.gameModeRevision);
+			if (!Number.isSafeInteger(revision)) throw new Error("game mode revision update failed");
+			return revision;
 		},
 		async members(name: string) {
 			return (

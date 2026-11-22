@@ -132,6 +132,19 @@ MC_ACCESS_TOKEN='<運用者トークン>' node tools/tick-probe.mjs --edge https
 
 ローカルの `pnpm dev` は今までどおり認証なしで動きます。`pnpm deploy` は pnpm 本体のコマンドなので、デプロイは `pnpm run deploy` です。手元から公開するときも、先にマイグレーションを適用してください。
 
+### マルチプレイのゲームモード
+
+ワールドの作成時にクリエイティブまたはサバイバルを選べます。既定はクリエイティブです。現在のモードはワールド一覧と詳細に表示されます。ワールドの operator は「メンバー」画面でモードを変更できます。モードが変わると、接続中のプレイヤーは `SERVICE_RESTART`（1012）で一度切断され、自動再接続後に新しいモードが適用されます。ログイン済みプレイヤーの体力・空腹・持ち物は、稼働中の WorldDO が再接続時に引き継ぎます。
+
+- `POST /api/worlds` は任意の `gameMode`（`creative` または `survival`）を受け付けます。省略時は `creative` です。
+- `GET /api/worlds` と `GET /api/worlds/:name` はワールドの `gameMode` を返します。
+- `PATCH /api/worlds/:name` は `{ "gameMode": "survival" }` のように変更を指定します。そのワールドの operator のみ実行でき、作成・削除と同じユーザー単位のレート制限がかかります。成功時は新しい `gameMode` を返します。不正な値は 400、権限不足は 403、存在しないワールドは 404 です。
+- 変更は先に D1 に保存し、同じ更新で `game_mode_revision` を 1 増やします。モードが同じ値でもリビジョンは増えます。WorldDO への即時反映が失敗すると 502 を返します。次にメンバーが接続するとき、Worker は D1 のモードとリビジョンを `X-MC-Game-Mode` と `X-MC-Game-Mode-Revision` で渡します。クライアントが付けた同名のヘッダーは捨てます。
+- WorldDO は `meta.gamemode_revision` を持ち、記録が無いときは 0 です。届いたリビジョンが保存値より大きいときだけ、モードとリビジョンを保存して反映します。モードが変わったときだけ、すでに接続しているプレイヤーを `SERVICE_RESTART` で切断します。参加処理では、今つながろうとしている接続はまだ接続一覧に入っていないので切断されません。同じリビジョン、より古いリビジョン、数値でないリビジョンの参加はモードを変えません。その接続は WorldDO に残っているモードで始まります。変更より前に D1 を読んだ参加が後から届いても、モードは巻き戻りません。
+- `DEBUG=1` の開発環境では `POST /api/debug/gamemode?world=<name>&mode=<creative|survival>` で WorldDO のモードを変更できます。D1 は読み書きしません。リビジョンを省略した RPC は、WorldDO の現在のリビジョンに 1 を足して反映します。開発用の接続と運用者トークンによる接続は WorldDO に保存されたモードを使います。
+
+Worker の公開前に D1 マイグレーション `apps/web/migrations/0002_world_game_mode.sql` を適用してください。`world.game_mode` は既存のワールドも `creative` です。`world.game_mode_revision` は既存のワールドが 0 です。新しく作るワールドは 1 から始まり、Durable Object 側の初期値 0 より新しいので、作成時に選んだモードが最初の参加で反映されます。
+
 ### 自動公開
 
 公開は、CI（`.github/workflows/ci.yml`）とは別のワークフロー（`.github/workflows/deploy.yml`）が行います。CI は変更を検査するだけで、本番には触れません。
