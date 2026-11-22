@@ -160,6 +160,8 @@ struct Client {
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
     visible_arrows: BTreeMap<u32, arrow::ArrowMotion>,
+    /// Connection ids this client has been told about, with the last sent feet and look.
+    visible_players: BTreeMap<u32, ([f64; 3], f32, f32)>,
     inventory: Inventory,
     health: health::Health,
     survival_movement: SurvivalMovement,
@@ -692,6 +694,7 @@ impl Server {
                 visible_entities: BTreeMap::new(),
                 visible_mobs: BTreeMap::new(),
                 visible_arrows: BTreeMap::new(),
+                visible_players: BTreeMap::new(),
                 inventory,
                 health: health::Health::new(vitals, pos[1]),
                 survival_movement: SurvivalMovement::default(),
@@ -795,6 +798,12 @@ impl Server {
         self.abort_dig(id);
         if let Some(client) = self.clients.remove(&id).filter(|client| client.joined) {
             self.broadcast_chat(ChatKind::Leave, client.display_name, String::new(), None);
+            for (&viewer, other) in &mut self.clients {
+                if other.visible_players.remove(&id).is_some() {
+                    self.outbox
+                        .push((viewer, S2C::PlayerRemove { id }.encode()));
+                }
+            }
         }
         self.pending.retain(|(c, _)| *c != id);
         self.outbox.retain(|(c, _)| *c != id);
@@ -821,6 +830,62 @@ impl Server {
                     self.clients.get_mut(&id).unwrap().inventory_dirty = true;
                 }
             }
+        }
+    }
+
+    fn sync_players(&mut self) {
+        let players: BTreeMap<u32, (String, [f64; 3], f32, f32, ChunkPos)> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.joined && !client.health.vitals.dead)
+            .map(|(&id, client)| {
+                (
+                    id,
+                    (
+                        client.display_name.clone(),
+                        client.pos,
+                        client.yaw,
+                        client.pitch,
+                        client.center(),
+                    ),
+                )
+            })
+            .collect();
+        for (&viewer, client) in self.clients.iter_mut().filter(|(_, client)| client.joined) {
+            let visible: BTreeMap<u32, ([f64; 3], f32, f32)> = players
+                .iter()
+                .filter(|(&id, (_, _, _, _, chunk))| id != viewer && client.sent.contains(chunk))
+                .map(|(&id, (_, pos, yaw, pitch, _))| (id, (*pos, *yaw, *pitch)))
+                .collect();
+            for id in client
+                .visible_players
+                .keys()
+                .copied()
+                .filter(|id| !visible.contains_key(id))
+            {
+                self.outbox
+                    .push((viewer, S2C::PlayerRemove { id }.encode()));
+            }
+            for (&id, &(pos, yaw, pitch)) in &visible {
+                let packet = match client.visible_players.get(&id) {
+                    None => S2C::PlayerSpawn {
+                        id,
+                        name: players[&id].0.clone(),
+                        pos,
+                        yaw,
+                        pitch,
+                    },
+                    Some(previous) if *previous != (pos, yaw, pitch) => S2C::PlayerMove {
+                        id,
+                        pos,
+                        yaw,
+                        pitch,
+                    },
+                    Some(_) => continue,
+                };
+                self.outbox.push((viewer, packet.encode()));
+            }
+            client.visible_players = visible;
         }
     }
 
@@ -874,6 +939,7 @@ impl Server {
         self.flush_digs();
         self.sync_entities();
         self.sync_mobs();
+        self.sync_players();
         self.sync_arrows();
         let changed: Vec<_> = self
             .clients
@@ -2440,6 +2506,216 @@ mod tests {
                 (2, chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "20")),
             ]
         );
+    }
+
+    fn player_packets(server: &mut Server) -> Vec<(u32, S2C)> {
+        server
+            .take_outbox()
+            .into_iter()
+            .filter_map(|(id, bytes)| {
+                let packet = S2C::decode(&bytes).unwrap();
+                matches!(
+                    packet,
+                    S2C::PlayerSpawn { .. } | S2C::PlayerMove { .. } | S2C::PlayerRemove { .. }
+                )
+                .then_some((id, packet))
+            })
+            .collect()
+    }
+
+    fn sync_players_preserving_hash(server: &mut Server) -> Vec<(u32, S2C)> {
+        let hash = server.state_hash();
+        server.sync_players();
+        assert_eq!(server.state_hash(), hash);
+        player_packets(server)
+    }
+
+    #[test]
+    fn nearby_players_sync_appearance_without_changing_state_hash() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect(1);
+        s.connect(2);
+        s.connect(3);
+        s.set_display_name(1, "アリス");
+        s.set_display_name(2, "ボブ");
+        let hello = C2S::Hello {
+            protocol: PROTOCOL_VERSION,
+            view_distance: 2,
+        }
+        .encode();
+        s.handle_packet(1, &hello);
+        s.handle_packet(2, &hello);
+        s.tick();
+
+        let pos = s.clients[&1].pos;
+        assert_eq!(s.clients[&2].pos, pos);
+        let spawned = player_packets(&mut s);
+        assert_eq!(
+            spawned,
+            [
+                (
+                    1,
+                    S2C::PlayerSpawn {
+                        id: 2,
+                        name: "ボブ".to_owned(),
+                        pos,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                ),
+                (
+                    2,
+                    S2C::PlayerSpawn {
+                        id: 1,
+                        name: "アリス".to_owned(),
+                        pos,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                ),
+            ]
+        );
+        assert!(s.clients[&3].visible_players.is_empty());
+        assert!(spawned.iter().all(|(viewer, _)| *viewer != 3));
+
+        s.tick();
+        assert!(player_packets(&mut s).is_empty());
+
+        let mut pos2 = pos;
+        pos2[0] += 0.5;
+        s.clients.get_mut(&2).unwrap().pos = pos2;
+        s.clients.get_mut(&2).unwrap().yaw = 30.0;
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(
+                1,
+                S2C::PlayerMove {
+                    id: 2,
+                    pos: pos2,
+                    yaw: 30.0,
+                    pitch: 0.0,
+                }
+            )]
+        );
+        s.clients.get_mut(&2).unwrap().pitch = -12.5;
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(
+                1,
+                S2C::PlayerMove {
+                    id: 2,
+                    pos: pos2,
+                    yaw: 30.0,
+                    pitch: -12.5,
+                }
+            )]
+        );
+        assert!(sync_players_preserving_hash(&mut s).is_empty());
+
+        let far = [pos[0] + 80.0, pos[1], pos[2]];
+        let far_chunk = ((far[0].floor() as i32) >> 4, (far[2].floor() as i32) >> 4);
+        assert!(!s.clients[&1].sent.contains(&far_chunk));
+        s.clients.get_mut(&2).unwrap().pos = far;
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(1, S2C::PlayerRemove { id: 2 })]
+        );
+        assert!(!s.clients[&1].visible_players.contains_key(&2));
+
+        s.clients.get_mut(&2).unwrap().pos = pos2;
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(
+                1,
+                S2C::PlayerSpawn {
+                    id: 2,
+                    name: "ボブ".to_owned(),
+                    pos: pos2,
+                    yaw: 30.0,
+                    pitch: -12.5,
+                }
+            )]
+        );
+
+        s.clients.get_mut(&2).unwrap().health.vitals = protocol::PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: protocol::DeathCause::Fall,
+            ..Default::default()
+        };
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(1, S2C::PlayerRemove { id: 2 })]
+        );
+        s.clients.get_mut(&1).unwrap().yaw = 45.0;
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(
+                2,
+                S2C::PlayerMove {
+                    id: 1,
+                    pos,
+                    yaw: 45.0,
+                    pitch: 0.0,
+                }
+            )]
+        );
+
+        s.respawn(2);
+        let respawned = s.clients[&2].pos;
+        assert!(!s.clients[&2].health.vitals.dead);
+        assert_eq!(
+            sync_players_preserving_hash(&mut s),
+            [(
+                1,
+                S2C::PlayerSpawn {
+                    id: 2,
+                    name: "ボブ".to_owned(),
+                    pos: respawned,
+                    yaw: 30.0,
+                    pitch: -12.5,
+                }
+            )]
+        );
+
+        s.disconnect(2);
+        assert_eq!(player_packets(&mut s), [(1, S2C::PlayerRemove { id: 2 })]);
+        assert!(!s.clients.contains_key(&2));
+        assert!(s.clients[&1].visible_players.is_empty());
+        assert!(sync_players_preserving_hash(&mut s).is_empty());
+
+        s.connect(2);
+        s.set_display_name(2, "ボブ");
+        s.handle_packet(2, &hello);
+        s.tick();
+        let pos = s.clients[&1].pos;
+        let rejoined = s.clients[&2].pos;
+        assert_eq!(
+            player_packets(&mut s),
+            [
+                (
+                    1,
+                    S2C::PlayerSpawn {
+                        id: 2,
+                        name: "ボブ".to_owned(),
+                        pos: rejoined,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    }
+                ),
+                (
+                    2,
+                    S2C::PlayerSpawn {
+                        id: 1,
+                        name: "アリス".to_owned(),
+                        pos,
+                        yaw: 45.0,
+                        pitch: 0.0,
+                    }
+                ),
+            ]
+        );
+        assert!(s.clients[&3].visible_players.is_empty());
     }
 
     #[test]

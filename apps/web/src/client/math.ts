@@ -73,16 +73,16 @@ export function frustumPlanes(m: Float32Array): Float32Array {
 	return planes;
 }
 
-/** True when the axis-aligned box [min, min + size] is at least partly inside all planes. */
-export function boxInFrustum(planes: Float32Array, minX: number, minY: number, minZ: number, size: number): boolean {
+/** True when the axis-aligned box is at least partly inside all planes. */
+export function boxInFrustum(planes: Float32Array, minX: number, minY: number, minZ: number, sizeX: number, sizeY = sizeX, sizeZ = sizeX): boolean {
 	for (let i = 0; i < 24; i += 4) {
 		const a = planes[i];
 		const b = planes[i + 1];
 		const c = planes[i + 2];
 		// Corner furthest along the plane normal.
-		const x = a >= 0 ? minX + size : minX;
-		const y = b >= 0 ? minY + size : minY;
-		const z = c >= 0 ? minZ + size : minZ;
+		const x = a >= 0 ? minX + sizeX : minX;
+		const y = b >= 0 ? minY + sizeY : minY;
+		const z = c >= 0 ? minZ + sizeZ : minZ;
 		if (a * x + b * y + c * z + planes[i + 3] < 0) return false;
 	}
 	return true;

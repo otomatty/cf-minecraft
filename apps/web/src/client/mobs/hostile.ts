@@ -3,7 +3,7 @@ import { paintMobSkin } from "./skin.ts";
 
 // Adult proportions and box UVs follow the v1.26.60.5 Bedrock sample models.
 // Arms and legs share UVs on these 64×32 skins.
-function humanoid(limbWidth: 2 | 4, rightArm: Vec3, leftArm: Vec3, legOffset = 2): MobAsset["bones"] {
+export function humanoid(limbWidth: 2 | 4, rightArm: Vec3, leftArm: Vec3, legOffset = 2): MobAsset["bones"] {
 	const half = limbWidth / 2;
 	return [
 		{ name: "waist", pivot: [0, 12, 0] },
