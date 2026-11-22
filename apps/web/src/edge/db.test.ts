@@ -41,13 +41,24 @@ test("game mode migration defaults legacy worlds and stores mode changes", async
 	t.after(f.close);
 	const db = createDB(f.db);
 	assert.equal((await db.world("legacy"))?.gameMode, "creative");
+	assert.equal((await db.world("legacy"))?.gameModeRevision, 0);
 	assert.equal(await db.createWorld("new", "owner", "owner@example.com", "survival"), "created");
 	assert.equal((await db.world("new"))?.gameMode, "survival");
+	assert.equal((await db.world("new"))?.gameModeRevision, 1);
 	assert.deepEqual(await db.worlds("owner", "owner@example.com"), [
-		{ name: "new", role: "operator", owner: true, gameMode: "survival" },
+		{ name: "new", role: "operator", owner: true, gameMode: "survival", gameModeRevision: 1 },
 	]);
-	await db.setWorldGameMode("new", "creative");
+	assert.equal(await db.setWorldGameMode("legacy", "survival"), 1);
+	assert.equal((await db.world("legacy"))?.gameModeRevision, 1);
+	assert.equal(await db.setWorldGameMode("new", "creative"), 2);
 	assert.equal((await db.world("new"))?.gameMode, "creative");
+	assert.equal((await db.world("new"))?.gameModeRevision, 2);
+	assert.equal(await db.setWorldGameMode("new", "creative"), 3);
+	assert.equal((await db.world("new"))?.gameMode, "creative");
+	assert.equal((await db.world("new"))?.gameModeRevision, 3);
+	assert.deepEqual(await db.worlds("owner", "owner@example.com"), [
+		{ name: "new", role: "operator", owner: true, gameMode: "creative", gameModeRevision: 3 },
+	]);
 	assert.throws(() => f.sqlite.exec("UPDATE world SET game_mode = 'invalid'"), /CHECK constraint failed/);
 });
 

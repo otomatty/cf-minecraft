@@ -199,8 +199,10 @@ export class WorldDO extends DurableObject<Env> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
+		// Apply before this socket is tracked, so a mode change disconnects current players only.
 		const gameMode = request.headers.get("X-MC-Game-Mode");
-		if (gameMode === "creative" || gameMode === "survival") this.applyGameMode(gameMode);
+		const revision = this.parseRevision(request.headers.get("X-MC-Game-Mode-Revision"));
+		if ((gameMode === "creative" || gameMode === "survival") && revision !== null) this.applyGameMode(gameMode, revision);
 		const previous = [...this.users].find(([, identity]) => identity === user)?.[0];
 		if (this.sockets.size - (previous === undefined ? 0 : 1) >= MAX_PLAYERS) {
 			const pair = new WebSocketPair();
@@ -311,14 +313,31 @@ export class WorldDO extends DurableObject<Env> {
 		return this.meta("gamemode") === "survival" ? "survival" : "creative";
 	}
 
-	async setGameMode(mode: GameMode): Promise<void> {
-		this.applyGameMode(mode);
+	private parseRevision(value: string | null): number | null {
+		if (value === null || !/^-?\d+$/.test(value)) return null;
+		const revision = Number(value);
+		return Number.isSafeInteger(revision) ? revision : null;
 	}
 
-	private applyGameMode(mode: GameMode): void {
+	/** Stored revision, or 0 when the meta row is missing or not an integer. */
+	private gameModeRevision(): number {
+		const revision = this.parseRevision(this.meta("gamemode_revision"));
+		return revision !== null && revision >= 0 ? revision : 0;
+	}
+
+	async setGameMode(mode: GameMode, revision?: number): Promise<void> {
+		// Debug calls omit the revision and move one step past whatever is stored.
+		this.applyGameMode(mode, revision ?? this.gameModeRevision() + 1);
+	}
+
+	private applyGameMode(mode: GameMode, revision: number): void {
+		// A late join can carry an older revision than a mode change that already landed.
+		if (!Number.isSafeInteger(revision) || revision <= this.gameModeRevision()) return;
 		const previous = this.meta("gamemode");
-		if (previous === mode) return;
-		this.setMeta("gamemode", mode);
+		this.ctx.storage.transactionSync(() => {
+			this.setMeta("gamemode", mode);
+			this.setMeta("gamemode_revision", String(revision));
+		});
 		if (mode === (previous === "survival" ? "survival" : "creative")) return;
 		this.core?.setGameMode(mode);
 		this.disconnectAll(SERVICE_RESTART, "ゲームモードが変わりました");

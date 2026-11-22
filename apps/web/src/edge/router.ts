@@ -25,7 +25,7 @@ export interface RouterDeps {
 			revoke(userId: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
 			getGameMode(): Promise<GameMode>;
-			setGameMode(mode: GameMode): Promise<void>;
+			setGameMode(mode: GameMode, revision?: number): Promise<void>;
 			evict(): Promise<void>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
 		};
@@ -133,6 +133,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (url.pathname === "/api/debug/gamemode") {
 			const gameMode = url.searchParams.get("mode");
 			if (!isGameMode(gameMode)) return error("invalid game mode", 400);
+			// No D1 row. An omitted revision makes WorldDO use its stored revision plus one.
 			await worlds.getByName(world).setGameMode(gameMode);
 			return json({ gameMode });
 		}
@@ -271,6 +272,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	}
 	if (ws || metrics) {
 		let gameMode: GameMode | undefined;
+		let gameModeRevision: number | undefined;
 		if (!open && !ops) {
 			if (!user) {
 				return error("unauthorized", 401);
@@ -284,6 +286,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 				return error("forbidden", 403);
 			}
 			gameMode = world.gameMode;
+			gameModeRevision = world.gameModeRevision;
 		}
 		if (metrics) {
 			return json(await worlds.getByName(name).metrics());
@@ -294,7 +297,11 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		headers.delete("X-MC-Session");
 		headers.delete("X-MC-Name");
 		headers.delete("X-MC-Game-Mode");
-		if (gameMode !== undefined) headers.set("X-MC-Game-Mode", gameMode);
+		headers.delete("X-MC-Game-Mode-Revision");
+		if (gameMode !== undefined && gameModeRevision !== undefined) {
+			headers.set("X-MC-Game-Mode", gameMode);
+			headers.set("X-MC-Game-Mode-Revision", String(gameModeRevision));
+		}
 		if (!ops && session) headers.set("X-MC-Session", session.session.id);
 		headers.set("X-MC-Authorized-At", String(authorizedAt));
 		const identity = ops ? `ops:${crypto.randomUUID()}` : user ? user.id : `dev:${crypto.randomUUID()}`;
@@ -322,7 +329,10 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 
 	if (parts.length === 2) {
 		if (request.method === "GET") {
-			return json({ worlds: await db.worlds(user.id, email) });
+			const worlds = await db.worlds(user.id, email);
+			return json({
+				worlds: worlds.map(({ name, role, owner, gameMode }) => ({ name, role, owner, gameMode })),
+			});
 		}
 		if (request.method !== "POST") {
 			return error("method not allowed", 405);
@@ -383,9 +393,9 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (!isGameMode(gameMode)) {
 			return error("invalid game mode", 400);
 		}
-		await db.setWorldGameMode(name, gameMode);
+		const revision = await db.setWorldGameMode(name, gameMode);
 		try {
-			await worlds.getByName(name).setGameMode(gameMode);
+			await worlds.getByName(name).setGameMode(gameMode, revision);
 		} catch (cause) {
 			console.error("game mode update failed", name, cause);
 			return error("game mode update failed", 502);
