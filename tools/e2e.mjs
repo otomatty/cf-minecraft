@@ -2879,7 +2879,7 @@ async function creepers() {
 		const ignited = await page.waitForFunction(id => {
 			const { mobs, positionsCorrected } = window.__mc.stats();
 			const mob = mobs.find(mob => mob.id === id);
-			return mob && mob.fuse > 0 && { fuse: mob.fuse, positionsCorrected, at: performance.now() };
+			return mob && mob.fuse > 0 && { fuse: mob.fuse, positionsCorrected };
 		}, { timeout: 5000, polling: 50 }, creeper.id);
 		const ignition = await ignited.jsonValue();
 		await ignited.dispose();
@@ -2887,10 +2887,10 @@ async function creepers() {
 
 		// Capture the rendered game canvas in the browser's frame callback while the smoke is visible.
 		const smoke = await page.waitForFunction(before => {
-			const { camera, explosionsReceived, lastExplosionCenter, explosionParticles } = window.__mc.stats();
-			if (explosionsReceived <= before || !lastExplosionCenter || !explosionParticles) return false;
+			const { camera, explosionsReceived, lastExplosion, explosionParticles } = window.__mc.stats();
+			if (explosionsReceived <= before || !lastExplosion || !explosionParticles) return false;
 			const view = document.getElementById("view");
-			const [dx, dy, dz] = lastExplosionCenter.map((value, axis) => value - [camera.x, camera.y, camera.z][axis]);
+			const [dx, dy, dz] = lastExplosion.center.map((value, axis) => value - [camera.x, camera.y, camera.z][axis]);
 			const yaw = camera.yaw * Math.PI / 180, pitch = camera.pitch * Math.PI / 180;
 			const horizontal = -dx * Math.sin(yaw) + dz * Math.cos(yaw);
 			const depth = horizontal * Math.cos(pitch) - dy * Math.sin(pitch);
@@ -2917,12 +2917,13 @@ async function creepers() {
 				if (shade !== -1) counts[shade]++;
 			}
 			if (counts.filter(count => count > 10).length < 2) return false;
-			return { explosionsReceived, center: lastExplosionCenter, counts, png: snapshot.toDataURL("image/png").split(",")[1] };
+			return { explosionsReceived, explosion: lastExplosion, counts, png: snapshot.toDataURL("image/png").split(",")[1] };
 		}, { timeout: 10000, polling: "raf" }, ground.explosionsReceived);
 		const shot = await smoke.jsonValue();
 		await smoke.dispose();
 		writeFileSync(join(shots, "mobs-creeper-explosion.png"), Buffer.from(shot.png, "base64"));
-		check(shot.explosionsReceived > ground.explosionsReceived, "creepers: received the explosion packet", `center ${shot.center.join(", ")}`);
+		check(shot.explosionsReceived > ground.explosionsReceived, "creepers: received the explosion packet",
+			`packet ${shot.explosion.seq}, center ${shot.explosion.center.join(", ")}`);
 		check(shot.counts.filter(count => count > 10).length >= 2, "creepers: gray smoke is visibly rendered around the blast",
 			`gray pixel counts ${shot.counts.join(", ")}`);
 
@@ -2939,20 +2940,29 @@ async function creepers() {
 		check(result.health < ground.healthBefore, "creepers: the explosion hurt the player", `${result.health} health remaining`);
 		check(result.after === 0, "creepers: the explosion removed the ground block", `block ${result.after}`);
 
-		const pushed = await page.waitForFunction((at, [cx, , cz]) => {
+		const pushed = await page.waitForFunction(({ seq, center: [cx, , cz] }) => {
 			const api = window.__mc;
 			const { lastKnockback: hit, server } = api.stats();
-			if (!hit || hit.receivedAt < at || !server) return false;
+			if (!hit || hit.seq <= seq) return false;
+			if (hit.seq !== seq + 1) {
+				return { error: `explosion packet ${seq} expected knockback packet ${seq + 1}, saw ${hit.seq}` };
+			}
 			const [hx, , hz] = hit.position;
 			const [vx, , vz] = hit.velocity;
 			const dx = hx - cx, dz = hz - cz;
-			if (vx * dx + vz * dz <= 0) return false;
+			if (vx * dx + vz * dz <= 0) {
+				return { error: `knockback packet ${hit.seq} did not push away from the photographed blast` };
+			}
+			if (!server) return false;
 			const [x, , z] = api.playerPosition();
 			const distance = ((x - hx) * dx + (z - hz) * dz) / Math.hypot(dx, dz);
 			return distance >= 0.3 && { distance, corrections: hit.positionsCorrected, serverTick: server.gameTime };
-		}, { timeout: 10000 }, ignition.at, shot.center);
+		}, { timeout: 10000 }, shot.explosion).catch(error => {
+			throw new Error(`creepers: no qualifying movement from knockback packet ${shot.explosion.seq + 1} after the photographed blast`, { cause: error });
+		});
 		const push = await pushed.jsonValue();
 		await pushed.dispose();
+		if (push.error) throw new Error(`creepers: ${push.error}`);
 		check(push.distance >= 0.3, "creepers: moved at least 0.3 blocks horizontally away from the blast", `${push.distance.toFixed(3)} blocks`);
 		// Two stats updates cover at least one second of server-side position validation.
 		await page.waitForFunction(tick => window.__mc.stats().server?.gameTime >= tick + 40,

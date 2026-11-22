@@ -203,9 +203,10 @@ async function main(): Promise<void> {
 	let reconnects = 0;
 	let closePending = false;
 	let positionsCorrected = 0;
-	let lastKnockback: { velocity: [number, number, number]; position: readonly number[]; receivedAt: number; positionsCorrected: number } | null = null;
+	let packetSequence = 0;
+	let lastKnockback: { seq: number; velocity: Vec3; position: readonly number[]; receivedAt: number; positionsCorrected: number } | null = null;
 	let explosionsReceived = 0;
-	let lastExplosionCenter: Vec3 | null = null;
+	let lastExplosion: { seq: number; center: Vec3; receivedAt: number } | null = null;
 	let explosionParticles: ExplosionParticle[] = [];
 	let renderedExplosionParticles = 0;
 	let closed: string | null = null;
@@ -289,6 +290,7 @@ async function main(): Promise<void> {
 			transport.send(core.encodeHello(viewDistance));
 		},
 		onPacket: (data: Uint8Array) => {
+			const seq = ++packetSequence;
 			const id = worldAudio.packet(data, position, mobHurtAt);
 			if (id === S2C.Chat) {
 				const line = core.takeChat();
@@ -302,7 +304,7 @@ async function main(): Promise<void> {
 				const now = performance.now();
 				for (let center = core.takeExplosion(); center; center = core.takeExplosion()) {
 					explosionsReceived++;
-					lastExplosionCenter = center;
+					lastExplosion = { seq, center, receivedAt: now };
 					explosionParticles.push(...spawnExplosionParticles(center, now));
 					explosionParticles.splice(0, Math.max(0, explosionParticles.length - MAX_EXPLOSION_PARTICLES));
 				}
@@ -383,6 +385,7 @@ async function main(): Promise<void> {
 			} else if (id === S2C.PlayerKnockback) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				lastKnockback = {
+					seq,
 					velocity: [view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)],
 					position: core.playerPosition, receivedAt: performance.now(), positionsCorrected,
 				};
@@ -1631,7 +1634,8 @@ async function main(): Promise<void> {
 			positionsCorrected,
 			lastKnockback,
 			explosionsReceived,
-			lastExplosionCenter,
+			lastExplosion,
+			lastExplosionCenter: lastExplosion?.center ?? null,
 			explosionParticles: renderedExplosionParticles,
 			fps,
 			...frame,

@@ -1131,16 +1131,28 @@ fn full_cube_occludes(world: &World, start: [f64; 3], end: [f64; 3]) -> bool {
     let delta = std::array::from_fn(|axis| end[axis] - start[axis]);
     let mut cell = start.map(|value| value.floor() as i32);
     let goal = end.map(|value| value.floor() as i32);
+    // The walk uses the upper cell on each stationary integer plane. Include the
+    // lower neighbor across each such plane: the seam is interior to the solid
+    // only when both face neighbors (or all four cells around an edge) are full.
+    let seam: [i32; 3] = std::array::from_fn(|axis| {
+        i32::from(start != end && delta[axis] == 0.0 && start[axis] == f64::from(cell[axis]))
+    });
     let step: [i32; 3] = std::array::from_fn(|axis| if goal[axis] > cell[axis] { 1 } else { -1 });
     loop {
         let [x, y, z] = cell;
         if !world.chunks.contains_key(&(x >> 4, z >> 4)) {
             return true;
         }
-        if cell_is_full_cube(world, x, y, z)
-            && segment_overlaps_aabb(start, delta, physics::Aabb::block(x, y, z))
-        {
-            return true;
+        let [min_x, min_y, min_z] = std::array::from_fn(|axis| cell[axis] - seam[axis]);
+        let solid = (min_x..=x).all(|bx| {
+            (min_y..=y).all(|by| (min_z..=z).all(|bz| cell_is_full_cube(world, bx, by, bz)))
+        });
+        if solid {
+            let mut bounds = physics::Aabb::block(x, y, z);
+            bounds.min = [min_x, min_y, min_z].map(f64::from);
+            if segment_overlaps_aabb(start, delta, bounds) {
+                return true;
+            }
         }
         if cell == goal {
             return false;
@@ -1734,6 +1746,7 @@ impl Server {
     }
 
     fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
+        let existing_items: Vec<_> = self.entities.keys().copied().collect();
         self.send_explosion(center);
 
         let mut deaths = Vec::new();
@@ -1819,10 +1832,10 @@ impl Server {
             }
         }
 
-        let removed: Vec<_> = self
-            .entities
-            .iter()
-            .filter_map(|(&id, entity)| {
+        let removed: Vec<_> = existing_items
+            .into_iter()
+            .filter_map(|id| {
+                let entity = self.entities.get(&id)?;
                 let bounds = entity.bounds();
                 let distance = spatial_distance(center, bounds_center(bounds));
                 if distance >= EXPLOSION_HURT_RADIUS {
@@ -4757,6 +4770,61 @@ mod tests {
     }
 
     #[test]
+    fn explosion_rays_on_a_face_require_both_adjacent_cubes_to_occlude() {
+        for plane in 0..3 {
+            let axis = (plane + 1) % 3;
+            let mut start = [5.5; 3];
+            start[plane] = 5.0;
+            let mut end = start;
+            end[axis] = 8.5;
+            let mut upper = [5; 3];
+            upper[axis] = 7;
+            let mut lower = upper;
+            lower[plane] -= 1;
+
+            let mut world = arena(16);
+            let [x, y, z] = upper;
+            world.set_block(x, y, z, blocks::STONE);
+            assert!(!full_cube_occludes(&world, start, end), "axis {plane}");
+            let [x, y, z] = lower;
+            world.set_block(x, y, z, blocks::STONE);
+            assert!(full_cube_occludes(&world, start, end), "axis {plane}");
+            let [x, y, z] = upper;
+            world.set_block(x, y, z, blocks::AIR);
+            assert!(!full_cube_occludes(&world, start, end), "axis {plane}");
+        }
+    }
+
+    #[test]
+    fn explosion_rays_along_an_edge_require_all_four_cubes_to_occlude() {
+        let mut world = arena(16);
+        let start = [5.5, 5.0, 5.0];
+        let end = [8.5, 5.0, 5.0];
+        world.set_block(7, 4, 4, blocks::STONE);
+        world.set_block(7, 4, 5, blocks::STONE);
+        world.set_block(7, 5, 4, blocks::STONE);
+        assert!(!full_cube_occludes(&world, start, end));
+        world.set_block(7, 5, 5, blocks::STONE);
+        assert!(full_cube_occludes(&world, start, end));
+    }
+
+    #[test]
+    fn explosion_exposure_counts_a_wall_seam_as_blocked() {
+        let mut world = arena(16);
+        let center = [5.5, 1.85, 5.0];
+        let bounds = Player::new([8.5, 1.0, 5.0]).bounds();
+        assert_eq!(blast_exposure(&world, center, bounds), 1.0);
+        for y in 1..=3 {
+            world.set_block(7, y, 5, blocks::STONE);
+        }
+        assert_eq!(blast_exposure(&world, center, bounds), 18.0 / 27.0);
+        for y in 1..=3 {
+            world.set_block(7, y, 4, blocks::STONE);
+        }
+        assert_eq!(blast_exposure(&world, center, bounds), 0.0);
+    }
+
+    #[test]
     fn explosion_exposure_is_full_in_the_open_partial_behind_one_stone_and_zero_behind_a_wall() {
         let center = [5.5, 1.85, 5.5];
         let pos = [8.5, 1.0, 5.5];
@@ -5003,6 +5071,29 @@ mod tests {
         let landed = launch_until_landing(&mut server, body);
         assert!(origin[0] - landed.position[0] > 0.2, "{landed:?}");
         assert_eq!(landed.position[1], origin[1]);
+    }
+
+    #[test]
+    fn explosion_keeps_loot_from_the_cow_it_kills_but_removes_existing_exposed_drops() {
+        let (mut server, cow_id) = combat(GameMode::Survival);
+        let center = [5.5, 1.85, 5.5];
+        let cow = grounded(MobKind::Cow, [6.5, 1.0, 5.5]);
+        assert_eq!(blast_exposure(&server.world, center, cow.bounds()), 1.0);
+        server.mobs.insert(cow_id, cow);
+        let stick = items::by_name("stick").unwrap();
+        let existing = server.next_entity_id;
+        server.spawn_item(stick, 1, [5.5, 2.0, 6.5], [0.0; 3], 40);
+        assert_eq!(
+            blast_exposure(&server.world, center, server.entities[&existing].bounds()),
+            1.0
+        );
+
+        server.apply_explosion(center);
+
+        assert!(!server.mobs.contains_key(&cow_id));
+        assert!(!server.entities.contains_key(&existing));
+        let beef = items::by_name("raw_beef").unwrap();
+        assert!(server.entities.values().any(|drop| drop.item == beef));
     }
 
     #[test]
