@@ -204,6 +204,7 @@ async function main(): Promise<void> {
 	let closePending = false;
 	let positionsCorrected = 0;
 	let packetSequence = 0;
+	let knockbacksReceived = 0;
 	let lastKnockback: { seq: number; velocity: Vec3; position: readonly number[]; receivedAt: number; positionsCorrected: number } | null = null;
 	let explosionsReceived = 0;
 	let lastExplosion: { seq: number; center: Vec3; receivedAt: number } | null = null;
@@ -384,6 +385,7 @@ async function main(): Promise<void> {
 				syncVitals();
 			} else if (id === S2C.PlayerKnockback) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+				knockbacksReceived++;
 				lastKnockback = {
 					seq,
 					velocity: [view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)],
@@ -1632,6 +1634,7 @@ async function main(): Promise<void> {
 			connection,
 			reconnects,
 			positionsCorrected,
+			knockbacksReceived,
 			lastKnockback,
 			explosionsReceived,
 			lastExplosion,

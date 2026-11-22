@@ -2877,13 +2877,22 @@ async function creepers() {
 		}, creeper.id);
 		check(ground.before !== 0, "creepers: the ground under the creeper starts solid", `block ${ground.before} at ${ground.block.join(", ")}`);
 		const ignited = await page.waitForFunction(id => {
-			const { mobs, positionsCorrected } = window.__mc.stats();
+			const { mobs, positionsCorrected, knockbacksReceived, lastKnockback } = window.__mc.stats();
 			const mob = mobs.find(mob => mob.id === id);
-			return mob && mob.fuse > 0 && { fuse: mob.fuse, positionsCorrected };
+			return mob && mob.fuse > 0 && {
+				fuse: mob.fuse, positionsCorrected, knockbacksReceived, lastKnockback, observedAt: performance.now(),
+			};
 		}, { timeout: 5000, polling: 50 }, creeper.id);
 		const ignition = await ignited.jsonValue();
 		await ignited.dispose();
 		check(ignition.fuse > 0, "creepers: fuse climbs while the player is close", `fuse ${ignition.fuse}`);
+		if (ignition.lastKnockback) {
+			const elapsed = ignition.observedAt - ignition.lastKnockback.receivedAt;
+			if (elapsed <= 1000) {
+				throw new Error(`creepers: knockback packet ${ignition.lastKnockback.seq} arrived ${elapsed.toFixed(1)} ms before ignition was observed. `
+					+ "Residual velocity could affect the blast measurement.");
+			}
+		}
 
 		// Capture the rendered game canvas in the browser's frame callback while the smoke is visible.
 		const smoke = await page.waitForFunction(before => {
@@ -2940,10 +2949,18 @@ async function creepers() {
 		check(result.health < ground.healthBefore, "creepers: the explosion hurt the player", `${result.health} health remaining`);
 		check(result.after === 0, "creepers: the explosion removed the ground block", `block ${result.after}`);
 
-		const pushed = await page.waitForFunction(({ seq, center: [cx, , cz] }) => {
+		const pushed = await page.waitForFunction(({ seq, center: [cx, , cz] }, before) => {
 			const api = window.__mc;
-			const { lastKnockback: hit, server } = api.stats();
-			if (!hit || hit.seq <= seq) return false;
+			const { knockbacksReceived, lastKnockback: hit, server } = api.stats();
+			const received = knockbacksReceived - before;
+			if (received > 1) {
+				return {
+					error: `received ${received} knockbacks since ignition (${before} → ${knockbacksReceived}). `
+						+ `Explosion packet ${seq} expected only knockback packet ${seq + 1}. `
+						+ `Latest knockback was packet ${hit.seq} with velocity [${hit.velocity.join(", ")}].`,
+				};
+			}
+			if (received !== 1 || !hit) return false;
 			if (hit.seq !== seq + 1) {
 				return { error: `explosion packet ${seq} expected knockback packet ${seq + 1}, saw ${hit.seq}` };
 			}
@@ -2957,7 +2974,7 @@ async function creepers() {
 			const [x, , z] = api.playerPosition();
 			const distance = ((x - hx) * dx + (z - hz) * dz) / Math.hypot(dx, dz);
 			return distance >= 0.3 && { distance, corrections: hit.positionsCorrected, serverTick: server.gameTime };
-		}, { timeout: 10000 }, shot.explosion).catch(error => {
+		}, { timeout: 10000 }, shot.explosion, ignition.knockbacksReceived).catch(error => {
 			throw new Error(`creepers: no qualifying movement from knockback packet ${shot.explosion.seq + 1} after the photographed blast`, { cause: error });
 		});
 		const push = await pushed.jsonValue();
