@@ -23,7 +23,7 @@ export interface RouterDeps {
 			fetch(request: Request): Promise<Response>;
 			metrics(): Promise<unknown>;
 			revoke(userId: string): Promise<number>;
-			setRole(userId: string, role: Role): Promise<number>;
+			refreshRole(userId: string, world: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
 			getGameMode(): Promise<GameMode>;
 			setGameMode(mode: GameMode, revision?: number): Promise<void>;
@@ -114,15 +114,14 @@ async function revokeWithRetry(
 	return false;
 }
 
-async function setRoleWithRetry(
+async function refreshRoleWithRetry(
 	worlds: RouterDeps["worlds"],
 	name: string,
 	userId: string,
-	role: Role,
 ): Promise<boolean> {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
-			await worlds.getByName(name).setRole(userId, role);
+			await worlds.getByName(name).refreshRole(userId, name);
 			return true;
 		} catch {
 			// Retry once before reporting that a live permission could still be stale.
@@ -460,7 +459,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		}
 		const role: Role = input.role === "operator" ? "operator" : "player";
 		const userIds = await db.userIds(target);
-		const updated = await Promise.all(userIds.map(id => setRoleWithRetry(worlds, name, id, role)));
+		const updated = await Promise.all(userIds.map(id => refreshRoleWithRetry(worlds, name, id)));
 		if (updated.some(success => !success)) {
 			return error("role update failed", 502);
 		}

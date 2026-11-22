@@ -4,6 +4,7 @@ import { registerHooks } from "node:module";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { testDB } from "./d1-shim.test.ts";
+import { createDB } from "./db.ts";
 import { ClientCore, S2C } from "../client/client-core.ts";
 import { SERVICE_RESTART } from "../shared/close-codes.ts";
 import { ChunkGenCore, Generator, ServerCore } from "../shared/server-core.ts";
@@ -495,7 +496,7 @@ test("a pending recheck preserves a newer role and still revokes invalid session
 	let resolveQuery;
 	const pending = new Promise(resolve => { resolveQuery = resolve; });
 	const prepare = f.authDB.db.prepare.bind(f.authDB.db);
-	t.mock.method(f.authDB.db, "prepare", sql => ({
+	t.mock.method(f.authDB.db, "prepare", prepare).mock.mockImplementationOnce(sql => ({
 		bind(...args) {
 			return {
 				async all() {
@@ -510,8 +511,10 @@ test("a pending recheck preserves a newer role and still revokes invalid session
 	await f.tick();
 	assert.equal(f.queries(), 1);
 	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
-	assert.equal(f.world.setRole("player", "player"), 1);
-	assert.equal(f.world.setRole("other", "player"), 1);
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'other@example.com'").run();
+	assert.equal(await f.world.refreshRole("player", "lobby"), 1);
+	assert.equal(await f.world.refreshRole("other", "lobby"), 1);
+	assert.equal(f.queries(), 3);
 	assert.deepEqual(f.operators, [[2, false], [3, false]]);
 	resolveQuery();
 	await new Promise(resolve => setImmediate(resolve));
@@ -609,15 +612,21 @@ test("X-MC-Role operator is the only value that grants operator", async t => {
 	assert.deepEqual(f.operators, [[1, true], [2, false], [3, false], [4, false]]);
 });
 
-test("setRole updates every current connection for that user and does not disconnect", async t => {
+test("refreshRole updates every current connection for that user and does not disconnect", async t => {
 	const f = fixture(t);
+	f.authDB.user("alice", "Alice@example.com");
+	f.authDB.user("bob", "Bob@example.com");
+	const db = createDB(f.authDB.db);
+	await db.createWorld("lobby", "alice", "alice@example.com");
+	await db.putMember("lobby", "bob@example.com", "player");
 	assert.equal((await f.join("alice")).status, 101);
 	assert.equal((await f.join("bob")).status, 101);
-	assert.equal(f.world.setRole("alice", "operator"), 1);
-	assert.equal(f.world.setRole("bob", "player"), 1);
+	assert.equal(await f.world.refreshRole("alice", "lobby"), 1);
+	assert.equal(await f.world.refreshRole("bob", "lobby"), 1);
 	f.world.users.set(99, "alice");
-	assert.equal(f.world.setRole("alice", "player"), 2);
-	assert.equal(f.world.setRole("nobody", "operator"), 0);
+	await db.putMember("lobby", "alice@example.com", "player");
+	assert.equal(await f.world.refreshRole("alice", "lobby"), 2);
+	assert.equal(await f.world.refreshRole("nobody", "lobby"), 0);
 	assert.equal(f.world.sockets.size, 2);
 	assert.deepEqual(f.closed, []);
 	assert.deepEqual(f.disconnected, []);
@@ -626,12 +635,99 @@ test("setRole updates every current connection for that user and does not discon
 	]);
 });
 
+test("refreshRole discards an older D1 response when refreshes finish out of order", async t => {
+	const f = await accessFixture(t);
+	const prepare = f.authDB.db.prepare.bind(f.authDB.db);
+	const pending = Promise.withResolvers<void>();
+	t.mock.method(f.authDB.db, "prepare", prepare).mock.mockImplementationOnce(sql => ({
+		bind(...args) {
+			return {
+				async all() {
+					const result = await prepare(sql).bind(...args).all();
+					await pending.promise;
+					return result;
+				},
+			};
+		},
+	}));
+	f.operators.length = 0;
+	const older = f.world.refreshRole("player", "lobby");
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
+	await f.tick(1_000);
+	const updated = await f.world.refreshRole("player", "lobby");
+	pending.resolve();
+	assert.equal(updated, 1);
+	assert.equal(await older, 0);
+	assert.deepEqual(f.operators, [[2, false]]);
+	assert.deepEqual({ ...f.sqlite.prepare("SELECT role, at FROM role_changes WHERE user_id = 'player'").get() }, {
+		role: "player", at: 101_000,
+	});
+});
+
+test("refreshRole uses player for a non-member or unverified user", async t => {
+	const f = await accessFixture(t);
+	f.sql.prepare("DELETE FROM world_member WHERE email = 'player@example.com'").run();
+	const db = createDB(f.authDB.db);
+	await db.createWorld("other-world", "player", "player@example.com");
+	f.sql.prepare('UPDATE "user" SET emailVerified = 0 WHERE id = ?').run("other");
+	f.operators.length = 0;
+	assert.equal(await f.world.refreshRole("player", "lobby"), 1);
+	assert.equal(await f.world.refreshRole("other", "lobby"), 1);
+	assert.deepEqual(f.operators, [[2, false], [3, false]]);
+});
+
+test("refreshRole propagates D1 failures without applying any role", async t => {
+	const f = await accessFixture(t);
+	const query = t.mock.method(f.authDB.db, "prepare", () => ({
+		bind() { return this; },
+		async all() { return { success: false, results: [] }; },
+	}));
+	f.operators.length = 0;
+	await assert.rejects(f.world.refreshRole("player", "lobby"), /Role refresh query failed/);
+	query.mock.mockImplementationOnce(() => { throw new Error("D1 unavailable"); });
+	await assert.rejects(f.world.refreshRole("player", "lobby"), /D1 unavailable/);
+	assert.deepEqual(f.operators, []);
+	assert.deepEqual(f.sqlite.prepare("SELECT * FROM role_changes").all(), []);
+});
+
+test("refreshRole rejects a different world before querying D1 once a player has joined", async t => {
+	const f = fixture(t);
+	assert.equal((await f.join("player")).status, 101);
+	const prepare = t.mock.method(f.authDB.db, "prepare");
+	await assert.rejects(f.world.refreshRole("player", "other-world"), /World name mismatch/);
+	assert.equal(prepare.mock.callCount(), 0);
+	assert.deepEqual(f.operators, [[1, false]]);
+	assert.deepEqual(f.sqlite.prepare("SELECT * FROM role_changes").all(), []);
+});
+
+test("refreshRole rejects a different world when the first player joins during the query", async t => {
+	const f = fixture(t);
+	const pending = Promise.withResolvers<{ success: boolean; results: { role: string }[] }>();
+	t.mock.method(f.authDB.db, "prepare", () => ({
+		bind() { return this; },
+		all() { return pending.promise; },
+	}));
+	const refreshing = f.world.refreshRole("player", "other-world");
+	assert.equal((await f.join("player")).status, 101);
+	pending.resolve({ success: true, results: [{ role: "operator" }] });
+	await assert.rejects(refreshing, /World name mismatch/);
+	assert.deepEqual(f.operators, [[1, false]]);
+	assert.deepEqual(f.sqlite.prepare("SELECT * FROM role_changes").all(), []);
+});
+
 test("a role change overrides join authorization through the clock-skew window", async t => {
 	let now = 100_000;
 	t.mock.method(Date, "now", () => now);
 	const f = fixture(t);
-	assert.equal(f.world.setRole("player", "operator"), 0);
-	assert.equal(f.world.setRole("player", "player"), 0);
+	f.authDB.user("owner", "owner@example.com");
+	f.authDB.user("player", "player@example.com");
+	const db = createDB(f.authDB.db);
+	await db.createWorld("lobby", "owner", "owner@example.com");
+	await db.putMember("lobby", "player@example.com", "operator");
+	assert.equal(await f.world.refreshRole("player", "lobby"), 0);
+	assert.equal(f.sqlite.prepare("SELECT role FROM role_changes WHERE user_id = 'player'").get()?.role, "operator");
+	await db.putMember("lobby", "player@example.com", "player");
+	assert.equal(await f.world.refreshRole("player", "lobby"), 0);
 	assert.equal(f.world.core, null);
 	now = 102_001;
 	for (const authorizedAt of ["99999", "102000", "102001"]) {

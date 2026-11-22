@@ -323,20 +323,32 @@ export class WorldDO extends DurableObject<Env> {
 		return revoked;
 	}
 
-	setRole(userId: string, role: "operator" | "player"): number {
-		const now = Date.now();
+	async refreshRole(userId: string, world: string): Promise<number> {
+		if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
+		const version = (this.roleVersions.get(userId) ?? 0) + 1;
+		this.roleVersions.set(userId, version);
+		const at = Date.now();
+		const result = await this.env.DB.prepare(
+			'SELECT m.role FROM "user" u JOIN world_member m ON m.email = lower(u.email) ' +
+				"WHERE m.world = ? AND u.id = ? AND u.emailVerified = 1",
+		).bind(world, userId).all<{ role: string }>();
+		if (!result.success) throw new Error("Role refresh query failed");
+		// The first WebSocket connection may have set the name during the query.
+		if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
+		if (this.roleVersions.get(userId) !== version) return 0;
+
+		const role = result.results[0]?.role === "operator" ? "operator" : "player";
 		this.ctx.storage.sql.exec(
 			"INSERT INTO role_changes (user_id, role, at) VALUES (?, ?, ?) " +
 				"ON CONFLICT(user_id) DO UPDATE SET role = excluded.role, at = excluded.at",
 			userId,
 			role,
-			now,
+			at,
 		);
 		this.ctx.storage.sql.exec(
 			"DELETE FROM role_changes WHERE at < ?",
-			now - AUTHORIZATION_MAX_AGE_MS - CLOCK_SKEW_MS,
+			at - AUTHORIZATION_MAX_AGE_MS - CLOCK_SKEW_MS,
 		);
-		this.roleVersions.set(userId, (this.roleVersions.get(userId) ?? 0) + 1);
 		const operator = role === "operator";
 		let changed = 0;
 		for (const [id, user] of this.users) {

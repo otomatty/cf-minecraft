@@ -30,9 +30,10 @@ export function matchesKey(code: string, assigned: string): boolean {
 export function implicitEnterOpensChat(keys: Record<Action, string>): boolean {
 	return !ACTIONS.some(action => action !== "chat" && (matchesKey(keys[action], "Enter") || matchesKey(keys[action], "NumpadEnter")));
 }
-/** Slash and NumpadDivide can both report key "/". Also check the actual code for other layouts. */
+/** Check the slash bindings and preserve the digit shortcuts for the hotbar. */
 export function implicitSlashOpensChat(keys: Record<Action, string>, code = "Slash"): boolean {
-	return !ACTIONS.some(action => action !== "chat" && ["Slash", "NumpadDivide", code].includes(keys[action]));
+	return !/^Digit[1-9]$/.test(code)
+		&& !ACTIONS.some(action => action !== "chat" && ["Slash", "NumpadDivide", code].includes(keys[action]));
 }
 export function keyOpensChat(keys: Record<Action, string>, code: string, key: string): boolean {
 	return matchesKey(code, keys.chat)

@@ -250,6 +250,15 @@ test("implicit slash opens chat only when slash keys are free", () => {
 	assert.equal(keyOpensChat({ ...keys, chat: "Slash", inventory: "NumpadDivide" }, "Slash", "/"), true);
 });
 
+test("a slash on a hotbar key only opens chat when explicitly assigned to chat", () => {
+	const keys = defaultSettings().keys;
+	for (let digit = 1; digit <= 9; digit++) {
+		assert.equal(implicitSlashOpensChat(keys, `Digit${digit}`), false);
+		assert.equal(keyOpensChat(keys, `Digit${digit}`, "/"), false);
+	}
+	assert.equal(keyOpensChat({ ...keys, chat: "Digit7" }, "Digit7", "/"), true);
+});
+
 test("both sides of each modifier match the assigned key", () => {
 	assert.equal(matchesKey("ShiftRight", defaultSettings().keys.down), true);
 	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {

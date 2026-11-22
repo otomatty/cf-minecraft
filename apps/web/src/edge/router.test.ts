@@ -67,8 +67,15 @@ async function setup(t) {
 						}
 						return 0;
 					},
-					async setRole(userId, role: "operator" | "player") {
-						roleChanges.push([name, userId, role]);
+					async refreshRole(...args: [userId: string, world: string]) {
+						assert.equal(args.length, 2);
+						const [userId, world] = args;
+						assert.equal(world, name);
+						const { email } = f.sqlite.prepare('SELECT lower(email) AS email FROM "user" WHERE id = ?').get(userId);
+						const member = await db.member(world, email);
+						assert.ok(member);
+						const { role } = member;
+						roleChanges.push([world, userId, role]);
 						if (roleUpdateFails > 0) {
 							roleUpdateFails--;
 							throw new Error("role update failed");
@@ -343,23 +350,24 @@ test("Worker strips a spoofed role and assigns operator or player", async t => {
 	assert.equal(f.forwarded[3].headers.get("X-MC-Role"), "operator");
 });
 
-test("member role changes call setRole for every matching user and retry once", async t => {
+test("member role changes pass the requested world to refreshRole for every matching user after writing to D1", async t => {
 	const f = await setup(t);
 	f.user("player-alias", "player@example.com");
 	f.login(owner);
-	const promoted = await f.request("/api/worlds/lobby/members", "POST", {
+	assert.equal(await f.db.createWorld("role-world", owner.id, owner.email.toLowerCase()), "created");
+	const promoted = await f.request("/api/worlds/role-world/members", "POST", {
 		email: "PLAYER@example.com",
 		role: "operator",
 	});
 	assert.equal(promoted.status, 200);
 	assert.deepEqual(await promoted.json(), { email: "player@example.com", role: "operator" });
 	assert.deepEqual([...f.roleChanges].sort(), [
-		["lobby", "player", "operator"],
-		["lobby", "player-alias", "operator"],
+		["role-world", "player", "operator"],
+		["role-world", "player-alias", "operator"],
 	]);
 });
 
-test("member role update retries setRole once and returns 502 when both attempts fail", async t => {
+test("member role update retries refreshRole once and returns 502 when both attempts fail", async t => {
 	const f = await setup(t);
 	f.login(owner);
 	f.failRoleUpdate(1);
