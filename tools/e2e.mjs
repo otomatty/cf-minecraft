@@ -2880,18 +2880,18 @@ async function creepers() {
 			const { mobs, positionsCorrected, knockbacksReceived, lastKnockback } = window.__mc.stats();
 			const mob = mobs.find(mob => mob.id === id);
 			return mob && mob.fuse > 0 && {
-				fuse: mob.fuse, positionsCorrected, knockbacksReceived, lastKnockback, observedAt: performance.now(),
+				fuse: mob.fuse, positionsCorrected, knockbacksReceived, lastKnockback,
 			};
 		}, { timeout: 5000, polling: 50 }, creeper.id);
 		const ignition = await ignited.jsonValue();
 		await ignited.dispose();
 		check(ignition.fuse > 0, "creepers: fuse climbs while the player is close", `fuse ${ignition.fuse}`);
-		if (ignition.lastKnockback) {
-			const elapsed = ignition.observedAt - ignition.lastKnockback.receivedAt;
-			if (elapsed <= 1000) {
-				throw new Error(`creepers: knockback packet ${ignition.lastKnockback.seq} arrived ${elapsed.toFixed(1)} ms before ignition was observed. `
-					+ "Residual velocity could affect the blast measurement.");
-			}
+		const { knockbacksReceived, lastKnockback } = ignition;
+		if (knockbacksReceived !== 0 || lastKnockback !== null) {
+			const latest = lastKnockback
+				? `Latest knockback was packet ${lastKnockback.seq} with velocity [${lastKnockback.velocity.join(", ")}].`
+				: "Latest knockback details were missing.";
+			throw new Error(`creepers: expected zero knockbacks at ignition, saw ${knockbacksReceived}. ${latest}`);
 		}
 
 		// Capture the rendered game canvas in the browser's frame callback while the smoke is visible.
