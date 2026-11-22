@@ -7,7 +7,7 @@ import { RegionCodec } from "../shared/region-codec.ts";
 import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
-import type { GameMode } from "./db.ts";
+import type { GameMode, Role } from "./db.ts";
 import serverWasm from "../wasm/server.wasm";
 
 // One world = one Durable Object: the dedicated server.
@@ -57,6 +57,11 @@ export interface WorldMetrics {
 	timerGap: ReturnType<typeof summarize>;
 }
 
+interface RoleRefreshes {
+	callers: number;
+	latest: PromiseWithResolvers<void> | { changed: number } | { error: unknown };
+}
+
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private generation: GenerationDispatcher | null = null;
@@ -73,6 +78,7 @@ export class WorldDO extends DurableObject<Env> {
 	private readonly positions = new Map<string, [number, number, number]>();
 	private readonly sessions = new Map<number, string>();
 	private readonly roleVersions = new Map<string, number>();
+	private readonly roleRefreshes = new Map<string, RoleRefreshes>();
 	private worldName: string | null = null;
 	private lastAccessCheck = Date.now();
 	private accessCheckRunning = false;
@@ -324,20 +330,61 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	async refreshRole(userId: string, world: string): Promise<number> {
-		if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
-		const version = (this.roleVersions.get(userId) ?? 0) + 1;
-		this.roleVersions.set(userId, version);
+		const checkWorld = () => {
+			if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
+		};
+		checkWorld();
+		this.roleVersions.set(userId, (this.roleVersions.get(userId) ?? 0) + 1);
 		const at = Date.now();
+		const current = Promise.withResolvers<void>();
+		const refreshes = this.roleRefreshes.get(userId) ?? { callers: 0, latest: current };
+		const previous = refreshes.latest;
+		refreshes.latest = current;
+		refreshes.callers++;
+		this.roleRefreshes.set(userId, refreshes);
+		// Wake callers already waiting on the previous query so they can follow this one.
+		if (previous !== current && "promise" in previous) previous.resolve();
+
+		try {
+			try {
+				const role = await this.readRole(userId, world);
+				if (refreshes.latest === current) {
+					// The first WebSocket connection may have set the name during the query.
+					checkWorld();
+					refreshes.latest = { changed: this.applyRole(userId, role, at) };
+				}
+			} catch (error) {
+				if (refreshes.latest === current) refreshes.latest = { error };
+			} finally {
+				current.resolve();
+			}
+
+			for (;;) {
+				const latest = refreshes.latest;
+				if ("error" in latest) throw latest.error;
+				checkWorld();
+				if ("promise" in latest) {
+					await latest.promise;
+					continue;
+				}
+				return latest.changed;
+			}
+		} finally {
+			// Retain the outcome only while overlapping callers still need it.
+			if (--refreshes.callers === 0) this.roleRefreshes.delete(userId);
+		}
+	}
+
+	private async readRole(userId: string, world: string): Promise<Role> {
 		const result = await this.env.DB.prepare(
 			'SELECT m.role FROM "user" u JOIN world_member m ON m.email = lower(u.email) ' +
 				"WHERE m.world = ? AND u.id = ? AND u.emailVerified = 1",
 		).bind(world, userId).all<{ role: string }>();
 		if (!result.success) throw new Error("Role refresh query failed");
-		// The first WebSocket connection may have set the name during the query.
-		if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
-		if (this.roleVersions.get(userId) !== version) return 0;
+		return result.results[0]?.role === "operator" ? "operator" : "player";
+	}
 
-		const role = result.results[0]?.role === "operator" ? "operator" : "player";
+	private applyRole(userId: string, role: Role, at: number): number {
 		this.ctx.storage.sql.exec(
 			"INSERT INTO role_changes (user_id, role, at) VALUES (?, ?, ?) " +
 				"ON CONFLICT(user_id) DO UPDATE SET role = excluded.role, at = excluded.at",

@@ -635,7 +635,7 @@ test("refreshRole updates every current connection for that user and does not di
 	]);
 });
 
-test("refreshRole discards an older D1 response when refreshes finish out of order", async t => {
+test("refreshRole returns the newer applied result when D1 responses finish out of order", async t => {
 	const f = await accessFixture(t);
 	const prepare = f.authDB.db.prepare.bind(f.authDB.db);
 	const pending = Promise.withResolvers<void>();
@@ -657,11 +657,77 @@ test("refreshRole discards an older D1 response when refreshes finish out of ord
 	const updated = await f.world.refreshRole("player", "lobby");
 	pending.resolve();
 	assert.equal(updated, 1);
-	assert.equal(await older, 0);
+	assert.equal(await older, updated);
 	assert.deepEqual(f.operators, [[2, false]]);
 	assert.deepEqual({ ...f.sqlite.prepare("SELECT role, at FROM role_changes WHERE user_id = 'player'").get() }, {
 		role: "player", at: 101_000,
 	});
+	assert.equal(f.world.roleRefreshes.size, 0);
+});
+
+test("refreshRole propagates a newer failed refresh to an older caller", async t => {
+	const f = await accessFixture(t);
+	await f.world.recheckAccess();
+	assert.deepEqual(f.operators.slice(-3), [[1, true], [2, true], [3, true]]);
+	f.operators.length = 0;
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
+	const prepare = f.authDB.db.prepare.bind(f.authDB.db);
+	const pending = Promise.withResolvers<void>();
+	const query = t.mock.method(f.authDB.db, "prepare", prepare);
+	query.mock.mockImplementationOnce(sql => ({
+		bind(...args) {
+			return {
+				async all() {
+					const result = await prepare(sql).bind(...args).all();
+					await pending.promise;
+					return result;
+				},
+			};
+		},
+	}));
+	const older = f.world.refreshRole("player", "lobby");
+	query.mock.mockImplementationOnce(() => ({
+		bind() { return this; },
+		async all() { return { success: false, results: [] }; },
+	}));
+	await assert.rejects(f.world.refreshRole("player", "lobby"), /Role refresh query failed/);
+	pending.resolve();
+	await assert.rejects(older, /Role refresh query failed/);
+	assert.deepEqual(f.operators, []);
+	assert.deepEqual(f.sqlite.prepare("SELECT * FROM role_changes").all(), []);
+	assert.equal(f.world.roleRefreshes.size, 0);
+});
+
+test("refreshRole follows a third refresh while waiting on the second", async t => {
+	const f = await accessFixture(t);
+	const firstQuery = Promise.withResolvers<{ success: boolean; results: { role: string }[] }>();
+	const secondQuery = Promise.withResolvers<{ success: boolean; results: { role: string }[] }>();
+	const query = t.mock.method(f.authDB.db, "prepare");
+	for (const [index, pending] of [firstQuery, secondQuery].entries()) {
+		query.mock.mockImplementationOnce(() => ({
+			bind() { return this; },
+			all() { return pending.promise; },
+		}), index);
+	}
+	f.operators.length = 0;
+	let firstResult: number | undefined;
+	const first = f.world.refreshRole("player", "lobby").then(changed => { firstResult = changed; });
+	const second = f.world.refreshRole("player", "lobby");
+	firstQuery.resolve({ success: true, results: [{ role: "operator" }] });
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(firstResult, undefined);
+	assert.deepEqual(f.operators, []);
+
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
+	const third = await f.world.refreshRole("player", "lobby");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(third, 1);
+	assert.equal(firstResult, third);
+	secondQuery.resolve({ success: true, results: [{ role: "operator" }] });
+	assert.equal(await second, third);
+	await first;
+	assert.deepEqual(f.operators, [[2, false]]);
+	assert.equal(f.world.roleRefreshes.size, 0);
 });
 
 test("refreshRole uses player for a non-member or unverified user", async t => {
