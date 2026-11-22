@@ -8,13 +8,14 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
 
 const MAX_CHAT_TEXT_BYTES: usize = 1024;
 const MAX_CHAT_SENDER_BYTES: usize = 64;
+const MAX_PLAYER_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -163,6 +164,24 @@ impl PlayerVitals {
             cause: self.cause as u8,
             food: self.food,
         }
+    }
+}
+
+fn write_player_pose(w: &mut Writer, pos: [f64; 3], yaw: f32, pitch: f32) {
+    for value in pos {
+        w.f64(value);
+    }
+    w.f32(yaw);
+    w.f32(pitch);
+}
+
+fn finite_angles(r: &mut Reader<'_>) -> Result<(f32, f32), DecodeError> {
+    let yaw = r.f32()?;
+    let pitch = r.f32()?;
+    if yaw.is_finite() && pitch.is_finite() {
+        Ok((yaw, pitch))
+    } else {
+        Err(DecodeError)
     }
 }
 
@@ -385,6 +404,23 @@ pub enum S2C {
         game_time: i64,
         day_time: i64,
     },
+    /// Another joined player. `id` is the connection id, not an entity id.
+    PlayerSpawn {
+        id: u32,
+        name: String,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    },
+    PlayerMove {
+        id: u32,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    },
+    PlayerRemove {
+        id: u32,
+    },
 }
 
 pub mod id {
@@ -416,6 +452,9 @@ pub mod id {
     pub const S2C_PLAYER_KNOCKBACK: u8 = 0x14;
     pub const S2C_MOB_BURNING: u8 = 0x15;
     pub const S2C_EXPLOSION: u8 = 0x16;
+    pub const S2C_PLAYER_SPAWN: u8 = 0x17;
+    pub const S2C_PLAYER_MOVE: u8 = 0x18;
+    pub const S2C_PLAYER_REMOVE: u8 = 0x19;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
     pub const C2S_CREATIVE_SET_SLOT: u8 = 0x05;
@@ -880,6 +919,32 @@ impl S2C {
                 w.i64(*game_time);
                 w.i64(*day_time);
             }
+            S2C::PlayerSpawn {
+                id: player,
+                name,
+                pos,
+                yaw,
+                pitch,
+            } => {
+                w.u8(id::S2C_PLAYER_SPAWN);
+                w.i32(*player as i32);
+                w.string(name);
+                write_player_pose(&mut w, *pos, *yaw, *pitch);
+            }
+            S2C::PlayerMove {
+                id: player,
+                pos,
+                yaw,
+                pitch,
+            } => {
+                w.u8(id::S2C_PLAYER_MOVE);
+                w.i32(*player as i32);
+                write_player_pose(&mut w, *pos, *yaw, *pitch);
+            }
+            S2C::PlayerRemove { id: player } => {
+                w.u8(id::S2C_PLAYER_REMOVE);
+                w.i32(*player as i32);
+            }
         }
         w.finish()
     }
@@ -1165,6 +1230,34 @@ impl S2C {
                 kind: ChatKind::from_wire_id(r.u8()?)?,
                 sender: r.string(MAX_CHAT_SENDER_BYTES)?.to_owned(),
                 text: r.string(MAX_CHAT_TEXT_BYTES)?.to_owned(),
+            },
+            tag @ (id::S2C_PLAYER_SPAWN | id::S2C_PLAYER_MOVE) => {
+                let id = entity_id(&mut r)?;
+                let name = if tag == id::S2C_PLAYER_SPAWN {
+                    Some(r.string(MAX_PLAYER_NAME_BYTES)?.to_owned())
+                } else {
+                    None
+                };
+                let pos = entity_pos(&mut r)?;
+                let (yaw, pitch) = finite_angles(&mut r)?;
+                match name {
+                    Some(name) => S2C::PlayerSpawn {
+                        id,
+                        name,
+                        pos,
+                        yaw,
+                        pitch,
+                    },
+                    None => S2C::PlayerMove {
+                        id,
+                        pos,
+                        yaw,
+                        pitch,
+                    },
+                }
+            }
+            id::S2C_PLAYER_REMOVE => S2C::PlayerRemove {
+                id: entity_id(&mut r)?,
             },
             _ => return Err(DecodeError),
         };
@@ -1466,6 +1559,20 @@ mod tests {
             S2C::Explosion {
                 center: [1.5, 64.25, -2.5],
             },
+            S2C::PlayerSpawn {
+                id: 4,
+                name: "プレイヤー".to_owned(),
+                pos: [0.5, 65.0, 0.5],
+                yaw: 180.0,
+                pitch: -15.0,
+            },
+            S2C::PlayerMove {
+                id: 4,
+                pos: [1.5, 65.0, 0.5],
+                yaw: 90.0,
+                pitch: 0.0,
+            },
+            S2C::PlayerRemove { id: 4 },
         ];
         for p in s2c {
             assert_eq!(S2C::decode(&p.encode()), Ok(p));
@@ -1541,7 +1648,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1771,7 +1878,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -1809,7 +1916,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -1826,6 +1933,95 @@ mod tests {
             for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 let mut bad = bytes.clone();
                 bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+                assert!(S2C::decode(&bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
+        assert_eq!(PROTOCOL_VERSION, 27);
+        let name = "🙂".repeat(16);
+        assert_eq!(name.len(), 64);
+        let pos = [12.25, -60.0, -8.75];
+        let spawn = S2C::PlayerSpawn {
+            id: u32::MAX,
+            name: name.clone(),
+            pos,
+            yaw: 90.0,
+            pitch: -45.5,
+        };
+        let movement = S2C::PlayerMove {
+            id: u32::MAX,
+            pos,
+            yaw: 270.5,
+            pitch: 10.0,
+        };
+        let remove = S2C::PlayerRemove { id: u32::MAX };
+        let spawn_bytes = spawn.encode();
+        let move_bytes = movement.encode();
+        let remove_bytes = remove.encode();
+        assert_eq!(
+            (spawn_bytes[0], spawn_bytes.len(), spawn_bytes[5]),
+            (0x17, 102, 64)
+        );
+        assert_eq!((move_bytes[0], move_bytes.len()), (0x18, 37));
+        assert_eq!(remove_bytes, [0x19, 0xff, 0xff, 0xff, 0xff]);
+        for (packet, bytes) in [
+            (spawn, spawn_bytes.clone()),
+            (movement, move_bytes.clone()),
+            (remove, remove_bytes.clone()),
+        ] {
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+            for end in 0..bytes.len() {
+                assert!(S2C::decode(&bytes[..end]).is_err());
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(S2C::decode(&trailing).is_err());
+        }
+
+        let empty = S2C::PlayerSpawn {
+            id: 1,
+            name: String::new(),
+            pos,
+            yaw: -90.0,
+            pitch: 90.0,
+        };
+        assert_eq!(S2C::decode(&empty.encode()), Ok(empty));
+
+        assert!(S2C::decode(
+            &S2C::PlayerSpawn {
+                id: 1,
+                name: "a".repeat(65),
+                pos,
+                yaw: 0.0,
+                pitch: 0.0,
+            }
+            .encode()
+        )
+        .is_err());
+        assert!(S2C::decode(&[0x17, 0, 0, 0, 1, 1, 0xff]).is_err());
+        for (tag, bytes) in [
+            (0x17u8, spawn_bytes.clone()),
+            (0x18, move_bytes.clone()),
+            (0x19, remove_bytes.clone()),
+        ] {
+            let mut zero = bytes.clone();
+            zero[1..5].fill(0);
+            assert!(S2C::decode(&zero).is_err(), "id 0 tag {tag}");
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for offset in [5, 13, 21] {
+                let mut bad = move_bytes.clone();
+                bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+                assert!(S2C::decode(&bad).is_err());
+            }
+        }
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for offset in [29, 33] {
+                let mut bad = move_bytes.clone();
+                bad[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
                 assert!(S2C::decode(&bad).is_err());
             }
         }

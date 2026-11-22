@@ -5,6 +5,7 @@ import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { creeper, skeleton, zombie } from "./mobs/hostile.ts";
 import type { MobAsset, MobBone, MobCube, Vec3 } from "./mobs/model.ts";
+import { player } from "./mobs/player.ts";
 
 /** Interpolate in double precision before converting camera-relative vertices to f32. */
 export function interpolateEntity(previous: readonly number[], current: readonly number[], elapsedMs: number): [number, number, number] {
@@ -148,15 +149,24 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 	return new Float32Array(out);
 }
 
-export interface RenderMob {
-	kind: MobKind;
+interface RenderPose {
 	position: [number, number, number];
 	yaw: number;
 	moving: boolean;
+	light: RenderItem["light"];
+}
+
+export interface RenderMob extends RenderPose {
+	kind: MobKind;
 	hurt: boolean;
 	fuse?: number;
 	burning?: boolean;
-	light: RenderItem["light"];
+}
+
+export interface RenderPlayer extends RenderPose {
+	id: number;
+	name: string;
+	pitch: number;
 }
 
 /** Cross two cutout sprites through the hitbox, leaving the upper body visible between tongues. */
@@ -237,9 +247,11 @@ export function explosionVertices(particles: readonly ExplosionParticle[], camer
 	return new Float32Array(out);
 }
 
-// Protocol kinds index both this table and the GPU skin array. The 64×32 skins
-// occupy the upper half of a layer at their original texel scale.
+// Protocol mob kinds index the first layers; the player skin follows them.
+// The 64×32 skins occupy the upper half of a layer at their original texel scale.
 export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie, skeleton, creeper] as const satisfies Record<MobKind, MobAsset>;
+const playerSkinLayer = mobAssetsByKind.length;
+export const entitySkins = [...mobAssetsByKind, player].map(asset => asset.texture);
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
@@ -291,7 +303,7 @@ function bonePose(bone: MobBone, stridePitch: number, parent: Transform): Transf
 	};
 }
 
-const mobMeshes = mobAssetsByKind.map((asset, kind) => {
+function compileMob(asset: MobAsset, { height, width }: { height: number; width: number }) {
 	const poses: Transform[] = [];
 	const restPoints: Vec3[] = [];
 	const bones = asset.bones.map(bone => {
@@ -303,22 +315,30 @@ const mobMeshes = mobAssetsByKind.map((asset, kind) => {
 		return { bone, parent, walkPitch: asset.walkPitch[bone.name] ?? 0, cubes };
 	});
 	const floats = bones.reduce((sum, { cubes }) => sum + cubes.length * 36 * 9, 0);
-	const { height, width } = mobHitboxes[kind];
 	const scale = Math.min(1 / 16, height / Math.max(...restPoints.map(point => point[1])));
 	const z = restPoints.map(point => point[2]);
 	const front = Math.min(...z), back = Math.max(...z);
 	// Centre long models over the interaction box so a side view can target the head.
 	const centerZ = Math.max(-front, back) * scale > width / 2 ? (front + back) / 2 : 0;
 	return { bones, floats, scale, centerZ };
-});
+}
 
-export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number,
+const mobMeshes = mobAssetsByKind.map((asset, kind) => compileMob(asset, mobHitboxes[kind]));
+const playerMesh = compileMob(player, { height: 2, width: 0.6 });
+
+function meshFor(entity: RenderMob | RenderPlayer) {
+	return "kind" in entity ? mobMeshes[entity.kind] : playerMesh;
+}
+
+export function mobVertices(mobs: readonly (RenderMob | RenderPlayer)[], camera: readonly number[], timeMs: number,
 	sprites?: { output: RenderSprite[]; textures: ReadonlyMap<string, number> }): Float32Array {
-	const out = new Float32Array(mobs.reduce((sum, mob) => sum + mobMeshes[mob.kind].floats, 0));
+	const out = new Float32Array(mobs.reduce((sum, mob) => sum + meshFor(mob).floats, 0));
 	let i = 0;
 	for (const mob of mobs) {
-		const { bones, scale, centerZ } = mobMeshes[mob.kind];
-		const fuse = Math.min(mob.fuse ?? 0, 30);
+		const { bones, scale, centerZ } = meshFor(mob);
+		const skinLayer = "kind" in mob ? mob.kind : playerSkinLayer;
+		const headPitch = "pitch" in mob ? mob.pitch : 0;
+		const fuse = Math.min(("fuse" in mob ? mob.fuse : undefined) ?? 0, 30);
 		const swell = 1 + 0.2 * fuse / 30;
 		const flash = Math.floor(fuse / 4) % 2 === 1;
 		const drawn = scale * swell;
@@ -326,11 +346,12 @@ export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[
 		const [ox, oy, oz] = mob.position.map((value, axis) => value - camera[axis]);
 		const world: Transform = ([x, y, z]) => [ox + c * x + s * (z - centerZ), oy + y * drawn, oz + s * x - c * (z - centerZ)];
 		const stride = mob.moving ? Math.sin(timeMs / 100) : 0;
-		const shadeSign = mob.hurt ? -1 : 1;
+		const shadeSign = "hurt" in mob && mob.hurt ? -1 : 1;
 		const blockLight = (mob.light[1] + 0.5) / 16, skyLight = (mob.light[0] + 0.5) / 16;
 		const poses: Transform[] = [];
 		for (const { bone, parent, walkPitch, cubes } of bones) {
-			const pose = bonePose(bone, walkPitch * stride, parent < 0 ? world : poses[parent]);
+			const pitch = walkPitch * stride + (bone.name === "head" ? headPitch : 0);
+			const pose = bonePose(bone, pitch, parent < 0 ? world : poses[parent]);
 			poses.push(pose);
 			if (sprites && bone.itemSprite) {
 				const texture = sprites.textures.get(bone.itemSprite.texture);
@@ -355,7 +376,7 @@ export function mobVertices(mobs: readonly RenderMob[], camera: readonly number[
 					out[i++] = vertex.v;
 					const shade = vertex.shade * shadeSign;
 					out[i++] = flash ? shade + Math.sign(shade) * 2 : shade;
-					out[i++] = mob.kind;
+					out[i++] = skinLayer;
 					out[i++] = blockLight;
 					out[i++] = skyLight;
 				}

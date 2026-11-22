@@ -22,6 +22,22 @@
 				height: 100%;
 				display: block;
 			}
+			#player-names {
+				position: fixed;
+				inset: 0;
+				overflow: hidden;
+				pointer-events: none;
+			}
+			#player-names > div {
+				position: absolute;
+				top: 0;
+				left: 0;
+				padding: 2px 5px;
+				background: rgba(0, 0, 0, 0.55);
+				color: #fff;
+				font-size: 13px;
+				white-space: nowrap;
+			}
 			#hud {
 				font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
 				position: fixed;
@@ -270,6 +286,7 @@
 	</head>
 	<body>
 		<canvas id="view"></canvas>
+		<div id="player-names"></div>
 		<pre id="hud">読み込み中…</pre>
 		<div id="crosshair"></div>
 		<progress id="eat-progress" role="progressbar" aria-label="食事" max="1600" value="0" hidden></progress>

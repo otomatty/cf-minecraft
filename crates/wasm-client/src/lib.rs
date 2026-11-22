@@ -40,10 +40,18 @@ struct ArrowEntity {
     velocity: [f64; 3],
     fresh: bool,
 }
+struct RemotePlayer {
+    name: String,
+    pos: [f64; 3],
+    previous: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+}
 struct State {
     entities: BTreeMap<u32, ItemEntity>,
     mobs: BTreeMap<u32, MobEntity>,
     arrows: BTreeMap<u32, ArrowEntity>,
+    players: BTreeMap<u32, RemotePlayer>,
     mob_hurt_sequence: u32,
     chat: Option<(protocol::ChatKind, String, String)>,
     explosions: Vec<[f64; 3]>,
@@ -202,6 +210,7 @@ pub extern "C" fn client_new() {
         entities: BTreeMap::new(),
         mobs: BTreeMap::new(),
         arrows: BTreeMap::new(),
+        players: BTreeMap::new(),
         mob_hurt_sequence: 0,
         chat: None,
         explosions: Vec::new(),
@@ -260,6 +269,7 @@ pub extern "C" fn client_reset_world() {
     st.entities.clear();
     st.mobs.clear();
     st.arrows.clear();
+    st.players.clear();
     st.explosions.clear();
     st.mob_hurt_sequence = 0;
     st.connectivity.clear();
@@ -419,6 +429,40 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         }
         S2C::Explosion { center } => {
             st.explosions.push(center);
+        }
+        S2C::PlayerSpawn {
+            id,
+            name,
+            pos,
+            yaw,
+            pitch,
+        } => {
+            st.players.insert(
+                id,
+                RemotePlayer {
+                    name,
+                    pos,
+                    previous: pos,
+                    yaw,
+                    pitch,
+                },
+            );
+        }
+        S2C::PlayerMove {
+            id,
+            pos,
+            yaw,
+            pitch,
+        } => {
+            if let Some(player) = st.players.get_mut(&id) {
+                player.previous = player.pos;
+                player.pos = pos;
+                player.yaw = yaw;
+                player.pitch = pitch;
+            }
+        }
+        S2C::PlayerRemove { id } => {
+            st.players.remove(&id);
         }
         S2C::DigProgress { .. } => {}
         S2C::EntityRemove { id } => {
@@ -1639,6 +1683,27 @@ pub extern "C" fn client_mobs() -> usize {
     st.out = w.finish();
     st.out.len()
 }
+/// Sorted by connection ID. Each record: ID u32, name length u8, name UTF-8,
+/// yaw f32, pitch f32, current position f64×3, previous position f64×3.
+/// Previous position is the pose from before the latest `PlayerMove`, as with mobs.
+#[no_mangle]
+pub extern "C" fn client_players() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, player) in &st.players {
+        w.i32(id as i32);
+        w.u8(u8::try_from(player.name.len()).expect("player name is at most 64 bytes"));
+        w.raw(player.name.as_bytes());
+        w.f32(player.yaw);
+        w.f32(player.pitch);
+        for v in player.pos.into_iter().chain(player.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+
 /// Sorted packed records: ID u32, current/previous position and velocity as f64 triples, fresh u8.
 #[no_mangle]
 pub extern "C" fn client_arrows() -> usize {
@@ -1940,6 +2005,143 @@ mod tests {
         );
         client_reset_world();
         assert_eq!(client_take_explosion(), 0);
+    }
+
+    #[test]
+    fn remote_players_keep_the_previous_position_and_reset_with_the_world() {
+        let _guard = CLIENT_LOCK.lock().unwrap();
+        client_new();
+        assert_eq!(client_players(), 0);
+        let receive = |packet: S2C, tag| {
+            let bytes = packet.encode();
+            assert_eq!(unsafe { client_packet(bytes.as_ptr(), bytes.len()) }, tag);
+        };
+        receive(
+            S2C::PlayerSpawn {
+                id: 2,
+                name: "ボブ".to_owned(),
+                pos: [1.0, 2.0, 3.0],
+                yaw: 90.0,
+                pitch: -10.0,
+            },
+            0x17,
+        );
+        receive(
+            S2C::PlayerSpawn {
+                id: 1,
+                name: "アリス".to_owned(),
+                pos: [4.0, 5.0, 6.0],
+                yaw: 15.0,
+                pitch: 5.0,
+            },
+            0x17,
+        );
+        receive(
+            S2C::MobSpawn {
+                id: 2,
+                kind: MobKind::Cow,
+                x: 9.0,
+                y: 8.0,
+                z: 7.0,
+                yaw: 1.0,
+            },
+            0x0d,
+        );
+        receive(
+            S2C::PlayerMove {
+                id: 2,
+                pos: [1.5, 2.5, 3.5],
+                yaw: 180.0,
+                pitch: 20.0,
+            },
+            0x18,
+        );
+        receive(
+            S2C::PlayerMove {
+                id: 9,
+                pos: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            0x18,
+        );
+
+        let mut expected = world::io::Writer::new();
+        expected.i32(1);
+        expected.u8("アリス".len() as u8);
+        expected.raw("アリス".as_bytes());
+        expected.f32(15.0);
+        expected.f32(5.0);
+        for v in [4.0, 5.0, 6.0, 4.0, 5.0, 6.0] {
+            expected.f64(v);
+        }
+        expected.i32(2);
+        expected.u8("ボブ".len() as u8);
+        expected.raw("ボブ".as_bytes());
+        expected.f32(180.0);
+        expected.f32(20.0);
+        for v in [1.5, 2.5, 3.5, 1.0, 2.0, 3.0] {
+            expected.f64(v);
+        }
+        let bytes = expected.finish();
+        assert_eq!(client_players(), bytes.len());
+        assert_eq!(state().out, bytes);
+        assert_eq!(client_mobs(), 63);
+
+        receive(S2C::EntityRemove { id: 2 }, 0x0a);
+        assert_eq!(client_mobs(), 0);
+        assert_eq!(client_players(), bytes.len());
+        assert_eq!(state().out, bytes);
+
+        receive(
+            S2C::PlayerSpawn {
+                id: 2,
+                name: "ボブ".to_owned(),
+                pos: [8.0, 7.0, 6.0],
+                yaw: 1.0,
+                pitch: 2.0,
+            },
+            0x17,
+        );
+        let mut respawned = world::io::Writer::new();
+        respawned.i32(1);
+        respawned.u8("アリス".len() as u8);
+        respawned.raw("アリス".as_bytes());
+        respawned.f32(15.0);
+        respawned.f32(5.0);
+        for v in [4.0, 5.0, 6.0, 4.0, 5.0, 6.0] {
+            respawned.f64(v);
+        }
+        respawned.i32(2);
+        respawned.u8("ボブ".len() as u8);
+        respawned.raw("ボブ".as_bytes());
+        respawned.f32(1.0);
+        respawned.f32(2.0);
+        for v in [8.0, 7.0, 6.0, 8.0, 7.0, 6.0] {
+            respawned.f64(v);
+        }
+        let bytes = respawned.finish();
+        assert_eq!(client_players(), bytes.len());
+        assert_eq!(state().out, bytes);
+
+        receive(
+            S2C::MobSpawn {
+                id: 1,
+                kind: MobKind::Pig,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                yaw: 0.0,
+            },
+            0x0d,
+        );
+        receive(S2C::PlayerRemove { id: 1 }, 0x19);
+        receive(S2C::PlayerRemove { id: 2 }, 0x19);
+        assert_eq!(client_players(), 0);
+        assert_eq!(client_mobs(), 63);
+        client_reset_world();
+        assert_eq!(client_players(), 0);
+        assert_eq!(client_mobs(), 0);
     }
 
     #[test]

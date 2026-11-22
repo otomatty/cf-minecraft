@@ -778,6 +778,79 @@ async function chat() {
 	}
 }
 
+async function players() {
+	const query = `server=ws&world=e2e-players-${run}&view=2`;
+	const first = await open(query);
+	let second;
+	try {
+		const { spawn } = await settle(first.page, "players first page", chunksInView(2));
+		second = await open(query);
+		await settle(second.page, "players second page", chunksInView(2));
+		const remote = await first.page.waitForFunction(() => {
+			const { chat, players } = window.__mc.stats();
+			const joined = chat.lines.find(line => line.kind === 1);
+			return players.find(player => player.name && player.name === joined?.sender);
+		}, { polling: 50 });
+		const player = await remote.jsonValue();
+		await remote.dispose();
+		check(true, "players: first page sees second player with their name", player.name);
+		await second.page.waitForFunction(() => window.__mc.stats().players.length > 0, { polling: 50 });
+		const seenBySecond = await second.page.evaluate(() => window.__mc.stats().players);
+		check(seenBySecond.length === 1 && seenBySecond[0].id !== player.id,
+			"players: second page sees only the first player");
+
+		// Creative setCamera holds both players above the build limit, with sky behind the jacket.
+		const destination = [spawn[0], 324, player.position[2] + 4];
+		await second.page.evaluate(([x, y, z]) => window.__mc.setCamera(x, y + 1.62, z, 180, 0), destination);
+		await first.page.bringToFront();
+		await first.page.waitForFunction((id, destination) => window.__mc.stats().players.some(
+			player => player.id === id && player.position.every((coordinate, axis) => Math.abs(coordinate - destination[axis]) < 0.05)),
+		{ polling: 50 }, player.id, destination);
+		check(true, "players: first page receives the second player's four-block horizontal move");
+
+		await resumePointerLock(first.page, "players camera");
+		const beforeAim = await first.page.evaluate(([x, y, z]) => {
+			window.__mc.setCamera(x, y + 1.25, z - 5, 0, 0);
+			return window.__mc.frames;
+		}, destination);
+		await first.page.waitForFunction(frame => window.__mc.frames > frame + 1, {}, beforeAim);
+		const selector = `#player-names > [data-player-id="${player.id}"]`;
+		await first.page.waitForSelector(selector, { visible: true });
+		check(await first.page.$eval(selector, (label, name) => label.textContent.includes(name), player.name),
+			"players: visible name label contains the second player's name");
+		const image = await first.page.screenshot({ path: join(shots, "players.png"), encoding: "base64" });
+		const greenPixels = await first.page.evaluate(async image => {
+			const img = new Image();
+			img.src = `data:image/png;base64,${image}`;
+			await img.decode();
+			const canvas = new OffscreenCanvas(img.width, img.height);
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(img, 0, 0);
+			const pixels = ctx.getImageData(img.width / 2 - 40, img.height / 2 - 32, 80, 64).data;
+			let count = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+				if (g > 12 && g > 1.5 * r && g > 1.25 * b) count++;
+			}
+			return count;
+		}, image);
+		check(greenPixels > 20, "players: green jacket pixels are visible at the aim point", `${greenPixels} pixels`);
+
+		await second.page.close();
+		await first.page.waitForFunction((id, selector) => !window.__mc.stats().players.some(player => player.id === id)
+			&& !document.querySelector(selector), { polling: 50 }, player.id, selector);
+		check(true, "players: closing the second page removes its player and name");
+		check(first.errors.length === 0, "players first page: no page errors", first.errors.join(" | "));
+		check(second.errors.length === 0, "players second page: no page errors", second.errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(first.page, "players", err);
+		throw err;
+	} finally {
+		if (second && !second.page.isClosed()) await second.page.close();
+		await first.page.close();
+	}
+}
+
 async function audio() {
 	const { page, errors } = await open(`server=local&world=e2e-audio-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -3045,6 +3118,7 @@ try {
 	await bow();
 	await audio();
 	await chat();
+	await players();
 	await zombies();
 	await mobBurning();
 	await skeletons();

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, flameVertices, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderSprite } from "./entities.ts";
+import { aimedMob, entitySkins, flameVertices, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { flameFrames } from "./mobs/flame.ts";
+import { player } from "./mobs/player.ts";
+import { projectPlayerName } from "./player-names.ts";
+import { viewProjection } from "./math.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -16,6 +19,70 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 	const a=[29999998,2,-29999998],b=[29999998.25,3,-29999998.5];
 	assert.deepEqual(interpolateEntity(a,b,-5),a); assert.deepEqual(interpolateEntity(a,b,100),b);
 	assert.deepEqual(interpolateEntity(a,b,25),[29999998.125,2.5,-29999998.25]);
+});
+
+test("player skin paints every humanoid face and keeps the existing mob layers", () => {
+	const { texture } = player;
+	assert.equal(texture.width, 64);
+	assert.equal(texture.height, 32);
+	assert.deepEqual(entitySkins, [...mobAssetsByKind.map(asset => asset.texture), texture]);
+	const pixels = texture.pixels();
+	assert.deepEqual(pixels, texture.pixels());
+	for (const bone of player.bones) {
+		for (const { uv: [u, v], size: [w, h, d] } of bone.cubes ?? []) {
+			for (const [x, y, width, height] of [[u + d, v, 2 * w, d], [u, v + d, 2 * (w + d), h]]) {
+				for (let row = y; row < y + height; row++) {
+					for (let col = x; col < x + width; col++) {
+						assert.equal(pixels[(row * texture.width + col) * 4 + 3], 255, `${bone.name} at ${col},${row}`);
+					}
+				}
+			}
+		}
+	}
+	const pixel = (x: number, y: number) => [...pixels.subarray((y * texture.width + x) * 4, (y * texture.width + x) * 4 + 3)];
+	const [red, green, blue] = pixel(22, 23);
+	assert.ok(green > blue && blue > red, "green jacket");
+	assert.notDeepEqual(pixel(9, 12), pixel(11, 12), "visible eyes");
+});
+
+test("player head pitches independently and arms swing opposite their legs", () => {
+	const pose: RenderPlayer = { id: 1, name: "Test", position: [0, 0, 0], yaw: 0, pitch: 0, moving: false, light: [15, 4] };
+	const strideTime = 50 * Math.PI;
+	const rest = mobVertices([pose], [0, 0, 0], strideTime);
+	const pitched = mobVertices([{ ...pose, pitch: 35 }], [0, 0, 0], strideTime);
+	const walking = mobVertices([{ ...pose, moving: true }], [0, 0, 0], strideTime);
+	const cube = 36 * 9;
+	assert.equal(rest.length, 6 * cube);
+	assert.equal(rest[6], mobAssetsByKind.length);
+	assert.equal(rest[7], 4.5 / 16);
+	assert.equal(rest[8], 15.5 / 16);
+	assert.deepEqual(rest.slice(0, cube), pitched.slice(0, cube));
+	assert.deepEqual(rest.slice(2 * cube), pitched.slice(2 * cube));
+	const mean = (vertices: Float32Array, start: number, count: number, axis: number) => {
+		let sum = 0;
+		for (let i = start; i < start + count; i++) sum += vertices[i * 9 + axis];
+		return sum / count;
+	};
+	assert.ok(mean(pitched, 42, 6, 1) < mean(rest, 42, 6, 1), "front of the head tilts down");
+	assert.deepEqual(rest.slice(0, 2 * cube), walking.slice(0, 2 * cube));
+	const swing = (bone: number) => mean(walking, bone * 36, 36, 2) - mean(rest, bone * 36, 36, 2);
+	assert.ok(swing(2) * swing(4) < 0 && swing(3) * swing(5) < 0 && swing(2) * swing(3) < 0);
+});
+
+test("player name projects above the feet and clips to the visible 32-block range", () => {
+	const eye = [29999980, 70, -29999980] as const;
+	const matrix = viewProjection(0, 0, 70, 16 / 9, 0.05, 512);
+	const point = (x: number, y: number, z: number) =>
+		projectPlayerName([eye[0] + x, eye[1] + y, eye[2] + z], eye, matrix);
+	assert.deepEqual(point(0, -2.1, 4)?.map(value => Math.round(value * 1000)), [500, 500]);
+	const upperLeft = point(1, -1.62, 4);
+	assert.ok(upperLeft && upperLeft[0] < 0.5 && upperLeft[1] < 0.5);
+	assert.ok(point(0, -2.1, 32));
+	assert.equal(point(0, -2.1, 33), null);
+	assert.equal(point(0, -2.1, -4), null);
+	assert.equal(point(0, -2.1, 0.01), null);
+	assert.equal(point(10, -2.1, 4), null);
+	assert.equal(point(0, 8, 4), null);
 });
 
 test("cow targeting uses the nearest forward hitbox within reach", () => {

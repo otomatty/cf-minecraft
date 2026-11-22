@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, mobAssetsByKind, MOB_SKIN_SIZE, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderSprite } from "./entities.ts";
+import { entitySkins, explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import type { TintRect } from "./tint-map.ts";
@@ -25,6 +25,7 @@ import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
 import { hasItemTexture } from "./item-textures.ts";
+import type { PlayerNames } from "./player-names.ts";
 
 const MAX_SECTIONS = 16384;
 /** A fence has a post and up to eight rails, with six faces per box. */
@@ -395,6 +396,7 @@ export class Renderer {
 	private readonly itemBuffer: GPUBuffer;
 	private mobBuffer: GPUBuffer | null = null;
 	private readonly mobBind: GPUBindGroup;
+	private readonly playerNames: PlayerNames;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
 	private readonly outline: GPURenderPipeline;
@@ -424,7 +426,8 @@ export class Renderer {
 
 	private readonly heldItemTextures: ReadonlyMap<string, number>;
 
-	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[]) {
+	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[], playerNames: PlayerNames) {
+		this.playerNames = playerNames;
 		this.heldItemTextures = new Map(textureNames.map((name, index) => [name, index]));
 		this.crackTextureBase = textureNames.length;
 		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
@@ -504,10 +507,10 @@ export class Renderer {
 		});
 		// Keep each UV island at native resolution, including the chicken's half-height skin.
 		const mobSkins = device.createTexture({
-			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, mobAssetsByKind.length], format: "rgba8unorm",
+			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, entitySkins.length], format: "rgba8unorm",
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
-		for (const [layer, { texture: skin }] of mobAssetsByKind.entries()) {
+		for (const [layer, skin] of entitySkins.entries()) {
 			device.queue.writeTexture({ texture: mobSkins, origin: [0, 0, layer] }, skin.pixels(),
 				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
 		}
@@ -667,7 +670,7 @@ export class Renderer {
 			{ bytesPerRow: r.width * 4, rowsPerImage: r.height }, [r.width, r.height, 3]);
 	}
 
-	static async create(canvas: HTMLCanvasElement, textureNames: string[]): Promise<Renderer> {
+	static async create(canvas: HTMLCanvasElement, textureNames: string[], playerNames: PlayerNames): Promise<Renderer> {
 		if (!("gpu" in navigator)) {
 			throw new Error("このブラウザはWebGPUに対応していません。最新のChrome、Edge、Safari、Firefoxをお試しください。");
 		}
@@ -676,7 +679,7 @@ export class Renderer {
 		const device = await adapter.requestDevice();
 		const info = adapter.info;
 		const label = [info.vendor, info.architecture, info.description].filter(Boolean).join(" ") || "unknown adapter";
-		return new Renderer(canvas, device, label, textureNames);
+		return new Renderer(canvas, device, label, textureNames, playerNames);
 	}
 
 	/** Replaces (or removes, when empty) the mesh of one section. */
@@ -749,7 +752,7 @@ export class Renderer {
 	 * `viewDistance` is in chunks and drives fog and the far plane.
 	 * `dayTime` includes the presentation-only partial tick from time packet arrivals.
 	 */
-	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], mobs: readonly RenderMob[] = [], particles: readonly ExplosionParticle[] = []): FrameStats {
+	render(camera: Camera, viewDistance: number, target: RayHit | null, fovY = FOV_Y, dayTime = 6000, items: readonly RenderItem[] = [], now = 0, digs: readonly RenderDig[] = [], mobs: readonly RenderMob[] = [], particles: readonly ExplosionParticle[] = [], players: readonly RenderPlayer[] = []): FrameStats {
 		this.resize();
 		const sky = skyState(dayTime, viewDistance);
 		this.device.queue.writeTexture({ texture: this.lightTexture }, lightmap(sky.skylight), { bytesPerRow: 64 }, [16, 16]);
@@ -757,6 +760,7 @@ export class Renderer {
 		// Keep the cloud plane visible through its entire fade, including diagonal views.
 		const far = Math.max((viewDistance + 2) * 16 * 2, cloudFogEnd * 2);
 		const viewProj = viewProjection(camera.yaw, camera.pitch, fovY, this.canvas.width / this.canvas.height, NEAR, far);
+		const planes = frustumPlanes(viewProj);
 		const block = [Math.floor(camera.x), Math.floor(camera.y), Math.floor(camera.z)];
 		const frac = [camera.x - block[0], camera.y - block[1], camera.z - block[2]];
 
@@ -794,7 +798,11 @@ export class Renderer {
 		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
 		const heldItems: RenderSprite[] = [];
 		const eye: Vec3 = [camera.x, camera.y, camera.z];
-		const mobData = mobVertices(visibleMobs, eye, now, { output: heldItems, textures: this.heldItemTextures });
+		const visiblePlayers = players.filter(({ position: [x, y, z] }) => boxInFrustum(planes,
+			x - eye[0] - 0.75, y - eye[1] - 0.1, z - eye[2] - 0.75, 1.5, 2.4, 1.5))
+			.slice(0, MAX_RENDER_ITEMS - visibleMobs.length);
+		this.playerNames.update(players, visiblePlayers, eye, viewProj);
+		const mobData = mobVertices([...visibleMobs, ...visiblePlayers], eye, now, { output: heldItems, textures: this.heldItemTextures });
 		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
 		const flameData = flameVertices(visibleMobs, eye, now, this.firstFlameFrame);
 		const explosionData = explosionVertices(particles, eye, side, up, now, this.firstExplosionFrame);
@@ -834,7 +842,6 @@ export class Renderer {
 		pass.setBindGroup(0, this.skyBind);
 		pass.draw(3);
 
-		const planes = frustumPlanes(viewProj);
 		const visible = filterVisibleSections(this.sections, this.visibleSections).filter(mesh => boxInFrustum(planes,
 			mesh.origin[0] - block[0] - frac[0], mesh.origin[1] - block[1] - frac[1], mesh.origin[2] - block[2] - frac[2], 16));
 		const cameraPoint: Point = [camera.x, camera.y, camera.z];

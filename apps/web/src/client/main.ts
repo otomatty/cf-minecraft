@@ -29,7 +29,8 @@ import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob } from "./entities.ts";
+import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
+import { PlayerNames } from "./player-names.ts";
 import { forward, type Vec3 } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
@@ -158,7 +159,7 @@ async function main(): Promise<void> {
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const textureNames = [...core.textureNames(), "bow"];
 	const arrowTexture = textureNames.indexOf("arrow");
-	const renderer = await Renderer.create(canvas, textureNames);
+	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
@@ -224,6 +225,7 @@ async function main(): Promise<void> {
 	let timeReceivedAt = performance.now();
 	let fps = 0;
 	const entityReceivedAt = new Map<number, number>();
+	const playerReceivedAt = new Map<number, number>();
 	const mobHurtAt = new Map<number, number>();
 	let renderMobs: Array<RenderMob & { id: number }> = [];
 
@@ -281,6 +283,7 @@ async function main(): Promise<void> {
 				meshPool.reset();
 				core.resetWorld();
 				entityReceivedAt.clear();
+				playerReceivedAt.clear();
 				mobHurtAt.clear();
 				renderMobs = [];
 				remoteDigs.clear();
@@ -310,6 +313,12 @@ async function main(): Promise<void> {
 					explosionParticles.push(...spawnExplosionParticles(center, now));
 					explosionParticles.splice(0, Math.max(0, explosionParticles.length - MAX_EXPLOSION_PARTICLES));
 				}
+				return;
+			}
+			if (id === S2C.PlayerSpawn || id === S2C.PlayerMove || id === S2C.PlayerRemove) {
+				const player = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(1);
+				if (id === S2C.PlayerRemove) playerReceivedAt.delete(player);
+				else playerReceivedAt.set(player, performance.now());
 				return;
 			}
 			removeUnloaded();
@@ -1584,6 +1593,17 @@ async function main(): Promise<void> {
 				light: core.entityLight(entity.position),
 			};
 		});
+		const renderPlayers: RenderPlayer[] = core.players.map(({ id, name, previous, position, yaw, pitch }) => {
+			const elapsed = now - (playerReceivedAt.get(id) ?? now);
+			const dx = position[0] - previous[0], dz = position[2] - previous[2];
+			const interpolated = interpolateEntity(previous, position, elapsed);
+			return {
+				id, name, yaw, pitch,
+				position: interpolated,
+				moving: elapsed < 150 && dx * dx + dz * dz >= 0.01 * 0.01,
+				light: core.entityLight(interpolated),
+			};
+		});
 		const renderDigs = [...remoteDigs.values(), ...(dig.active ? [dig.active] : [])].flatMap(d => {
 			const bounds = core.selectionBounds(d.x, d.y, d.z);
 			return bounds ? [{ ...d, bounds }] : [];
@@ -1593,7 +1613,7 @@ async function main(): Promise<void> {
 		if (joined) audio.updateMusic(dayTime);
 		explosionParticles = explosionParticles.filter(particle => now < particle.startedAt + particle.lifetime);
 		const renderParticles = explosionParticles.filter(particle => now >= particle.startedAt);
-		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs, renderParticles);
+		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs, renderParticles, renderPlayers);
 		renderedExplosionParticles = renderParticles.length;
 		window.__mc.frames++;
 
@@ -1625,6 +1645,7 @@ async function main(): Promise<void> {
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,
+			players: core.players.map(({ id, name, position }) => ({ id, name, position })),
 			bowDraw: bowDraw(performance.now()),
 			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),
 			dig: dig.active,
