@@ -7,7 +7,7 @@ import { RegionCodec } from "../shared/region-codec.ts";
 import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
-import type { GameMode } from "./db.ts";
+import type { GameMode, Role } from "./db.ts";
 import serverWasm from "../wasm/server.wasm";
 
 // One world = one Durable Object: the dedicated server.
@@ -57,6 +57,11 @@ export interface WorldMetrics {
 	timerGap: ReturnType<typeof summarize>;
 }
 
+interface RoleRefreshes {
+	callers: number;
+	latest: PromiseWithResolvers<void> | { changed: number } | { error: unknown };
+}
+
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private generation: GenerationDispatcher | null = null;
@@ -72,6 +77,8 @@ export class WorldDO extends DurableObject<Env> {
 	private readonly inventories = new Map<string, Uint8Array>();
 	private readonly positions = new Map<string, [number, number, number]>();
 	private readonly sessions = new Map<number, string>();
+	private readonly roleVersions = new Map<string, number>();
+	private readonly roleRefreshes = new Map<string, RoleRefreshes>();
 	private worldName: string | null = null;
 	private lastAccessCheck = Date.now();
 	private accessCheckRunning = false;
@@ -95,6 +102,11 @@ export class WorldDO extends DurableObject<Env> {
 			) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS revocations (
 				user_id TEXT PRIMARY KEY,
+				at INTEGER NOT NULL
+			) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS role_changes (
+				user_id TEXT PRIMARY KEY,
+				role TEXT NOT NULL,
 				at INTEGER NOT NULL
 			) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS meta (
@@ -199,6 +211,13 @@ export class WorldDO extends DurableObject<Env> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
+		const [roleChange] = this.ctx.storage.sql.exec<{ role: string; at: number }>(
+			"SELECT role, at FROM role_changes WHERE user_id = ?",
+			user,
+		).toArray();
+		const role = roleChange && authorizedAt <= roleChange.at + CLOCK_SKEW_MS
+			? roleChange.role
+			: request.headers.get("X-MC-Role");
 		// Apply before this socket is tracked, so a mode change disconnects current players only.
 		const gameMode = request.headers.get("X-MC-Game-Mode");
 		const revision = this.parseRevision(request.headers.get("X-MC-Game-Mode-Revision"));
@@ -233,6 +252,7 @@ export class WorldDO extends DurableObject<Env> {
 			catch { /* Use the core's default name when decoding fails. */ }
 		}
 		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user), displayName);
+		core.setOperator(id, role === "operator");
 		this.sockets.set(id, server);
 		this.users.set(id, user);
 		const session = request.headers.get("X-MC-Session");
@@ -309,6 +329,83 @@ export class WorldDO extends DurableObject<Env> {
 		return revoked;
 	}
 
+	async refreshRole(userId: string, world: string): Promise<number> {
+		const checkWorld = () => {
+			if (this.worldName !== null && this.worldName !== world) throw new Error("World name mismatch");
+		};
+		checkWorld();
+		this.roleVersions.set(userId, (this.roleVersions.get(userId) ?? 0) + 1);
+		const at = Date.now();
+		const current = Promise.withResolvers<void>();
+		const refreshes = this.roleRefreshes.get(userId) ?? { callers: 0, latest: current };
+		const previous = refreshes.latest;
+		refreshes.latest = current;
+		refreshes.callers++;
+		this.roleRefreshes.set(userId, refreshes);
+		// Wake callers already waiting on the previous query so they can follow this one.
+		if (previous !== current && "promise" in previous) previous.resolve();
+
+		try {
+			try {
+				const role = await this.readRole(userId, world);
+				if (refreshes.latest === current) {
+					// The first WebSocket connection may have set the name during the query.
+					checkWorld();
+					refreshes.latest = { changed: this.applyRole(userId, role, at) };
+				}
+			} catch (error) {
+				if (refreshes.latest === current) refreshes.latest = { error };
+			} finally {
+				current.resolve();
+			}
+
+			for (;;) {
+				const latest = refreshes.latest;
+				if ("error" in latest) throw latest.error;
+				checkWorld();
+				if ("promise" in latest) {
+					await latest.promise;
+					continue;
+				}
+				return latest.changed;
+			}
+		} finally {
+			// Retain the outcome only while overlapping callers still need it.
+			if (--refreshes.callers === 0) this.roleRefreshes.delete(userId);
+		}
+	}
+
+	private async readRole(userId: string, world: string): Promise<Role> {
+		const result = await this.env.DB.prepare(
+			'SELECT m.role FROM "user" u JOIN world_member m ON m.email = lower(u.email) ' +
+				"WHERE m.world = ? AND u.id = ? AND u.emailVerified = 1",
+		).bind(world, userId).all<{ role: string }>();
+		if (!result.success) throw new Error("Role refresh query failed");
+		return result.results[0]?.role === "operator" ? "operator" : "player";
+	}
+
+	private applyRole(userId: string, role: Role, at: number): number {
+		this.ctx.storage.sql.exec(
+			"INSERT INTO role_changes (user_id, role, at) VALUES (?, ?, ?) " +
+				"ON CONFLICT(user_id) DO UPDATE SET role = excluded.role, at = excluded.at",
+			userId,
+			role,
+			at,
+		);
+		this.ctx.storage.sql.exec(
+			"DELETE FROM role_changes WHERE at < ?",
+			at - AUTHORIZATION_MAX_AGE_MS - CLOCK_SKEW_MS,
+		);
+		const operator = role === "operator";
+		let changed = 0;
+		for (const [id, user] of this.users) {
+			if (user !== userId) continue;
+			this.core?.setOperator(id, operator);
+			changed++;
+		}
+		return changed;
+	}
+
 	getGameMode(): GameMode {
 		return this.meta("gamemode") === "survival" ? "survival" : "creative";
 	}
@@ -370,32 +467,39 @@ export class WorldDO extends DurableObject<Env> {
 	}
 
 	private async recheckAccess(): Promise<void> {
-		const connections = [...this.sessions].map(([id, session]) => ({
-			id, session, user: this.users.get(id),
-		}));
+		const connections = [...this.sessions].map(([id, session]) => {
+			const user = this.users.get(id);
+			return { id, session, user, roleVersion: user === undefined ? undefined : this.roleVersions.get(user) };
+		});
 		if (connections.length === 0) return;
 		try {
 			// At most MAX_PLAYERS session IDs: one query, below D1's bind limit.
 			// Better Auth's SQLite adapter stores dates as ISO 8601 strings.
 			// Owners need membership too, exactly as at the router's entrance.
 			const result = await this.env.DB.prepare(
-				'SELECT s.id, s.userId, s.expiresAt FROM session s JOIN "user" u ON u.id = s.userId ' +
+				'SELECT s.id, s.userId, s.expiresAt, m.role FROM session s JOIN "user" u ON u.id = s.userId ' +
 					"JOIN world_member m ON m.email = lower(u.email) " +
 					"JOIN world w ON w.name = m.world " +
 					`WHERE m.world = ? AND u.emailVerified = 1 AND s.id IN (${connections.map(() => "?").join(",")})`,
 			).bind(this.worldName, ...connections.map(connection => connection.session))
-				.all<{ id: string; userId: string; expiresAt: string }>();
+				.all<{ id: string; userId: string; expiresAt: string; role: string }>();
 			if (!result.success) throw new Error("Access recheck query failed");
 			const now = Date.now();
 			for (const connection of connections) {
 				// An old query must never revoke a replacement connection.
 				if (this.sessions.get(connection.id) !== connection.session) continue;
-				if (result.results.some(row =>
+				const row = result.results.find(row =>
 					row.id === connection.session && row.userId === connection.user &&
 					new Date(row.expiresAt).getTime() > now
-				)) continue;
-				this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
-				this.releaseClient(connection.id);
+				);
+				if (!row) {
+					this.sockets.get(connection.id)?.close(ACCESS_REVOKED, "access revoked");
+					this.releaseClient(connection.id);
+					continue;
+				}
+				if (this.roleVersions.get(row.userId) === connection.roleVersion) {
+					this.core?.setOperator(connection.id, row.role === "operator");
+				}
 			}
 		} catch (error) {
 			console.error("access recheck failed", this.worldName, error);

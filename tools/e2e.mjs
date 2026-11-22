@@ -778,6 +778,106 @@ async function chat() {
 	}
 }
 
+async function chatCommands() {
+	const openCommand = async (page, label) => {
+		await resumePointerLock(page, label);
+		await page.keyboard.press("Slash");
+		await page.waitForFunction(() => window.__mc.stats().chat.open
+			&& document.activeElement?.id === "chat-input" && !document.pointerLockElement);
+	};
+	const sendCommand = async (page, command) => {
+		await openCommand(page, `chat commands: ${command}`);
+		await page.keyboard.type(command.slice(1));
+		await page.keyboard.press("Enter");
+	};
+	const local = await open(`server=local&world=e2e-chat-commands-local-${run}&gen=flat&mode=creative&view=2`);
+	try {
+		const { page, errors } = local;
+		await settle(page, "chat commands local", chunksInView(2));
+		await openCommand(page, "chat commands local start");
+		check(await page.$eval("#chat-input", input => input.value === "/" && input.selectionStart === 1
+			&& input.selectionEnd === 1), "chat commands local: Slash opens the input with one slash and the caret at the end");
+		await page.keyboard.type("help");
+		await page.keyboard.press("Enter");
+		await page.waitForFunction(() => window.__mc.stats().chat.lines.some(
+			({ kind, sender, text }) => kind === 3 && sender === "" && text.startsWith("/time set ")));
+		check(true, "chat commands local: /help includes the operator time command as a system line");
+
+		await sendCommand(page, "/time set night");
+		await page.waitForFunction(() => {
+			const time = window.__mc.stats().dayTime % 24000;
+			return time >= 13000 && time <= 13100;
+		}, { polling: 50 });
+		check(true, "chat commands local: /time set night moves the clock to night");
+		await sendCommand(page, "/seed");
+		await page.waitForFunction(() => window.__mc.stats().chat.lines.some(
+			({ kind, text }) => kind === 3 && text.startsWith("シード:")));
+		check(true, "chat commands local: /seed reports the seed as a system line");
+		await sendCommand(page, "/nope");
+		await page.waitForFunction(() => window.__mc.stats().chat.lines.some(
+			({ kind, text }) => kind === 3 && text.includes("不明なコマンド")));
+		check(!await page.evaluate(() => window.__mc.stats().chat.lines.some(({ kind }) => kind === 0)),
+			"chat commands local: /nope reports an unknown command and none of the commands appear as player chat");
+
+		await openCommand(page, "chat commands local history");
+		await page.keyboard.type("draft");
+		await page.keyboard.press("ArrowUp");
+		check(await page.$eval("#chat-input", input => input.value === "/nope"),
+			"chat commands local: ArrowUp recalls the last command");
+		await page.keyboard.press("ArrowDown");
+		check(await page.$eval("#chat-input", input => input.value === "/draft"),
+			"chat commands local: ArrowDown restores the draft");
+		check(errors.length === 0, "chat commands local: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(local.page, "chat-commands-local", err);
+		throw err;
+	} finally { await local.page.close(); }
+
+	const query = `server=ws&world=e2e-chat-commands-ws-${run}&view=2`;
+	const first = await open(query);
+	let second;
+	try {
+		await settle(first.page, "chat commands first multiplayer page", chunksInView(2));
+		second = await open(query);
+		await settle(second.page, "chat commands second multiplayer page", chunksInView(2));
+		await second.page.waitForFunction(() => window.__mc.stats().players[0]?.name, { polling: 50 });
+		const firstName = await second.page.evaluate(() => window.__mc.stats().players[0].name);
+		await first.page.waitForFunction(() => window.__mc.stats().players[0]?.name, { polling: 50 });
+		const secondName = await first.page.evaluate(() => window.__mc.stats().players[0].name);
+
+		await sendCommand(second.page, `/msg ${firstName} secret`);
+		await first.page.waitForFunction(name => window.__mc.stats().chat.lines.some(
+			({ kind, sender, text }) => kind === 5 && sender === name && text === "secret"), { polling: 50 }, secondName);
+		await second.page.waitForFunction(name => window.__mc.stats().chat.lines.some(
+			({ kind, sender, text }) => kind === 6 && sender === name && text === "secret"), { polling: 50 }, firstName);
+		check(true, "chat commands multiplayer: /msg reaches both pages with their respective whisper kinds and names");
+
+		await first.page.bringToFront();
+		await sendCommand(first.page, "/me waves");
+		for (const { page } of [first, second]) {
+			await page.waitForFunction(name => window.__mc.stats().chat.lines.some(
+				({ kind, sender, text }) => kind === 4 && sender === name && text === "waves"), { polling: 50 }, firstName);
+		}
+		check(true, "chat commands multiplayer: /me reaches both pages as an emote");
+		await sendCommand(first.page, "/list");
+		await first.page.waitForFunction(() => window.__mc.stats().chat.lines.some(
+			({ kind, text }) => kind === 3 && text.includes("参加中 2 人")));
+		check(true, "chat commands multiplayer: /list reports two players as a system line");
+		for (const [label, { page, errors }] of [["first", first], ["second", second]]) {
+			check(!await page.evaluate(() => window.__mc.stats().chat.lines.some(
+				({ kind, text }) => kind === 0 && text.includes("secret"))),
+			`chat commands multiplayer ${label} page: the whisper does not appear as player chat`);
+			check(errors.length === 0, `chat commands multiplayer ${label} page: no page errors`, errors.join(" | "));
+		}
+	} catch (err) {
+		await diagnoseFailure(first.page, "chat-commands-multiplayer", err);
+		throw err;
+	} finally {
+		if (second && !second.page.isClosed()) await second.page.close();
+		await first.page.close();
+	}
+}
+
 async function players() {
 	const query = `server=ws&world=e2e-players-${run}&view=2`;
 	const first = await open(query);
@@ -3118,6 +3218,7 @@ try {
 	await bow();
 	await audio();
 	await chat();
+	await chatCommands();
 	await players();
 	await zombies();
 	await mobBurning();

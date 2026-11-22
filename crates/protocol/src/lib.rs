@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -23,6 +23,14 @@ pub enum ChatKind {
     Player = 0,
     Join = 1,
     Leave = 2,
+    /// Server notice. `sender` is empty and `text` is shown as-is.
+    System = 3,
+    /// `/me`. `sender` is the speaker.
+    Emote = 4,
+    /// Whisper delivered to the recipient. `sender` is the speaker.
+    WhisperFrom = 5,
+    /// Whisper delivered to the speaker. `sender` is the recipient.
+    WhisperTo = 6,
 }
 
 impl ChatKind {
@@ -31,6 +39,10 @@ impl ChatKind {
             0 => Ok(Self::Player),
             1 => Ok(Self::Join),
             2 => Ok(Self::Leave),
+            3 => Ok(Self::System),
+            4 => Ok(Self::Emote),
+            5 => Ok(Self::WhisperFrom),
+            6 => Ok(Self::WhisperTo),
             _ => Err(DecodeError),
         }
     }
@@ -1303,7 +1315,15 @@ mod tests {
         bytes.push(0);
         assert_eq!(C2S::decode(&bytes), Err(DecodeError));
 
-        for kind in [ChatKind::Player, ChatKind::Join, ChatKind::Leave] {
+        for kind in [
+            ChatKind::Player,
+            ChatKind::Join,
+            ChatKind::Leave,
+            ChatKind::System,
+            ChatKind::Emote,
+            ChatKind::WhisperFrom,
+            ChatKind::WhisperTo,
+        ] {
             let packet = S2C::Chat {
                 kind,
                 sender: "🙂".repeat(16),
@@ -1341,7 +1361,7 @@ mod tests {
             Err(DecodeError)
         );
         for bytes in [
-            &[0x13, 3, 0, 0][..],
+            &[0x13, 7, 0, 0][..],
             &[0x13, 0, 1, 0xff, 0],
             &[0x13, 0, 0, 1, 0xff],
         ] {
@@ -1363,6 +1383,42 @@ mod tests {
                 Err(DecodeError)
             );
         }
+    }
+
+    #[test]
+    fn system_emote_and_whisper_chat_round_trip_and_unknown_kinds_fail() {
+        for (kind, sender, text) in [
+            (ChatKind::System, "", "サーバーからの通知"),
+            (ChatKind::Emote, "あなた", "手を振る"),
+            (ChatKind::WhisperFrom, "アリス", "ひそひそ"),
+            (ChatKind::WhisperTo, "ボブ", "ひそひそ"),
+            (ChatKind::System, "", ""),
+        ] {
+            let packet = S2C::Chat {
+                kind,
+                sender: sender.to_owned(),
+                text: text.to_owned(),
+            };
+            let bytes = packet.encode();
+            assert_eq!(bytes[1], kind as u8);
+            assert_eq!(S2C::decode(&bytes), Ok(packet.clone()));
+            for end in 0..bytes.len() {
+                assert_eq!(S2C::decode(&bytes[..end]), Err(DecodeError));
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert_eq!(S2C::decode(&trailing), Err(DecodeError));
+        }
+        assert_eq!(
+            S2C::decode(&[0x13, ChatKind::System as u8, 0, 0]),
+            Ok(S2C::Chat {
+                kind: ChatKind::System,
+                sender: String::new(),
+                text: String::new(),
+            })
+        );
+        assert_eq!(S2C::decode(&[0x13, 7, 0, 0]), Err(DecodeError));
+        assert_eq!(S2C::decode(&[0x13, 255, 0, 0]), Err(DecodeError));
     }
 
     #[test]
@@ -1648,7 +1704,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1878,7 +1934,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -1916,7 +1972,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -1940,7 +1996,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];

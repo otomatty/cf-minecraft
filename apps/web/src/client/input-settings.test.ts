@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
+import { ACTIONS, keyLabel, defaultSettings, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, loadSettings, matchesKey, mouseDegrees, saveSettings, SETTINGS_KEY, sprintKey, LOCKABLE_CODES, validKey } from "./input-settings.ts";
 
 const memory = () => {
 	const values = new Map<string, string>();
@@ -232,6 +232,33 @@ test("implicit Enter opens chat only when Enter and NumpadEnter are free", () =>
 	assert.equal(keyOpensChat(chatEnterInventoryNumpad, "NumpadEnter", "Enter"), false);
 	assert.equal(implicitEnterOpensChat(chatEnterInventoryNumpad), false);
 });
+test("implicit slash opens chat only when slash keys are free", () => {
+	const keys = defaultSettings().keys;
+	assert.equal(keyLabel("Slash"), "/");
+	assert.equal(implicitSlashOpensChat(keys), true);
+	assert.equal(keyOpensChat(keys, "Slash", "/"), true);
+	assert.equal(keyOpensChat(keys, "NumpadDivide", "/"), true);
+	assert.equal(keyOpensChat(keys, "Slash", "?"), false);
+	for (const inventory of ["Slash", "NumpadDivide"]) {
+		const assigned = { ...keys, inventory };
+		assert.equal(implicitSlashOpensChat(assigned), false);
+		assert.equal(keyOpensChat(assigned, "Slash", "/"), false);
+		assert.equal(keyOpensChat(assigned, "NumpadDivide", "/"), false);
+		assert.equal(keyOpensChat(assigned, "KeyT", "t"), true);
+	}
+	assert.equal(keyOpensChat({ ...keys, inventory: "Digit7" }, "Digit7", "/"), false);
+	assert.equal(keyOpensChat({ ...keys, chat: "Slash", inventory: "NumpadDivide" }, "Slash", "/"), true);
+});
+
+test("a slash on a hotbar key only opens chat when explicitly assigned to chat", () => {
+	const keys = defaultSettings().keys;
+	for (let digit = 1; digit <= 9; digit++) {
+		assert.equal(implicitSlashOpensChat(keys, `Digit${digit}`), false);
+		assert.equal(keyOpensChat(keys, `Digit${digit}`, "/"), false);
+	}
+	assert.equal(keyOpensChat({ ...keys, chat: "Digit7" }, "Digit7", "/"), true);
+});
+
 test("both sides of each modifier match the assigned key", () => {
 	assert.equal(matchesKey("ShiftRight", defaultSettings().keys.down), true);
 	for (const modifier of ["Shift", "Control", "Alt", "Meta"]) {

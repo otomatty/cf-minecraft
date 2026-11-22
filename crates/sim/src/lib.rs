@@ -151,9 +151,25 @@ impl SurvivalMovement {
 const CHAT_CAPACITY: i64 = 5;
 const CHAT_REFILL_TICKS: i64 = 20;
 const DEFAULT_DISPLAY_NAME: &str = "プレイヤー";
+const DAY_TICKS: i64 = 24_000;
+const MAX_CHAT_TEXT_BYTES: usize = 1024;
+const TIME_USAGE: &str =
+    "使い方: /time set <day|noon|night|midnight|0〜23999> または /time add <1〜24000>";
+const PLAYER_HELP: &[&str] = &[
+    "/help: コマンドの一覧を表示します",
+    "/list: 参加中のプレイヤーを表示します",
+    "/me <本文>: 動作を表示します",
+    "/msg <名前> <本文>: ほかのプレイヤーにささやきます",
+];
+const OPERATOR_HELP: &[&str] = &[
+    "/time set <day|noon|night|midnight|0〜23999>: 時刻を設定します",
+    "/time add <1〜24000>: 時刻を進めます",
+    "/seed: シードを表示します",
+];
 
 struct Client {
     display_name: String,
+    operator: bool,
     chat_tokens: i64,
     chat_refill_tick: i64,
     dig: Option<Dig>,
@@ -202,6 +218,50 @@ impl Client {
     fn in_view(&self, c: ChunkPos) -> bool {
         let (cx, cz) = self.center();
         (c.0 - cx).abs() <= self.view && (c.1 - cz).abs() <= self.view
+    }
+}
+
+fn limit_chat_text(text: &str) -> String {
+    const ELLIPSIS: &str = "…";
+    if text.len() <= MAX_CHAT_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_CHAT_TEXT_BYTES - ELLIPSIS.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut limited = String::with_capacity(end + ELLIPSIS.len());
+    limited.push_str(&text[..end]);
+    limited.push_str(ELLIPSIS);
+    limited
+}
+
+fn message_names(args: &str, name: &str) -> bool {
+    let Some(rest) = args.strip_prefix(name) else {
+        return false;
+    };
+    rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn parse_ticks(value: &str, min: i64, max: i64) -> Option<i64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let ticks: i64 = value.parse().ok()?;
+    (min..=max).contains(&ticks).then_some(ticks)
+}
+
+fn parse_time_of_day(value: &str) -> Option<i64> {
+    if value.eq_ignore_ascii_case("day") {
+        Some(1000)
+    } else if value.eq_ignore_ascii_case("noon") {
+        Some(6000)
+    } else if value.eq_ignore_ascii_case("night") {
+        Some(13_000)
+    } else if value.eq_ignore_ascii_case("midnight") {
+        Some(18_000)
+    } else {
+        parse_ticks(value, 0, DAY_TICKS - 1)
     }
 }
 
@@ -688,6 +748,7 @@ impl Server {
             id,
             Client {
                 display_name: DEFAULT_DISPLAY_NAME.to_owned(),
+                operator: false,
                 chat_tokens: CHAT_CAPACITY,
                 chat_refill_tick: self.game_time,
                 dig: None,
@@ -714,6 +775,14 @@ impl Server {
             },
         );
         self.return_crafting(id);
+    }
+
+    /// Sets whether this connection may use operator commands. The host is trusted;
+    /// packets cannot change this flag.
+    pub fn set_operator(&mut self, id: u32, operator: bool) {
+        if let Some(client) = self.clients.get_mut(&id) {
+            client.operator = operator;
+        }
     }
 
     /// Sets the trusted host's display name for this connection.
@@ -766,7 +835,187 @@ impl Server {
         }
         client.chat_tokens -= 1;
         let sender = client.display_name.clone();
-        self.broadcast_chat(ChatKind::Player, sender, trimmed.to_owned(), None);
+        let operator = client.operator;
+        if trimmed.starts_with('/') {
+            self.run_command(id, trimmed, &sender, operator);
+        } else {
+            self.broadcast_chat(ChatKind::Player, sender, trimmed.to_owned(), None);
+        }
+    }
+
+    fn reply(&mut self, id: u32, text: impl Into<String>) {
+        self.outbox.push((
+            id,
+            S2C::Chat {
+                kind: ChatKind::System,
+                sender: String::new(),
+                text: text.into(),
+            }
+            .encode(),
+        ));
+    }
+
+    fn run_command(&mut self, id: u32, text: &str, sender: &str, operator: bool) {
+        let rest = text[1..].trim_start();
+        let (name, args) = match rest.find(char::is_whitespace) {
+            Some(end) => (&rest[..end], rest[end..].trim_start()),
+            None => (rest, ""),
+        };
+        if name.eq_ignore_ascii_case("help") {
+            self.command_help(id, operator);
+        } else if name.eq_ignore_ascii_case("list") {
+            self.command_list(id);
+        } else if name.eq_ignore_ascii_case("me") {
+            self.command_me(id, sender, args);
+        } else if name.eq_ignore_ascii_case("msg")
+            || name.eq_ignore_ascii_case("tell")
+            || name.eq_ignore_ascii_case("w")
+        {
+            self.command_msg(id, sender, args);
+        } else if name.eq_ignore_ascii_case("time") {
+            if !operator {
+                self.reply(id, "このコマンドを使う権限がありません");
+                return;
+            }
+            self.command_time(id, args);
+        } else if name.eq_ignore_ascii_case("seed") {
+            if !operator {
+                self.reply(id, "このコマンドを使う権限がありません");
+                return;
+            }
+            let seed = self.seed;
+            self.reply(id, format!("シード: {seed}"));
+        } else {
+            self.reply(id, "不明なコマンドです。/help で一覧を表示します");
+        }
+    }
+
+    fn command_help(&mut self, id: u32, operator: bool) {
+        for line in PLAYER_HELP {
+            self.reply(id, *line);
+        }
+        if operator {
+            for line in OPERATOR_HELP {
+                self.reply(id, *line);
+            }
+        }
+    }
+
+    fn command_list(&mut self, id: u32) {
+        let text = {
+            let names: Vec<&str> = self
+                .clients
+                .iter()
+                .filter(|(_, client)| client.joined)
+                .map(|(_, client)| client.display_name.as_str())
+                .collect();
+            let count = names.len();
+            let list = names.join(", ");
+            limit_chat_text(&format!("参加中 {count} 人: {list}"))
+        };
+        self.reply(id, text);
+    }
+
+    fn command_me(&mut self, id: u32, sender: &str, args: &str) {
+        let text = args.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            self.reply(id, "使い方: /me <本文>");
+            return;
+        }
+        self.broadcast_chat(ChatKind::Emote, sender.to_owned(), text, None);
+    }
+
+    fn command_msg(&mut self, id: u32, sender: &str, args: &str) {
+        let mut target: Option<String> = None;
+        for client in self
+            .clients
+            .iter()
+            .filter(|(other, client)| **other != id && client.joined)
+            .map(|(_, client)| client)
+        {
+            let name = client.display_name.as_str();
+            if target.as_ref().is_some_and(|best| name.len() <= best.len()) {
+                continue;
+            }
+            if message_names(args, name) {
+                target = Some(name.to_owned());
+            }
+        }
+        let Some(target) = target else {
+            if message_names(args, sender) {
+                self.reply(id, "自分にはささやけません");
+            } else {
+                self.reply(id, "プレイヤーが見つかりません");
+            }
+            return;
+        };
+        let body = args[target.len()..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let recipients: Vec<u32> = self
+            .clients
+            .iter()
+            .filter(|(other, client)| {
+                **other != id && client.joined && client.display_name == target
+            })
+            .map(|(other, _)| *other)
+            .collect();
+        if recipients.is_empty() {
+            self.reply(id, "自分にはささやけません");
+            return;
+        }
+        if body.is_empty() {
+            self.reply(id, "本文を入力してください");
+            return;
+        }
+        let from = S2C::Chat {
+            kind: ChatKind::WhisperFrom,
+            sender: sender.to_owned(),
+            text: body.clone(),
+        }
+        .encode();
+        for recipient in recipients {
+            self.outbox.push((recipient, from.clone()));
+        }
+        self.outbox.push((
+            id,
+            S2C::Chat {
+                kind: ChatKind::WhisperTo,
+                sender: target,
+                text: body,
+            }
+            .encode(),
+        ));
+    }
+
+    fn command_time(&mut self, id: u32, args: &str) {
+        let mut parts = args.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("");
+        if parts.next().is_some() {
+            self.reply(id, TIME_USAGE);
+            return;
+        }
+        if sub.eq_ignore_ascii_case("set") {
+            let Some(time) = parse_time_of_day(value) else {
+                self.reply(id, TIME_USAGE);
+                return;
+            };
+            let origin = self.day_time.div_euclid(DAY_TICKS) * DAY_TICKS;
+            self.day_time = origin + time;
+        } else if sub.eq_ignore_ascii_case("add") {
+            let Some(amount) = parse_ticks(value, 1, DAY_TICKS) else {
+                self.reply(id, TIME_USAGE);
+                return;
+            };
+            self.day_time += amount;
+        } else {
+            self.reply(id, TIME_USAGE);
+            return;
+        }
+        let time = self.day_time.rem_euclid(DAY_TICKS);
+        self.reply(id, format!("時刻を {time} にしました"));
     }
 
     /// Last accepted position, never a queued or rejected client report.
@@ -2506,6 +2755,370 @@ mod tests {
                 (2, chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "20")),
             ]
         );
+    }
+
+    fn join_named(server: &mut Server, id: u32, name: &str) {
+        server.connect(id);
+        server.set_display_name(id, name);
+        server.handle_packet(
+            id,
+            &C2S::Hello {
+                protocol: PROTOCOL_VERSION,
+                view_distance: 2,
+            }
+            .encode(),
+        );
+    }
+
+    fn fill_chat(server: &mut Server, id: u32) {
+        let game_time = server.game_time;
+        let client = server.clients.get_mut(&id).unwrap();
+        client.chat_tokens = CHAT_CAPACITY;
+        client.chat_refill_tick = game_time;
+    }
+
+    fn system_lines(server: &mut Server) -> Vec<(u32, String)> {
+        chat_outbox(server)
+            .into_iter()
+            .map(|(id, packet)| match packet {
+                S2C::Chat {
+                    kind: ChatKind::System,
+                    sender,
+                    text,
+                } => {
+                    assert!(sender.is_empty());
+                    (id, text)
+                }
+                other => panic!("unexpected chat {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slash_commands_stay_private_and_spend_chat_tokens() {
+        let mut s = joined(2);
+        join_named(&mut s, 2, "ボブ");
+        s.tick();
+        assert!(!chat_outbox(&mut s).is_empty());
+
+        s.connect(3);
+        queue_chat(&mut s, 1, "/\nhelp");
+        queue_chat(&mut s, 1, &format!("/{}", "あ".repeat(256)));
+        queue_chat(&mut s, 3, "/help");
+        for _ in 0..5 {
+            queue_chat(&mut s, 1, "/nope");
+        }
+        queue_chat(&mut s, 1, "/help");
+        queue_chat(&mut s, 1, "まだ届く？");
+        s.tick();
+        let lines = system_lines(&mut s);
+        assert_eq!(lines.len(), 5);
+        assert!(lines
+            .iter()
+            .all(|(id, text)| *id == 1 && text == "不明なコマンドです。/help で一覧を表示します"));
+
+        while s.game_time() < 40 {
+            s.tick();
+        }
+        queue_chat(&mut s, 1, "hello");
+        queue_chat(&mut s, 1, "/list");
+        s.tick();
+        let chats = chat_outbox(&mut s);
+        assert_eq!(
+            chats[0],
+            (
+                1,
+                chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "hello")
+            )
+        );
+        assert_eq!(
+            chats[1],
+            (
+                2,
+                chat_packet(ChatKind::Player, DEFAULT_DISPLAY_NAME, "hello")
+            )
+        );
+        assert!(matches!(
+            &chats[2],
+            (1, S2C::Chat { kind: ChatKind::System, sender, text })
+                if sender.is_empty() && text.starts_with("参加中 2 人:")
+        ));
+        assert_eq!(chats.len(), 3);
+    }
+
+    #[test]
+    fn help_list_me_and_msg_follow_permission_names_and_length() {
+        let mut s = joined(2);
+        s.set_display_name(1, "花子");
+        join_named(&mut s, 2, "太郎");
+        join_named(&mut s, 3, "太郎 次郎");
+        join_named(&mut s, 4, "太郎");
+        s.connect(5);
+        s.set_display_name(5, "未参加");
+        s.tick();
+        let _ = chat_outbox(&mut s);
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/HELP extra");
+        s.tick();
+        assert_eq!(
+            system_lines(&mut s),
+            PLAYER_HELP
+                .iter()
+                .map(|line| (1, (*line).to_owned()))
+                .collect::<Vec<_>>()
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/LiSt");
+        s.tick();
+        assert_eq!(
+            system_lines(&mut s),
+            [(1, "参加中 4 人: 花子, 太郎, 太郎 次郎, 太郎".to_owned())]
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/ME   こんにちは    世界");
+        queue_chat(&mut s, 1, "/me");
+        queue_chat(&mut s, 1, "/me   ");
+        s.tick();
+        let chats = chat_outbox(&mut s);
+        let emote = chat_packet(ChatKind::Emote, "花子", "こんにちは 世界");
+        assert_eq!(
+            chats,
+            [
+                (1, emote.clone()),
+                (2, emote.clone()),
+                (3, emote.clone()),
+                (4, emote),
+                (1, chat_packet(ChatKind::System, "", "使い方: /me <本文>")),
+                (1, chat_packet(ChatKind::System, "", "使い方: /me <本文>")),
+            ]
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/msg 太郎 次郎 こんにちは   世界");
+        s.tick();
+        assert_eq!(
+            chat_outbox(&mut s),
+            [
+                (
+                    3,
+                    chat_packet(ChatKind::WhisperFrom, "花子", "こんにちは 世界")
+                ),
+                (
+                    1,
+                    chat_packet(ChatKind::WhisperTo, "太郎 次郎", "こんにちは 世界")
+                ),
+            ]
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/tell 太郎 やあ");
+        s.tick();
+        assert_eq!(
+            chat_outbox(&mut s),
+            [
+                (2, chat_packet(ChatKind::WhisperFrom, "花子", "やあ")),
+                (4, chat_packet(ChatKind::WhisperFrom, "花子", "やあ")),
+                (1, chat_packet(ChatKind::WhisperTo, "太郎", "やあ")),
+            ]
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/w 太郎 次郎");
+        queue_chat(&mut s, 1, "/msg 花子 自分宛");
+        queue_chat(&mut s, 1, "/msg いない 人");
+        queue_chat(&mut s, 1, "/msg");
+        s.tick();
+        assert_eq!(
+            system_lines(&mut s),
+            [
+                (1, "本文を入力してください".to_owned()),
+                (1, "自分にはささやけません".to_owned()),
+                (1, "プレイヤーが見つかりません".to_owned()),
+                (1, "プレイヤーが見つかりません".to_owned()),
+            ]
+        );
+
+        // A longer name of the sender does not beat a shorter other player.
+        s.set_display_name(1, "太郎 次郎 花");
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/msg 太郎 次郎 花 こんにちは");
+        s.tick();
+        assert_eq!(
+            chat_outbox(&mut s),
+            vec![
+                (
+                    3,
+                    S2C::Chat {
+                        kind: ChatKind::WhisperFrom,
+                        sender: "太郎 次郎 花".to_owned(),
+                        text: "花 こんにちは".to_owned(),
+                    },
+                ),
+                (
+                    1,
+                    S2C::Chat {
+                        kind: ChatKind::WhisperTo,
+                        sender: "太郎 次郎".to_owned(),
+                        text: "花 こんにちは".to_owned(),
+                    },
+                ),
+            ]
+        );
+        s.set_display_name(1, "花子");
+
+        for id in 2..=4 {
+            s.disconnect(id);
+        }
+        for id in 0..24 {
+            let name = "🙂".repeat(16);
+            join_named(&mut s, 10 + id, &name);
+        }
+        s.tick();
+        let _ = chat_outbox(&mut s);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/list");
+        s.tick();
+        let lines = system_lines(&mut s);
+        assert_eq!(lines.len(), 1);
+        let text = &lines[0].1;
+        let full_count = 1 + 24;
+        assert!(text.starts_with(&format!("参加中 {full_count} 人: 花子, ")));
+        assert!(text.len() > 3);
+        assert!(text.len() <= 1024);
+        assert!(text.ends_with('…'));
+        assert_ne!(text.chars().last(), Some('🙂'));
+        let decoded = S2C::decode(
+            &S2C::Chat {
+                kind: ChatKind::System,
+                sender: String::new(),
+                text: text.clone(),
+            }
+            .encode(),
+        );
+        assert!(decoded.is_ok());
+    }
+
+    #[test]
+    fn operator_commands_keep_the_day_and_refuse_everyone_else() {
+        let mut quiet = joined(2);
+        let mut s = joined(2);
+        s.set_operator(1, true);
+        queue_chat(&mut s, 1, "/help");
+        quiet.tick();
+        s.tick();
+        assert_eq!(quiet.state_hash(), s.state_hash());
+        assert_eq!(s.day_time(), quiet.day_time());
+        let help = system_lines(&mut s);
+        assert_eq!(
+            help.iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>(),
+            PLAYER_HELP
+                .iter()
+                .chain(OPERATOR_HELP)
+                .copied()
+                .collect::<Vec<_>>()
+        );
+        assert!(help.iter().all(|(id, _)| *id == 1));
+
+        s.set_operator(1, false);
+        s.set_time(40, 50_000);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time set day");
+        queue_chat(&mut s, 1, "/SEED");
+        s.tick();
+        assert_eq!(s.game_time(), 41);
+        assert_eq!(s.day_time(), 50_001);
+        assert_eq!(
+            system_lines(&mut s),
+            [
+                (1, "このコマンドを使う権限がありません".to_owned()),
+                (1, "このコマンドを使う権限がありません".to_owned()),
+            ]
+        );
+
+        s.set_operator(1, true);
+        s.set_time(40, 50_000);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time SET noon extra");
+        queue_chat(&mut s, 1, "/time set 24000");
+        queue_chat(&mut s, 1, "/time add 0");
+        queue_chat(&mut s, 1, "/time add 24001");
+        queue_chat(&mut s, 1, "/time");
+        s.tick();
+        assert_eq!(s.game_time(), 41);
+        assert_eq!(s.day_time(), 50_001);
+        let usage = system_lines(&mut s);
+        assert_eq!(usage.len(), 5);
+        assert!(usage.iter().all(|(_, text)| text == TIME_USAGE));
+
+        s.set_time(40, 50_000);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/TiMe SeT NoOn");
+        s.tick();
+        assert_eq!(s.game_time(), 41);
+        assert_eq!(s.day_time(), 48_000 + 6000 + 1);
+        assert_eq!(
+            system_lines(&mut s),
+            [(1, "時刻を 6000 にしました".to_owned())]
+        );
+
+        s.set_time(7, -100);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time set day");
+        s.tick();
+        assert_eq!(s.game_time(), 8);
+        assert_eq!(s.day_time(), -23_000 + 1);
+        assert_eq!(
+            system_lines(&mut s),
+            [(1, "時刻を 1000 にしました".to_owned())]
+        );
+
+        s.set_time(8, 23_990);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time add 20");
+        s.tick();
+        assert_eq!(s.game_time(), 9);
+        assert_eq!(s.day_time(), 24_011);
+        assert_eq!(
+            system_lines(&mut s),
+            [(1, "時刻を 10 にしました".to_owned())]
+        );
+
+        s.set_time(2, 1_000);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time add 24000");
+        s.tick();
+        assert_eq!(s.game_time(), 3);
+        assert_eq!(s.day_time(), 25_001);
+        assert_eq!(
+            system_lines(&mut s),
+            [(1, "時刻を 1000 にしました".to_owned())]
+        );
+
+        s.set_time(2, 48_000);
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/time set 0");
+        queue_chat(&mut s, 1, "/time add 5");
+        s.tick();
+        assert_eq!(s.game_time(), 3);
+        assert_eq!(s.day_time(), 48_006);
+        assert_eq!(
+            system_lines(&mut s),
+            [
+                (1, "時刻を 0 にしました".to_owned()),
+                (1, "時刻を 5 にしました".to_owned()),
+            ]
+        );
+
+        fill_chat(&mut s, 1);
+        queue_chat(&mut s, 1, "/seed");
+        s.tick();
+        assert_eq!(system_lines(&mut s), [(1, "シード: 1".to_owned())]);
+        assert_eq!(s.game_time(), 4);
     }
 
     fn player_packets(server: &mut Server) -> Vec<(u32, S2C)> {

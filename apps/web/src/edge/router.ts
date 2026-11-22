@@ -2,7 +2,7 @@ import { SERVICE_RESTART } from "../shared/close-codes.ts";
 import { isOperator, tokenFromRequest } from "./access.ts";
 import { hasAuthSecrets } from "./auth-config.ts";
 import type { AuthSecrets } from "./auth-config.ts";
-import type { GameMode, WorldDB } from "./db.ts";
+import type { GameMode, Role, WorldDB } from "./db.ts";
 import { clientIP } from "./ratelimit.ts";
 import type { Limiter } from "./ratelimit.ts";
 
@@ -23,6 +23,7 @@ export interface RouterDeps {
 			fetch(request: Request): Promise<Response>;
 			metrics(): Promise<unknown>;
 			revoke(userId: string): Promise<number>;
+			refreshRole(userId: string, world: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
 			getGameMode(): Promise<GameMode>;
 			setGameMode(mode: GameMode, revision?: number): Promise<void>;
@@ -108,6 +109,22 @@ async function revokeWithRetry(
 			return true;
 		} catch {
 			// Retry once before reporting that a connection could still be active.
+		}
+	}
+	return false;
+}
+
+async function refreshRoleWithRetry(
+	worlds: RouterDeps["worlds"],
+	name: string,
+	userId: string,
+): Promise<boolean> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			await worlds.getByName(name).refreshRole(userId, name);
+			return true;
+		} catch {
+			// Retry once before reporting that a live permission could still be stale.
 		}
 	}
 	return false;
@@ -273,6 +290,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 	if (ws || metrics) {
 		let gameMode: GameMode | undefined;
 		let gameModeRevision: number | undefined;
+		let memberRole: Role | undefined;
 		if (!open && !ops) {
 			if (!user) {
 				return error("unauthorized", 401);
@@ -285,6 +303,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			if (!member || (metrics && member.role !== "operator")) {
 				return error("forbidden", 403);
 			}
+			memberRole = member.role;
 			gameMode = world.gameMode;
 			gameModeRevision = world.gameModeRevision;
 		}
@@ -296,6 +315,7 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		headers.delete("X-MC-Authorized-At");
 		headers.delete("X-MC-Session");
 		headers.delete("X-MC-Name");
+		headers.delete("X-MC-Role");
 		headers.delete("X-MC-Game-Mode");
 		headers.delete("X-MC-Game-Mode-Revision");
 		if (gameMode !== undefined && gameModeRevision !== undefined) {
@@ -308,6 +328,16 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		const displayName = ops ? "operator" : user ? user.name : `dev-${identity.slice(4, 8)}`;
 		headers.set("X-MC-User", identity);
 		headers.set("X-MC-Name", encodeURIComponent(displayName.toWellFormed()));
+		let role: Role = "player";
+		if (ops || !user) {
+			role = "operator";
+		} else if (memberRole) {
+			role = memberRole;
+		} else {
+			const row = user.emailVerified ? await db.member(name, user.email.toLowerCase()) : null;
+			role = row?.role === "operator" ? "operator" : "player";
+		}
+		headers.set("X-MC-Role", role);
 		return worlds.getByName(name).fetch(new Request(request, { headers }));
 	}
 
@@ -427,7 +457,13 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (!(await db.putMember(name, target, input.role))) {
 			return limited();
 		}
-		return json({ email: target, role: input.role });
+		const role: Role = input.role === "operator" ? "operator" : "player";
+		const userIds = await db.userIds(target);
+		const updated = await Promise.all(userIds.map(id => refreshRoleWithRetry(worlds, name, id)));
+		if (updated.some(success => !success)) {
+			return error("role update failed", 502);
+		}
+		return json({ email: target, role });
 	}
 
 	if (parts.length === 5 && request.method === "DELETE") {

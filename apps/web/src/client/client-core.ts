@@ -458,8 +458,9 @@ export class ClientCore {
 
 	takeChat(): ChatLine | null {
 		const bytes = this.out(this.x.client_take_chat());
-		if (bytes.length === 0) return null;
+		if (bytes.length < 2 || bytes[0] > 6) return null;
 		const textStart = 2 + bytes[1];
+		if (textStart > bytes.length) return null;
 		return {
 			kind: bytes[0] as ChatLine["kind"],
 			sender: this.chatDecoder.decode(bytes.subarray(2, textStart)),
