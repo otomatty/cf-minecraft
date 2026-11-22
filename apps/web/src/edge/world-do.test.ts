@@ -48,6 +48,7 @@ function fixture(t, synchronousClose = false, legacy = false) {
 		]));
 	});
 	const connected: number[] = [];
+	const operators: [number, boolean][] = [];
 	const teleportPermissions: boolean[] = [];
 	const initialPositions: Array<[number, number, number] | undefined> = [];
 	const acceptedPositions = new Map<number, [number, number, number]>();
@@ -112,7 +113,7 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	const authDB = testDB();
 	t.after(authDB.close);
 	const world = new WorldDO(context, { DB: authDB.db });
-	world.ensureCore = () => ({
+	const core = {
 		returnCrafting(id) { releaseCalls.push(["returnCrafting", id]); },
 		inventoryData(id) { releaseCalls.push(["inventoryData", id]); return undefined; },
 		connect(id, allowTeleport, position) {
@@ -128,9 +129,16 @@ function fixture(t, synchronousClose = false, legacy = false) {
 			releaseCalls.push(["disconnect", id]);
 			disconnected.push(id);
 		},
-	});
+		setOperator(id, operator) { operators.push([id, operator]); },
+		setGameMode() {},
+		flushEntityChanges() {},
+		takeDirty() { return null; },
+		gameTime: 1n,
+		dayTime: 1n,
+	};
+	world.ensureCore = function () { return this.core ??= core; };
 	world.startTicking = () => {};
-	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string, gameMode?: string, gameModeRevision?: string) =>
+	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string, gameMode?: string, gameModeRevision?: string, role?: string) =>
 		world.fetch(
 			new Request("https://game.example/ws/lobby", {
 				headers: {
@@ -139,12 +147,13 @@ function fixture(t, synchronousClose = false, legacy = false) {
 					...(encodedName !== undefined ? { "X-MC-Name": encodedName } : {}),
 					...(gameMode !== undefined ? { "X-MC-Game-Mode": gameMode } : {}),
 					...(gameModeRevision !== undefined ? { "X-MC-Game-Mode-Revision": gameModeRevision } : {}),
+					...(role !== undefined ? { "X-MC-Role": role } : {}),
 					...(user ? { "X-MC-User": user } : {}),
 					...(authorizedAt === null ? {} : { "X-MC-Authorized-At": authorizedAt }),
 				},
 			}),
 		);
-	return { world, join, initialPositions, acceptedPositions, teleportPermissions, connected, disconnected, closed, sqlite, context, authDB };
+	return { world, join, initialPositions, acceptedPositions, teleportPermissions, operators, connected, disconnected, closed, sqlite, context, authDB };
 }
 
 test("DO requires the Worker identity header before admitting a connection", async t => {
@@ -316,6 +325,7 @@ function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 	const loaded = [];
 	const missing = [];
 	world.core = {
+		...world.core,
 		tick() {}, takeOutbox() { return []; }, takeRequests() { return requests.splice(0); },
 		loadChunk(cx, cz, data) { loaded.push([cx, cz, data]); },
 		chunkMissing(cx, cz) { missing.push([cx, cz]); },
@@ -464,6 +474,52 @@ test("valid sessions and development connections remain connected", async t => {
 	assert.equal(f.world.sockets.size, 4);
 });
 
+test("recheck refreshes operator from the member role without disconnecting", async t => {
+	const f = await accessFixture(t);
+	assert.deepEqual(f.operators, [[1, false], [2, false], [3, false], [4, false]]);
+	f.operators.length = 0;
+	await f.tick();
+	assert.deepEqual(f.operators, [[1, true], [2, true], [3, true]]);
+	assert.equal(f.world.sockets.size, 4);
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
+	f.operators.length = 0;
+	await f.tick();
+	assert.deepEqual(f.operators, [[1, true], [2, false], [3, true]]);
+	assert.deepEqual(f.closed, []);
+	assert.equal(f.world.sockets.size, 4);
+});
+
+test("a pending recheck preserves a newer role and still revokes invalid sessions", async t => {
+	const f = await accessFixture(t);
+	f.sql.prepare("DELETE FROM session WHERE userId = 'other'").run();
+	let resolveQuery;
+	const pending = new Promise(resolve => { resolveQuery = resolve; });
+	const prepare = f.authDB.db.prepare.bind(f.authDB.db);
+	t.mock.method(f.authDB.db, "prepare", sql => ({
+		bind(...args) {
+			return {
+				async all() {
+					const result = await prepare(sql).bind(...args).all();
+					await pending;
+					return result;
+				},
+			};
+		},
+	}));
+	f.operators.length = 0;
+	await f.tick();
+	assert.equal(f.queries(), 1);
+	f.sql.prepare("UPDATE world_member SET role = 'player' WHERE email = 'player@example.com'").run();
+	assert.equal(f.world.setRole("player", "player"), 1);
+	assert.equal(f.world.setRole("other", "player"), 1);
+	assert.deepEqual(f.operators, [[2, false], [3, false]]);
+	resolveQuery();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(f.operators, [[2, false], [3, false], [1, true]]);
+	assert.deepEqual(f.closed, [[4001, "access revoked"]]);
+	assert.deepEqual(f.disconnected, [3]);
+});
+
 test("expired sessions and sessions belonging to another user are rejected", async t => {
 	const f = await accessFixture(t);
 	f.sql.prepare("UPDATE session SET expiresAt = ? WHERE userId = 'player'")
@@ -539,6 +595,50 @@ test("only ops and dev connections receive teleport permission", async t => {
 	assert.deepEqual(f.teleportPermissions, [true, true, false, false, false, false]);
 });
 
+
+test("X-MC-Role operator is the only value that grants operator", async t => {
+	const f = fixture(t);
+	for (const [user, role] of [
+		["ops:1", "operator"],
+		["player", "player"],
+		["spoof", "OPERATOR"],
+		["plain", undefined],
+	] as const) {
+		assert.equal((await f.join(user, undefined, undefined, undefined, undefined, undefined, role)).status, 101);
+	}
+	assert.deepEqual(f.operators, [[1, true], [2, false], [3, false], [4, false]]);
+});
+
+test("setRole updates every current connection for that user and does not disconnect", async t => {
+	const f = fixture(t);
+	assert.equal((await f.join("alice")).status, 101);
+	assert.equal((await f.join("bob")).status, 101);
+	assert.equal(f.world.setRole("alice", "operator"), 1);
+	assert.equal(f.world.setRole("bob", "player"), 1);
+	f.world.users.set(99, "alice");
+	assert.equal(f.world.setRole("alice", "player"), 2);
+	assert.equal(f.world.setRole("nobody", "operator"), 0);
+	assert.equal(f.world.sockets.size, 2);
+	assert.deepEqual(f.closed, []);
+	assert.deepEqual(f.disconnected, []);
+	assert.deepEqual(f.operators, [
+		[1, false], [2, false], [1, true], [2, false], [1, false], [99, false],
+	]);
+});
+
+test("a role change overrides join authorization through the clock-skew window", async t => {
+	let now = 100_000;
+	t.mock.method(Date, "now", () => now);
+	const f = fixture(t);
+	assert.equal(f.world.setRole("player", "operator"), 0);
+	assert.equal(f.world.setRole("player", "player"), 0);
+	assert.equal(f.world.core, null);
+	now = 102_001;
+	for (const authorizedAt of ["99999", "102000", "102001"]) {
+		assert.equal((await f.join("player", authorizedAt, undefined, undefined, undefined, undefined, "operator")).status, 101);
+	}
+	assert.deepEqual(f.operators, [[1, false], [2, false], [3, true]]);
+});
 
 for (const event of ["close", "error"]) {
 	test(`reconnect after ${event} restores only the same user's accepted position`, async t => {

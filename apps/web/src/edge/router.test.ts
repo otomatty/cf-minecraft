@@ -28,12 +28,14 @@ async function setup(t) {
 	const calls: string[] = [];
 	const forwarded: Request[] = [];
 	const revocations: [string, string][] = [];
+	const roleChanges: [string, string, "operator" | "player"][] = [];
 	const disconnections: [string, number, string][] = [];
 	const evictions: string[] = [];
 	const modeChanges: [string, GameMode, number | undefined][] = [];
 	const modes = new Map<string, GameMode>();
 	let modeUpdateFails = false;
 	let revokeFailures = 0;
+	let roleUpdateFails = 0;
 	const limits: [string, string][] = [];
 	let blocked = "";
 	let captcha = true;
@@ -64,6 +66,14 @@ async function setup(t) {
 							throw new Error("revoke failed");
 						}
 						return 0;
+					},
+					async setRole(userId, role: "operator" | "player") {
+						roleChanges.push([name, userId, role]);
+						if (roleUpdateFails > 0) {
+							roleUpdateFails--;
+							throw new Error("role update failed");
+						}
+						return 1;
 					},
 					async disconnectAll(code, reason) {
 						disconnections.push([name, code, reason]);
@@ -123,6 +133,7 @@ async function setup(t) {
 		calls,
 		forwarded,
 		revocations,
+		roleChanges,
 		disconnections,
 		evictions,
 		modeChanges,
@@ -131,6 +142,9 @@ async function setup(t) {
 		},
 		failRevocation(count = Infinity) {
 			revokeFailures = count;
+		},
+		failRoleUpdate(count = Infinity) {
+			roleUpdateFails = count;
 		},
 		limits,
 		request,
@@ -305,6 +319,85 @@ test("Worker replaces spoofed chat names with the verified session, operator or 
 	const identity = f.forwarded[2].headers.get("X-MC-User");
 	assert.match(identity, /^dev:[0-9a-f]{8}-/);
 	assert.equal(f.forwarded[2].headers.get("X-MC-Name"), `dev-${identity.slice(4, 8)}`);
+});
+
+test("Worker strips a spoofed role and assigns operator or player", async t => {
+	const f = await setup(t);
+	f.login(player);
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, { "x-mc-role": "operator" })).status, 200);
+	assert.equal(f.forwarded[0].headers.get("X-MC-Role"), "player");
+
+	f.login(owner);
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, { "X-MC-Role": "player" })).status, 200);
+	assert.equal(f.forwarded[1].headers.get("X-MC-Role"), "operator");
+
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, {
+		"X-MC-Role": "player",
+		Authorization: "Bearer operator-secret",
+	})).status, 200);
+	assert.equal(f.forwarded[2].headers.get("X-MC-Role"), "operator");
+
+	f.login(null);
+	f.deps.env.DEBUG = "1";
+	assert.equal((await f.request("/ws/lobby", "GET", undefined, { "X-MC-Role": "player" })).status, 200);
+	assert.equal(f.forwarded[3].headers.get("X-MC-Role"), "operator");
+});
+
+test("member role changes call setRole for every matching user and retry once", async t => {
+	const f = await setup(t);
+	f.user("player-alias", "player@example.com");
+	f.login(owner);
+	const promoted = await f.request("/api/worlds/lobby/members", "POST", {
+		email: "PLAYER@example.com",
+		role: "operator",
+	});
+	assert.equal(promoted.status, 200);
+	assert.deepEqual(await promoted.json(), { email: "player@example.com", role: "operator" });
+	assert.deepEqual([...f.roleChanges].sort(), [
+		["lobby", "player", "operator"],
+		["lobby", "player-alias", "operator"],
+	]);
+});
+
+test("member role update retries setRole once and returns 502 when both attempts fail", async t => {
+	const f = await setup(t);
+	f.login(owner);
+	f.failRoleUpdate(1);
+	const retried = await f.request("/api/worlds/lobby/members", "POST", {
+		email: "player@example.com",
+		role: "operator",
+	});
+	assert.equal(retried.status, 200);
+	assert.deepEqual(await retried.json(), { email: "player@example.com", role: "operator" });
+	assert.deepEqual(f.roleChanges, [
+		["lobby", "player", "operator"],
+		["lobby", "player", "operator"],
+	]);
+
+	const missing = await f.request("/api/worlds/lobby/members", "POST", {
+		email: "ghost@example.com",
+		role: "player",
+	});
+	assert.equal(missing.status, 200);
+	assert.deepEqual(await missing.json(), { email: "ghost@example.com", role: "player" });
+	assert.deepEqual(f.roleChanges, [
+		["lobby", "player", "operator"],
+		["lobby", "player", "operator"],
+	]);
+
+	f.roleChanges.length = 0;
+	f.failRoleUpdate(2);
+	const denied = await f.request("/api/worlds/lobby/members", "POST", {
+		email: "player@example.com",
+		role: "player",
+	});
+	assert.equal(denied.status, 502);
+	assert.deepEqual(await denied.json(), { error: "role update failed" });
+	assert.deepEqual(await f.db.member("lobby", "player@example.com"), { role: "player" });
+	assert.deepEqual(f.roleChanges, [
+		["lobby", "player", "player"],
+		["lobby", "player", "player"],
+	]);
 });
 
 test("operator Bearer bypasses registration; cookie does not; failures consume AUTH_LIMIT", async t => {

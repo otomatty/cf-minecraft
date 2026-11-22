@@ -131,6 +131,11 @@ pub unsafe extern "C" fn server_set_display_name(client: u32, ptr: *const u8, le
     }
 }
 
+#[no_mangle]
+pub extern "C" fn server_set_operator(client: u32, operator: u32) {
+    server().set_operator(client, operator != 0);
+}
+
 /// Output: last accepted feet [x, y, z] as f64 LE, or length 0 for an unknown id.
 #[no_mangle]
 pub extern "C" fn server_client_position(client: u32) -> usize {

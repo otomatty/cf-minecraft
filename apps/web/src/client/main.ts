@@ -23,8 +23,8 @@ import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
-import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
-import { appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, visibleChatLines, type TimedChatLine } from "./chat.ts";
+import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
+import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -235,6 +235,9 @@ async function main(): Promise<void> {
 	let chatOpen = false;
 	let chatOpeningKey = "";
 	let chatHistory: TimedChatLine[] = [];
+	let chatInputHistory: string[] = [];
+	let chatInputRecall: ChatInputRecall | null = null;
+	const chatLineClasses = ["chat-player", "chat-join", "chat-leave", "chat-system", "chat-emote", "chat-whisper-from", "chat-whisper-to"];
 	let chatExpiry: ReturnType<typeof setTimeout> | undefined;
 	function renderChat(): void {
 		clearTimeout(chatExpiry);
@@ -245,6 +248,7 @@ async function main(): Promise<void> {
 		chatPanel.hidden = !chatOpen && visible.length === 0;
 		chatLog.replaceChildren(...visible.map(({ line, receivedAt }) => {
 			const row = document.createElement("div");
+			row.className = chatLineClasses[line.kind];
 			row.textContent = formatChatLine(line);
 			if (!chatOpen) row.style.animationDelay = `-${now - receivedAt}ms`;
 			return row;
@@ -259,6 +263,7 @@ async function main(): Promise<void> {
 		if (!chatOpen) return;
 		chatOpen = false;
 		chatOpeningKey = "";
+		chatInputRecall = null;
 		chatInput.hidden = true;
 		chatInput.value = "";
 		chatPanel.classList.remove("open");
@@ -744,6 +749,7 @@ async function main(): Promise<void> {
 		const key = (action: Action) => kbd(action === "sprint" ? sprintKey(settings, keyboardLocked) : settings.keys[action]);
 		const chatKeys: Array<Node | string> = [key("chat")];
 		if (implicitEnterOpensChat(settings.keys)) chatKeys.push(" / ", kbd("Enter"));
+		if (implicitSlashOpensChat(settings.keys) && settings.keys.chat !== "Slash") chatKeys.push(" / ", kbd("Slash"));
 		const groups: Array<[string, Array<[string, Array<Node | string>]>]> = [
 			["移動", [
 				["前後左右", [key("forward"), " / ", key("left"), " / ", key("backward"), " / ", key("right")]],
@@ -1078,12 +1084,27 @@ async function main(): Promise<void> {
 	window.addEventListener("keydown", (e) => {
 		if (chatOpen) {
 			if (e.isComposing) return;
-			if (e.repeat && e.code === chatOpeningKey) e.preventDefault();
+			if (e.repeat && e.code === chatOpeningKey) {
+				e.preventDefault();
+				return;
+			}
+			if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+				e.preventDefault();
+				const next = recallChatInput(chatInputHistory, chatInputRecall, chatInput.value, e.key === "ArrowUp" ? -1 : 1);
+				if (next) {
+					chatInputRecall = next.recall;
+					chatInput.value = next.value;
+				}
+				return;
+			}
 			if (e.key === "Enter" || e.key === "Escape") {
 				e.preventDefault();
 				if (e.repeat) return;
 				const text = limitChatInput(chatInput.value).trim();
-				if (e.key === "Enter" && text && connection === "open") transport.send(core.encodeChat(text));
+				if (e.key === "Enter" && text && connection === "open") {
+					transport.send(core.encodeChat(text));
+					chatInputHistory = appendChatInput(chatInputHistory, text);
+				}
 				closeChat(true);
 			}
 			return;
@@ -1136,11 +1157,13 @@ async function main(): Promise<void> {
 			chatOpeningKey = e.code;
 			clearInput();
 			chatInput.hidden = false;
+			chatInput.value = e.key === "/" ? "/" : "";
 			chatPanel.classList.add("open");
 			renderChat();
 			chatLog.scrollTop = chatLog.scrollHeight;
 			document.exitPointerLock();
 			chatInput.focus();
+			chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
 			return;
 		}
 		if (matchesKey(e.code, settings.keys.inventory) && locked() && joined && !closed && !failed) {

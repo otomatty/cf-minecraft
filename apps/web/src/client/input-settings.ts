@@ -30,9 +30,14 @@ export function matchesKey(code: string, assigned: string): boolean {
 export function implicitEnterOpensChat(keys: Record<Action, string>): boolean {
 	return !ACTIONS.some(action => action !== "chat" && (matchesKey(keys[action], "Enter") || matchesKey(keys[action], "NumpadEnter")));
 }
-/** The assigned chat key opens chat. Enter does too, unless Enter or NumpadEnter is used elsewhere. */
+/** Slash and NumpadDivide can both report key "/". Also check the actual code for other layouts. */
+export function implicitSlashOpensChat(keys: Record<Action, string>, code = "Slash"): boolean {
+	return !ACTIONS.some(action => action !== "chat" && ["Slash", "NumpadDivide", code].includes(keys[action]));
+}
 export function keyOpensChat(keys: Record<Action, string>, code: string, key: string): boolean {
-	return matchesKey(code, keys.chat) || (key === "Enter" && implicitEnterOpensChat(keys));
+	return matchesKey(code, keys.chat)
+		|| (key === "Enter" && implicitEnterOpensChat(keys))
+		|| (key === "/" && implicitSlashOpensChat(keys, code));
 }
 export function duplicateKeys(keys: Record<Action, string>): string[] {
 	return [...new Set(ACTIONS.map(action => keys[action]).filter(code => typeof code === "string").map(normalizedKey).filter((code, i, codes) => codes.indexOf(code) !== i))];
@@ -124,7 +129,7 @@ export function keyLabel(code: string): string {
 	if (/^Digit[0-9]$/.test(code)) return code.slice(5);
 	const labels: Record<string, string> = {
 		Space: "Space", ShiftLeft: "Shift", ShiftRight: "Shift", ControlLeft: "Ctrl", AltLeft: "Alt",
-		ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+		ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Slash: "/",
 	};
 	return Object.hasOwn(labels, code) ? labels[code] : code;
 }

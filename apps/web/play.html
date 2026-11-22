@@ -133,6 +133,12 @@
 				color: white;
 				white-space: pre-wrap;
 			}
+			#chat-log > .chat-system { color: #fff2a8; }
+			#chat-log > .chat-emote { font-style: italic; }
+			#chat-log > .chat-whisper-from, #chat-log > .chat-whisper-to {
+				color: #e8d5ff;
+				font-style: italic;
+			}
 			#chat:not(.open) #chat-log > div { animation: chat-fade 10s linear both; }
 			@keyframes chat-fade { 90% { opacity: 1; } 100% { opacity: 0; } }
 			#chat.open { z-index: 19; pointer-events: auto; }

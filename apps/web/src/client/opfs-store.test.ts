@@ -287,7 +287,7 @@ test("regenerating a missing stored chunk in the real core does not make it dirt
 	core.start(1n, Generator.Flat);
 	core.setStored([[0, 0]]);
 	core.connect(1);
-	core.packet(1, new Uint8Array([0, 27, 2])); // Hello: protocol 27, view distance 2.
+	core.packet(1, new Uint8Array([0, 28, 2])); // Hello: protocol 28, view distance 2.
 	core.tick();
 	assert.ok(core.takeRequests().some(([cx, cz]) => cx === 0 && cz === 0));
 	core.chunkMissing(0, 0);

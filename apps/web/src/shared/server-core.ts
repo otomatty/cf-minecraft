@@ -16,6 +16,7 @@ interface ServerExports {
 	server_client_position(client: number): number;
 	server_return_crafting(client: number): void;
 	server_set_display_name(client: number, ptr: number, len: number): void;
+	server_set_operator(client: number, operator: number): void;
 	server_disconnect(client: number): void;
 	server_packet(client: number, ptr: number, len: number): void;
 	server_tick(): void;
@@ -121,6 +122,10 @@ export class ServerCore {
 
 	setGameMode(mode: "creative" | "survival"): void {
 		this.x.server_set_game_mode(mode === "survival" ? 1 : 0);
+	}
+
+	setOperator(client: number, operator: boolean): void {
+		this.x.server_set_operator(client, Number(operator));
 	}
 
 	inventoryData(client: number): Uint8Array | undefined {
