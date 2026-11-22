@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { testDB } from "./d1-shim.test.ts";
 import { ClientCore, S2C } from "../client/client-core.ts";
+import { SERVICE_RESTART } from "../shared/close-codes.ts";
 import { ChunkGenCore, Generator, ServerCore } from "../shared/server-core.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
 
@@ -129,13 +130,14 @@ function fixture(t, synchronousClose = false, legacy = false) {
 		},
 	});
 	world.startTicking = () => {};
-	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string) =>
+	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string, gameMode?: string) =>
 		world.fetch(
 			new Request("https://game.example/ws/lobby", {
 				headers: {
 					Upgrade: "websocket",
 					...(session ? { "X-MC-Session": session } : {}),
 					...(encodedName !== undefined ? { "X-MC-Name": encodedName } : {}),
+					...(gameMode !== undefined ? { "X-MC-Game-Mode": gameMode } : {}),
 					...(user ? { "X-MC-User": user } : {}),
 					...(authorizedAt === null ? {} : { "X-MC-Authorized-At": authorizedAt }),
 				},
@@ -402,7 +404,7 @@ async function accessFixture(t, synchronousClose = false) {
 		sql.prepare("INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId) VALUES (?, ?, ?, 0, 0, ?)")
 			.run(`session-${user}`, new Date(1_000_000).toISOString(), `token-${user}`, user);
 	}
-	sql.prepare("INSERT INTO world VALUES ('lobby', 'owner', 0)").run();
+	sql.prepare("INSERT INTO world(name, owner_id, created_at) VALUES ('lobby', 'owner', 0)").run();
 	for (const user of ["owner", "player", "other"]) {
 		sql.prepare("INSERT INTO world_member VALUES ('lobby', ?, 'operator', 0)").run(`${user}@example.com`);
 		await f.join(user, String(now), `session-${user}`);
@@ -975,4 +977,56 @@ test("DO restores the saved mode and persists creative for a missing gamemode", 
 		assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, gameMode ?? "creative");
 		if (gameMode === "survival") assert.deepEqual(client.inventory, Array(36).fill(null));
 	}
+});
+
+test("DO game mode RPC persists and only restarts connections on a change", async t => {
+	const f = fixture(t, true);
+	assert.equal(f.world.getGameMode(), "creative");
+	await f.world.setGameMode("survival");
+	assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, "survival");
+	await f.join("first");
+	await f.join("second");
+	await f.world.setGameMode("survival");
+	assert.deepEqual(f.closed, []);
+	await f.world.setGameMode("creative");
+	assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, "creative");
+	assert.deepEqual(f.closed, Array.from({ length: 2 }, () => [SERVICE_RESTART, "ゲームモードが変わりました"]));
+	assert.deepEqual(f.disconnected, [1, 2]);
+});
+
+test("DO applies the mode header before admitting the new socket and retains player state", async t => {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.env.GEN_OFFLOAD = "0";
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	await f.join("first");
+	await f.join("second");
+	const core = f.world.ensureCore();
+	const welcome = (id: number) => {
+		core.packet(id, client.encodeHello(2));
+		core.tick();
+		for (const packet of core.takeOutbox()) if (packet.client === id) client.packet(packet.data);
+		return client.gameMode;
+	};
+	assert.equal(welcome(1), "creative");
+	core.packet(1, client.encodeCreativeSetSlot(0, 1, 23));
+	core.tick();
+	const saved = core.inventoryData(1);
+	assert.ok(saved);
+
+	assert.equal((await f.join("first", undefined, undefined, undefined, "survival")).status, 101);
+	assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, "survival");
+	assert.deepEqual([...f.world.sockets.keys()], [3]);
+	assert.deepEqual(f.closed, Array.from({ length: 2 }, () => [SERVICE_RESTART, "ゲームモードが変わりました"]));
+	assert.deepEqual(core.inventoryData(3), saved);
+	assert.equal(welcome(3), "survival");
+
+	await f.join("third", undefined, undefined, undefined, "survival");
+	await f.join("fourth");
+	assert.equal(f.closed.length, 2);
+	assert.deepEqual([...f.world.sockets.keys()], [3, 4, 5]);
+	assert.equal(welcome(5), "survival");
 });

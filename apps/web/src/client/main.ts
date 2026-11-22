@@ -186,8 +186,8 @@ async function main(): Promise<void> {
 	let lastJumpTap = -Infinity;
 	let pendingJump = false;
 	let pendingFlightToggle = false;
-	function resetPlayer(): void {
-		position = [camera.x, camera.y - EYE_HEIGHT, camera.z];
+	function resetPlayer(feet: [number, number, number] = [camera.x, camera.y - EYE_HEIGHT, camera.z]): void {
+		position = feet;
 		previousPosition = [...position];
 		movementTime = 0;
 		lastJumpTap = -Infinity;
@@ -292,6 +292,7 @@ async function main(): Promise<void> {
 		},
 		onPacket: (data: Uint8Array) => {
 			const seq = ++packetSequence;
+			const previousMode = data[0] === S2C.Welcome ? core.gameMode : undefined;
 			const id = worldAudio.packet(data, position, mobHurtAt);
 			if (id === S2C.Chat) {
 				const line = core.takeChat();
@@ -355,6 +356,7 @@ async function main(): Promise<void> {
 			}
 			if (id === S2C.Welcome) {
 				pendingSelectedSlot = null;
+				vitals.hidden = core.gameMode !== "survival";
 				seedReady = true;
 				joinedGameTime = core.gameTime;
 				timeReceivedAt = performance.now();
@@ -370,6 +372,7 @@ async function main(): Promise<void> {
 					// Keep camera/prediction at the previous location. The DO restores
 					// its accepted position; PlayerCorrect still wins if they differ.
 					reconnects++;
+					if (core.gameMode !== previousMode) resetPlayer(position);
 					sendPosition();
 				}
 				connection = "open";

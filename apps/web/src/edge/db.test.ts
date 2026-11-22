@@ -32,6 +32,25 @@ test("duplicate creation is rolled back and foreign keys cascade", async t => {
 	assert.deepEqual(await db.members("lobby"), []);
 });
 
+test("game mode migration defaults legacy worlds and stores mode changes", async t => {
+	const f = testDB(sqlite => {
+		sqlite.exec(`INSERT INTO "user"(id, name, email, emailVerified, createdAt, updatedAt)
+			VALUES ('owner', 'owner', 'owner@example.com', 1, 0, 0);
+			INSERT INTO world(name, owner_id, created_at) VALUES ('legacy', 'owner', 0);`);
+	});
+	t.after(f.close);
+	const db = createDB(f.db);
+	assert.equal((await db.world("legacy"))?.gameMode, "creative");
+	assert.equal(await db.createWorld("new", "owner", "owner@example.com", "survival"), "created");
+	assert.equal((await db.world("new"))?.gameMode, "survival");
+	assert.deepEqual(await db.worlds("owner", "owner@example.com"), [
+		{ name: "new", role: "operator", owner: true, gameMode: "survival" },
+	]);
+	await db.setWorldGameMode("new", "creative");
+	assert.equal((await db.world("new"))?.gameMode, "creative");
+	assert.throws(() => f.sqlite.exec("UPDATE world SET game_mode = 'invalid'"), /CHECK constraint failed/);
+});
+
 test("member cap permits updates, and deletion releases a slot", async t => {
 	const f = testDB();
 	t.after(f.close);

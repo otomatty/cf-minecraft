@@ -1,11 +1,13 @@
 export const MAX_WORLDS_PER_CREATOR = 5;
 export const MAX_MEMBERS_PER_WORLD = 64;
 export type Role = "operator" | "player";
+export type GameMode = "creative" | "survival";
 
 export interface World {
 	name: string;
 	owner_id: string;
 	owner_email: string;
+	gameMode: GameMode;
 }
 
 export function createDB(db: D1Database) {
@@ -22,7 +24,7 @@ export function createDB(db: D1Database) {
 		},
 		world: (name: string) =>
 			query(
-				"SELECT w.name, w.owner_id, lower(u.email) AS owner_email FROM world w " +
+				"SELECT w.name, w.owner_id, lower(u.email) AS owner_email, w.game_mode AS gameMode FROM world w " +
 					'JOIN "user" u ON u.id = w.owner_id WHERE w.name = ?',
 				name,
 			).first<World>(),
@@ -33,27 +35,29 @@ export function createDB(db: D1Database) {
 		async worlds(userId: string, email: string) {
 			return (
 				await query(
-					"SELECT w.name, m.role, w.owner_id = ? AS owner FROM world w " +
+					"SELECT w.name, m.role, w.owner_id = ? AS owner, w.game_mode AS gameMode FROM world w " +
 						"JOIN world_member m ON w.name = m.world WHERE m.email = ? ORDER BY w.name",
 					userId,
 					email,
-				).all<{ name: string; role: Role; owner: number }>()
+				).all<{ name: string; role: Role; owner: number; gameMode: GameMode }>()
 			).results.map(row => ({ ...row, owner: !!row.owner }));
 		},
 		async createWorld(
 			name: string,
 			userId: string,
 			email: string,
+			gameMode: GameMode = "creative",
 		): Promise<"created" | "exists" | "limit"> {
 			// Conditional writes enforce the quota within the D1 batch transaction.
 			try {
 				const results = await db.batch([
 					query(
-						"INSERT INTO world(name, owner_id, created_at) SELECT ?, ?, ? " +
+						"INSERT INTO world(name, owner_id, created_at, game_mode) SELECT ?, ?, ?, ? " +
 							"WHERE (SELECT count(*) FROM world WHERE owner_id = ?) < ?",
 						name,
 						userId,
 						Date.now(),
+						gameMode,
 						userId,
 						MAX_WORLDS_PER_CREATOR,
 					),
@@ -74,6 +78,9 @@ export function createDB(db: D1Database) {
 				}
 				throw error;
 			}
+		},
+		async setWorldGameMode(name: string, gameMode: GameMode) {
+			await query("UPDATE world SET game_mode = ? WHERE name = ?", gameMode, name).run();
 		},
 		async members(name: string) {
 			return (

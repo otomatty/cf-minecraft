@@ -570,6 +570,44 @@ async function playthrough(kind) {
 	return page;
 }
 
+async function gameModeChange() {
+	const world = `e2e-mode-${run}`;
+	const { page, errors } = await open(`server=ws&world=${world}&view=2`);
+	try {
+		const initial = await settle(page, "game mode change", chunksInView(2));
+		check(initial.gameMode === "creative", "game mode: new multiplayer world starts in creative");
+		check(await page.$eval("#vitals", vitals => vitals.hidden), "game mode: creative hides the health and food HUD");
+
+		for (const mode of ["survival", "creative"]) {
+			const before = await page.evaluate(() => window.__mc.stats().reconnects);
+			const response = await fetch(`${edge}/api/debug/gamemode?world=${encodeURIComponent(world)}&mode=${mode}`, { method: "POST" });
+			if (!response.ok) throw new Error(`game mode: debug request for ${mode} failed (${response.status})`);
+			await page.waitForFunction((mode, before) => {
+				const stats = window.__mc.stats();
+				return stats.connection === "open" && stats.reconnects > before && stats.gameMode === mode;
+			}, { timeout: 15000 }, mode, before);
+			check(true, `game mode: reconnected in ${mode}`);
+			const healthVisible = await page.$eval("#health", meter => meter.getClientRects().length > 0);
+			check(healthVisible === (mode === "survival"), `game mode: health visibility matches ${mode}`);
+			const foodVisible = await page.$eval("#food", meter => meter.getClientRects().length > 0);
+			check(foodVisible === (mode === "survival"), `game mode: food visibility matches ${mode}`);
+
+			await resumePointerLock(page, `game mode: ${mode}`);
+			await page.keyboard.press("KeyE");
+			const screen = mode === "survival" ? "#inventory-screen" : "#block-picker";
+			await page.waitForSelector(`${screen}:not([hidden])`, { timeout: 5000 });
+			check(true, `game mode: ${mode} opens ${screen}`);
+			await page.keyboard.press("Escape");
+		}
+		check(errors.length === 0, "game mode: no page errors", errors.join(" | "));
+	} catch (error) {
+		await diagnoseFailure(page, "game-mode-change", error);
+		throw error;
+	} finally {
+		await page.close();
+	}
+}
+
 /** Real input events: pointer lock, keyboard movement, mouse look, break and place by clicking. */
 async function inputs() {
 	const view = 3;
@@ -3040,6 +3078,7 @@ try {
 	check(inBrowser === expected, "scenario fingerprint in Chrome equals Node", `${inBrowser} vs ${expected}`);
 	await page.close();
 	await (await playthrough("ws")).close();
+	await gameModeChange();
 } catch (err) {
 	if (shouldDiagnoseRunFailure(err)) {
 		// Enumerating pages can itself require CDP; keep the failure path bounded.

@@ -7,6 +7,7 @@ import { RegionCodec } from "../shared/region-codec.ts";
 import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
 import { summarize, TICK_MS, TickPacer } from "../shared/tick-pacer.ts";
 import { GenerationDispatcher, type GenerationStats } from "../shared/gen-dispatch.ts";
+import type { GameMode } from "./db.ts";
 import serverWasm from "../wasm/server.wasm";
 
 // One world = one Durable Object: the dedicated server.
@@ -198,6 +199,8 @@ export class WorldDO extends DurableObject<Env> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
+		const gameMode = request.headers.get("X-MC-Game-Mode");
+		if (gameMode === "creative" || gameMode === "survival") this.applyGameMode(gameMode);
 		const previous = [...this.users].find(([, identity]) => identity === user)?.[0];
 		if (this.sockets.size - (previous === undefined ? 0 : 1) >= MAX_PLAYERS) {
 			const pair = new WebSocketPair();
@@ -304,7 +307,24 @@ export class WorldDO extends DurableObject<Env> {
 		return revoked;
 	}
 
-	/** RPC (debug): disconnect everyone using the same cleanup as revoke. */
+	getGameMode(): GameMode {
+		return this.meta("gamemode") === "survival" ? "survival" : "creative";
+	}
+
+	async setGameMode(mode: GameMode): Promise<void> {
+		this.applyGameMode(mode);
+	}
+
+	private applyGameMode(mode: GameMode): void {
+		const previous = this.meta("gamemode");
+		if (previous === mode) return;
+		this.setMeta("gamemode", mode);
+		if (mode === (previous === "survival" ? "survival" : "creative")) return;
+		this.core?.setGameMode(mode);
+		this.disconnectAll(SERVICE_RESTART, "ゲームモードが変わりました");
+	}
+
+	/** Disconnect everyone using the same cleanup as revoke. */
 	disconnectAll(code: number, reason: string): number {
 		const count = this.sockets.size;
 		for (const [id, socket] of this.sockets) {

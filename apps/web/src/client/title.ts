@@ -1,11 +1,18 @@
 import { gameRedirect, safeNext, thumbPosition } from "./title-route.ts";
 
 type Role = "operator" | "player";
+type GameMode = "creative" | "survival";
+
+const gameModeText: Record<GameMode, string> = {
+	creative: "クリエイティブ",
+	survival: "サバイバル",
+};
 
 interface World {
 	name: string;
 	role: Role;
 	owner: boolean;
+	gameMode: GameMode;
 }
 
 interface Me {
@@ -54,6 +61,19 @@ function link(text: string, href: string): HTMLAnchorElement {
 	return node;
 }
 
+function gameModeSelect(mode: GameMode = "creative") {
+	const label = element("label", "ゲームモード");
+	const field = element("select");
+	for (const [value, text] of Object.entries(gameModeText)) {
+		const option = element("option", text);
+		option.value = value;
+		field.append(option);
+	}
+	field.value = mode;
+	label.append(field);
+	return { label, field };
+}
+
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : "通信できません。再度お試しください";
 }
@@ -64,6 +84,9 @@ function apiErrorMessage(status: number, code?: unknown): string {
 	}
 	switch (status) {
 		case 502:
+			if (code === "game mode update failed") {
+				return "ゲームモードは保存されました。次の接続時にワールドへ反映されます";
+			}
 			return "メンバーは削除しましたが、接続中の切断に失敗しました。もう一度削除してください";
 		case 503:
 			return "本番の認証設定が未完了です";
@@ -366,7 +389,8 @@ function start(): void {
 			cards.forEach((card, index) => card.setAttribute("aria-pressed", String(worlds![index].name === selected)));
 			const text = element("div");
 			text.className = "world-info";
-			text.append(element("small", "マルチプレイ"), element("h3", world.name), element("p", roleText(world)));
+			text.append(element("small", "マルチプレイ"), element("h3", world.name),
+				element("p", roleText(world)), element("p", `ゲームモード ${gameModeText[world.gameMode]}`));
 			const actions = element("div");
 			actions.className = "actions";
 			if (world.role === "operator") actions.append(button("メンバー", "outline", () => go("members")));
@@ -388,7 +412,7 @@ function start(): void {
 			thumb.setAttribute("aria-hidden", "true");
 			const name = element("span", world.name);
 			name.className = "world-name";
-			card.append(thumb, name, element("small", roleText(world)));
+			card.append(thumb, name, element("small", `${roleText(world)} · ${gameModeText[world.gameMode]}`));
 			cards.push(card);
 			grid.append(card);
 		}
@@ -403,12 +427,37 @@ function start(): void {
 	}
 
 	async function members(world: World, current: number) {
+		const worldPath = `/api/worlds/${encodeURIComponent(world.name)}`;
+		const modeForm = element("form");
+		const mode = gameModeSelect(world.gameMode);
+		const change = button("変更");
+		change.type = "submit";
+		modeForm.append(mode.label, element("p", "接続中のプレイヤーはいったん切断され、再接続されます"), change);
+		panel.append(modeForm);
+		const modeFeedback = notice(panel);
+		modeForm.onsubmit = async event => {
+			event.preventDefault();
+			if (change.disabled) return;
+			const gameMode = mode.field.value as GameMode;
+			change.disabled = mode.field.disabled = true;
+			modeFeedback.textContent = "";
+			try {
+				const updated = await api<{ gameMode: GameMode }>(worldPath, "PATCH", { gameMode });
+				world.gameMode = updated.gameMode;
+				modeFeedback.textContent = `ゲームモードを${gameModeText[updated.gameMode]}に変更しました`;
+			} catch (error) {
+				if (error instanceof APIError && error.status === 502) world.gameMode = gameMode;
+				modeFeedback.textContent = message(error);
+			} finally {
+				change.disabled = mode.field.disabled = false;
+			}
+		};
 		const list = element("ul");
 		list.className = "member-list";
 		list.append(element("li", "読み込み中…"));
 		panel.append(list);
 		const feedback = notice(panel);
-		const path = `/api/worlds/${encodeURIComponent(world.name)}/members`;
+		const path = `${worldPath}/members`;
 		async function refresh() {
 			const data = await api<{ members: { email: string; role: Role }[] }>(path);
 			if (current !== generation) return;
@@ -471,10 +520,11 @@ function start(): void {
 		panel.append(element("p", "名前は半角英小文字・数字で始まる1〜32文字です。途中に - と _ も使えます。作成は1人5個までです。"));
 		const form = element("form");
 		const name = worldInput("名前");
+		const mode = gameModeSelect();
 		const slot = element("div");
 		const submit = button("作成");
 		submit.type = "submit";
-		form.append(name.label, slot, submit);
+		form.append(name.label, mode.label, slot, submit);
 		panel.append(form);
 		const feedback = notice(panel);
 		form.onsubmit = event => event.preventDefault();
@@ -486,7 +536,7 @@ function start(): void {
 			widget.begin();
 			feedback.textContent = "";
 			try {
-				await api("/api/worlds", "POST", { name: name.field.value, turnstileToken: widget.token() });
+				await api("/api/worlds", "POST", { name: name.field.value, gameMode: mode.field.value, turnstileToken: widget.token() });
 				await refreshWorlds(name.field.value);
 				if (current === generation) {
 					widget.reset();
