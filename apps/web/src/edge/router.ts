@@ -26,6 +26,7 @@ export interface RouterDeps {
 			refreshRole(userId: string, world: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
 			getGameMode(): Promise<GameMode>;
+			getGameModeRevision(): Promise<number>;
 			setGameMode(mode: GameMode, revision?: number): Promise<void>;
 			evict(): Promise<void>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
@@ -150,8 +151,24 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (url.pathname === "/api/debug/gamemode") {
 			const gameMode = url.searchParams.get("mode");
 			if (!isGameMode(gameMode)) return error("invalid game mode", 400);
-			// No D1 row. An omitted revision makes WorldDO use its stored revision plus one.
-			await worlds.getByName(world).setGameMode(gameMode);
+			let hasWorld = false;
+			try {
+				hasWorld = Boolean(await db.world(world));
+			} catch {
+				// Unmigrated development databases use WorldDO's local revision.
+			}
+			const worldDO = worlds.getByName(world);
+			let revision: number | undefined;
+			if (hasWorld) {
+				try {
+					const revisionFloor = await worldDO.getGameModeRevision();
+					revision = await db.setWorldGameMode(world, gameMode, revisionFloor);
+				} catch (cause) {
+					console.error("game mode update failed", world, cause);
+					return error("game mode update failed", 500);
+				}
+			}
+			await worldDO.setGameMode(gameMode, revision);
 			return json({ gameMode });
 		}
 		if (url.pathname === "/api/debug/evict") {

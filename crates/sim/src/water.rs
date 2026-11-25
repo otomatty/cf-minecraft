@@ -1,4 +1,4 @@
-//! Scheduled fluid updates and bucket interactions.
+//! Scheduled block updates, fluid flow and bucket interactions.
 
 use world::{blocks, items, HEIGHT, MIN_Y};
 
@@ -132,6 +132,8 @@ impl Server {
             if let Some(state) = self.get_block(x, y, z) {
                 if let Some(fluid) = Fluid::for_state(state) {
                     self.tick_fluid(pos, state, fluid);
+                } else if blocks::info(state).falls {
+                    self.tick_falling_block(pos, state);
                 }
             }
         }
@@ -240,7 +242,14 @@ impl Server {
             if count == 1 {
                 client
                     .inventory
-                    .set(client.inventory.selected(), Some(Stack { item, count: 1 }))
+                    .set(
+                        client.inventory.selected(),
+                        Some(Stack {
+                            item,
+                            count: 1,
+                            damage: 0,
+                        }),
+                    )
                     .expect("bucket fits in the selected slot");
             } else {
                 client.inventory.take_selected();
@@ -406,7 +415,9 @@ mod tests {
         assert!(server.scheduled_blocks.is_empty());
         assert!(server.scheduled_block_times.is_empty());
         server.connect(1);
-        server.clients.get_mut(&1).unwrap().pos = [8.5, 80.0, 8.5];
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = [8.5, 80.0, 8.5];
         assert!(server.load_chunk(cx, cz, &flow_bytes));
         advance(&mut server, 2 * WATER_FLOW_DELAY);
         assert_eq!(at(&server, EAST_EDGE), blocks::FLOWING_WATER);
@@ -588,7 +599,9 @@ mod tests {
         );
         assert_eq!(server.dirty_chunks(), 0);
         server.connect(1);
-        server.clients.get_mut(&1).unwrap().pos = [8.5, 80.0, 8.5];
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = [8.5, 80.0, 8.5];
         advance(&mut server, 1);
         assert!(!server.scheduled_blocks.contains(&(100, [14, 80, 1])));
         assert_eq!(server.dirty_chunks(), 0);
@@ -679,7 +692,9 @@ mod tests {
         assert!(server.load_chunk(cx, cz, &bytes));
         assert_eq!(server.scheduled_blocks.len(), 1);
         server.connect(1);
-        server.clients.get_mut(&1).unwrap().pos = [8.5, 80.0, 8.5];
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = [8.5, 80.0, 8.5];
         advance(&mut server, WATER_FLOW_DELAY);
         assert!(server.scheduled_blocks.is_empty());
         assert_eq!(server.dirty_chunks(), 0);
@@ -788,7 +803,9 @@ mod tests {
         }
         assert_eq!(at(&server, source), blocks::WATER);
         assert!(server.scheduled_blocks.is_empty());
-        server.clients.get_mut(&1).unwrap().pos = source.map(|v| f64::from(v) + 0.5);
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = source.map(|v| f64::from(v) + 0.5);
         advance(&mut server, 20);
         assert_eq!(server.stats.blocks_changed, 0);
         assert!(server.scheduled_blocks.is_empty());
@@ -949,6 +966,7 @@ mod tests {
         Stack {
             item: items::by_name(name).unwrap(),
             count,
+            damage: 0,
         }
     }
 

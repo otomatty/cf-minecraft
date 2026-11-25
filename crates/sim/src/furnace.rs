@@ -40,35 +40,23 @@ impl Furnace {
             self.slots[2] = Some(Stack {
                 item: output.unwrap(),
                 count: self.slots[2].map_or(1, |s| s.count + 1),
+                damage: 0,
             });
             self.progress = 0;
         }
     }
-    pub fn write(&self, w: &mut Writer) {
+    pub fn write(&self, w: &mut Writer, with_damage: bool) {
         for s in self.slots {
-            w.u16(s.map_or(0, |s| s.item));
-            w.u8(s.map_or(0, |s| s.count));
+            Stack::write_slot(s, w, with_damage);
         }
         w.raw(&self.burn.to_be_bytes());
         w.raw(&self.total.to_be_bytes());
         w.u16(self.progress);
     }
-    pub fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+    pub fn read(r: &mut Reader<'_>, with_damage: bool) -> Result<Self, DecodeError> {
         let mut f = Self::default();
         for s in &mut f.slots {
-            let item = r.u16()?;
-            let count = r.u8()?;
-            if item == 0 {
-                if count != 0 {
-                    return Err(DecodeError);
-                }
-            } else {
-                let stack = Stack { item, count };
-                if !crate::inventory::valid(stack) {
-                    return Err(DecodeError);
-                }
-                *s = Some(stack);
-            }
+            *s = Stack::read_slot(r, with_damage)?;
         }
         f.burn = r.i32()? as u32;
         f.total = r.i32()? as u32;
@@ -100,9 +88,12 @@ mod tests {
                 progress,
             };
             let mut w = Writer::new();
-            f.write(&mut w);
+            f.write(&mut w, false);
             f.progress = progress.min(smelting::SMELT_TICKS - 1);
-            assert_eq!(Furnace::read(&mut Reader::new(&w.finish())).unwrap(), f);
+            assert_eq!(
+                Furnace::read(&mut Reader::new(&w.finish()), false).unwrap(),
+                f
+            );
         }
     }
     #[test]
@@ -114,14 +105,15 @@ mod tests {
                 ..Furnace::default()
             };
             let mut w = Writer::new();
-            f.write(&mut w);
-            assert!(Furnace::read(&mut Reader::new(&w.finish())).is_err());
+            f.write(&mut w, false);
+            assert!(Furnace::read(&mut Reader::new(&w.finish()), false).is_err());
         }
     }
     fn stack(name: &str, count: u8) -> Option<Stack> {
         Some(Stack {
             item: items::by_name(name).unwrap(),
             count,
+            damage: 0,
         })
     }
     #[test]

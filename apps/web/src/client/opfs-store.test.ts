@@ -20,6 +20,7 @@ Object.defineProperty(navigator, "locks", { configurable: true, value: {
 } });
 
 const module = new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url)));
+const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
 
 class MemoryDirectory {
 	files = new Map<string, { bytes: Uint8Array; durable: Uint8Array; open: boolean }>();
@@ -242,7 +243,6 @@ test("OPFS saves entity-only chunks and a fresh core streams the restored entiti
 	const store = await open(new MemoryDirectory());
 	const saves = new PendingChunkSaves(store);
 	const reads = new PendingChunkReads((cx, cz) => store.readChunk(cx, cz));
-	const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
 	const join = () => {
 		const core = ServerCore.fromModule(module);
 		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
@@ -287,7 +287,8 @@ test("regenerating a missing stored chunk in the real core does not make it dirt
 	core.start(1n, Generator.Flat);
 	core.setStored([[0, 0]]);
 	core.connect(1);
-	core.packet(1, new Uint8Array([0, 28, 2])); // Hello: protocol 28, view distance 2.
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	core.packet(1, client.encodeHello(2));
 	core.tick();
 	assert.ok(core.takeRequests().some(([cx, cz]) => cx === 0 && cz === 0));
 	core.chunkMissing(0, 0);

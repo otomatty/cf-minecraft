@@ -12,6 +12,7 @@ const MAX_SAVED_SPEED: f64 = 8.0;
 const MAX_SAVED_Y: f64 = (MIN_Y + HEIGHT + 64) as f64;
 const ANIMAL: u8 = 0;
 const ITEM: u8 = 1;
+const DAMAGED_ITEM: u8 = 2;
 const MIN_RECORD_BYTES: usize = 1 + 2 + 1 + 6 * 8 + 2 * 4;
 
 pub(super) enum SavedEntity<M = Mob, I = Entity> {
@@ -61,7 +62,7 @@ pub(super) fn read_saved_entities(
     for _ in 0..count {
         entities.push(match r.u8()? {
             ANIMAL => SavedEntity::Animal(Mob::read_saved(chunk, &mut r)?),
-            ITEM => {
+            tag @ (ITEM | DAMAGED_ITEM) => {
                 let item = r.u16()?;
                 let count = r.u8()?;
                 if count == 0 || items::info(item).is_none_or(|info| count > info.max_stack) {
@@ -76,6 +77,11 @@ pub(super) fn read_saved_entities(
                     velocity,
                     age: r.i32()? as u32,
                     pickup_delay: r.i32()? as u32,
+                    damage: if tag == DAMAGED_ITEM {
+                        crate::inventory::normalize_damage(item, r.u16()?)
+                    } else {
+                        0
+                    },
                     on_ground: false,
                 })
             }
@@ -126,7 +132,7 @@ impl Server {
                     mob.write_saved(w);
                 }
                 SavedEntity::Item(item) => {
-                    w.u8(ITEM);
+                    w.u8(if item.damage == 0 { ITEM } else { DAMAGED_ITEM });
                     w.u16(item.item);
                     w.u8(item.count);
                     for value in item.pos.into_iter().chain(item.velocity) {
@@ -134,6 +140,9 @@ impl Server {
                     }
                     w.i32(item.age as i32);
                     w.i32(item.pickup_delay as i32);
+                    if item.damage != 0 {
+                        w.u16(item.damage);
+                    }
                 }
             }
         }
@@ -259,6 +268,49 @@ mod tests {
         assert_eq!(target.next_entity_id, 25);
         assert_eq!(target.state_hash(), restore().state_hash());
         assert_eq!(save(&mut target), bytes);
+    }
+
+    #[test]
+    fn item_records_preserve_damage_and_read_legacy_and_invalid_values() {
+        let mut source = server();
+        let item = items::by_name("wooden_pickaxe").unwrap();
+        let pos = [2.5, 4.0, 3.5];
+        source.spawn_item_stack(
+            crate::Stack {
+                item,
+                count: 1,
+                damage: 28,
+            },
+            pos,
+            [0.0; 3],
+            37,
+        );
+        let hash = source.state_hash();
+        source.entities.get_mut(&1).unwrap().damage = 0;
+        assert_ne!(source.state_hash(), hash);
+        let legacy = save(&mut source);
+        source.entities.get_mut(&1).unwrap().damage = 28;
+        let bytes = save(&mut source);
+        let tag = source.world.chunks[&(0, 0)].to_bytes().len() + 3;
+        assert_eq!(legacy[tag], ITEM);
+        assert_eq!(bytes[tag], DAMAGED_ITEM);
+
+        let restore = |bytes: &[u8]| {
+            let mut target = Server::new(5, Generator::Flat);
+            assert!(target.load_chunk(0, 0, bytes));
+            let entity = &target.entities[&1];
+            (entity.item, entity.damage)
+        };
+        assert_eq!(restore(&legacy), (item, 0));
+        assert_eq!(restore(&bytes), (item, 28));
+
+        let mut invalid = bytes;
+        let damage = invalid.len() - 2;
+        invalid[damage..].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(restore(&invalid), (item, 47));
+        let stone = items::by_name("stone").unwrap();
+        invalid[tag + 1..tag + 3].copy_from_slice(&stone.to_be_bytes());
+        assert_eq!(restore(&invalid), (stone, 0));
     }
 
     #[test]
@@ -413,6 +465,8 @@ mod tests {
     fn movement_within_one_chunk_waits_for_tick_600() {
         let mut source = server();
         source.connect(1);
+        source.clients.get_mut(&1).unwrap().joined = true;
+        source.set_external_generation(1);
         source.spawn_item(1, 5, [3.5, 80.0, 3.5], [0.5, 0.0, 0.0], 40);
         let first = save(&mut source);
         source.game_time = 598;
@@ -502,6 +556,8 @@ mod tests {
         let mut source = server();
         source.set_entity_persistence(false);
         source.connect(1);
+        source.clients.get_mut(&1).unwrap().joined = true;
+        source.set_external_generation(1);
         for cx in [0, 30, 60] {
             source.world.insert_chunk(Chunk::empty(cx, 0));
             let pos = [f64::from(cx * 16) + 2.5, 80.0, 3.5];

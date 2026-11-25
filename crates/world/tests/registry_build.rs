@@ -99,6 +99,16 @@ fn data_errors_identify_the_problem() {
         ),
         ("solid = false", "typo = false", "unknown field `typo`"),
         (
+            "name = \"oak_slab\"",
+            "name = \"oak_slab\"\nfalls = true",
+            "oak_slab: falls requires a solid cube",
+        ),
+        (
+            "name = \"air\"",
+            "name = \"air\"\nfalls = true",
+            "air: falls requires a solid cube",
+        ),
+        (
             "textures = [",
             "textures = [\"stone\",",
             "duplicate texture stone",
@@ -318,20 +328,30 @@ fn farming_preserves_existing_generated_block_entries() {
             add(line);
         }
     }
-    // Fingerprint of the original atlas prefix, state constants, metadata and properties.
-    assert_eq!(hash.finish(), 0xbb0d_4edd_803d_f4fa);
+    // Fingerprint of the original atlas prefix, state constants, metadata and
+    // properties, now including the falls field.
+    assert_eq!(hash.finish(), 0xb628_304c_3ea4_c340);
 }
 
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
         "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\nfalls = false\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
         generate_fixture(&explicit, BIOMES).unwrap()
     );
+}
+
+#[test]
+fn only_sand_and_gravel_fall() {
+    use world::blocks;
+    let falling: Vec<_> = (0..blocks::COUNT)
+        .filter(|&state| blocks::info(state).falls)
+        .collect();
+    assert_eq!(falling, [blocks::SAND, blocks::GRAVEL]);
 }
 
 #[test]
@@ -612,4 +632,41 @@ fn loot_requires_known_mobs_and_items_and_an_ordered_range() {
         assert!(error.contains("loot.toml:"), "{error}");
         assert!(error.contains(message), "{error}");
     }
+}
+
+#[test]
+fn durability_requires_a_single_item_stack_and_a_nonzero_u16() {
+    let items = include_str!("../../../data/registry/items.toml");
+    let error = generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("id = 1\n", "id = 1\ndurability = 48\n", 1),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("durability requires max_stack = 1"),
+        "{error}"
+    );
+    for value in ["0", "65536", "-1", "1.5"] {
+        let error = generate_items_fixture(
+            BLOCKS,
+            BIOMES,
+            &items.replacen("durability = 48", &format!("durability = {value}"), 1),
+        )
+        .unwrap_err();
+        assert!(error.contains("items.toml"), "{error}");
+    }
+    assert!(generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("durability = 48", "durability = 65535", 1)
+    )
+    .is_ok());
+    let error = generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("durability = 48", "durabilitty = 48", 1),
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown field `durabilitty`"), "{error}");
 }

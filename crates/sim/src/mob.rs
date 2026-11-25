@@ -888,17 +888,21 @@ fn sees_sunlight(world: &World, pos: [f64; 3], head_offset: f64) -> bool {
 
 fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
     let [bx, by, bz] = [x, y - 0.01, z].map(|v| v.floor() as i32);
-    if world.get_block(bx, by, bz).is_none_or(blocks::is_lava) {
-        return false;
-    }
     // The mob's footprint can stay grounded while its center is over an edge.
-    let mut supported = false;
-    collisions.collision_boxes(bx, by, bz, &mut |bounds| {
-        supported |= bounds.max[1] <= y
-            && (bounds.min[0]..bounds.max[0]).contains(&x)
-            && (bounds.min[2]..bounds.max[2]).contains(&z);
-    });
-    supported
+    // Fences can support the center from a block below the cell under the feet.
+    [by, by - 1].into_iter().any(|block_y| {
+        if world.get_block(bx, block_y, bz).is_none_or(blocks::is_lava) {
+            return false;
+        }
+        let mut supported = false;
+        collisions.collision_boxes(bx, block_y, bz, &mut |bounds| {
+            supported |= bounds.max[1] > f64::from(by)
+                && bounds.max[1] <= y
+                && (bounds.min[0]..bounds.max[0]).contains(&x)
+                && (bounds.min[2]..bounds.max[2]).contains(&z);
+        });
+        supported
+    })
 }
 
 /// None means stop. A solid block at foot level can ask physics to jump.
@@ -2187,6 +2191,7 @@ mod tests {
                 Some(crate::Stack {
                     item: items::by_name(item).unwrap(),
                     count: 1,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -2262,7 +2267,14 @@ mod tests {
                         .get_mut(&1)
                         .unwrap()
                         .inventory
-                        .set(1, Some(crate::Stack { item, count: 1 }))
+                        .set(
+                            1,
+                            Some(crate::Stack {
+                                item,
+                                count: 1,
+                                damage: 0,
+                            }),
+                        )
                         .unwrap();
                     server.handle_packet(1, &C2S::SelectSlot { slot: 1 }.encode());
                     attack(&mut server, id);
@@ -2276,6 +2288,51 @@ mod tests {
             attack(&mut server, id);
             server.tick();
             assert_eq!(server.mobs[&id].health, 9);
+        }
+    }
+
+    #[test]
+    fn melee_wear_requires_a_landed_survival_hit() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut server, id) = combat(mode);
+            let item = items::by_name("wooden_axe").unwrap();
+            let damage = items::info(item).unwrap().durability.unwrap() - 2;
+            let stack = crate::Stack {
+                item,
+                count: 1,
+                damage,
+            };
+            server
+                .clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(stack))
+                .unwrap();
+            for attempt in 0..3 {
+                if attempt == 2 {
+                    server.mobs.get_mut(&id).unwrap().hurt_ticks = 0;
+                }
+                server.apply(1, C2S::Attack { id });
+                assert_eq!(server.mobs[&id].health, if attempt == 2 { 4 } else { 7 });
+                let broken = attempt == 2 && mode == GameMode::Survival;
+                let worn = if mode == GameMode::Survival {
+                    damage + 1
+                } else {
+                    damage
+                };
+                assert_eq!(
+                    server.clients[&1].inventory.selected_stack(),
+                    (!broken).then_some(crate::Stack {
+                        damage: worn,
+                        ..stack
+                    })
+                );
+                assert_eq!(
+                    server.take_outbox().contains(&(1, S2C::ToolBreak.encode())),
+                    broken
+                );
+            }
         }
     }
 
@@ -2805,6 +2862,7 @@ mod tests {
             let stack = crate::Stack {
                 item: drop.item,
                 count: drop.count,
+                damage: 0,
             };
             for _ in 0..10 {
                 server.tick();
@@ -2859,6 +2917,7 @@ mod tests {
         let stack = crate::Stack {
             item: drop.item,
             count: drop.count,
+            damage: 0,
         };
         assert_eq!(stack.item, items::by_name("cooked_beef").unwrap());
         assert!((1..=3).contains(&stack.count));
@@ -2873,6 +2932,30 @@ mod tests {
         server.tick();
         assert!(server.entities.is_empty());
         assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
+    }
+
+    #[test]
+    fn lava_death_drops_loot_on_the_last_dry_fence() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let fence = [8.5, 2.5, 5.5];
+        assert_ne!(server.mobs[&id].last_dry_pos, fence);
+        server.world.set_block(8, 1, 5, blocks::OAK_FENCE);
+        server.mobs.get_mut(&id).unwrap().body.position = fence;
+        server.tick();
+        assert_eq!(server.mobs[&id].last_dry_pos, fence);
+
+        server.world.set_block(10, 1, 5, blocks::LAVA);
+        let cow = server.mobs.get_mut(&id).unwrap();
+        cow.body.position = [10.5, 1.0, 5.5];
+        cow.health = LAVA_DAMAGE;
+        cow.lava_ticks = LAVA_INTERVAL - 1;
+        server.tick();
+
+        assert!(!server.mobs.contains_key(&id));
+        assert_eq!(server.entities.len(), 1);
+        let drop = server.entities.values().next().unwrap();
+        assert_eq!(drop.item, items::by_name("cooked_beef").unwrap());
+        assert_eq!(drop.pos, [fence[0], fence[1] + 0.65, fence[2]]);
     }
 
     #[test]
@@ -4578,6 +4661,21 @@ mod tests {
     }
 
     #[test]
+    fn explosion_starts_a_fall_when_it_breaks_the_support_below_sand() {
+        let (mut server, _) = combat(GameMode::Creative);
+        server.world.set_block(5, 2, 5, blocks::OBSIDIAN);
+        server.world.set_block(5, 3, 5, blocks::STONE);
+        server.world.set_block(5, 4, 5, blocks::SAND);
+        server.apply_explosion([5.5, 0.5, 5.5]);
+        assert_eq!(server.get_block(5, 3, 5), Some(blocks::AIR));
+        server.tick();
+        assert_eq!(server.get_block(5, 4, 5), Some(blocks::SAND));
+        server.tick();
+        assert_eq!(server.get_block(5, 4, 5), Some(blocks::AIR));
+        assert_eq!(server.get_block(5, 3, 5), Some(blocks::SAND));
+    }
+
+    #[test]
     fn explosion_removes_torches_outside_the_blast_when_their_support_breaks() {
         let run = |mode| {
             let (mut server, _) = combat(mode);
@@ -4627,6 +4725,7 @@ mod tests {
                     Some(crate::inventory::Stack {
                         item: coal,
                         count: 3,
+                        damage: 0,
                     }),
                     None,
                     None,

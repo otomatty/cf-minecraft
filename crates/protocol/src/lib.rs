@@ -8,7 +8,10 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
+/// Item ID, count, and accumulated damage.
+pub type ItemStack = (u16, u8, u16);
+
 pub const MAX_HEALTH: u8 = 20;
 pub const MAX_FOOD: u8 = 20;
 pub const MAX_AIR: u16 = 300;
@@ -300,11 +303,13 @@ pub enum S2C {
         z: i32,
         stage: u8,
     },
+    ToolBreak,
     EntitySpawn {
         id: u32,
         kind: u8,
         item: u16,
         count: u8,
+        damage: u16,
         x: f64,
         y: f64,
         z: f64,
@@ -373,17 +378,17 @@ pub enum S2C {
         id: u32,
     },
     Inventory {
-        furnace: [Option<(u16, u8)>; 3],
+        furnace: [Option<ItemStack>; 3],
         burn: u16,
         total: u16,
         progress: u16,
         screen: u8,
-        table: [Option<(u16, u8)>; 9],
+        table: [Option<ItemStack>; 9],
         selected: u8,
-        slots: Vec<Option<(u16, u8)>>,
-        crafting: [Option<(u16, u8)>; 4],
-        result: Option<(u16, u8)>,
-        cursor: Option<(u16, u8)>,
+        slots: Vec<Option<ItemStack>>,
+        crafting: [Option<ItemStack>; 4],
+        result: Option<ItemStack>,
+        cursor: Option<ItemStack>,
     },
     Welcome {
         seed: i64,
@@ -466,6 +471,7 @@ pub mod id {
     pub const S2C_EXPLOSION: u8 = 0x16;
     pub const S2C_PLAYER_SPAWN: u8 = 0x17;
     pub const S2C_PLAYER_MOVE: u8 = 0x18;
+    pub const S2C_TOOL_BREAK: u8 = 0x1a;
     pub const S2C_PLAYER_REMOVE: u8 = 0x19;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
@@ -716,11 +722,13 @@ impl S2C {
                 w.i32(*z);
                 w.u8(*stage);
             }
+            S2C::ToolBreak => w.u8(id::S2C_TOOL_BREAK),
             S2C::EntitySpawn {
                 id: entity,
                 kind,
                 item,
                 count,
+                damage,
                 x,
                 y,
                 z,
@@ -728,8 +736,7 @@ impl S2C {
                 w.u8(id::S2C_ENTITY_SPAWN);
                 w.i32(*entity as i32);
                 w.u8(*kind);
-                w.u16(*item);
-                w.u8(*count);
+                write_stack(&mut w, Some((*item, *count, *damage)));
                 w.f64(*x);
                 w.f64(*y);
                 w.f64(*z);
@@ -855,18 +862,12 @@ impl S2C {
                 w.u8(id::S2C_INVENTORY);
                 w.u8(*selected);
                 w.u8(slots.len() as u8);
-                for slot in slots.iter().chain(crafting).chain([result, cursor]) {
-                    w.u16(slot.map_or(0, |s| s.0));
-                    w.u8(slot.map_or(0, |s| s.1));
+                for &slot in slots.iter().chain(crafting).chain([result, cursor]) {
+                    write_stack(&mut w, slot);
                 }
                 w.u8(*screen);
-                for slot in table {
-                    w.u16(slot.map_or(0, |s| s.0));
-                    w.u8(slot.map_or(0, |s| s.1));
-                }
-                for slot in furnace {
-                    w.u16(slot.map_or(0, |s| s.0));
-                    w.u8(slot.map_or(0, |s| s.1));
+                for &slot in table.iter().chain(furnace) {
+                    write_stack(&mut w, slot);
                 }
                 w.u16(*burn);
                 w.u16(*total);
@@ -964,14 +965,12 @@ impl S2C {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
+            id::S2C_TOOL_BREAK => S2C::ToolBreak,
             id::S2C_ENTITY_SPAWN => {
                 let id = entity_id(&mut r)?;
                 let kind = r.u8()?;
-                let item = r.u16()?;
-                let count = r.u8()?;
-                if kind != 0
-                    || !world::items::info(item).is_some_and(|i| (1..=i.max_stack).contains(&count))
-                {
+                let (item, count, damage) = read_stack(&mut r)?.ok_or(DecodeError)?;
+                if kind != 0 {
                     return Err(DecodeError);
                 }
                 let [x, y, z] = entity_pos(&mut r)?;
@@ -980,6 +979,7 @@ impl S2C {
                     kind,
                     item,
                     count,
+                    damage,
                     x,
                     y,
                     z,
@@ -1092,78 +1092,21 @@ impl S2C {
                 if selected >= 9 || n != 36 {
                     return Err(DecodeError);
                 }
-                let mut slots = Vec::with_capacity(36);
-                for _ in 0..36 {
-                    let item = r.u16()?;
-                    let count = r.u8()?;
-                    if item == 0 {
-                        if count != 0 {
-                            return Err(DecodeError);
-                        }
-                        slots.push(None);
-                    } else {
-                        if !world::items::info(item)
-                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
-                        {
-                            return Err(DecodeError);
-                        }
-                        slots.push(Some((item, count)));
-                    }
-                }
+                let slots = (0..36)
+                    .map(|_| read_stack(&mut r))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut extra = [None; 6];
                 for slot in &mut extra {
-                    let item = r.u16()?;
-                    let count = r.u8()?;
-                    if item == 0 {
-                        if count != 0 {
-                            return Err(DecodeError);
-                        }
-                    } else {
-                        if !world::items::info(item)
-                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
-                        {
-                            return Err(DecodeError);
-                        }
-                        *slot = Some((item, count));
-                    }
+                    *slot = read_stack(&mut r)?;
                 }
                 let screen = r.u8()?;
                 if screen > 2 {
                     return Err(DecodeError);
                 }
                 let mut table = [None; 9];
-                for slot in &mut table {
-                    let item = r.u16()?;
-                    let count = r.u8()?;
-                    if item == 0 {
-                        if count != 0 {
-                            return Err(DecodeError);
-                        }
-                    } else {
-                        if !world::items::info(item)
-                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
-                        {
-                            return Err(DecodeError);
-                        }
-                        *slot = Some((item, count));
-                    }
-                }
                 let mut furnace = [None; 3];
-                for slot in &mut furnace {
-                    let item = r.u16()?;
-                    let count = r.u8()?;
-                    if item == 0 {
-                        if count != 0 {
-                            return Err(DecodeError);
-                        }
-                    } else {
-                        if !world::items::info(item)
-                            .is_some_and(|i| (1..=i.max_stack).contains(&count))
-                        {
-                            return Err(DecodeError);
-                        }
-                        *slot = Some((item, count));
-                    }
+                for slot in table.iter_mut().chain(&mut furnace) {
+                    *slot = read_stack(&mut r)?;
                 }
                 let burn = r.u16()?;
                 let total = r.u16()?;
@@ -1278,6 +1221,29 @@ impl S2C {
         }
         Ok(packet)
     }
+}
+
+fn write_stack(w: &mut Writer, stack: Option<ItemStack>) {
+    let (item, count, damage) = stack.unwrap_or_default();
+    w.u16(item);
+    w.u8(count);
+    w.u16(damage);
+}
+
+fn read_stack(r: &mut Reader<'_>) -> Result<Option<ItemStack>, DecodeError> {
+    let item = r.u16()?;
+    let count = r.u8()?;
+    let damage = r.u16()?;
+    if (item, count, damage) == (0, 0, 0) {
+        return Ok(None);
+    }
+    if !world::items::info(item).is_some_and(|info| {
+        (1..=info.max_stack).contains(&count)
+            && info.durability.map_or(damage == 0, |max| damage < max)
+    }) {
+        return Err(DecodeError);
+    }
+    Ok(Some((item, count, damage)))
 }
 
 fn entity_id(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
@@ -1559,6 +1525,7 @@ mod tests {
                 kind: 0,
                 item: 1,
                 count: 2,
+                damage: 0,
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,
@@ -1579,7 +1546,7 @@ mod tests {
                 screen: 0,
                 table: [None; 9],
                 selected: 8,
-                slots: vec![Some((1, 64)); 36],
+                slots: vec![Some((1, 64, 0)); 36],
                 crafting: [None; 4],
                 result: None,
                 cursor: None,
@@ -1669,13 +1636,13 @@ mod tests {
             table: [None; 9],
             selected: 3,
             slots: vec![None; 36],
-            crafting: [Some((8, 2)), None, Some((5, 3)), None],
-            result: Some((43, 4)),
-            cursor: Some((44, 1)),
+            crafting: [Some((8, 2, 0)), None, Some((5, 3, 0)), None],
+            result: Some((43, 4, 0)),
+            cursor: Some((44, 1, 0)),
         };
         let bytes = packet.encode();
         assert_eq!(S2C::decode(&bytes), Ok(packet));
-        for offset in [111, 114, 117, 120, 123, 126] {
+        for offset in [183, 188, 193, 198, 203, 208] {
             let mut bad = bytes.clone();
             bad[offset + 2] = 65;
             assert!(S2C::decode(&bad).is_err());
@@ -1704,7 +1671,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1934,7 +1901,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -1972,7 +1939,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -1996,7 +1963,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];
@@ -2130,21 +2097,21 @@ mod tests {
             total: 0,
             progress: 0,
             screen: 1,
-            table: [Some((5, 3)); 9],
+            table: [Some((5, 3, 0)); 9],
             selected: 0,
             slots: vec![None; 36],
             crafting: [None; 4],
-            result: Some((5, 4)),
+            result: Some((5, 4, 0)),
             cursor: None,
         };
         let bytes = p.encode();
         assert_eq!(S2C::decode(&bytes), Ok(p));
         for screen in 3..=255 {
             let mut bad = bytes.clone();
-            bad[129] = screen;
+            bad[213] = screen;
             assert!(S2C::decode(&bad).is_err());
         }
-        for offset in (130..157).step_by(3) {
+        for offset in (214..259).step_by(5) {
             for (item, count) in [(0u16, 1), (u16::MAX, 1), (5, 0), (5, 65)] {
                 let mut bad = bytes.clone();
                 bad[offset..offset + 2].copy_from_slice(&item.to_be_bytes());
@@ -2163,9 +2130,9 @@ mod tests {
     fn furnace_packet_checks_stacks_timers_and_inactive_payload() {
         let p = S2C::Inventory {
             furnace: [
-                Some((items_id("iron_ore"), 3)),
+                Some((items_id("iron_ore"), 3, 0)),
                 None,
-                Some((items_id("iron_ingot"), 1)),
+                Some((items_id("iron_ingot"), 1, 0)),
             ],
             burn: 1387,
             total: MAX_FURNACE_DISPLAY_TICKS,
@@ -2184,12 +2151,12 @@ mod tests {
         let bytes = p.encode();
         assert_eq!(S2C::decode(&bytes), Ok(p));
         for (offset, value) in [
-            (129, 0),
-            (157, 255),
-            (159, 0),
-            (166, 255),
-            (168, 255),
-            (170, 255),
+            (213, 0),
+            (259, 255),
+            (261, 0),
+            (274, 255),
+            (276, 255),
+            (278, 255),
         ] {
             let mut bad = bytes.clone();
             bad[offset] = value;
@@ -2206,7 +2173,7 @@ mod tests {
             screen: 0,
             table: [None; 9],
             selected: 0,
-            slots: vec![Some((1, 64)); 36],
+            slots: vec![Some((1, 64, 0)); 36],
             crafting: [None; 4],
             result: None,
             cursor: None,
@@ -2257,12 +2224,53 @@ mod tests {
         }
     }
     #[test]
+    fn protocol_29_round_trips_damage_and_tool_break() {
+        let item = world::items::by_name("bow").unwrap();
+        let stack = Some((item, 1, 127));
+        let mut slots = vec![None; 36];
+        slots[0] = stack;
+        let inventory = |slots| S2C::Inventory {
+            furnace: [stack, None, None],
+            burn: 0,
+            total: 0,
+            progress: 0,
+            screen: 2,
+            table: [stack; 9],
+            selected: 0,
+            slots,
+            crafting: [stack; 4],
+            result: None,
+            cursor: stack,
+        };
+        let entity = |item, damage| S2C::EntitySpawn {
+            id: 1,
+            kind: 0,
+            item,
+            count: 1,
+            damage,
+            x: 0.0,
+            y: 1.0,
+            z: 2.0,
+        };
+        for packet in [inventory(slots.clone()), entity(item, 127), S2C::ToolBreak] {
+            assert_eq!(S2C::decode(&packet.encode()), Ok(packet));
+        }
+        assert_eq!(S2C::ToolBreak.encode(), [0x1a]);
+        for (item, damage) in [(item, 128), (1, 1)] {
+            slots[0] = Some((item, 1, damage));
+            assert!(S2C::decode(&inventory(slots.clone()).encode()).is_err());
+            assert!(S2C::decode(&entity(item, damage).encode()).is_err());
+        }
+    }
+
+    #[test]
     fn entity_packets_reject_invalid_values_and_lengths() {
         let valid = S2C::EntitySpawn {
             id: 1,
             kind: 0,
             item: 1,
             count: 1,
+            damage: 0,
             x: 0.0,
             y: 1.0,
             z: 2.0,

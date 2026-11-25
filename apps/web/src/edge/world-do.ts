@@ -30,7 +30,7 @@ const MAX_CHAT_PACKET_BYTES = 1 + 2 + 1024;
 /** Packets accepted per client per tick before the connection is dropped. */
 const MAX_PACKETS_PER_TICK = 100;
 const AUTOSAVE_TICKS = 100;
-// The current inventory format, including vitals, is 158 bytes.
+// The current inventory format, including vitals, is 258 bytes.
 const MAX_SAVED_INVENTORY_BYTES = 4096;
 /** Ticks without any player before the loop stops and the object may sleep. */
 const IDLE_STOP_TICKS = 100;
@@ -447,6 +447,10 @@ export class WorldDO extends DurableObject<Env> {
 
 	getGameMode(): GameMode {
 		return this.meta("gamemode") === "survival" ? "survival" : "creative";
+	}
+
+	getGameModeRevision(): number {
+		return this.gameModeRevision();
 	}
 
 	private parseRevision(value: string | null): number | null {

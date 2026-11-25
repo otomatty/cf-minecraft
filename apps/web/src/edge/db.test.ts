@@ -62,6 +62,19 @@ test("game mode migration defaults legacy worlds and stores mode changes", async
 	assert.throws(() => f.sqlite.exec("UPDATE world SET game_mode = 'invalid'"), /CHECK constraint failed/);
 });
 
+test("game mode changes increment past the stored revision and the optional floor", async t => {
+	const f = testDB();
+	t.after(f.close);
+	f.user("o", "o@example.com");
+	const db = createDB(f.db);
+	assert.equal(await db.createWorld("lobby", "o", "o@example.com"), "created");
+	assert.equal(await db.setWorldGameMode("lobby", "survival", 7), 8);
+	assert.equal(await db.setWorldGameMode("lobby", "creative", 3), 9);
+	assert.equal(await db.setWorldGameMode("lobby", "survival"), 10);
+	assert.equal((await db.world("lobby"))?.gameModeRevision, 10);
+	assert.equal((await db.world("lobby"))?.gameMode, "survival");
+});
+
 test("member cap permits updates, and deletion releases a slot", async t => {
 	const f = testDB();
 	t.after(f.close);

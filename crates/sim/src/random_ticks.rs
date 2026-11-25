@@ -337,6 +337,7 @@ mod tests {
             server.game_time = 137;
             server.connect(1);
             let client = server.clients.get_mut(&1).unwrap();
+            client.joined = true;
             client.view = 1;
             client.pos = [0.5, 0.0, 0.5];
             let mut coords = [(-1, 1), (0, 0), (0, 3), (1, -1), (4, 0)];
@@ -389,7 +390,10 @@ mod tests {
     fn server_tick_applies_a_random_tick_to_the_selected_block() {
         let mut server = empty_world(1);
         server.connect(1);
-        server.clients.get_mut(&1).unwrap().pos = [0.5, 0.0, 0.5];
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = [0.5, 0.0, 0.5];
+        server.set_external_generation(1);
         put(&mut server, [0, 64, 0], blocks::STONE);
         server.game_time = 1;
         let ([x, y, z], _) = server.random_tick_samples().next().unwrap();

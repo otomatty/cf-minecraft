@@ -9,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{MobKind, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
+use protocol::{ItemStack, MobKind, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -22,6 +22,7 @@ const UNKNOWN: u16 = blocks::STONE;
 struct ItemEntity {
     item: u16,
     count: u8,
+    damage: u16,
     pos: [f64; 3],
     previous: [f64; 3],
 }
@@ -81,7 +82,7 @@ struct State {
     dead: bool,
     death_cause: u8,
     selected: u8,
-    slots: Vec<Option<(u16, u8)>>,
+    slots: Vec<Option<ItemStack>>,
     screen: u8,
     furnace_times: [u16; 3],
     seed: i64,
@@ -327,6 +328,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             id,
             item,
             count,
+            damage,
             x,
             y,
             z,
@@ -337,6 +339,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 ItemEntity {
                     item,
                     count,
+                    damage,
                     pos: [x, y, z],
                     previous: [x, y, z],
                 },
@@ -464,7 +467,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         S2C::PlayerRemove { id } => {
             st.players.remove(&id);
         }
-        S2C::DigProgress { .. } => {}
+        S2C::DigProgress { .. } | S2C::ToolBreak => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
             st.mobs.remove(&id);
@@ -1604,6 +1607,15 @@ pub extern "C" fn client_slot_count(slot: usize) -> u32 {
         .map_or(0, |s| s.1 as u32)
 }
 #[no_mangle]
+pub extern "C" fn client_slot_damage(slot: usize) -> u32 {
+    state()
+        .slots
+        .get(slot)
+        .copied()
+        .flatten()
+        .map_or(0, |s| u32::from(s.2))
+}
+#[no_mangle]
 pub extern "C" fn client_enc_select_slot(slot: u8) -> usize {
     state().out = C2S::SelectSlot { slot }.encode();
     state().out.len()
@@ -1633,13 +1645,14 @@ pub extern "C" fn client_item_registry() -> usize {
         }
         write!(
             out,
-            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{},\"food\":{}}}",
+            "{{\"id\":{},\"name\":{:?},\"maxStack\":{},\"block\":{},\"texture\":{},\"food\":{},\"durability\":{}}}",
             item.id,
             item.name,
             item.max_stack,
             item.block.map_or("null".into(), |b| b.to_string()),
             item.texture.map_or("null".into(), |t| format!("{t:?}")),
-            item.food.map_or("null".into(), |value| value.to_string())
+            item.food.map_or("null".into(), |value| value.to_string()),
+            item.durability.map_or("null".into(), |value| value.to_string())
         )
         .unwrap();
     }
@@ -1648,7 +1661,7 @@ pub extern "C" fn client_item_registry() -> usize {
     state().out.len()
 }
 
-/// Sorted packed records: ID u32, item u16, count u8, current/previous f64 triples.
+/// Sorted packed records: ID u32, item u16, count u8, current/previous f64 triples, damage u16.
 #[no_mangle]
 pub extern "C" fn client_entities() -> usize {
     let st = state();
@@ -1660,6 +1673,7 @@ pub extern "C" fn client_entities() -> usize {
         for v in e.pos.into_iter().chain(e.previous) {
             w.f64(v);
         }
+        w.u16(e.damage);
     }
     st.out = w.finish();
     st.out.len()
@@ -2139,6 +2153,17 @@ mod tests {
         receive(S2C::PlayerRemove { id: 2 }, 0x19);
         assert_eq!(client_players(), 0);
         assert_eq!(client_mobs(), 63);
+        receive(
+            S2C::PlayerSpawn {
+                id: 2,
+                name: "ボブ".to_owned(),
+                pos: [8.0, 7.0, 6.0],
+                yaw: 1.0,
+                pitch: 2.0,
+            },
+            0x17,
+        );
+        assert!(client_players() > 0);
         client_reset_world();
         assert_eq!(client_players(), 0);
         assert_eq!(client_mobs(), 0);
@@ -2160,6 +2185,7 @@ mod tests {
             kind: 0,
             item: 1,
             count: 3,
+            damage: 0,
             x: 2.0,
             y: 3.0,
             z: 4.0,
@@ -2176,7 +2202,7 @@ mod tests {
         assert_eq!(e.pos, [3.0, 4.0, 5.0]);
         assert_eq!(e.previous, [2.0, 3.0, 4.0]);
         assert_eq!(e.count, 2);
-        assert_eq!(client_entities(), 55);
+        assert_eq!(client_entities(), 57);
         assert_eq!(
             client_entity_light(2, 3, 4),
             state().world.sky_light(2, 3, 4) as u32 * 16
@@ -2189,6 +2215,7 @@ mod tests {
             kind: 0,
             item: 1,
             count: 1,
+            damage: 0,
             x: 0.0,
             y: 1.0,
             z: 0.0,

@@ -32,7 +32,7 @@ async function setup(t) {
 	const disconnections: [string, number, string][] = [];
 	const evictions: string[] = [];
 	const modeChanges: [string, GameMode, number | undefined][] = [];
-	const modes = new Map<string, GameMode>();
+	const modes = new Map<string, { mode: GameMode; revision: number }>();
 	let modeUpdateFails = false;
 	let revokeFailures = 0;
 	let roleUpdateFails = 0;
@@ -87,12 +87,18 @@ async function setup(t) {
 						return 2;
 					},
 					async getGameMode() {
-						return modes.get(name) ?? "creative";
+						return modes.get(name)?.mode ?? "creative";
+					},
+					async getGameModeRevision() {
+						return modes.get(name)?.revision ?? 0;
 					},
 					async setGameMode(mode, revision?: number) {
 						modeChanges.push([name, mode, revision]);
 						if (modeUpdateFails) throw new Error("game mode update failed");
-						modes.set(name, mode);
+						const current = modes.get(name)?.revision ?? 0;
+						const next = revision ?? current + 1;
+						if (!Number.isSafeInteger(next) || next <= current) return;
+						modes.set(name, { mode, revision: next });
 					},
 					async evict() {
 						evictions.push(name);
@@ -288,7 +294,7 @@ test("open and ops WebSockets strip the untrusted game mode header", async t => 
 	assert.deepEqual(f.forwarded.map(request => request.headers.get("X-MC-Game-Mode-Revision")), [null, null]);
 });
 
-test("debug gamemode uses the open debug route guards and updates the DO", async t => {
+test("debug gamemode uses the open debug route guards and updates D1 and the DO", async t => {
 	const f = await setup(t);
 	const path = "/api/debug/gamemode?world=lobby&mode=survival";
 	assert.equal((await f.request(path, "POST", undefined, { Authorization: "Bearer operator-secret" })).status, 404);
@@ -303,10 +309,77 @@ test("debug gamemode uses the open debug route guards and updates the DO", async
 	const response = await handle(new Request(`https://game.example${path}`, { method: "POST" }), f.deps);
 	assert.equal(response.status, 200);
 	assert.deepEqual(await response.json(), { gameMode: "survival" });
-	assert.deepEqual(f.modeChanges, [["lobby", "survival", undefined]]);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2]]);
 	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "survival");
-	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 2);
 	assert.deepEqual(f.limits, []);
+
+	f.login(owner);
+	assert.equal((await f.request("/api/worlds/lobby", "PATCH", { gameMode: "creative" })).status, 200);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2], ["lobby", "creative", 3]]);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 3);
+	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "creative");
+});
+
+test("debug gamemode applies when the DO revision is ahead of D1", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const world = f.deps.worlds.getByName("lobby");
+	await world.setGameMode("creative", 7);
+	await world.setGameMode("survival", 7);
+	assert.equal(await world.getGameMode(), "creative");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 1);
+
+	const response = await f.request("/api/debug/gamemode?world=lobby&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.equal(await world.getGameMode(), "survival");
+	assert.equal(await world.getGameModeRevision(), 8);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 8);
+	assert.deepEqual(f.modeChanges.at(-1), ["lobby", "survival", 8]);
+});
+
+test("debug gamemode updates disposable worlds without creating a D1 row", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const response = await f.request("/api/debug/gamemode?world=disposable&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.deepEqual(f.modeChanges, [["disposable", "survival", undefined]]);
+	assert.equal(await f.db.world("disposable"), null);
+});
+
+test("debug gamemode updates only the DO when the D1 lookup fails", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const lookup = t.mock.method(f.db, "world", async () => {
+		throw new Error("D1_ERROR: no such table: world: SQLITE_ERROR");
+	});
+	const update = t.mock.method(f.db, "setWorldGameMode");
+
+	const response = await f.request("/api/debug/gamemode?world=disposable&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.equal(lookup.mock.callCount(), 1);
+	assert.equal(update.mock.callCount(), 0);
+	assert.deepEqual(f.modeChanges, [["disposable", "survival", undefined]]);
+});
+
+test("debug gamemode returns an error when the D1 update fails for an existing world", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const update = t.mock.method(f.db, "setWorldGameMode", async () => {
+		throw new Error("D1 update failed");
+	});
+	t.mock.method(console, "error", () => {});
+
+	const response = await f.request("/api/debug/gamemode?world=lobby&mode=survival", "POST");
+	assert.equal(response.status, 500);
+	assert.equal(update.mock.callCount(), 1);
+	assert.deepEqual(f.modeChanges, []);
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 1);
 });
 
 test("Worker replaces spoofed chat names with the verified session, operator or dev display name", async t => {

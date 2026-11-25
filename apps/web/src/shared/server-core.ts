@@ -47,7 +47,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 8;
+export const SERVER_ABI_VERSION = 9;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 

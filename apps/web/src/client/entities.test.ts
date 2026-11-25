@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, entitySkins, flameVertices, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { aimedMob, entitySkins, flameVertices, mobInFrustum, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { player } from "./mobs/player.ts";
 import { projectPlayerName } from "./player-names.ts";
-import { viewProjection } from "./math.ts";
+import { frustumPlanes, viewProjection } from "./math.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -19,6 +19,16 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 	const a=[29999998,2,-29999998],b=[29999998.25,3,-29999998.5];
 	assert.deepEqual(interpolateEntity(a,b,-5),a); assert.deepEqual(interpolateEntity(a,b,100),b);
 	assert.deepEqual(interpolateEntity(a,b,25),[29999998.125,2.5,-29999998.25]);
+});
+
+test("mob frustum culling keeps partial models at the edge in camera-relative coordinates", () => {
+	const eye = [29999980, 70, -29999980] as const;
+	const planes = frustumPlanes(viewProjection(0, 0, 90, 1, 0.05, 32));
+	const mob: RenderMob = { kind: 0, position: [eye[0], eye[1], eye[2] + 4], yaw: 0, moving: false, hurt: false, light: [15, 0] };
+	assert.equal(mobInFrustum(mob, eye, planes), true);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0] + 4.2, eye[1], eye[2] + 4] }, eye, planes), true);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0] + 7, eye[1], eye[2] + 4] }, eye, planes), false);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0], eye[1], eye[2] - 2] }, eye, planes), false);
 });
 
 test("player skin paints every humanoid face and keeps the existing mob layers", () => {
@@ -159,19 +169,19 @@ test("WASM entity records expose unsigned IDs, current/previous positions and co
 	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
 	const core = new ClientCore(instance);
 	const id = 0x80000001;
-	const spawn = new Uint8Array(33), view = new DataView(spawn.buffer);
+	const spawn = new Uint8Array(35), view = new DataView(spawn.buffer);
 	spawn[0] = S2C.EntitySpawn;
 	view.setUint32(1, id); spawn[5] = 0; view.setUint16(6, 1); spawn[8] = 3;
-	view.setFloat64(9, 29999998.25); view.setFloat64(17, 2.5); view.setFloat64(25, -3.25);
+	view.setFloat64(11, 29999998.25); view.setFloat64(19, 2.5); view.setFloat64(27, -3.25);
 	assert.equal(core.packet(spawn), S2C.EntitySpawn);
-	assert.deepEqual(core.entities, [{ id, item: 1, count: 3, position: [29999998.25, 2.5, -3.25], previous: [29999998.25, 2.5, -3.25] }]);
+	assert.deepEqual(core.entities, [{ id, item: 1, count: 3, damage: 0, position: [29999998.25, 2.5, -3.25], previous: [29999998.25, 2.5, -3.25] }]);
 	const move = new Uint8Array(29), moved = new DataView(move.buffer);
 	move[0] = S2C.EntityMove; moved.setUint32(1, id);
 	moved.setFloat64(5, 29999998.5); moved.setFloat64(13, 2); moved.setFloat64(21, -4);
 	core.packet(move);
 	const count = new Uint8Array(6); count[0] = S2C.EntityCount; new DataView(count.buffer).setUint32(1, id); count[5] = 2;
 	core.packet(count);
-	assert.deepEqual(core.entities[0], { id, item: 1, count: 2, position: [29999998.5, 2, -4], previous: [29999998.25, 2.5, -3.25] });
+	assert.deepEqual(core.entities[0], { id, item: 1, count: 2, damage: 0, position: [29999998.5, 2, -4], previous: [29999998.25, 2.5, -3.25] });
 	const drop = core.encodeDropItem([0.25, -0.5, 1]);
 	assert.equal(drop[0], 6); assert.equal(drop.length, 13); assert.equal(new DataView(drop.buffer).getFloat32(5), -0.5);
 	const remove = new Uint8Array(5); remove[0] = S2C.EntityRemove; new DataView(remove.buffer).setUint32(1, id);

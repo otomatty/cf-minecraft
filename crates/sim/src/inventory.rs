@@ -10,7 +10,54 @@ pub const HOTBAR_COUNT: u8 = 9;
 pub struct Stack {
     pub item: u16,
     pub count: u8,
+    pub damage: u16,
 }
+impl Stack {
+    fn matches_item_and_damage(self, item: u16, damage: u16) -> bool {
+        self.item == item && self.damage == damage
+    }
+
+    pub(crate) fn wire(self) -> protocol::ItemStack {
+        (self.item, self.count, self.damage)
+    }
+
+    pub(crate) fn write_slot(slot: Option<Self>, w: &mut Writer, with_damage: bool) {
+        let (item, count, damage) = slot.map_or((0, 0, 0), Self::wire);
+        w.u16(item);
+        w.u8(count);
+        if with_damage {
+            w.u16(damage);
+        }
+    }
+
+    pub(crate) fn read_slot(
+        r: &mut Reader<'_>,
+        with_damage: bool,
+    ) -> Result<Option<Self>, DecodeError> {
+        let item = r.u16()?;
+        let count = r.u8()?;
+        let damage = if with_damage { r.u16()? } else { 0 };
+        if item == 0 && count == 0 {
+            return Ok(None);
+        }
+        let stack = Self {
+            item,
+            count,
+            damage: normalize_damage(item, damage),
+        };
+        if !valid(stack) {
+            return Err(DecodeError);
+        }
+        Ok(Some(stack))
+    }
+}
+
+pub(crate) fn normalize_damage(item: u16, damage: u16) -> u16 {
+    items::info(item)
+        .and_then(|i| i.durability)
+        .map_or(0, |max| damage.min(max - 1))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
     #[default]
@@ -63,6 +110,7 @@ impl Inventory {
             result.slots[i] = Some(Stack {
                 item: items::by_name(name).expect("default item"),
                 count: 1,
+                damage: 0,
             });
         }
         result
@@ -91,14 +139,29 @@ impl Inventory {
         Ok(())
     }
     pub fn take_selected(&mut self) -> Option<u16> {
-        let stack = self.slots[self.selected as usize].as_mut()?;
-        let item = stack.item;
-        stack.count -= 1;
-        if stack.count == 0 {
-            self.slots[self.selected as usize] = None;
-        }
-        Some(item)
+        self.take_selected_stack().map(|stack| stack.item)
     }
+
+    pub(crate) fn take_selected_stack(&mut self) -> Option<Stack> {
+        let slot = &mut self.slots[self.selected as usize];
+        let stack = (*slot)?;
+        subtract(slot, 1);
+        Some(Stack { count: 1, ..stack })
+    }
+
+    /// Returns whether the selected item broke, if it had durability.
+    pub(crate) fn wear_selected(&mut self) -> Option<bool> {
+        let slot = &mut self.slots[self.selected as usize];
+        let stack = slot.as_mut()?;
+        let max = items::info(stack.item)?.durability?;
+        stack.damage += 1;
+        let broken = stack.damage == max;
+        if broken {
+            *slot = None;
+        }
+        Some(broken)
+    }
+
     pub(crate) fn first_slot_with(&self, item: u16) -> Option<usize> {
         self.slots
             .iter()
@@ -110,7 +173,16 @@ impl Inventory {
     }
 
     pub fn add(&mut self, item: u16, count: u32) -> u32 {
-        add_slots(&mut self.slots, item, count)
+        add_slots(&mut self.slots, item, count, 0)
+    }
+
+    pub(crate) fn add_stack(&mut self, stack: Stack) -> u8 {
+        add_slots(
+            &mut self.slots,
+            stack.item,
+            u32::from(stack.count),
+            stack.damage,
+        ) as u8
     }
 
     pub fn result(&self) -> Option<Stack> {
@@ -126,6 +198,7 @@ impl Inventory {
         .map(|r| Stack {
             item: r.item,
             count: r.count,
+            damage: 0,
         })
     }
     fn width(&self) -> usize {
@@ -167,21 +240,21 @@ impl Inventory {
             while let Some(result) = self.result() {
                 if shift {
                     let mut next = self.clone();
-                    if next.add(result.item, u32::from(result.count)) != 0 {
+                    if next.add_stack(result) != 0 {
                         break;
                     }
                     self.slots = next.slots;
                 } else {
                     if self.cursor.is_some_and(|s| {
-                        s.item != result.item
+                        !s.matches_item_and_damage(result.item, result.damage)
                             || u16::from(s.count) + u16::from(result.count)
                                 > u16::from(items::info(s.item).unwrap().max_stack)
                     }) {
                         break;
                     }
                     self.cursor = Some(Stack {
-                        item: result.item,
                         count: self.cursor.map_or(0, |s| s.count) + result.count,
+                        ..result
                     });
                 }
                 self.consume();
@@ -206,8 +279,12 @@ impl Inventory {
                 } else {
                     0..36
                 };
-                let remaining =
-                    add_slots(&mut self.slots[range], stack.item, u32::from(stack.count));
+                let remaining = add_slots(
+                    &mut self.slots[range],
+                    stack.item,
+                    u32::from(stack.count),
+                    stack.damage,
+                );
                 let source = if index < 36 {
                     &mut self.slots[index]
                 } else if base == 36 {
@@ -216,8 +293,8 @@ impl Inventory {
                     &mut self.table[index - 41]
                 };
                 *source = (remaining != 0).then_some(Stack {
-                    item: stack.item,
                     count: remaining as u8,
+                    ..stack
                 });
             }
         } else {
@@ -235,20 +312,17 @@ impl Inventory {
                     } else {
                         s.count.div_ceil(2)
                     };
-                    self.cursor = Some(Stack {
-                        item: s.item,
-                        count,
-                    });
+                    self.cursor = Some(Stack { count, ..s });
                     subtract(target, count);
                 }
-                (Some(c), t) if t.is_none_or(|s| s.item == c.item) => {
+                (Some(c), t) if t.is_none_or(|s| s.matches_item_and_damage(c.item, c.damage)) => {
                     let present = t.map_or(0, |s| s.count);
                     let count = (items::info(c.item).unwrap().max_stack - present)
                         .min(if button == 0 { c.count } else { 1 });
                     if count > 0 {
                         *target = Some(Stack {
-                            item: c.item,
                             count: present + count,
+                            ..c
                         });
                         subtract(&mut self.cursor, count);
                     }
@@ -280,7 +354,8 @@ impl Inventory {
                         None
                     };
                     if let Some(i) = target {
-                        let left = add_slots(&mut f.slots[i..=i], s.item, u32::from(s.count));
+                        let left =
+                            add_slots(&mut f.slots[i..=i], s.item, u32::from(s.count), s.damage);
                         subtract(&mut self.slots[slot as usize], s.count - left as u8);
                         return Ok(());
                     }
@@ -288,15 +363,18 @@ impl Inventory {
             } else {
                 let source = &mut f.slots[(slot - 51) as usize];
                 if let Some(s) = *source {
-                    let left = self.add(s.item, u32::from(s.count));
-                    subtract(source, s.count - left as u8);
+                    let left = self.add_stack(s);
+                    subtract(source, s.count - left);
                 }
                 return Ok(());
             }
         }
         if slot == 53 {
             if let Some(s) = f.slots[2] {
-                if self.cursor.is_none_or(|c| c.item == s.item) {
+                if self
+                    .cursor
+                    .is_none_or(|c| c.matches_item_and_damage(s.item, s.damage))
+                {
                     let room =
                         items::info(s.item).unwrap().max_stack - self.cursor.map_or(0, |c| c.count);
                     let count = room.min(if button == 0 {
@@ -306,8 +384,8 @@ impl Inventory {
                     });
                     if count > 0 {
                         self.cursor = Some(Stack {
-                            item: s.item,
                             count: self.cursor.map_or(0, |c| c.count) + count,
+                            ..s
                         });
                         subtract(&mut f.slots[2], count);
                     }
@@ -348,12 +426,9 @@ impl Inventory {
         self.crafting = [None; 4];
         self.cursor = None;
         for stack in stacks.into_iter().flatten() {
-            let count = self.add(stack.item, u32::from(stack.count));
+            let count = self.add_stack(stack);
             if count > 0 {
-                overflow.push(Stack {
-                    item: stack.item,
-                    count: count as u8,
-                });
+                overflow.push(Stack { count, ..stack });
             }
         }
         overflow
@@ -371,7 +446,7 @@ impl Inventory {
 
     pub fn to_bytes(&self, vitals: PlayerVitals) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(5);
+        w.u8(6);
         w.u8(self.selected);
         for slot in self
             .slots
@@ -380,8 +455,7 @@ impl Inventory {
             .chain([self.cursor])
             .chain(self.table)
         {
-            w.u16(slot.map_or(0, |s| s.item));
-            w.u8(slot.map_or(0, |s| s.count));
+            Stack::write_slot(slot, &mut w, true);
         }
         vitals.write(&mut w);
         w.finish()
@@ -389,7 +463,7 @@ impl Inventory {
     pub fn from_bytes(bytes: &[u8]) -> Result<(Self, PlayerVitals), DecodeError> {
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 1..=5) {
+        if !matches!(version, 1..=6) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
@@ -404,19 +478,10 @@ impl Inventory {
             .chain(result.table.iter_mut())
             .take(count)
         {
-            let item = r.u16()?;
-            let count = r.u8()?;
-            if item == 0 && count != 0 {
-                return Err(DecodeError);
-            }
-            let stack = (item != 0).then_some(Stack { item, count });
-            if stack.is_some_and(|s| !valid(s)) {
-                return Err(DecodeError);
-            }
-            *slot = stack;
+            *slot = Stack::read_slot(&mut r, version >= 6)?;
         }
         let vitals = match version {
-            5 => PlayerVitals::read(&mut r)?,
+            5 | 6 => PlayerVitals::read(&mut r)?,
             4 => PlayerVitals::read_v4(&mut r)?,
             _ => PlayerVitals::default(),
         };
@@ -427,7 +492,10 @@ impl Inventory {
     }
 }
 pub(crate) fn valid(s: Stack) -> bool {
-    items::info(s.item).is_some_and(|i| (1..=i.max_stack).contains(&s.count))
+    items::info(s.item).is_some_and(|i| {
+        (1..=i.max_stack).contains(&s.count)
+            && i.durability.map_or(s.damage == 0, |max| s.damage < max)
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -435,7 +503,15 @@ mod tests {
     #[test]
     fn insertion_merges_before_filling_empty_slots_and_returns_overflow() {
         let mut inv = Inventory::default();
-        inv.set(12, Some(Stack { item: 1, count: 60 })).unwrap();
+        inv.set(
+            12,
+            Some(Stack {
+                item: 1,
+                count: 60,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         assert_eq!(inv.add(1, 70), 0);
         assert_eq!(inv.slots[12].unwrap().count, 64);
         assert_eq!(inv.slots[0].unwrap().count, 64);
@@ -443,42 +519,81 @@ mod tests {
         assert_eq!(inv.add(1, 64 * 36), 130);
         assert_eq!(inv.add(u16::MAX, 3), 3);
     }
+    fn v5_save(inv: &Inventory, vitals: PlayerVitals) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(5);
+        w.u8(inv.selected);
+        for slot in inv
+            .slots
+            .into_iter()
+            .chain(inv.crafting)
+            .chain([inv.cursor])
+            .chain(inv.table)
+        {
+            Stack::write_slot(slot, &mut w, false);
+        }
+        vitals.write(&mut w);
+        w.finish()
+    }
+
     #[test]
     fn persistence_preserves_transient_slots_and_reads_v1_through_v4() {
         let mut inv = Inventory::creative();
         inv.select(7).unwrap();
         inv.crafting = [
-            Some(Stack { item: 8, count: 64 }),
+            Some(Stack {
+                item: 8,
+                count: 64,
+                damage: 0,
+            }),
             None,
-            Some(Stack { item: 5, count: 3 }),
-            Some(Stack { item: 31, count: 1 }),
+            Some(Stack {
+                item: 5,
+                count: 3,
+                damage: 0,
+            }),
+            Some(Stack {
+                item: 31,
+                count: 1,
+                damage: 0,
+            }),
         ];
-        inv.cursor = Some(Stack { item: 43, count: 5 });
-        inv.table[8] = Some(Stack { item: 5, count: 7 });
+        inv.cursor = Some(Stack {
+            item: 43,
+            count: 5,
+            damage: 0,
+        });
+        inv.table[8] = Some(Stack {
+            item: 5,
+            count: 7,
+            damage: 0,
+        });
         let vitals = PlayerVitals::default();
         let bytes = inv.to_bytes(vitals);
-        assert_eq!(bytes.len(), 158);
-        assert_eq!(bytes[0], 5);
+        assert_eq!(bytes.len(), 258);
+        assert_eq!(bytes[0], 6);
         assert_eq!(Inventory::from_bytes(&bytes), Ok((inv.clone(), vitals)));
-        let mut v4 = bytes[..157].to_vec();
+        let v5 = v5_save(&inv, vitals);
+        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals)));
+        let mut v4 = v5[..157].to_vec();
         v4[0] = 4;
         assert_eq!(Inventory::from_bytes(&v4), Ok((inv.clone(), vitals)));
-        let mut v3 = bytes[..152].to_vec();
+        let mut v3 = v5[..152].to_vec();
         v3[0] = 3;
         assert_eq!(Inventory::from_bytes(&v3), Ok((inv.clone(), vitals)));
-        let mut v2 = bytes[..125].to_vec();
+        let mut v2 = v5[..125].to_vec();
         v2[0] = 2;
         let mut expected_v2 = inv.clone();
         expected_v2.table = [None; 9];
         assert_eq!(Inventory::from_bytes(&v2), Ok((expected_v2, vitals)));
-        let mut legacy = bytes[..110].to_vec();
+        let mut legacy = v5[..110].to_vec();
         legacy[0] = 1;
         let mut expected = inv.clone();
         expected.crafting = [None; 4];
         expected.cursor = None;
         expected.table = [None; 9];
         assert_eq!(Inventory::from_bytes(&legacy), Ok((expected, vitals)));
-        for data in [&bytes, &v4, &v3, &v2, &legacy] {
+        for data in [&bytes, &v5, &v4, &v3, &v2, &legacy] {
             for length in 0..data.len() {
                 assert!(Inventory::from_bytes(&data[..length]).is_err());
             }
@@ -486,7 +601,7 @@ mod tests {
             extra.push(0);
             assert!(Inventory::from_bytes(&extra).is_err());
         }
-        for offset in [110, 113, 116, 119, 122, 125, 149] {
+        for offset in [182, 187, 192, 197, 202, 207, 247] {
             for (item, count) in [(0u16, 1), (u16::MAX, 1), (8, 0), (8, 65), (31, 2)] {
                 let mut bad = bytes.clone();
                 bad[offset..offset + 2].copy_from_slice(&item.to_be_bytes());
@@ -499,7 +614,7 @@ mod tests {
         }
     }
     #[test]
-    fn persistence_v5_stores_vitals_and_rejects_invalid_status() {
+    fn persistence_v5_and_v6_store_vitals_and_rejects_invalid_status() {
         use protocol::DeathCause;
 
         let inv = Inventory::default();
@@ -511,19 +626,21 @@ mod tests {
             food: 9,
         };
         let save = inv.to_bytes(vitals);
-        assert_eq!(&save[152..], &[0, 0, 42, 1, 4, 9]);
+        assert_eq!(&save[252..], &[0, 0, 42, 1, 4, 9]);
         assert_eq!(Inventory::from_bytes(&save), Ok((inv.clone(), vitals)));
         let explosion = PlayerVitals {
             cause: DeathCause::Explosion,
             ..vitals
         };
         let explosion_save = inv.to_bytes(explosion);
-        assert_eq!(explosion_save[156], 8);
+        assert_eq!(explosion_save[256], 8);
         assert_eq!(
             Inventory::from_bytes(&explosion_save),
             Ok((inv.clone(), explosion))
         );
-        let mut v4 = save[..157].to_vec();
+        let v5 = v5_save(&inv, vitals);
+        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals)));
+        let mut v4 = v5[..157].to_vec();
         v4[0] = 4;
         assert_eq!(
             Inventory::from_bytes(&v4),
@@ -539,11 +656,174 @@ mod tests {
             (156, 9),
             (157, 21),
         ] {
-            let mut bad = save.clone();
-            bad[offset] = value;
-            assert!(Inventory::from_bytes(&bad).is_err(), "{offset} = {value}");
+            for (data, offset) in [(&v5, offset), (&save, offset + 100)] {
+                let mut bad = data.clone();
+                bad[offset] = value;
+                assert!(Inventory::from_bytes(&bad).is_err(), "{offset} = {value}");
+            }
         }
     }
+    #[test]
+    fn persistence_keeps_wear_and_normalizes_invalid_damage() {
+        let item = items::by_name("wooden_pickaxe").unwrap();
+        let tool = Stack {
+            item,
+            count: 1,
+            damage: 31,
+        };
+        let mut inv = Inventory::creative();
+        inv.set(0, Some(tool)).unwrap();
+        inv.crafting[3] = Some(tool);
+        inv.cursor = Some(tool);
+        inv.table[8] = Some(tool);
+
+        let vitals = PlayerVitals::default();
+        let bytes = inv.to_bytes(vitals);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv.clone(), vitals)));
+        let v5 = v5_save(&inv, vitals);
+        assert_eq!(v5.len(), 158);
+        assert_eq!(&v5[2..4], &item.to_be_bytes());
+        assert_eq!(v5[4], 1);
+        let (legacy, _) = Inventory::from_bytes(&v5).unwrap();
+        assert_eq!(legacy.slots[0], Some(Stack { damage: 0, ..tool }));
+        assert_eq!(legacy.crafting[3].unwrap().damage, 0);
+        assert_eq!(legacy.cursor.unwrap().damage, 0);
+        assert_eq!(legacy.table[8].unwrap().damage, 0);
+
+        let mut corrupt = bytes;
+        corrupt[5..7].copy_from_slice(&u16::MAX.to_be_bytes());
+        corrupt[10..12].copy_from_slice(&1u16.to_be_bytes());
+        let (restored, _) = Inventory::from_bytes(&corrupt).unwrap();
+        let max = items::info(item).unwrap().durability.unwrap();
+        assert_eq!(
+            restored.slots[0],
+            Some(Stack {
+                damage: max - 1,
+                ..tool
+            })
+        );
+        assert_eq!(restored.slots[1], inv.slots[1]);
+    }
+
+    #[test]
+    fn moving_a_worn_tool_preserves_damage_in_each_screen_and_on_return() {
+        let tool = Stack {
+            item: items::by_name("bow").unwrap(),
+            count: 1,
+            damage: 34,
+        };
+        let mut inv = Inventory::default();
+        inv.set(0, Some(tool)).unwrap();
+        for (screen, slot) in [
+            (Screen::None, 36),
+            (Screen::CraftingTable { pos: [0; 3] }, 41),
+        ] {
+            inv.screen = screen;
+            inv.click(0, 1, false).unwrap();
+            assert_eq!(inv.cursor, Some(tool));
+            inv.click(slot, 1, false).unwrap();
+            assert_eq!(inv.grid()[0], Some(tool));
+            inv.click(slot, 0, true).unwrap();
+            assert_eq!(inv.slots[0], Some(tool));
+        }
+
+        let mut f = crate::furnace::Furnace::default();
+        inv.screen = Screen::Furnace { pos: [0; 3] };
+        inv.click_furnace(&mut f, 0, 0, false).unwrap();
+        inv.click_furnace(&mut f, 51, 0, false).unwrap();
+        assert_eq!(f.slots[0], Some(tool));
+        inv.click_furnace(&mut f, 51, 0, true).unwrap();
+        assert_eq!(inv.slots[0], Some(tool));
+
+        inv.screen = Screen::None;
+        inv.click(0, 0, false).unwrap();
+        inv.click(36, 0, false).unwrap();
+        assert!(inv.return_crafting().is_empty());
+        assert_eq!(inv.slots[0], Some(tool));
+        inv.click(0, 0, true).unwrap();
+        assert_eq!(inv.slots[9], Some(tool));
+        inv.click(9, 0, false).unwrap();
+        inv.slots.fill(Some(Stack {
+            item: 1,
+            count: 64,
+            damage: 0,
+        }));
+        assert_eq!(inv.return_crafting(), vec![tool]);
+    }
+
+    #[test]
+    fn clicks_swap_pickaxes_with_different_wear_in_inventory_and_screens() {
+        let item = items::by_name("wooden_pickaxe").unwrap();
+        let fresh = Stack {
+            item,
+            count: 1,
+            damage: 0,
+        };
+        let worn = Stack {
+            damage: items::info(item).unwrap().durability.unwrap() - 1,
+            ..fresh
+        };
+        let furnace = Screen::Furnace { pos: [0; 3] };
+        for (screen, slot) in [
+            (Screen::None, 1),
+            (Screen::None, 36),
+            (Screen::CraftingTable { pos: [0; 3] }, 41),
+            (furnace, 1),
+            (furnace, 51),
+        ] {
+            let mut inv = Inventory::default();
+            inv.set(0, Some(worn)).unwrap();
+            inv.set(1, Some(fresh)).unwrap();
+            inv.screen = screen;
+            let mut f = crate::furnace::Furnace::default();
+            let mut click = |inv: &mut Inventory, slot| {
+                if screen == furnace {
+                    inv.click_furnace(&mut f, slot, 0, false).unwrap();
+                } else {
+                    inv.click(slot, 0, false).unwrap();
+                }
+            };
+            if slot != 1 {
+                click(&mut inv, 1);
+                click(&mut inv, slot);
+            }
+            click(&mut inv, 0);
+            assert_eq!(inv.cursor, Some(worn));
+            click(&mut inv, slot);
+            assert_eq!(inv.cursor, Some(fresh), "{screen:?}, slot {slot}");
+            click(&mut inv, 0);
+            click(&mut inv, slot);
+            assert_eq!(inv.cursor, Some(worn), "{screen:?}, slot {slot}");
+            assert_eq!(inv.slots[0], Some(fresh));
+        }
+    }
+
+    #[test]
+    fn clicking_matching_stacks_respects_the_stack_limit() {
+        let mut inv = Inventory::default();
+        let pickaxe = Stack {
+            item: items::by_name("wooden_pickaxe").unwrap(),
+            count: 1,
+            damage: 1,
+        };
+        inv.set(0, Some(pickaxe)).unwrap();
+        inv.cursor = Some(pickaxe);
+        let before = inv.clone();
+        inv.click(0, 0, false).unwrap();
+        assert_eq!(inv, before);
+
+        let stone = Stack {
+            item: items::by_name("stone").unwrap(),
+            count: 2,
+            damage: 0,
+        };
+        inv.set(0, Some(stone)).unwrap();
+        inv.cursor = Some(stone);
+        inv.click(0, 0, false).unwrap();
+        assert_eq!(inv.slots[0], Some(Stack { count: 4, ..stone }));
+        assert_eq!(inv.cursor, None);
+    }
+
     #[test]
     fn persistence_is_strict_and_round_trips() {
         let mut inv = Inventory::creative();
@@ -551,7 +831,7 @@ mod tests {
         let vitals = PlayerVitals::default();
         let bytes = inv.to_bytes(vitals);
         assert_eq!(Inventory::from_bytes(&bytes), Ok((inv, vitals)));
-        for (at, value) in [(0, 6), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        for (at, value) in [(0, 7), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
@@ -571,11 +851,15 @@ pub(crate) fn subtract(slot: &mut Option<Stack>, count: u8) {
         }
     }
 }
-fn add_slots(slots: &mut [Option<Stack>], item: u16, mut count: u32) -> u32 {
+fn add_slots(slots: &mut [Option<Stack>], item: u16, mut count: u32, damage: u16) -> u32 {
     let Some(info) = items::info(item) else {
         return count;
     };
-    for slot in slots.iter_mut().flatten().filter(|s| s.item == item) {
+    for slot in slots
+        .iter_mut()
+        .flatten()
+        .filter(|s| s.matches_item_and_damage(item, damage))
+    {
         let n = count.min(u32::from(info.max_stack - slot.count)) as u8;
         slot.count += n;
         count -= u32::from(n);
@@ -585,7 +869,11 @@ fn add_slots(slots: &mut [Option<Stack>], item: u16, mut count: u32) -> u32 {
             break;
         }
         let n = count.min(u32::from(info.max_stack)) as u8;
-        *slot = Some(Stack { item, count: n });
+        *slot = Some(Stack {
+            item,
+            count: n,
+            damage,
+        });
         count -= u32::from(n);
     }
     count
@@ -633,7 +921,11 @@ pub fn matching_recipe<'a>(
 mod crafting_tests {
     use super::*;
     fn stack(item: u16, count: u8) -> Option<Stack> {
-        Some(Stack { item, count })
+        Some(Stack {
+            item,
+            count,
+            damage: 0,
+        })
     }
     #[test]
     fn matching_trims_offsets_shapeless_and_rejects_wrong_shapes() {
@@ -724,6 +1016,7 @@ mod crafting_tests {
                             grid[y * 3 + x + dx] = (ingredient != 0).then_some(Stack {
                                 item: ingredient,
                                 count: 2,
+                                damage: 0,
                             });
                         }
                     }
@@ -863,9 +1156,21 @@ mod crafting_tests {
         assert_eq!(
             inv.return_crafting(),
             vec![
-                Stack { item: 43, count: 1 },
-                Stack { item: 8, count: 1 },
-                Stack { item: 5, count: 4 }
+                Stack {
+                    item: 43,
+                    count: 1,
+                    damage: 0
+                },
+                Stack {
+                    item: 8,
+                    count: 1,
+                    damage: 0
+                },
+                Stack {
+                    item: 5,
+                    count: 4,
+                    damage: 0
+                }
             ]
         );
         assert_eq!(inv.screen, Screen::None);
@@ -994,6 +1299,7 @@ mod furnace_click_tests {
         Some(Stack {
             item: items::by_name(name).unwrap(),
             count,
+            damage: 0,
         })
     }
     #[test]

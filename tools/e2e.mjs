@@ -1685,6 +1685,42 @@ async function survivalCrafting() {
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.getElementById("crafting-table-screen").hidden && window.__mc.stats().screen===0);
         check(await page.evaluate(() => window.__mc.stats().inventory[11]?.count===1 && document.querySelector('#crafting-table-screen [data-slot="11"] canvas').title==="wooden_pickaxe"),"crafting: wooden pickaxe remains in inventory after closing");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view");
+        await page.keyboard.press("KeyE");
+        await page.waitForSelector("#inventory-screen:not([hidden])");
+        await inv(11,0);
+        await inv(0,1);
+        check(await page.$eval('#inventory-screen [data-slot="11"] canvas', c => !c.hasAttribute("data-durability")),
+            "crafting: moving the pickaxe clears durability from the empty slot");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => document.pointerLockElement?.id === "view" && window.__mc.stats().screen === 0);
+        await page.keyboard.press("Digit1");
+        const firstHotbarIcon = "#hotbar canvas:first-child";
+        const durabilityPixel = c => [...c.getContext("2d").getImageData(2, c.height - 3, 1, 1).data];
+        const freshPixel = await page.$eval(firstHotbarIcon, durabilityPixel);
+        check(await page.$eval(firstHotbarIcon, c => c.title === "wooden_pickaxe" &&
+            c.dataset.durability === "48/48" && window.__mc.stats().inventory[0]?.damage === 0),
+            "crafting: a new pickaxe has full durability");
+        // The table takes time to mine even with a pickaxe.
+        await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI),target);
+        await page.waitForFunction(([x,y,z]) => {
+            const c = window.__mc.stats().camera, pitch = c.pitch * Math.PI / 180;
+            const hit = window.__mc.raycast([c.x,c.y,c.z],[-Math.cos(pitch),-Math.sin(pitch),0],6);
+            return hit?.x === x && hit?.y === y && hit?.z === z;
+        },{},target);
+        await page.mouse.down();
+        await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0 && window.__mc.stats().inventory[0]?.damage === 1,{},target);
+        await page.mouse.up();
+        check(await page.$eval(firstHotbarIcon, c => c.title === "wooden_pickaxe" &&
+            c.dataset.durability === "47/48" && window.__mc.stats().inventory[0]?.damage === 1),
+            "crafting: mining consumes one use of the pickaxe");
+        const wornPixel = await page.$eval(firstHotbarIcon, durabilityPixel);
+        check(wornPixel[1] > wornPixel[0] && wornPixel[1] > wornPixel[2] && wornPixel[3] === 255 &&
+            wornPixel.some((value, channel) => value !== freshPixel[channel]), "crafting: worn pickaxe shows a green durability bar in the hotbar");
+        await page.keyboard.press("KeyE");
+        await page.waitForSelector("#inventory-screen:not([hidden])");
+        const inventoryPixel = await page.$eval('#inventory-screen [data-slot="0"] canvas', durabilityPixel);
+        check(inventoryPixel.every((value, channel) => value === wornPixel[channel]), "crafting: worn pickaxe shows the same bar in the inventory");
         check(errors.length===0,"crafting: no page errors",errors.join(" | "));
     } catch (err) {
         await diagnoseFailure(page, "crafting", err);
@@ -1967,6 +2003,36 @@ async function farming() {
 		check(errors.length === 0, "farming: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "farming", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
+async function fallingBlocks() {
+	const { page, errors } = await open(`server=local&world=e2e-falling-blocks-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "falling blocks", chunksInView(2));
+		const support = [Math.floor(spawn[0]) + 2, Math.floor(spawn[1]), Math.floor(spawn[2])];
+		check(await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			const sand = api.stateId("sand");
+			return api.getBlock(x, y - 1, z) === api.stateId("grass_block")
+				&& api.setBlock(x, y, z, api.stateId("stone"))
+				&& api.setBlock(x, y + 1, z, sand)
+				&& api.setBlock(x, y + 2, z, sand);
+		}, support), "falling blocks: stacks two sand blocks on a stone support");
+		check(await page.evaluate(pos => window.__mc.setBlock(...pos, 0), support),
+			"falling blocks: breaks the stone support");
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			const sand = api.stateId("sand");
+			return api.getBlock(x, y, z) === sand
+				&& api.getBlock(x, y + 1, z) === sand
+				&& api.getBlock(x, y + 2, z) === 0;
+		}, { timeout: 5000 }, support);
+		check(true, "falling blocks: both sand blocks land one block lower");
+		check(errors.length === 0, "falling blocks: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "falling-blocks", err);
 		throw err;
 	} finally { await page.close(); }
 }
@@ -3354,6 +3420,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await waterFlow();
 	await lavaFlow();
+	await fallingBlocks();
 	await mobs();
 	await entitySave();
 	await mobCombat();

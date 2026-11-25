@@ -14,6 +14,7 @@ pub struct Entity {
     pub velocity: [f64; 3],
     pub item: u16,
     pub count: u8,
+    pub damage: u16,
     pub age: u32,
     pub pickup_delay: u32,
     pub on_ground: bool,
@@ -404,5 +405,75 @@ mod tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use crate::{GameMode, Server, Stack};
+    use protocol::{C2S, PROTOCOL_VERSION, S2C};
+    use world::items;
+    use worldgen::Generator;
+
+    #[test]
+    fn dropping_and_dying_keep_damage_until_pickup() {
+        for dies in [false, true] {
+            let mut s = Server::new(5, Generator::Flat);
+            s.set_game_mode(GameMode::Survival);
+            s.connect(1);
+            s.apply(
+                1,
+                C2S::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    view_distance: 2,
+                },
+            );
+            s.tick();
+            let stack = Stack {
+                item: items::by_name("wooden_pickaxe").unwrap(),
+                count: 1,
+                damage: 17,
+            };
+            let before = s.state_hash();
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(Stack { damage: 0, ..stack }))
+                .unwrap();
+            let new_tool = s.state_hash();
+            assert_ne!(before, new_tool);
+            s.clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(stack))
+                .unwrap();
+            assert_ne!(s.state_hash(), new_tool);
+            if dies {
+                let client = s.clients.get_mut(&1).unwrap();
+                client.health.vitals.health = 1;
+                client.pos[1] = crate::health::VOID_Y - 1.0;
+                for _ in 0..10 {
+                    s.tick_health();
+                }
+                assert!(s.clients[&1].health.vitals.dead);
+                s.apply(1, C2S::Respawn);
+            } else {
+                s.apply(1, C2S::DropItem { dir: [0.0; 3] });
+            }
+            assert!(s.clients[&1].inventory.selected_stack().is_none());
+            let entity = s.entities.get_mut(&1).unwrap();
+            assert_eq!(entity.damage, stack.damage);
+            entity.pos = s.clients[&1].pos;
+            entity.velocity = [0.0; 3];
+            entity.pickup_delay = 0;
+            s.sync_entities();
+            assert!(s.take_outbox().iter().any(|(id, p)| *id == 1 &&
+                matches!(S2C::decode(p), Ok(S2C::EntitySpawn { item, damage: 17, .. }) if item == stack.item)));
+            s.tick_entities();
+            assert!(s.entities.is_empty());
+            assert_eq!(s.clients[&1].inventory.selected_stack(), Some(stack));
+        }
     }
 }

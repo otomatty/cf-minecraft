@@ -19,6 +19,7 @@
 mod arrow;
 pub mod entity;
 mod entity_storage;
+mod falling_blocks;
 pub mod furnace;
 mod health;
 pub mod inventory;
@@ -56,6 +57,8 @@ const DEFAULT_VIEW_DISTANCE: i32 = 6;
 const UNLOAD_MARGIN: i32 = 2;
 const UNLOAD_INTERVAL: i64 = 100;
 const ENTITY_SAVE_INTERVAL: i64 = 600;
+// The furnace count is bounded by the number of blocks in a chunk.
+const FURNACE_DAMAGE_FLAG: u32 = 1 << 31;
 const MAX_DROPPED_ITEMS: usize = 1024;
 /// Generous interaction range; real reach rules arrive with survival mode.
 const MAX_REACH: f64 = 8.0;
@@ -266,7 +269,7 @@ fn parse_time_of_day(value: &str) -> Option<i64> {
 }
 
 fn players_keep_chunk(clients: &BTreeMap<u32, Client>, cx: i32, cz: i32) -> bool {
-    clients.values().any(|c| {
+    clients.values().filter(|c| c.joined).any(|c| {
         let (px, pz) = c.center();
         let r = c.view + UNLOAD_MARGIN;
         (cx - px).abs() <= r && (cz - pz).abs() <= r
@@ -388,7 +391,7 @@ impl Server {
         self.outbox.push((
             id,
             S2C::Inventory {
-                furnace: f.slots.map(|s| s.map(|s| (s.item, s.count))),
+                furnace: f.slots.map(|s| s.map(Stack::wire)),
                 burn: f.burn.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
                 total: f.total.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
                 progress: f.progress,
@@ -397,19 +400,16 @@ impl Server {
                     inventory::Screen::CraftingTable { .. } => 1,
                     inventory::Screen::Furnace { .. } => 2,
                 },
-                table: client.inventory.table.map(|s| s.map(|s| (s.item, s.count))),
-                crafting: client
-                    .inventory
-                    .crafting
-                    .map(|s| s.map(|s| (s.item, s.count))),
-                result: client.inventory.result().map(|s| (s.item, s.count)),
-                cursor: client.inventory.cursor.map(|s| (s.item, s.count)),
+                table: client.inventory.table.map(|s| s.map(Stack::wire)),
+                crafting: client.inventory.crafting.map(|s| s.map(Stack::wire)),
+                result: client.inventory.result().map(Stack::wire),
+                cursor: client.inventory.cursor.map(Stack::wire),
                 selected: client.inventory.selected(),
                 slots: client
                     .inventory
                     .slots()
                     .iter()
-                    .map(|s| s.map(|s| (s.item, s.count)))
+                    .map(|s| s.map(Stack::wire))
                     .collect(),
             }
             .encode(),
@@ -438,6 +438,25 @@ impl Server {
         velocity: [f64; 3],
         pickup_delay: u32,
     ) {
+        self.spawn_item_stack(
+            Stack {
+                item,
+                count,
+                damage: 0,
+            },
+            pos,
+            velocity,
+            pickup_delay,
+        );
+    }
+
+    fn spawn_item_stack(
+        &mut self,
+        stack: Stack,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+        pickup_delay: u32,
+    ) {
         let Some(id) = self.allocate_entity_id() else {
             return;
         };
@@ -445,8 +464,9 @@ impl Server {
             kind: entity::EntityKind::Item,
             pos,
             velocity,
-            item,
-            count,
+            item: stack.item,
+            count: stack.count,
+            damage: stack.damage,
             age: 0,
             pickup_delay,
             on_ground: false,
@@ -515,7 +535,11 @@ impl Server {
                     bounds.max[a] += amount;
                 }
                 if bounds.intersects(e.bounds()) {
-                    let remaining = c.inventory.add(e.item, e.count as u32) as u8;
+                    let remaining = c.inventory.add_stack(Stack {
+                        item: e.item,
+                        count: e.count,
+                        damage: e.damage,
+                    });
                     c.inventory_dirty |= remaining != e.count;
                     e.count = remaining;
                     if remaining == 0 {
@@ -603,7 +627,8 @@ impl Server {
                     return comparisons;
                 }
                 comparisons += 1;
-                if (0..3).all(|axis| (a.pos[axis] - b.pos[axis]).abs() <= 0.5)
+                if a.damage == b.damage
+                    && (0..3).all(|axis| (a.pos[axis] - b.pos[axis]).abs() <= 0.5)
                     && a.count as u16 + b.count as u16 <= max_stack as u16
                 {
                     let b = self.entities.remove(&other).unwrap();
@@ -659,6 +684,7 @@ impl Server {
                             kind: e.kind as u8,
                             item: e.item,
                             count,
+                            damage: e.damage,
                             x,
                             y,
                             z,
@@ -1041,7 +1067,7 @@ impl Server {
 
     fn drop_carried_stacks(&mut self, stacks: impl IntoIterator<Item = Stack>, pos: [f64; 3]) {
         for stack in stacks {
-            self.spawn_item(stack.item, stack.count, pos, [0.0, 0.1, 0.0], 40);
+            self.spawn_item_stack(stack, pos, [0.0, 0.1, 0.0], 40);
         }
     }
     pub fn disconnect(&mut self, id: u32) {
@@ -1365,6 +1391,7 @@ impl Server {
                             && self.world.get_block(x, y + 1, z) == Some(blocks::AIR) =>
                     {
                         self.change_block_naturally(pos, blocks::FARMLAND);
+                        self.wear_held_item(id);
                     }
                     _ => self.stats.packets_rejected += 1,
                 }
@@ -1381,7 +1408,7 @@ impl Server {
                 if self.next_entity_id == 0 {
                     return;
                 }
-                let Some(item) = client.inventory.take_selected() else {
+                let Some(stack) = client.inventory.take_selected_stack() else {
                     return;
                 };
                 client.inventory_dirty = true;
@@ -1396,7 +1423,7 @@ impl Server {
                     *v = *v / length.max(1.0) * 0.3;
                 }
                 velocity[1] += 0.1;
-                self.spawn_item(item, 1, pos, velocity, 40);
+                self.spawn_item_stack(stack, pos, velocity, 40);
             }
             C2S::Hello {
                 protocol,
@@ -1440,7 +1467,11 @@ impl Server {
             C2S::CreativeSetSlot { slot, item, count } => {
                 let client = self.clients.get_mut(&id).unwrap();
                 let before = client.inventory.clone();
-                let stack = (item != 0).then_some(Stack { item, count });
+                let stack = (item != 0).then_some(Stack {
+                    item,
+                    count,
+                    damage: 0,
+                });
                 if !client.joined
                     || self.game_mode != GameMode::Creative
                     || client.inventory.set(slot, stack).is_err()
@@ -1523,9 +1554,8 @@ impl Server {
     fn drop_furnace_contents(&mut self, [x, y, z]: [i32; 3]) {
         if let Some(furnace) = self.furnaces.remove(&[x, y, z]) {
             for stack in furnace.slots.into_iter().flatten() {
-                self.spawn_item(
-                    stack.item,
-                    stack.count,
+                self.spawn_item_stack(
+                    stack,
                     [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
                     [0.0, 0.1, 0.0],
                     10,
@@ -1557,6 +1587,7 @@ impl Server {
         self.stats.blocks_changed += 1;
         self.broadcast_block(x, y, z, state);
         self.schedule_fluid_neighbors([x, y, z]);
+        self.schedule_falling_blocks([x, y, z], state);
         self.check_wheat_above([x, y, z], state, exploded);
         self.check_torches_supported_by([x, y, z], exploded);
         for [dx, _, dz] in blocks::FACE_NORMALS[2..].iter().copied() {
@@ -1681,6 +1712,21 @@ impl Server {
         }
     }
 
+    fn wear_held_item(&mut self, id: u32) {
+        if self.game_mode != GameMode::Survival {
+            return;
+        }
+        let client = self.clients.get_mut(&id).unwrap();
+        if let Some(broken) = client.inventory.wear_selected() {
+            client.inventory_dirty = true;
+            if broken {
+                client.health.cancel_using_item();
+                self.abort_dig(id);
+                self.outbox.push((id, S2C::ToolBreak.encode()));
+            }
+        }
+    }
+
     fn attack(&mut self, attacker: u32, id: u32) {
         let client = self.clients.get_mut(&attacker).unwrap();
         if !client.joined || client.health.vitals.dead {
@@ -1705,6 +1751,7 @@ impl Server {
                     items::ToolKind::Shovel | items::ToolKind::Hoe => 0,
                 }
         });
+        let health_before = mob.health;
         mob.hurt(
             &self.world,
             damage,
@@ -1713,8 +1760,12 @@ impl Server {
             id,
             self.game_time,
         );
+        let landed = mob.health < health_before;
         if self.game_mode == GameMode::Survival {
             client.health.add_exhaustion(40);
+        }
+        if landed {
+            self.wear_held_item(attacker);
         }
         self.finish_mob_hit(id);
     }
@@ -1761,6 +1812,7 @@ impl Server {
             let elapsed = self.game_time - dig.start;
             if elapsed >= i64::from(dig.ticks) {
                 self.change_block(id, [x, y, z], blocks::AIR, dig.drops);
+                self.wear_held_item(id);
                 self.add_mining_exhaustion(id);
                 self.abort_dig(id);
             } else {
@@ -2280,12 +2332,15 @@ impl Server {
             .iter()
             .filter(|(p, _)| (p[0] >> 4, p[2] >> 4) == (cx, cz))
             .collect();
-        w.varint(entries.len() as u32);
+        let with_damage = entries
+            .iter()
+            .any(|(_, f)| f.slots.iter().flatten().any(|s| s.damage != 0));
+        w.varint(entries.len() as u32 | if with_damage { FURNACE_DAMAGE_FLAG } else { 0 });
         for (p, f) in entries {
             w.u8(p[0].rem_euclid(16) as u8);
             w.i32(p[1]);
             w.u8(p[2].rem_euclid(16) as u8);
-            f.write(&mut w);
+            f.write(&mut w, with_damage);
         }
         let scheduled: Vec<_> = self
             .scheduled_blocks
@@ -2328,8 +2383,11 @@ impl Server {
         let chunk = Chunk::read(cx, cz, &mut Reader::new(&bytes[..prefix]))?;
         let mut furnaces = BTreeMap::new();
         if r.remaining() > 0 {
-            let count = r.varint()? as usize;
-            if count > 16 * 16 * HEIGHT as usize || r.remaining() < count * 25 {
+            let header = r.varint()?;
+            let with_damage = header & FURNACE_DAMAGE_FLAG != 0;
+            let count = (header & !FURNACE_DAMAGE_FLAG) as usize;
+            let record_len = if with_damage { 31 } else { 25 };
+            if count > 16 * 16 * HEIGHT as usize || r.remaining() < count * record_len {
                 return Err(DecodeError);
             }
             for _ in 0..count {
@@ -2348,7 +2406,7 @@ impl Server {
                     return Err(DecodeError);
                 }
                 if furnaces
-                    .insert(p, furnace::Furnace::read(&mut r)?)
+                    .insert(p, furnace::Furnace::read(&mut r, with_damage)?)
                     .is_some()
                 {
                     return Err(DecodeError);
@@ -2423,6 +2481,7 @@ impl Server {
             {
                 h.bytes(&slot.map_or(0, |s| s.item).to_be_bytes());
                 h.u8(slot.map_or(0, |s| s.count));
+                h.bytes(&slot.map_or(0, |s| s.damage).to_be_bytes());
             }
             h.u8(match client.inventory.screen {
                 inventory::Screen::None => 0,
@@ -2466,7 +2525,7 @@ impl Server {
                 h.bytes(&v.to_be_bytes());
             }
             let mut w = world::io::Writer::new();
-            f.write(&mut w);
+            f.write(&mut w, true);
             h.bytes(&w.finish());
         }
         h.i64(self.scheduled_blocks.len() as i64);
@@ -2486,6 +2545,7 @@ impl Server {
             }
             h.bytes(&e.item.to_be_bytes());
             h.u8(e.count);
+            h.bytes(&e.damage.to_be_bytes());
             h.bytes(&e.age.to_be_bytes());
             h.bytes(&e.pickup_delay.to_be_bytes());
             h.u8(e.on_ground as u8);
@@ -3519,6 +3579,7 @@ mod tests {
             let mut stack = Stack {
                 item: torch,
                 count: 8,
+                damage: 0,
             };
             s.clients
                 .get_mut(&1)
@@ -3587,6 +3648,7 @@ mod tests {
                     Some(Stack {
                         item: torch,
                         count: 1,
+                        damage: 0,
                     }),
                 )
                 .unwrap();
@@ -3649,6 +3711,7 @@ mod tests {
                     Some(Stack {
                         item: items::by_name("wooden_pickaxe").unwrap(),
                         count: 1,
+                        damage: 0,
                     }),
                 )
                 .unwrap();
@@ -3667,6 +3730,12 @@ mod tests {
             for _ in 0..=ticks {
                 s.tick();
             }
+            let wear_updates = inventories(&mut s);
+            assert_eq!(wear_updates.len(), usize::from(state == blocks::STONE));
+            if state == blocks::STONE {
+                assert!(matches!(&wear_updates[0], S2C::Inventory { slots, .. }
+                    if slots[8] == Some((items::by_name("wooden_pickaxe").unwrap(), 1, 1))));
+            }
             assert_eq!(s.entities.len(), 1);
             s.clients.get_mut(&1).unwrap().inventory.select(0).unwrap();
             assert!(s.clients[&1].inventory.selected_stack().is_none());
@@ -3678,7 +3747,8 @@ mod tests {
                 s.clients[&1].inventory.selected_stack(),
                 Some(Stack {
                     item: items::for_block(placed).unwrap(),
-                    count: 1
+                    count: 1,
+                    damage: 0,
                 })
             );
             assert_eq!(inventories(&mut s).len(), 1);
@@ -3699,6 +3769,7 @@ mod tests {
                 Some(Stack {
                     item: items::by_name("stone").unwrap(),
                     count: 1,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -3724,6 +3795,7 @@ mod tests {
                 Some(Stack {
                     item: leaves,
                     count: 1,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -3829,7 +3901,11 @@ mod tests {
             assert_eq!(s.get_block(x, y, z), Some(new));
             assert_eq!(
                 s.clients[&1].inventory.selected_stack(),
-                Some(Stack { item, count: 1 })
+                Some(Stack {
+                    item,
+                    count: 1,
+                    damage: 0
+                })
             );
             assert_eq!(s.stats.blocks_changed, 1);
             assert_eq!(s.stats.packets_rejected, 0);
@@ -5491,6 +5567,18 @@ mod tests {
     }
 
     #[test]
+    fn unjoined_connection_does_not_keep_a_chunk_loaded() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect(1);
+        let chunk = s.clients[&1].center();
+        assert!(s.ensure_chunk(chunk));
+
+        s.unload_far_chunks();
+
+        assert!(!s.world.chunks.contains_key(&chunk));
+    }
+
+    #[test]
     fn moving_unloads_old_chunks_and_loads_new_ones() {
         let mut s = joined(2);
         s.clients.get_mut(&1).unwrap().allow_teleport = true;
@@ -5908,7 +5996,14 @@ mod crafting_server_tests {
             .get_mut(&1)
             .unwrap()
             .inventory
-            .set(0, Some(Stack { item: 8, count: 3 }))
+            .set(
+                0,
+                Some(Stack {
+                    item: 8,
+                    count: 3,
+                    damage: 0,
+                }),
+            )
             .unwrap();
         for (slot, button, shift) in [
             (0, 0, false),
@@ -5962,7 +6057,8 @@ mod crafting_server_tests {
             inv.slots()[3],
             Some(Stack {
                 item: items::by_name("wooden_pickaxe").unwrap(),
-                count: 1
+                count: 1,
+                damage: 0,
             })
         );
         assert_eq!(inv.table, [None; 9]);
@@ -5984,6 +6080,7 @@ mod crafting_server_tests {
             Some(Stack {
                 item: wooden_pickaxe,
                 count: 1,
+                damage: 0,
             }),
         )
         .unwrap();
@@ -5992,6 +6089,7 @@ mod crafting_server_tests {
             Some(Stack {
                 item: stick,
                 count: 2,
+                damage: 0,
             }),
         )
         .unwrap();
@@ -6030,6 +6128,7 @@ mod crafting_server_tests {
                 Some(Stack {
                     item: cobblestone,
                     count: (dz + 1) as u8,
+                    damage: 0,
                 })
             );
         }
@@ -6052,6 +6151,7 @@ mod crafting_server_tests {
             Some(Stack {
                 item: items::by_name("stone_pickaxe").unwrap(),
                 count: 1,
+                damage: 0,
             })
         );
         for slot in [50, 3] {
@@ -6072,13 +6172,15 @@ mod crafting_server_tests {
             Some(Stack {
                 item: items::by_name("stone_pickaxe").unwrap(),
                 count: 1,
+                damage: 0,
             })
         );
         assert_eq!(
             inv.slots()[0],
             Some(Stack {
                 item: wooden_pickaxe,
-                count: 1
+                count: 1,
+                damage: 3,
             })
         );
         assert_eq!(&inv.slots()[1..3], &[None, None]);
@@ -6121,6 +6223,7 @@ mod crafting_server_tests {
                             Some(Stack {
                                 item: items::by_name("stone").unwrap(),
                                 count: 64,
+                                damage: 0,
                             }),
                         )
                         .unwrap();
@@ -6130,12 +6233,14 @@ mod crafting_server_tests {
                     inv.table[slot] = Some(Stack {
                         item: planks,
                         count: 1,
+                        damage: 0,
                     });
                 }
                 for slot in [4, 7] {
                     inv.table[slot] = Some(Stack {
                         item: stick,
                         count: 1,
+                        damage: 0,
                     });
                 }
                 use_table(&mut s, pos);
@@ -6143,7 +6248,8 @@ mod crafting_server_tests {
                     s.clients[&1].inventory.result(),
                     Some(Stack {
                         item: pickaxe,
-                        count: 1
+                        count: 1,
+                        damage: 0,
                     })
                 );
                 assert!(matches!(
@@ -6273,12 +6379,32 @@ mod crafting_server_tests {
         *inv = Inventory::default();
         if full {
             for i in 0..36 {
-                inv.set(i, Some(Stack { item: 1, count: 64 })).unwrap();
+                inv.set(
+                    i,
+                    Some(Stack {
+                        item: 1,
+                        count: 64,
+                        damage: 0,
+                    }),
+                )
+                .unwrap();
             }
         }
-        inv.crafting[0] = Some(Stack { item: 8, count: 2 });
-        inv.cursor = Some(Stack { item: 43, count: 3 });
-        inv.table[8] = Some(Stack { item: 5, count: 7 });
+        inv.crafting[0] = Some(Stack {
+            item: 8,
+            count: 2,
+            damage: 0,
+        });
+        inv.cursor = Some(Stack {
+            item: 43,
+            count: 3,
+            damage: 0,
+        });
+        inv.table[8] = Some(Stack {
+            item: 5,
+            count: 7,
+            damage: 0,
+        });
     }
     #[test]
     fn close_save_disconnect_return_and_drop_overflow() {
@@ -6288,15 +6414,27 @@ mod crafting_server_tests {
         s.tick();
         assert_eq!(
             s.clients[&1].inventory.slots()[0],
-            Some(Stack { item: 8, count: 2 })
+            Some(Stack {
+                item: 8,
+                count: 2,
+                damage: 0
+            })
         );
         assert_eq!(
             s.clients[&1].inventory.slots()[1],
-            Some(Stack { item: 5, count: 7 })
+            Some(Stack {
+                item: 5,
+                count: 7,
+                damage: 0
+            })
         );
         assert_eq!(
             s.clients[&1].inventory.slots()[2],
-            Some(Stack { item: 43, count: 3 })
+            Some(Stack {
+                item: 43,
+                count: 3,
+                damage: 0
+            })
         );
         fill(&mut s, true);
         let bytes = s.inventory_data(1).unwrap();
@@ -6318,9 +6456,20 @@ mod crafting_server_tests {
         assert_eq!(s.entities.len(), 6);
         // The same return operation used by disconnect also inserts into non-full inventories.
         let mut inv = Inventory::default();
-        inv.crafting[0] = Some(Stack { item: 8, count: 2 });
+        inv.crafting[0] = Some(Stack {
+            item: 8,
+            count: 2,
+            damage: 0,
+        });
         assert!(inv.return_crafting().is_empty());
-        assert_eq!(inv.slots()[0], Some(Stack { item: 8, count: 2 }));
+        assert_eq!(
+            inv.slots()[0],
+            Some(Stack {
+                item: 8,
+                count: 2,
+                damage: 0
+            })
+        );
     }
     #[test]
     fn inventory_snapshot_returns_transient_items_without_changing_live_state() {
@@ -6348,7 +6497,14 @@ mod crafting_server_tests {
             .get_mut(&1)
             .unwrap()
             .inventory
-            .set(35, Some(Stack { item: 8, count: 63 }))
+            .set(
+                35,
+                Some(Stack {
+                    item: 8,
+                    count: 63,
+                    damage: 0,
+                }),
+            )
             .unwrap();
         let before = original.clients[&1].inventory.clone();
         let mut expected = BTreeMap::<u16, u32>::new();
@@ -6371,7 +6527,14 @@ mod crafting_server_tests {
         let inv = &restored.clients[&1].inventory;
         assert_eq!(inv.crafting, [None; 4]);
         assert_eq!(inv.cursor, None);
-        assert_eq!(inv.slots()[35], Some(Stack { item: 8, count: 64 }));
+        assert_eq!(
+            inv.slots()[35],
+            Some(Stack {
+                item: 8,
+                count: 64,
+                damage: 0
+            })
+        );
         let mut actual = BTreeMap::<u16, u32>::new();
         for stack in inv.slots().iter().flatten() {
             *actual.entry(stack.item).or_default() += u32::from(stack.count);
@@ -6417,7 +6580,14 @@ mod crafting_server_tests {
             .get_mut(&1)
             .unwrap()
             .inventory
-            .set(35, Some(Stack { item: 8, count: 63 }))
+            .set(
+                35,
+                Some(Stack {
+                    item: 8,
+                    count: 63,
+                    damage: 0,
+                }),
+            )
             .unwrap();
         let before = totals(&s);
         // Same order as WorldDO: return, remember position/inventory, disconnect.
@@ -6441,7 +6611,11 @@ mod crafting_server_tests {
         fill(&mut a, false);
         fill(&mut b, false);
         assert_eq!(a.state_hash(), b.state_hash());
-        b.clients.get_mut(&1).unwrap().inventory.table[0] = Some(Stack { item: 5, count: 1 });
+        b.clients.get_mut(&1).unwrap().inventory.table[0] = Some(Stack {
+            item: 5,
+            count: 1,
+            damage: 0,
+        });
         assert_ne!(a.state_hash(), b.state_hash());
         fill(&mut b, false);
         b.clients.get_mut(&1).unwrap().inventory.screen =
@@ -6489,6 +6663,7 @@ mod furnace_server_tests {
         Some(Stack {
             item: items::by_name(name).unwrap(),
             count,
+            damage: 0,
         })
     }
     fn setup() -> (Server, [i32; 3]) {
@@ -6694,6 +6869,34 @@ mod furnace_server_tests {
         s.tick();
         assert_eq!(s.furnaces[&pos], resumed);
     }
+    #[test]
+    fn worn_tools_in_furnaces_are_saved_hashed_and_dropped() {
+        let (mut s, pos) = setup();
+        let item = items::by_name("wooden_pickaxe").unwrap();
+        let tool = Stack {
+            item,
+            count: 1,
+            damage: 16,
+        };
+        s.furnaces.get_mut(&pos).unwrap().slots[0] = Some(Stack { damage: 0, ..tool });
+        let fresh = s.state_hash();
+        s.furnaces.get_mut(&pos).unwrap().slots[0] = Some(tool);
+        assert_ne!(s.state_hash(), fresh);
+        let chunk = (pos[0] >> 4, pos[2] >> 4);
+        let bytes = loop {
+            let (cx, cz, bytes) = s.take_dirty().unwrap();
+            if (cx, cz) == chunk {
+                break bytes;
+            }
+        };
+        let mut restored = Server::new(5, Generator::Flat);
+        assert!(restored.load_chunk(chunk.0, chunk.1, &bytes));
+        assert_eq!(restored.furnaces[&pos].slots[0], Some(tool));
+        restored.drop_furnace_contents(pos);
+        let entity = restored.entities.values().next().unwrap();
+        assert_eq!((entity.item, entity.count, entity.damage), tool.wire());
+    }
+
     #[test]
     fn persists_unopened_furnaces_and_rejects_corrupt_tails() {
         let (mut s, pos) = setup();

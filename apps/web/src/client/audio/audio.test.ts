@@ -5,6 +5,7 @@ import { setImmediate } from "node:timers/promises";
 import { arrowHitPosition, arrowStopped, blockSound, creeperIgnited, distanceGain, materialFor, MAX_VOICES,
 	mobRemovalSound, playerSounds, soundGain, spatialSound, voicesToStop, type Sound } from "./events.ts";
 import { GameAudio } from "./engine.ts";
+import { playEffect } from "./effects.ts";
 import { musicPlan } from "./music.ts";
 import { WorldAudio } from "./world-audio.ts";
 import { ClientCore, S2C, type ArrowEntity } from "../client-core.ts";
@@ -118,13 +119,13 @@ test("only nearby partial pickups count toward inventory gains and play pickup s
 	const packet = (data: Uint8Array) => assert.equal(audio.packet(data, [0, 0, 0], new Map()), data[0]);
 
 	const drop = (id: number, position: Vec3) => {
-		const spawn = new Uint8Array(33);
+		const spawn = new Uint8Array(35);
 		const view = new DataView(spawn.buffer);
 		spawn[0] = S2C.EntitySpawn;
 		view.setUint32(1, id);
 		view.setUint16(6, 1);
 		spawn[8] = 4;
-		position.forEach((value, axis) => view.setFloat64(9 + axis * 8, value));
+		position.forEach((value, axis) => view.setFloat64(11 + axis * 8, value));
 		packet(spawn);
 		packet(Uint8Array.of(S2C.EntityCount, 0, 0, 0, id, 3));
 		assert.equal(core.entities.find(entity => entity.id === id)?.count, 3);
@@ -136,13 +137,57 @@ test("only nearby partial pickups count toward inventory gains and play pickup s
 	drop(2, near);
 	drop(3, otherNear);
 	assert.deepEqual(played, []);
-	const inventory = new Uint8Array(3 + 42 * 3 + 1 + 12 * 3 + 6);
+	const inventory = new Uint8Array(3 + 42 * 5 + 1 + 12 * 5 + 6);
 	inventory.set([S2C.Inventory, 0, 36, 0, 1, 2]);
 	packet(inventory);
 	assert.deepEqual(played, [
 		{ kind: "pickup", position: near },
 		{ kind: "pickup", position: otherNear },
 	]);
+});
+
+test("an accepted ToolBreak packet plays the synthesized snap", async () => {
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const played: Sound[] = [];
+	const audio = new WorldAudio(core, [], { play: sound => played.push(sound) });
+	const feet: Vec3 = [0, 0, 0];
+	const ids = new Map();
+	assert.equal(audio.packet(Uint8Array.of(S2C.ToolBreak, 0), feet, ids), -1);
+	assert.equal(audio.packet(Uint8Array.of(S2C.ToolBreak), feet, ids), S2C.ToolBreak);
+	assert.deepEqual(played, [{ kind: "toolBreak" }]);
+
+	const starts: string[] = [];
+	const stops: number[] = [];
+	const node = { connect: () => node, disconnect() {} };
+	const param = { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} };
+	const source = (kind: string) => ({
+		...node,
+		start: () => starts.push(kind),
+		stop: (time: number) => stops.push(time),
+		onended: null as (() => void) | null,
+	});
+	const oscillator = { ...source("tone"), frequency: param, type: "" };
+	const noise = { ...source("noise"), buffer: null };
+	const filter = { ...node, type: "", frequency: { value: 0 } };
+	const context = {
+		currentTime: 1,
+		createGain: () => ({ ...node, gain: { ...param, value: 0 } }),
+		createOscillator: () => oscillator,
+		createBufferSource: () => noise,
+		createBiquadFilter: () => filter,
+	};
+	let ended = false;
+	playEffect(context as unknown as AudioContext, node as unknown as AudioNode,
+		{ duration: 2 } as AudioBuffer, played[0], 0.8, 0, () => { ended = true; });
+	assert.deepEqual(starts, ["tone", "noise"]);
+	assert.equal(oscillator.type, "triangle");
+	assert.equal(filter.type, "highpass");
+	assert.equal(stops.length, 2);
+	assert.equal(stops[0], stops[1]);
+	assert.ok(stops[0] > 1);
+	oscillator.onended?.();
+	assert.ok(ended);
 });
 
 test("a user gesture retries a pending resume and only the latest request can complete it", async t => {

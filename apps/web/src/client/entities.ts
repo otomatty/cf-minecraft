@@ -1,4 +1,5 @@
 import type { MobKind, RayHit } from "./client-core.ts";
+import { boxInFrustum } from "./math.ts";
 
 import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
@@ -167,6 +168,14 @@ export interface RenderPlayer extends RenderPose {
 	id: number;
 	name: string;
 	pitch: number;
+}
+
+export function mobInFrustum({ kind, position: [x, y, z] }: RenderMob, eye: readonly number[], planes: Float32Array): boolean {
+	const { width, height } = mobHitboxes[kind];
+	// Animated limbs, held items and swelling can extend past the hitbox.
+	const half = width / 2 + 0.75;
+	return boxInFrustum(planes, x - eye[0] - half, y - eye[1] - 0.125, z - eye[2] - half,
+		2 * half, height + 0.625, 2 * half);
 }
 
 /** Cross two cutout sprites through the hitbox, leaving the upper body visible between tongues. */

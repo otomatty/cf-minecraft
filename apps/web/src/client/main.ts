@@ -26,7 +26,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
-import { hotbarStates, pickBlockItem } from "./hotbar.ts";
+import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
@@ -598,7 +598,7 @@ async function main(): Promise<void> {
 		hotbarBlocks = hotbarStates(inventory, items);
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
-			paintItemIcon(c, inventory[i]?.item);
+			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage);
 			const count = inventory[i]?.count ?? 0;
 			c.dataset.count = String(count);
 			if (count >= 2) {
@@ -634,7 +634,7 @@ async function main(): Promise<void> {
 			}
 		}
 	}
-	function paintItemIcon(c: HTMLCanvasElement, id?: number): void {
+	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0): void {
 		const item = items.find(item => item.id === id);
 		paintIcon(c, item?.block ?? 0);
 		if (item?.texture) {
@@ -642,7 +642,19 @@ async function main(): Promise<void> {
 			const pixels = renderer.texturePixels.get(item.texture);
 			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
 		}
+		const max = item?.durability ?? null;
 		if (item) c.title = item.name;
+		if (max === null) delete c.dataset.durability;
+		else c.dataset.durability = `${max - damage}/${max}`;
+		const bar = durabilityBar(damage, max);
+		if (bar) {
+			const ctx = c.getContext("2d")!;
+			const width = c.width - 4;
+			ctx.fillStyle = "#181818";
+			ctx.fillRect(2, c.height - 3, width, 2);
+			ctx.fillStyle = bar.color;
+			ctx.fillRect(2, c.height - 3, Math.max(1, Math.round(width * bar.fraction)), 1);
+		}
 	}
 	selectSlot(0, false);
 
@@ -923,7 +935,7 @@ async function main(): Promise<void> {
 		const display = inventoryDisplay(core.inventorySlots, active.kind);
 		for (const group of display.groups) for (const {slot,stack} of group) {
 			const view = active.buttons.get(slot)!;
-			paintItemIcon(view.canvas, stack?.item);
+			paintItemIcon(view.canvas, stack?.item, stack?.damage);
 			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
 			view.canvas.dataset.count = String(stack?.count ?? 0);
 		}
@@ -937,7 +949,7 @@ async function main(): Promise<void> {
 			gauge.setAttribute("aria-valuemax", String(max));
 			gauge.textContent = `${value} / ${max}`;
 		}
-		paintItemIcon(cursorCanvas, display.cursor?.item);
+		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
 		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
 	}
