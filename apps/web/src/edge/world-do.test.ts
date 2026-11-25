@@ -106,6 +106,11 @@ function fixture(t, synchronousClose = false, legacy = false) {
 						return { toArray: () => [] };
 					}
 					const rows = sqlite.prepare(sql).all(...args.map(arg => arg instanceof ArrayBuffer ? new Uint8Array(arg) : arg));
+					for (const row of rows) {
+						for (const [column, value] of Object.entries(row)) {
+							if (value instanceof Uint8Array) row[column] = Uint8Array.from(value).buffer;
+						}
+					}
 					return { toArray: () => rows, one: () => { assert.equal(rows.length, 1); return rows[0]; } };
 				},
 			},
@@ -139,8 +144,8 @@ function fixture(t, synchronousClose = false, legacy = false) {
 	};
 	world.ensureCore = function () { return this.core ??= core; };
 	world.startTicking = () => {};
-	const join = (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string, gameMode?: string, gameModeRevision?: string, role?: string) =>
-		world.fetch(
+	const joinWorld = (target: WorldDO) => (user?: string, authorizedAt: string | null = String(Date.now()), session?: string, encodedName?: string, gameMode?: string, gameModeRevision?: string, role?: string) =>
+		target.fetch(
 			new Request("https://game.example/ws/lobby", {
 				headers: {
 					Upgrade: "websocket",
@@ -154,7 +159,7 @@ function fixture(t, synchronousClose = false, legacy = false) {
 				},
 			}),
 		);
-	return { world, join, initialPositions, acceptedPositions, teleportPermissions, operators, connected, disconnected, closed, sqlite, context, authDB };
+	return { world, join: joinWorld(world), joinWorld, initialPositions, acceptedPositions, teleportPermissions, operators, connected, disconnected, closed, sqlite, context, authDB };
 }
 
 test("DO requires the Worker identity header before admitting a connection", async t => {
@@ -321,6 +326,37 @@ test("packet flood closes without reconnect", async t => {
 
 // Use the same real format implementation as the OPFS tests after build:wasm.
 const storageModule = new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url)));
+
+for (const synchronousClose of [false, true]) {
+	test(`DO closes only the mismatched Hello and frees its slot (synchronous close=${synchronousClose})`, async t => {
+		const f = fixture(t, synchronousClose);
+		delete f.world.ensureCore;
+		f.world.env.GEN_OFFLOAD = "0";
+		f.world.setMeta("generator", String(Generator.Flat));
+		await f.join("old-client");
+		await f.join("current-client");
+		assert.equal(f.world.sockets.size, 2);
+		assert.equal(f.world.core.clientCount, 2);
+		const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		const matching = client.encodeHello(2);
+		const mismatched = matching.slice();
+		mismatched[1] = 0; // Replace the single-byte protocol varint.
+		const wrongSocket = f.world.sockets.get(1);
+		const rightSocket = f.world.sockets.get(2);
+		wrongSocket.dispatchEvent(new MessageEvent("message", { data: mismatched.buffer }));
+		rightSocket.dispatchEvent(new MessageEvent("message", { data: matching.buffer }));
+		f.world.lastAccessCheck = Date.now();
+		f.world.step();
+		assert.deepEqual(f.closed, [[4004, "protocol mismatch"]]);
+		assert.deepEqual([...f.world.sockets.keys()], [2]);
+		assert.equal(f.world.core.clientCount, 1);
+		assert.ok(rightSocket.sent.some(frame => typeof frame !== "string" && client.packet(frame) === S2C.Welcome));
+		wrongSocket.dispatchEvent(new Event("close"));
+		assert.equal(f.world.core.clientCount, 1);
+	});
+}
+
 function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 	world.codec = new RegionCodec(new WebAssembly.Instance(storageModule, {}));
 	const loaded = [];
@@ -328,6 +364,7 @@ function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 	world.core = {
 		...world.core,
 		tick() {}, takeOutbox() { return []; }, takeRequests() { return requests.splice(0); },
+		takeProtocolMismatches() { return []; },
 		loadChunk(cx, cz, data) { loaded.push([cx, cz, data]); },
 		chunkMissing(cx, cz) { missing.push([cx, cz]); },
 		flushEntityChanges() {}, takeDirty() { return dirty.shift() ?? null; }, gameTime: 1n, dayTime: 1n,
@@ -836,7 +873,7 @@ for (const synchronousClose of [false, true]) {
 	});
 }
 
-test("debug disconnect remembers positions but debug evict clears them", async t => {
+test("debug disconnect remembers positions and debug evict restores them from SQLite", async t => {
 	const f = fixture(t);
 	await f.join("player");
 	const position: [number, number, number] = [3000.5, 100, 0.5];
@@ -846,8 +883,185 @@ test("debug disconnect remembers positions but debug evict clears them", async t
 	assert.deepEqual(f.initialPositions, [undefined, position]);
 	f.acceptedPositions.set(2, position);
 	f.world.evict();
+	assert.equal(f.world.savedPlayers.size, 0);
+	assert.equal(f.world.pendingPlayers.size, 0);
 	await f.join("player");
-	assert.deepEqual(f.initialPositions, [undefined, position, undefined]);
+	assert.deepEqual(f.initialPositions, [undefined, position, position]);
+});
+
+function playerStorageFixture(t) {
+	const f = fixture(t);
+	delete f.world.ensureCore;
+	f.world.env.GEN_OFFLOAD = "0";
+	f.world.setMeta("seed", "2026");
+	f.world.setMeta("generator", String(Generator.Flat));
+	const module = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+	const client = new ClientCore(new WebAssembly.Instance(module, {}));
+	const editPlayer = (id: number, count: number) => {
+		const core = f.world.core;
+		const [x, y, z] = core.clientPosition(id);
+		const position = [x + 0.25, y, z] as const;
+		const previous = core.inventoryData(id);
+		core.packet(id, client.encodeHello(2));
+		f.world.step();
+		core.packet(id, client.encodePos(...position, 0, 0));
+		core.packet(id, client.encodeCreativeSetSlot(0, 1, count));
+		f.world.step();
+		const inventory = core.inventoryData(id);
+		assert.deepEqual(core.clientPosition(id), position);
+		assert.notDeepEqual(inventory, previous);
+		return { position, inventory };
+	};
+	return { ...f, client, editPlayer };
+}
+
+for (const prefix of ["dev:", "ops:"]) {
+	test(`DO skips player storage for ${prefix} connections`, async t => {
+		const f = playerStorageFixture(t);
+		const sql = t.mock.method(f.context.storage.sql, "exec");
+		const user = `${prefix}player`;
+		const rows = () => f.sqlite.prepare("SELECT * FROM players").all();
+		assert.equal((await f.join(user)).status, 101);
+		const spawn = f.world.core.clientPosition(1);
+		const defaultInventory = f.world.core.inventoryData(1);
+		const { position, inventory } = f.editPlayer(1, 23);
+		f.world.core.setTime(99n, 6000n);
+		f.world.step();
+		assert.equal(f.world.meta("gameTime"), "100");
+		assert.deepEqual(rows(), []);
+		assert.equal(f.world.savedPlayers.size, 0);
+
+		f.world.sockets.get(1).dispatchEvent(new Event("close"));
+		assert.equal(f.world.pendingPlayers.size, 0);
+		f.world.evict();
+		assert.deepEqual(rows(), []);
+
+		// A row left by an earlier version is ignored even if the ID matches.
+		f.sqlite.prepare("INSERT INTO players VALUES (?, ?, ?, ?, ?, ?)").run(user, ...position, inventory, Date.now());
+		assert.equal((await f.join(user)).status, 101);
+		assert.deepEqual(f.world.core.clientPosition(2), spawn);
+		assert.deepEqual(f.world.core.inventoryData(2), defaultInventory);
+		assert.equal(f.world.savedPlayers.size, 0);
+		assert.deepEqual(sql.mock.calls.filter(call => /\bplayers\b/i.test(call.arguments[0])), []);
+	});
+}
+
+test("DO restores a disconnected user's position and inventory after eviction", async t => {
+	const f = playerStorageFixture(t);
+	assert.equal((await f.join("player")).status, 101);
+	const spawn = f.world.core.clientPosition(1);
+	const defaultInventory = f.world.core.inventoryData(1);
+	const { position, inventory } = f.editPlayer(1, 23);
+	f.world.sockets.get(1).dispatchEvent(new Event("close"));
+	f.world.evict();
+	assert.equal(f.world.savedPlayers.size, 0);
+	assert.equal(f.world.pendingPlayers.size, 0);
+	assert.equal((await f.join("player")).status, 101);
+	assert.deepEqual(f.world.core.clientPosition(2), position);
+	assert.deepEqual(f.world.core.inventoryData(2), inventory);
+	assert.equal((await f.join("another-user")).status, 101);
+	assert.deepEqual(f.world.core.clientPosition(3), spawn);
+	assert.deepEqual(f.world.core.inventoryData(3), defaultInventory);
+});
+
+test("DO autosaves connected players and skips identical rows across saves and instances", async t => {
+	const f = playerStorageFixture(t);
+	let now = 100_000;
+	t.mock.method(Date, "now", () => now);
+	assert.equal((await f.join("player")).status, 101);
+	const { position, inventory } = f.editPlayer(1, 23);
+	f.world.core.setTime(99n, 6000n);
+	f.world.step();
+	const row = () => f.sqlite.prepare("SELECT * FROM players WHERE user_id = ?").get("player");
+	assert.equal(row().saved_at, now);
+	const saved = row();
+	now += 5000;
+	f.world.core.setTime(199n, 6100n);
+	f.world.step();
+	assert.deepEqual(row(), saved);
+	f.editPlayer(1, 25);
+	assert.notDeepEqual(f.world.core.clientPosition(1), position);
+	assert.deepEqual(row(), saved);
+
+	const restarted = new WorldDO(f.context, f.world.env);
+	restarted.startTicking = () => {};
+	assert.equal((await f.joinWorld(restarted)("player")).status, 101);
+	assert.deepEqual(restarted.core.clientPosition(1), position);
+	assert.deepEqual(restarted.core.inventoryData(1), inventory);
+	assert.equal(restarted.core.gameTime, 200n);
+	restarted.save();
+	assert.deepEqual(row(), saved);
+	assert.equal(f.world.sockets.size, 1, "the original socket never disconnected or flushed");
+
+	now += 5000;
+	restarted.core.packet(1, f.client.encodeHello(2));
+	restarted.core.packet(1, f.client.encodeCreativeSetSlot(0, 1, 24));
+	restarted.core.setTime(299n, 6200n);
+	restarted.step();
+	const updated = row();
+	assert.equal(updated.saved_at, now);
+	assert.deepEqual([updated.x, updated.y, updated.z], position);
+	assert.notDeepEqual(updated.inventory, inventory);
+	assert.deepEqual(updated.inventory, restarted.core.inventoryData(1));
+});
+
+test("DO falls back to spawn and mode defaults for malformed player rows", async t => {
+	const f = playerStorageFixture(t);
+	assert.equal((await f.join("new-player")).status, 101);
+	const core = f.world.core;
+	const spawn = core.clientPosition(1);
+	const defaultInventory = core.inventoryData(1);
+	const insert = f.sqlite.prepare("INSERT INTO players VALUES (?, ?, ?, ?, ?, ?)");
+	for (const [i, x] of ["NaN", Infinity].entries()) {
+		const user = `broken-player-${i}`;
+		insert.run(user, x, 100, 1, new Uint8Array([5, 0, 1]), Date.now());
+		assert.equal((await f.join(user)).status, 101);
+		assert.deepEqual(core.clientPosition(i + 2), spawn);
+		assert.deepEqual(core.inventoryData(i + 2), defaultInventory);
+	}
+});
+
+test("DO retries player rows together with chunks and clock after a rollback", async t => {
+	const f = playerStorageFixture(t);
+	const warnings = t.mock.method(console, "warn", () => {});
+	assert.equal((await f.join("player")).status, 101);
+	const { position, inventory } = f.editPlayer(1, 23);
+	f.world.sockets.get(1).dispatchEvent(new Event("close"));
+	const data = new Uint8Array([1, 2, 3]);
+	t.mock.method(f.world.core, "takeDirty", () => ({ cx: -2, cz: 3, data }), { times: 1 });
+	const storage = f.context.storage;
+	const transactionSync = storage.transactionSync.bind(storage);
+	t.mock.method(storage, "transactionSync", fn => transactionSync(() => {
+		fn();
+		throw new Error("write rolled back");
+	}), { times: 1 });
+
+	const query = (sql: string) => f.sqlite.prepare(sql).all();
+	assert.equal(f.world.save(), null);
+	assert.deepEqual(query("SELECT * FROM players"), []);
+	assert.deepEqual(query("SELECT * FROM chunks"), []);
+	assert.deepEqual(query("SELECT * FROM meta WHERE key IN ('gameTime', 'dayTime')"), []);
+	assert.equal(warnings.mock.callCount(), 1);
+
+	assert.equal(f.world.save(), 1);
+	const [row] = query("SELECT * FROM players");
+	assert.deepEqual([row.x, row.y, row.z], position);
+	assert.deepEqual(row.inventory, inventory);
+	assert.equal(query("SELECT * FROM chunks").length, 1);
+	assert.equal(query("SELECT * FROM meta WHERE key IN ('gameTime', 'dayTime')").length, 2);
+});
+
+test("DO skips oversized inventory blobs and still saves the position", async t => {
+	const f = playerStorageFixture(t);
+	const warnings = t.mock.method(console, "warn", () => {});
+	assert.equal((await f.join("player")).status, 101);
+	const { position } = f.editPlayer(1, 23);
+	t.mock.method(f.world.core, "inventoryData", () => new Uint8Array(4097), { times: 1 });
+	f.world.save();
+	const row = f.sqlite.prepare("SELECT x, y, z, inventory FROM players WHERE user_id = ?").get("player");
+	assert.deepEqual([row.x, row.y, row.z], position);
+	assert.equal(row.inventory, null);
+	assert.equal(warnings.mock.callCount(), 1);
 });
 
 test("real WASM ABI restores a normal user's position and exposes only accepted movement", () => {

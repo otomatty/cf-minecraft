@@ -68,7 +68,7 @@ pub unsafe extern "C" fn mc_free(ptr: *mut u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn server_abi_version() -> u32 {
-    7
+    8
 }
 
 #[no_mangle]
@@ -174,6 +174,22 @@ pub extern "C" fn server_tick() {
 #[no_mangle]
 pub extern "C" fn server_out_ptr() -> *const u8 {
     state().out.as_ptr()
+}
+
+/// Output: repeated `[client u32 LE]` for protocol mismatches.
+#[no_mangle]
+pub extern "C" fn server_take_protocol_mismatches() -> usize {
+    let st = state();
+    let clients = st
+        .server
+        .as_mut()
+        .expect("server")
+        .take_protocol_mismatches();
+    st.out.clear();
+    for client in clients {
+        st.out.extend_from_slice(&client.to_le_bytes());
+    }
+    st.out.len()
 }
 
 /// Output: repeated `[client u32 LE][len u32 LE][packet bytes]`.

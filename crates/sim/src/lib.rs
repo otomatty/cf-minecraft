@@ -314,6 +314,7 @@ pub struct Server {
     clients: BTreeMap<u32, Client>,
     pending: Vec<(u32, C2S)>,
     outbox: Vec<(u32, Vec<u8>)>,
+    protocol_mismatches: BTreeSet<u32>,
     dig_updates: BTreeMap<(u32, [i32; 3]), u8>,
     /// Chunks the host has in storage.
     stored: BTreeSet<ChunkPos>,
@@ -355,6 +356,7 @@ impl Server {
             clients: BTreeMap::new(),
             pending: Vec::new(),
             outbox: Vec::new(),
+            protocol_mismatches: BTreeSet::new(),
             dig_updates: BTreeMap::new(),
             stored: BTreeSet::new(),
             requested: BTreeSet::new(),
@@ -1056,6 +1058,7 @@ impl Server {
         }
         self.pending.retain(|(c, _)| *c != id);
         self.outbox.retain(|(c, _)| *c != id);
+        self.protocol_mismatches.remove(&id);
     }
 
     /// Queues a packet. It takes effect at the start of the next tick, in
@@ -1202,6 +1205,10 @@ impl Server {
     }
 
     fn apply(&mut self, id: u32, packet: C2S) {
+        if self.protocol_mismatches.contains(&id) {
+            self.stats.packets_rejected += 1;
+            return;
+        }
         if let C2S::Chat { text } = packet {
             self.chat(id, &text);
             return;
@@ -1397,6 +1404,7 @@ impl Server {
             } => {
                 if protocol != protocol::PROTOCOL_VERSION {
                     self.stats.packets_rejected += 1;
+                    self.protocol_mismatches.insert(id);
                     return;
                 }
                 let spawn = self.spawn();
@@ -2189,6 +2197,11 @@ impl Server {
         std::mem::take(&mut self.outbox)
     }
 
+    /// Connection IDs to close for a protocol mismatch, independent of game state.
+    pub fn take_protocol_mismatches(&mut self) -> BTreeSet<u32> {
+        std::mem::take(&mut self.protocol_mismatches)
+    }
+
     // ---- storage -----------------------------------------------------------
 
     /// Tells the core which chunks the host has saved. Call once at startup.
@@ -2618,6 +2631,40 @@ mod tests {
             .encode(),
         );
         s
+    }
+
+    #[test]
+    fn mismatched_hello_is_reported_once_without_joining_or_changing_state_hash() {
+        let mut server = Server::new(1, Generator::DebugHills);
+        let mut reference = Server::new(1, Generator::DebugHills);
+        server.connect(1);
+        reference.connect(1);
+        let mismatched = C2S::Hello {
+            protocol: PROTOCOL_VERSION - 1,
+            view_distance: 2,
+        }
+        .encode();
+        let matching = C2S::Hello {
+            protocol: PROTOCOL_VERSION,
+            view_distance: 2,
+        }
+        .encode();
+        server.handle_packet(1, &mismatched);
+        server.handle_packet(1, &mismatched);
+        server.handle_packet(1, &matching);
+        server.tick();
+        reference.tick();
+        assert!(!server.clients[&1].joined);
+        assert!(server.take_outbox().is_empty());
+        assert_eq!(server.state_hash(), reference.state_hash());
+        assert_eq!(server.take_protocol_mismatches(), BTreeSet::from([1]));
+        assert!(server.take_protocol_mismatches().is_empty());
+
+        server.connect(2);
+        server.handle_packet(2, &matching);
+        server.tick();
+        assert!(server.clients[&2].joined);
+        assert!(server.take_protocol_mismatches().is_empty());
     }
 
     fn chat_outbox(server: &mut Server) -> Vec<(u32, S2C)> {

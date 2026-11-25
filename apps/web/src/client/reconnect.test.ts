@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { nextDelayMs, shouldReconnect } from "./reconnect.ts";
+import { clearProtocolReload, disconnectMessage, nextDelayMs, NO_WELCOME, reconnectMessage, recordProtocolReload, shouldReconnect, shouldReloadForProtocolMismatch } from "./reconnect.ts";
 import { WebSocketTransport } from "./transport.ts";
 
 test("backoff doubles from 500 ms and stays capped without an attempt limit", () => {
@@ -22,8 +22,51 @@ test("jitter stays between half and all of each capped delay", () => {
 });
 
 test("only permanent application failures prevent reconnection", () => {
-	for (const code of [4000, 4001, 4002, 4003]) assert.equal(shouldReconnect(code), false);
+	for (const code of [4000, 4001, 4002, 4003, 4004]) assert.equal(shouldReconnect(code), false);
 	for (const code of [1000, 1003, 1006, 1008, 1011, 1012, 1013, 4999]) assert.equal(shouldReconnect(code), true);
+});
+
+test("connection messages describe the close code or missing Welcome in Japanese", () => {
+	for (const [code, reason, expected] of [
+		[1013, "world is full", "ワールドが満員です。空きを待って再接続しています(3回目)…"],
+		[1012, "debug disconnect", "サーバーが再起動しています。再接続しています(3回目)…"],
+		[undefined, NO_WELCOME, "サーバーが応答しません。再接続しています(3回目)…"],
+		[1006, "", "サーバーとの接続が切れました。再接続しています(3回目)…"],
+	]) assert.equal(reconnectMessage({ attempt: 3, reason, code }), expected);
+
+	for (const [code, expected] of [
+		[4000, "サーバーとの接続が切れました: 別の場所で同じアカウントが接続しました"],
+		[4001, "サーバーとの接続が切れました: このワールドへの参加が取り消されました"],
+		[4002, "操作が多すぎたため、サーバーから切断されました"],
+		[4003, "通信の内容が正しくないため、サーバーから切断されました"],
+		[4004, "ゲームのバージョンがサーバーと違います。ページを再読み込みしてください"],
+		[undefined, "サーバーとの接続が切れました: ログインし直してください"],
+	]) assert.equal(disconnectMessage("ログインし直してください", code), expected);
+});
+
+test("reloads only once for a protocol mismatch until Welcome clears the record", () => {
+	assert.equal(shouldReloadForProtocolMismatch(null), true);
+	assert.equal(shouldReloadForProtocolMismatch("1"), false);
+	const entries = new Map();
+	const getStorage = () => ({
+		getItem: key => entries.get(key) ?? null,
+		setItem: (key, value) => entries.set(key, value),
+		removeItem: key => entries.delete(key),
+	});
+	assert.equal(recordProtocolReload(getStorage), true);
+	assert.equal(recordProtocolReload(getStorage), false);
+	clearProtocolReload(getStorage);
+	assert.equal(entries.size, 0);
+	assert.equal(recordProtocolReload(getStorage), true);
+});
+
+test("unavailable session storage prevents reload and does not break Welcome", () => {
+	const denied = () => { throw new Error("storage unavailable"); };
+	assert.equal(recordProtocolReload(denied), false);
+	assert.equal(recordProtocolReload(() => ({ getItem: denied, setItem: assert.fail })), false);
+	assert.equal(recordProtocolReload(() => ({ getItem: () => null, setItem: denied })), false);
+	assert.doesNotThrow(() => clearProtocolReload(denied));
+	assert.doesNotThrow(() => clearProtocolReload(() => ({ removeItem: denied })));
 });
 
 function fixture(t) {
@@ -79,6 +122,7 @@ function fixture(t) {
 		status: value => { status = value; },
 		reject: value => { reject = value; },
 		async advance() {
+			while (timers[0]?.cleared) timers.shift();
 			const timer = timers.shift();
 			assert.ok(timer && !timer.cleared);
 			timer.callback();
@@ -94,7 +138,7 @@ test("transport probes before retry, resets attempts only on Welcome, and drops 
 	f.sockets[0].open();
 	f.sockets[0].packet([0]); // Welcome
 	f.sockets[0].drop();
-	assert.deepEqual(f.retrying[0], { attempt: 1, delayMs: 500, reason: "dropped" });
+	assert.deepEqual(f.retrying[0], { attempt: 1, delayMs: 500, reason: "dropped", code: 1012 });
 	await f.advance();
 	assert.equal(f.requests[0].url, "/api/worlds/my-world");
 	assert.equal(f.sockets.length, 2);
@@ -110,6 +154,54 @@ test("transport probes before retry, resets attempts only on Welcome, and drops 
 	assert.equal(f.retrying[2].delayMs, 500);
 	assert.equal(f.opens(), 3);
 	assert.deepEqual(f.closed, []);
+});
+
+test("missing Welcome closes the socket after 10 seconds and retries through a probe", async t => {
+	const f = fixture(t);
+	f.sockets[0].open();
+	f.sockets[0].packet([1]);
+	const watchdog = f.timers[0];
+	assert.equal(watchdog.delay, 10_000);
+	assert.deepEqual(f.retrying, []);
+	await f.advance();
+	assert.equal(f.sockets[0].readyState, 3);
+	assert.deepEqual(f.retrying, [{ attempt: 1, delayMs: 500, reason: NO_WELCOME, code: undefined }]);
+	assert.equal(f.requests.length, 0);
+	await f.advance();
+	assert.equal(f.requests.length, 1);
+	assert.equal(f.sockets.length, 2);
+	f.sockets[1].open();
+	watchdog.callback(); // A stale callback cannot close the replacement.
+	assert.equal(f.sockets[1].readyState, 1);
+	assert.equal(f.retrying.length, 1);
+});
+
+test("Welcome cancels the watchdog and prevents a retry", t => {
+	const f = fixture(t);
+	f.sockets[0].open();
+	f.sockets[0].packet([0]); // Welcome
+	assert.equal(f.timers[0].cleared, true);
+	f.timers[0].callback();
+	assert.equal(f.sockets[0].readyState, 1);
+	assert.deepEqual(f.retrying, []);
+});
+
+test("a server close cancels the watchdog and reports the close code", t => {
+	const f = fixture(t);
+	f.sockets[0].open();
+	f.sockets[0].drop(1013);
+	assert.equal(f.timers[0].cleared, true);
+	f.timers[0].callback();
+	assert.deepEqual(f.retrying, [{ attempt: 1, delayMs: 500, reason: "dropped", code: 1013 }]);
+});
+
+test("explicit close cancels a pending Welcome watchdog", t => {
+	const f = fixture(t);
+	f.sockets[0].open();
+	f.transport.close();
+	assert.equal(f.timers[0].cleared, true);
+	f.timers[0].callback();
+	assert.deepEqual(f.retrying, []);
 });
 
 for (const [status, reason] of [[401, "ログインし直してください"], [403, "このワールドに招待されていません"], [404, "ワールドがありません"]]) {
@@ -139,13 +231,15 @@ test("transient HTTP and network failures keep retrying", async t => {
 	assert.equal(f.sockets.length, 2);
 });
 
-test("permanent close codes terminate without probing", t => {
-	const f = fixture(t);
-	f.sockets[0].drop(4000);
-	assert.deepEqual(f.closed, [{ reason: "dropped", code: 4000 }]);
-	assert.equal(f.requests.length, 0);
-	assert.equal(f.timers.length, 0);
-});
+for (const code of [4000, 4004]) {
+	test(`permanent close code ${code} terminates without probing`, t => {
+		const f = fixture(t);
+		f.sockets[0].drop(code);
+		assert.deepEqual(f.closed, [{ reason: "dropped", code }]);
+		assert.equal(f.requests.length, 0);
+		assert.equal(f.timers.length, 0);
+	});
+}
 
 test("explicit close cancels a scheduled retry", t => {
 	const f = fixture(t);

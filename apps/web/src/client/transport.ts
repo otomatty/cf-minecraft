@@ -3,9 +3,10 @@ import type { GenerationStats } from "../shared/gen-dispatch.ts";
 // rest of the client cannot tell single player from multiplayer.
 
 import { S2C } from "./client-core.ts";
-import { nextDelayMs, shouldReconnect } from "./reconnect.ts";
+import { nextDelayMs, NO_WELCOME, shouldReconnect } from "./reconnect.ts";
 
 const WORLD_CHECK_TIMEOUT_MS = 10_000;
+const WELCOME_TIMEOUT_MS = 10_000;
 
 export interface ServerStats {
 	generation?: GenerationStats | null;
@@ -25,7 +26,7 @@ export interface TransportHandlers {
 	onGenerator?(generator: number): void;
 	onPacket(data: Uint8Array): void;
 	onStats(stats: ServerStats): void;
-	onReconnecting(info: { attempt: number; delayMs: number; reason: string }): void;
+	onReconnecting(info: { attempt: number; delayMs: number; reason: string; code?: number }): void;
 	onClose(reason: string, code?: number): void;
 }
 
@@ -184,6 +185,7 @@ export class WebSocketTransport implements Transport {
 	private stopped = false;
 	private attempt = 0;
 	private timer: ReturnType<typeof setTimeout> | null = null;
+	private welcomeTimer: ReturnType<typeof setTimeout> | null = null;
 	private probe: AbortController | null = null;
 	private readonly world: string;
 	private readonly handlers: TransportHandlers;
@@ -196,13 +198,21 @@ export class WebSocketTransport implements Transport {
 
 	private connect(): void {
 		if (this.stopped) return;
+		this.clearWelcomeTimer();
 		const scheme = location.protocol === "https:" ? "wss:" : "ws:";
 		const socket = new WebSocket(`${scheme}//${location.host}/ws/${encodeURIComponent(this.world)}`);
 		this.socket = socket;
 		socket.binaryType = "arraybuffer";
 		socket.onopen = () => {
-			if (this.socket !== socket) return;
-			if (!this.stopped) this.handlers.onOpen();
+			if (this.socket !== socket || this.stopped) return;
+			this.welcomeTimer = setTimeout(() => {
+				if (this.socket !== socket || this.welcomeTimer === null) return;
+				this.welcomeTimer = null;
+				this.socket = null;
+				socket.close();
+				this.retry(NO_WELCOME);
+			}, WELCOME_TIMEOUT_MS);
+			this.handlers.onOpen();
 		};
 		socket.onmessage = (event) => {
 			if (this.socket !== socket) return;
@@ -217,22 +227,32 @@ export class WebSocketTransport implements Transport {
 			}
 			if (!(event.data instanceof ArrayBuffer)) return;
 			const packet = new Uint8Array(event.data);
+			if (packet[0] === S2C.Welcome) {
+				this.clearWelcomeTimer();
+				this.attempt = 0;
+			}
 			this.handlers.onPacket(packet);
-			if (packet[0] === S2C.Welcome) this.attempt = 0;
 		};
 		socket.onclose = (event) => {
 			if (this.socket !== socket) return;
 			if (this.stopped) return;
+			this.clearWelcomeTimer();
+			this.socket = null;
 			const reason = event.reason || `connection closed (${event.code})`;
-			if (shouldReconnect(event.code)) this.retry(reason);
+			if (shouldReconnect(event.code)) this.retry(reason, event.code);
 			else this.finish(reason, event.code);
 		};
 	}
 
-	private retry(reason: string): void {
+	private clearWelcomeTimer(): void {
+		if (this.welcomeTimer !== null) clearTimeout(this.welcomeTimer);
+		this.welcomeTimer = null;
+	}
+
+	private retry(reason: string, code?: number): void {
 		if (this.stopped) return;
 		const delayMs = nextDelayMs(this.attempt++, Math.random);
-		this.handlers.onReconnecting({ attempt: this.attempt, delayMs, reason });
+		this.handlers.onReconnecting({ attempt: this.attempt, delayMs, reason, code });
 		this.timer = setTimeout(() => {
 			this.timer = null;
 			void this.reconnect();
@@ -285,6 +305,7 @@ export class WebSocketTransport implements Transport {
 
 	close(): void {
 		this.stopped = true;
+		this.clearWelcomeTimer();
 		if (this.timer !== null) clearTimeout(this.timer);
 		this.timer = null;
 		this.probe?.abort();

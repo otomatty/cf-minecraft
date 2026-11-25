@@ -21,6 +21,7 @@ interface ServerExports {
 	server_packet(client: number, ptr: number, len: number): void;
 	server_tick(): void;
 	server_out_ptr(): number;
+	server_take_protocol_mismatches(): number;
 	server_take_outbox(): number;
 	server_set_stored(ptr: number, len: number): void;
 	server_take_requests(): number;
@@ -46,7 +47,7 @@ interface ServerExports {
 	server_run_scenario(seed: bigint, ticks: number): bigint;
 }
 
-export const SERVER_ABI_VERSION = 7;
+export const SERVER_ABI_VERSION = 8;
 
 export const Generator = { Flat: 0, DebugHills: 1, Terrain: 2 } as const;
 
@@ -169,6 +170,15 @@ export class ServerCore {
 			at += 8 + len;
 		}
 		return packets;
+	}
+
+	takeProtocolMismatches(): number[] {
+		const len = this.x.server_take_protocol_mismatches();
+		if (len === 0) return [];
+		const view = new DataView(this.x.memory.buffer, this.x.server_out_ptr(), len);
+		const clients: number[] = [];
+		for (let at = 0; at < len; at += 4) clients.push(view.getUint32(at, true));
+		return clients;
 	}
 
 	setStored(coords: ReadonlyArray<readonly [number, number]>): void {
