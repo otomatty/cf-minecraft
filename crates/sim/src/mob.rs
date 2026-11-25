@@ -4633,6 +4633,21 @@ mod tests {
     }
 
     #[test]
+    fn explosion_starts_a_fall_when_it_breaks_the_support_below_sand() {
+        let (mut server, _) = combat(GameMode::Creative);
+        server.world.set_block(5, 2, 5, blocks::OBSIDIAN);
+        server.world.set_block(5, 3, 5, blocks::STONE);
+        server.world.set_block(5, 4, 5, blocks::SAND);
+        server.apply_explosion([5.5, 0.5, 5.5]);
+        assert_eq!(server.get_block(5, 3, 5), Some(blocks::AIR));
+        server.tick();
+        assert_eq!(server.get_block(5, 4, 5), Some(blocks::SAND));
+        server.tick();
+        assert_eq!(server.get_block(5, 4, 5), Some(blocks::AIR));
+        assert_eq!(server.get_block(5, 3, 5), Some(blocks::SAND));
+    }
+
+    #[test]
     fn explosion_removes_torches_outside_the_blast_when_their_support_breaks() {
         let run = |mode| {
             let (mut server, _) = combat(mode);

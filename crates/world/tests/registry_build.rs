@@ -99,6 +99,16 @@ fn data_errors_identify_the_problem() {
         ),
         ("solid = false", "typo = false", "unknown field `typo`"),
         (
+            "name = \"oak_slab\"",
+            "name = \"oak_slab\"\nfalls = true",
+            "oak_slab: falls requires a solid cube",
+        ),
+        (
+            "name = \"air\"",
+            "name = \"air\"\nfalls = true",
+            "air: falls requires a solid cube",
+        ),
+        (
             "textures = [",
             "textures = [\"stone\",",
             "duplicate texture stone",
@@ -318,20 +328,30 @@ fn farming_preserves_existing_generated_block_entries() {
             add(line);
         }
     }
-    // Fingerprint of the original atlas prefix, state constants, metadata and properties.
-    assert_eq!(hash.finish(), 0xbb0d_4edd_803d_f4fa);
+    // Fingerprint of the original atlas prefix, state constants, metadata and
+    // properties, now including the falls field.
+    assert_eq!(hash.finish(), 0xb628_304c_3ea4_c340);
 }
 
 #[test]
 fn omitted_defaults_match_explicit_values() {
     let explicit = BLOCKS.replacen(
         "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"",
-        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
+        "name = \"stone\"\ndrop = \"cobblestone\"\ntool = \"pickaxe\"\nmin_tier = 1\ndig_ticks = 70\nid = 1\ntexture = \"stone\"\nmodel = \"cube\"\nlayer = \"opaque\"\noccludes = true\nsolid = true\nfalls = false\ncull_same = false\nopacity = 15\nemission = 0\ntint = false", 1);
     assert_ne!(explicit, BLOCKS);
     assert_eq!(
         generate_fixture(BLOCKS, BIOMES).unwrap(),
         generate_fixture(&explicit, BIOMES).unwrap()
     );
+}
+
+#[test]
+fn only_sand_and_gravel_fall() {
+    use world::blocks;
+    let falling: Vec<_> = (0..blocks::COUNT)
+        .filter(|&state| blocks::info(state).falls)
+        .collect();
+    assert_eq!(falling, [blocks::SAND, blocks::GRAVEL]);
 }
 
 #[test]

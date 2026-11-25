@@ -64,6 +64,8 @@ struct Block {
     layer: String,
     occludes: Option<bool>,
     solid: Option<bool>,
+    #[serde(default)]
+    falls: bool,
     cull_same: Option<bool>,
     opacity: Option<u8>,
     #[serde(default)]
@@ -398,6 +400,11 @@ fn generate(root: &Path, dest: &Path) {
                 .or(b.occludes)
                 .unwrap_or(m == "cube" && b.layer == "opaque");
             let solid = b.solid.unwrap_or(m != "cross");
+            assert!(
+                !b.falls || (m == "cube" && solid),
+                "blocks.toml: {}: falls requires a solid cube",
+                b.name
+            );
             let cull_same = b
                 .cull_same
                 .unwrap_or(m == "cube" && b.layer == "translucent");
@@ -454,7 +461,7 @@ fn generate(root: &Path, dest: &Path) {
             let tool = b.tool.as_ref().map_or("None".into(), |kind| {
                 format!("Some(crate::items::ToolKind::{})", tool_kind(kind))
             });
-            writeln!(infos, "BlockInfo {{ tool: {tool}, min_tier: {}, dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.min_tier, b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            writeln!(infos, "BlockInfo {{ tool: {tool}, min_tier: {}, dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, falls: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.min_tier, b.dig_ticks, model(m), occludes, solid, b.falls, cull_same, b.emission, b.name, tint).unwrap();
             if let Some(tex) = backed_leaf_tex {
                 writeln!(backed_leaf_textures, "{count} => Some({tex}),").unwrap();
             }

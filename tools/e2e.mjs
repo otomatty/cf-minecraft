@@ -2007,6 +2007,36 @@ async function farming() {
 	} finally { await page.close(); }
 }
 
+async function fallingBlocks() {
+	const { page, errors } = await open(`server=local&world=e2e-falling-blocks-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
+	try {
+		const { spawn } = await settle(page, "falling blocks", chunksInView(2));
+		const support = [Math.floor(spawn[0]) + 2, Math.floor(spawn[1]), Math.floor(spawn[2])];
+		check(await page.evaluate(([x, y, z]) => {
+			const api = window.__mc;
+			const sand = api.stateId("sand");
+			return api.getBlock(x, y - 1, z) === api.stateId("grass_block")
+				&& api.setBlock(x, y, z, api.stateId("stone"))
+				&& api.setBlock(x, y + 1, z, sand)
+				&& api.setBlock(x, y + 2, z, sand);
+		}, support), "falling blocks: stacks two sand blocks on a stone support");
+		check(await page.evaluate(pos => window.__mc.setBlock(...pos, 0), support),
+			"falling blocks: breaks the stone support");
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			const sand = api.stateId("sand");
+			return api.getBlock(x, y, z) === sand
+				&& api.getBlock(x, y + 1, z) === sand
+				&& api.getBlock(x, y + 2, z) === 0;
+		}, { timeout: 5000 }, support);
+		check(true, "falling blocks: both sand blocks land one block lower");
+		check(errors.length === 0, "falling blocks: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "falling-blocks", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function waterFlow() {
 	const { page, errors } = await open(`server=local&world=e2e-water-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -3390,6 +3420,7 @@ try {
 	if (process.env.MC_E2E_ONLY === "input") throw new Error("stopped after the input stage");
 	await waterFlow();
 	await lavaFlow();
+	await fallingBlocks();
 	await mobs();
 	await entitySave();
 	await mobCombat();

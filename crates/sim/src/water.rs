@@ -1,4 +1,4 @@
-//! Scheduled fluid updates and bucket interactions.
+//! Scheduled block updates, fluid flow and bucket interactions.
 
 use world::{blocks, items, HEIGHT, MIN_Y};
 
@@ -132,6 +132,8 @@ impl Server {
             if let Some(state) = self.get_block(x, y, z) {
                 if let Some(fluid) = Fluid::for_state(state) {
                     self.tick_fluid(pos, state, fluid);
+                } else if blocks::info(state).falls {
+                    self.tick_falling_block(pos, state);
                 }
             }
         }

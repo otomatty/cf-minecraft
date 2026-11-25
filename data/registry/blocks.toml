@@ -76,6 +76,7 @@ texture = "bedrock"
 
 [[blocks]]
 name = "sand"
+falls = true
 tool = "shovel"
 min_tier = 0
 dig_ticks = 12
@@ -256,6 +257,7 @@ bottom = "sandstone_bottom"
 
 [[blocks]]
 name = "gravel"
+falls = true
 tool = "shovel"
 min_tier = 0
 dig_ticks = 14

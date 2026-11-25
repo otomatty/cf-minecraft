@@ -19,6 +19,7 @@
 mod arrow;
 pub mod entity;
 mod entity_storage;
+mod falling_blocks;
 pub mod furnace;
 mod health;
 pub mod inventory;
@@ -1585,6 +1586,7 @@ impl Server {
         self.stats.blocks_changed += 1;
         self.broadcast_block(x, y, z, state);
         self.schedule_fluid_neighbors([x, y, z]);
+        self.schedule_falling_blocks([x, y, z], state);
         self.check_wheat_above([x, y, z], state, exploded);
         self.check_torches_supported_by([x, y, z], exploded);
         for [dx, _, dz] in blocks::FACE_NORMALS[2..].iter().copied() {
