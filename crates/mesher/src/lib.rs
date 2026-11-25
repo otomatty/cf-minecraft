@@ -181,6 +181,12 @@ pub fn mesh_section_layers(
                 }
                 let info = blocks::info(state);
                 let torch = info.model == blocks::Model::Torch;
+                let is_leaf = blocks::is_oak_leaves(state);
+                let backed_leaf_tex = if is_leaf && info.model == blocks::Model::Cube {
+                    blocks::backed_leaf_texture(state)
+                } else {
+                    None
+                };
                 let fluid_top =
                     blocks::is_fluid(state).then(|| FluidTop::at(padded, x, y, z, state));
                 let out = &mut layers[info.layer as usize];
@@ -245,7 +251,7 @@ pub fn mesh_section_layers(
                             && !(f == UP && fluid_top.is_some_and(|top| top.height() < 144));
                         let same = state == neighbor
                             || joins_fluid
-                            || (blocks::is_oak_leaves(state) && blocks::is_oak_leaves(neighbor));
+                            || (is_leaf && blocks::is_oak_leaves(neighbor));
                         if boundary
                             && (blocks::occludes(neighbor)
                                 || (same && info.cull_same && fluid_strip.is_none()))
@@ -253,6 +259,13 @@ pub fn mesh_section_layers(
                             continue;
                         }
 
+                        let texture = backed_leaf_tex
+                            .filter(|_| {
+                                blocks::is_oak_leaves(
+                                    padded[padded_index(x - n[0], y - n[1], z - n[2])],
+                                )
+                            })
+                            .unwrap_or(info.tex[f]);
                         let mut words = [[0u32; 2]; 4];
                         let mut ao = [0u32; 4];
                         for (k, &(i, j)) in CORNERS.iter().enumerate() {
@@ -342,7 +355,7 @@ pub fn mesh_section_layers(
                                 f,
                                 ao[k],
                                 (u, v),
-                                info.tex[f],
+                                texture,
                                 info.tint[f],
                                 sky,
                                 block,
@@ -970,6 +983,58 @@ mod tests {
                 .filter(|quad| quad.iter().all(|v| v.pos[axis] == b[axis]))
                 .count();
             assert_eq!(internal_faces, 0, "axis={axis}");
+        }
+    }
+
+    #[test]
+    fn paired_leaves_use_dense_texture_on_the_two_end_faces() {
+        for neighbor in [blocks::OAK_LEAVES, blocks::PLACED_OAK_LEAVES] {
+            for axis in 0..3 {
+                let mut p = empty();
+                let mut b = [5, 5, 5];
+                b[axis] += 1;
+                p[padded_index(5, 5, 5)] = blocks::OAK_LEAVES;
+                p[padded_index(b[0], b[1], b[2])] = neighbor;
+                let mut out = Vec::new();
+                assert_eq!(mesh_section_layers(&p, None, &mut out), [0, 10, 0]);
+                let mut end_faces = 0;
+                for quad in decode(&out) {
+                    let normal = FACES[quad[0].face].normal[axis];
+                    let texture = if normal == 0 {
+                        "oak_leaves"
+                    } else {
+                        end_faces += 1;
+                        let end = if normal < 0 { 5 } else { 7 };
+                        assert!(quad.iter().all(|v| v.pos[axis] == end));
+                        "oak_leaves_dense"
+                    };
+                    for v in quad {
+                        assert_eq!(blocks::TEXTURES[v.layer as usize], texture);
+                        assert!(v.tint);
+                    }
+                }
+                assert_eq!(end_faces, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_without_another_leaf_behind_keep_regular_texture() {
+        for leaf in [blocks::OAK_LEAVES, blocks::PLACED_OAK_LEAVES] {
+            for neighbor in [blocks::AIR, blocks::OAK_LOG, blocks::STONE] {
+                let mut p = empty();
+                p[padded_index(5, 5, 5)] = leaf;
+                p[padded_index(4, 5, 5)] = neighbor;
+                let mut out = Vec::new();
+                let [opaque, cutout, translucent] = mesh_section_layers(&p, None, &mut out);
+                assert_eq!(cutout, if neighbor == blocks::AIR { 6 } else { 5 });
+                assert_eq!(translucent, 0);
+                let quads = decode(&out[opaque as usize * WORDS_PER_QUAD..]);
+                assert!(quads.iter().any(|quad| quad[0].face == EAST));
+                for v in quads.iter().flatten() {
+                    assert_eq!(blocks::TEXTURES[v.layer as usize], "oak_leaves");
+                }
+            }
         }
     }
 

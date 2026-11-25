@@ -9,7 +9,8 @@ export const TEX_SIZE = 16;
 
 const iconTints = new Map<string, readonly number[]>([
 	["grass_block_top", CARRIED_GRASS_TOP_TINT], ["short_grass", CARRIED_SHORT_GRASS_TINT],
-	["oak_leaves", CARRIED_LEAVES_TINT], ["water", WATER_TINT], ["water_flow", WATER_TINT],
+	["oak_leaves", CARRIED_LEAVES_TINT], ["oak_leaves_dense", CARRIED_LEAVES_TINT],
+	["water", WATER_TINT], ["water_flow", WATER_TINT],
 ]);
 
 /** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */

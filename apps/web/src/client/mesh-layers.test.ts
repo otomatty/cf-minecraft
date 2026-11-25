@@ -8,7 +8,7 @@ import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { ClientCore } from "./client-core.ts";
-import { filterVisibleSections, outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { filterVisibleSections, outlineBox, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);
@@ -55,7 +55,20 @@ test("terrain tint layers follow texture names when the texture array is reorder
 	assert.ok(!shader.includes("g.grassTint"));
 	const absent = terrainShader(["stone"]);
 	assert.ok(absent.includes("if (out.layer == 4294967295u || out.layer == 4294967295u)"));
+	assert.ok(absent.includes("if (false) { tintLayer = 1; }"));
 	assert.doesNotMatch(absent, /__[A-Z_]+__/);
+});
+
+test("dense and regular leaves share terrain tint and cap rotation", () => {
+	for (const [names, predicate] of [
+		[["oak_leaves", "water", "oak_leaves_dense"], "out.layer == 0u || out.layer == 2u"],
+		[["water", "oak_leaves_dense", "stone", "oak_leaves"], "out.layer == 1u || out.layer == 3u"],
+	]) {
+		const shader = terrainShader(names);
+		assert.ok(shader.includes(`if (${predicate}) { tintLayer = 1; }`));
+		assert.ok(shader.includes(`face <= 1u && (${predicate})`));
+		assert.doesNotMatch(shader, /__LEAVES_LAYERS__/);
+	}
 });
 
 test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
@@ -271,6 +284,28 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 	}
 	// Non-cutout averaging keeps water's continuous opacity.
 	assert.equal(downsample(new Uint8Array([255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170]), 2)[3], 170);
+});
+
+test("dense leaves fill only the original holes with a darker opaque gray", () => {
+	const regular = paintTexture("oak_leaves");
+	let dense = paintTexture("oak_leaves_dense");
+	assert.equal(dense.length, 16 * 16 * 4);
+	const darkest = Math.min(...regular.filter((_, i) => i % 4 === 0 && regular[i + 3] === 255));
+	for (let i = 0; i < dense.length; i += 4) {
+		assert.equal(dense[i + 3], 255);
+		if (regular[i + 3] === 255) {
+			assert.deepEqual(dense.subarray(i, i + 4), regular.subarray(i, i + 4));
+		} else {
+			assert.equal(dense[i], dense[i + 1]);
+			assert.equal(dense[i], dense[i + 2]);
+			assert.ok(dense[i] < darkest);
+		}
+	}
+	assert.ok(usesCutoutMips("oak_leaves_dense"));
+	for (let size = 16; size > 1; size >>= 1) {
+		dense = downsample(dense, size, true);
+		assert.ok(dense.every((v, i) => i % 4 !== 3 || v === 255));
+	}
 });
 
 

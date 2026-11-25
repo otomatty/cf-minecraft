@@ -6,3 +6,6 @@ publish.workspace = true
 
 [dependencies]
 world.workspace = true
+
+[dev-dependencies]
+worldgen.workspace = true

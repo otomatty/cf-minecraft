@@ -127,7 +127,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	out.tintColor = vec3<f32>(1.0);
 	if (((a.y >> 12u) & 1u) == 1u) {
 		var tintLayer = 0;
-		if (out.layer == __LEAVES_LAYER__u) { tintLayer = 1; }
+		if (__LEAVES_LAYERS__) { tintLayer = 1; }
 		if (out.layer == __WATER_LAYER__u || out.layer == __FLOW_LAYER__u) {
 			tintLayer = 2;
 			out.layer = select(g.waterLayers.x, g.waterLayers.y, out.layer == __FLOW_LAYER__u);
@@ -197,19 +197,20 @@ export function terrainShader(textureNames: readonly string[]): string {
 		names.includes(name) ? [`out.layer == ${layer}u`] : []).join(" || ") || "false";
 	// Bedrock's blocks.json marks these cube faces as isotropic.
 	const allFaces = matches(["dirt", "coarse_dirt", "sand", "snow_block"]);
-	const caps = matches(["grass_block_top", "sandstone_top", "sandstone_bottom", "oak_leaves"]);
+	const leaves = ["oak_leaves", "oak_leaves_dense"];
+	const caps = matches(["grass_block_top", "sandstone_top", "sandstone_bottom", ...leaves]);
 	// Missing names use an impossible packed texture index rather than tinting layer zero.
 	return TERRAIN_WGSL
 		.replace("__ISOTROPIC_FACE__", `${allFaces} || (face <= 1u && (${caps}))`)
 		.replace("__GRASS_SIDE_LAYER__", String(textureNames.indexOf("grass_block_side") >>> 0))
 		.replace("__DROP_ALPHA_TEST__", dropAlphaTest(textureNames))
-		.replace("__LEAVES_LAYER__", String(textureNames.indexOf("oak_leaves") >>> 0))
+		.replace("__LEAVES_LAYERS__", matches(leaves))
 		.replaceAll("__FLOW_LAYER__", String(textureNames.indexOf("water_flow") >>> 0))
 		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
 }
 
 const cutoutBlockTextures = new Set([
-	"glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass",
+	"glass", "oak_leaves", "oak_leaves_dense", "red_flower", "yellow_flower", "short_grass",
 	"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe",
 ]);
 
