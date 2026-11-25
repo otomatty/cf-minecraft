@@ -321,6 +321,37 @@ test("packet flood closes without reconnect", async t => {
 
 // Use the same real format implementation as the OPFS tests after build:wasm.
 const storageModule = new WebAssembly.Module(readFileSync(new URL("../wasm/server.wasm", import.meta.url)));
+
+for (const synchronousClose of [false, true]) {
+	test(`DO closes only the mismatched Hello and frees its slot (synchronous close=${synchronousClose})`, async t => {
+		const f = fixture(t, synchronousClose);
+		delete f.world.ensureCore;
+		f.world.env.GEN_OFFLOAD = "0";
+		f.world.setMeta("generator", String(Generator.Flat));
+		await f.join("old-client");
+		await f.join("current-client");
+		assert.equal(f.world.sockets.size, 2);
+		assert.equal(f.world.core.clientCount, 2);
+		const clientModule = new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url)));
+		const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+		const matching = client.encodeHello(2);
+		const mismatched = matching.slice();
+		mismatched[1] = 0; // Replace the single-byte protocol varint.
+		const wrongSocket = f.world.sockets.get(1);
+		const rightSocket = f.world.sockets.get(2);
+		wrongSocket.dispatchEvent(new MessageEvent("message", { data: mismatched.buffer }));
+		rightSocket.dispatchEvent(new MessageEvent("message", { data: matching.buffer }));
+		f.world.lastAccessCheck = Date.now();
+		f.world.step();
+		assert.deepEqual(f.closed, [[4004, "protocol mismatch"]]);
+		assert.deepEqual([...f.world.sockets.keys()], [2]);
+		assert.equal(f.world.core.clientCount, 1);
+		assert.ok(rightSocket.sent.some(frame => typeof frame !== "string" && client.packet(frame) === S2C.Welcome));
+		wrongSocket.dispatchEvent(new Event("close"));
+		assert.equal(f.world.core.clientCount, 1);
+	});
+}
+
 function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 	world.codec = new RegionCodec(new WebAssembly.Instance(storageModule, {}));
 	const loaded = [];
@@ -328,6 +359,7 @@ function storageCore(world, requests: Array<[number, number]>, dirty = []) {
 	world.core = {
 		...world.core,
 		tick() {}, takeOutbox() { return []; }, takeRequests() { return requests.splice(0); },
+		takeProtocolMismatches() { return []; },
 		loadChunk(cx, cz, data) { loaded.push([cx, cz, data]); },
 		chunkMissing(cx, cz) { missing.push([cx, cz]); },
 		flushEntityChanges() {}, takeDirty() { return dirty.shift() ?? null; }, gameTime: 1n, dayTime: 1n,

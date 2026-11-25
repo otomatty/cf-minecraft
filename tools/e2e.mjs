@@ -598,6 +598,37 @@ async function playthrough(kind) {
 	return page;
 }
 
+async function protocolMismatch() {
+	const world = `e2e-version-${run}`;
+	const page = await browser.newPage();
+	const url = `${edge}/play.html?server=ws&world=${world}&view=2`;
+	let navigations = 0;
+	page.on("framenavigated", frame => {
+		if (frame === page.mainFrame() && frame.url() === url) navigations++;
+	});
+	try {
+		await page.evaluateOnNewDocument((path) => {
+			const send = WebSocket.prototype.send;
+			WebSocket.prototype.send = function (data) {
+				// Hello starts with packet ID 0 and a single-byte version in this build.
+				if (new URL(this.url).pathname === path && data instanceof Uint8Array && data.length === 3 && data[0] === 0) {
+					data = data.slice();
+					data[1] = 0;
+				}
+				return send.call(this, data);
+			};
+		}, `/ws/${world}`);
+		await page.goto(url, { waitUntil: "load" });
+		await page.waitForFunction(() =>
+			document.querySelector("#status.error")?.textContent === "ゲームのバージョンがサーバーと違います。ページを再読み込みしてください",
+			{ timeout: 20000 },
+		);
+		check(navigations === 2, "ws: protocol mismatch reloads once and then shows the error", `${navigations} navigations`);
+	} finally {
+		await page.close();
+	}
+}
+
 async function gameModeChange() {
 	const world = `e2e-mode-${run}`;
 	const { page, errors } = await open(`server=ws&world=${world}&view=2`);
@@ -3290,6 +3321,7 @@ try {
 	check(inBrowser === expected, "scenario fingerprint in Chrome equals Node", `${inBrowser} vs ${expected}`);
 	await page.close();
 	await (await playthrough("ws")).close();
+	await protocolMismatch();
 	await gameModeChange();
 } catch (err) {
 	if (shouldDiagnoseRunFailure(err)) {

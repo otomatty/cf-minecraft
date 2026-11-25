@@ -190,6 +190,7 @@ async function init(msg: Extract<WorkerRequest, { type: "init" }>): Promise<void
 			const start = performance.now();
 			pumpGeneration(c);
 			c.tick();
+			c.takeProtocolMismatches();
 			pumpGeneration(c);
 			const packets = c.takeOutbox();
 			spent.push(performance.now() - start);

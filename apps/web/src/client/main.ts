@@ -17,7 +17,8 @@ import { advanceDig, digSelection, updateDigSelection, newDigState, observeDigBl
 //   cull=0            disable section visibility culling
 //   autopilot=1       no input needed: the camera circles above the spawn point
 
-import { LOGGED_IN_ELSEWHERE, ACCESS_REVOKED } from "../shared/close-codes.ts";
+import { PROTOCOL_MISMATCH } from "../shared/close-codes.ts";
+import { clearProtocolReload, disconnectMessage, reconnectMessage, recordProtocolReload } from "./reconnect.ts";
 import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
@@ -36,7 +37,7 @@ import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { LocalTransport, type ServerStats, type Transport, WebSocketTransport } from "./transport.ts";
+import { LocalTransport, type ServerStats, type Transport, type TransportHandlers, WebSocketTransport } from "./transport.ts";
 import { pageCacheActions, type PageCacheAction } from "./page-cache.ts";
 import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
 
@@ -275,7 +276,7 @@ async function main(): Promise<void> {
 	}
 
 	// ---- transport ---------------------------------------------------------
-	const handlers = {
+	const handlers: TransportHandlers = {
 		onGenerator: (id: number) => { generator = id; },
 		onOpen: () => {
 			closePending = false;
@@ -369,6 +370,7 @@ async function main(): Promise<void> {
 				mobHurtAt.delete(entity);
 			}
 			if (id === S2C.Welcome) {
+				if (serverKind === "ws") clearProtocolReload(() => window.sessionStorage);
 				pendingSelectedSlot = null;
 				vitals.hidden = core.gameMode !== "survival";
 				seedReady = true;
@@ -426,7 +428,7 @@ async function main(): Promise<void> {
 		onStats: (stats: ServerStats) => {
 			serverStats = stats;
 		},
-		onReconnecting: ({ attempt }: { attempt: number; delayMs: number; reason: string }) => {
+		onReconnecting: (info) => {
 			connection = "reconnecting";
 			closeChat(false);
 			endUsingItem();
@@ -438,20 +440,22 @@ async function main(): Promise<void> {
 			timeSamples.length = 0;
 			if (!failed) {
 				statusLine.className = "";
-				statusLine.textContent = `サーバーとの接続が切れました。再接続しています(${attempt}回目)…`;
+				statusLine.textContent = reconnectMessage(info);
 			}
 		},
 		onClose: (reason: string, code?: number) => {
 			connection = "closed";
 			closeChat(false);
 			endUsingItem();
-			if (code === LOGGED_IN_ELSEWHERE) reason = "別の場所で同じアカウントが接続しました";
-			if (code === ACCESS_REVOKED) reason = "このワールドへの参加が取り消されました";
-			closed = reason;
+			if (code === PROTOCOL_MISMATCH && recordProtocolReload(() => window.sessionStorage)) {
+				location.reload();
+				return;
+			}
+			closed = disconnectMessage(reason, code);
 			picker.hidden = true;
 			hideInventoryScreens();
 			if (locked()) document.exitPointerLock();
-			fail(`サーバーとの接続が切れました: ${reason}`);
+			fail(closed);
 		},
 	};
 	const transport: Transport =

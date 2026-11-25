@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import {
-	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, WORLD_FULL, SERVICE_RESTART,
+	LOGGED_IN_ELSEWHERE, ACCESS_REVOKED, TOO_MANY_PACKETS, BAD_PACKET, PROTOCOL_MISMATCH, WORLD_FULL, SERVICE_RESTART,
 } from "../shared/close-codes.ts";
 import { RegionCodec } from "../shared/region-codec.ts";
 import { type DirtyChunk, Generator, ServerCore } from "../shared/server-core.ts";
@@ -543,6 +543,10 @@ export class WorldDO extends DurableObject<Env> {
 		if (!core) return;
 		this.pumpGeneration(core);
 		core.tick();
+		for (const id of core.takeProtocolMismatches()) {
+			this.sockets.get(id)?.close(PROTOCOL_MISMATCH, "protocol mismatch");
+			this.releaseClient(id);
+		}
 		this.pumpGeneration(core);
 		const now = Date.now();
 		if (!this.accessCheckRunning && now - this.lastAccessCheck >= ACCESS_RECHECK_MS) {
