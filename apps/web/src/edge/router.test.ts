@@ -327,6 +327,37 @@ test("debug gamemode updates disposable worlds without creating a D1 row", async
 	assert.equal(await f.db.world("disposable"), null);
 });
 
+test("debug gamemode updates only the DO when the D1 lookup fails", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const lookup = t.mock.method(f.db, "world", async () => {
+		throw new Error("D1_ERROR: no such table: world: SQLITE_ERROR");
+	});
+	const update = t.mock.method(f.db, "setWorldGameMode");
+
+	const response = await f.request("/api/debug/gamemode?world=disposable&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.equal(lookup.mock.callCount(), 1);
+	assert.equal(update.mock.callCount(), 0);
+	assert.deepEqual(f.modeChanges, [["disposable", "survival", undefined]]);
+});
+
+test("debug gamemode returns an error when the D1 update fails for an existing world", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const update = t.mock.method(f.db, "setWorldGameMode", async () => {
+		throw new Error("D1 update failed");
+	});
+	t.mock.method(console, "error", () => {});
+
+	const response = await f.request("/api/debug/gamemode?world=lobby&mode=survival", "POST");
+	assert.equal(response.status, 500);
+	assert.equal(update.mock.callCount(), 1);
+	assert.deepEqual(f.modeChanges, []);
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 1);
+});
+
 test("Worker replaces spoofed chat names with the verified session, operator or dev display name", async t => {
 	const f = await setup(t);
 	const name = "空 🙂 %";

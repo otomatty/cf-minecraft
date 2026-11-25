@@ -150,8 +150,21 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (url.pathname === "/api/debug/gamemode") {
 			const gameMode = url.searchParams.get("mode");
 			if (!isGameMode(gameMode)) return error("invalid game mode", 400);
-			// Disposable worlds use WorldDO's local revision when there is no D1 row.
-			const revision = await db.world(world) ? await db.setWorldGameMode(world, gameMode) : undefined;
+			let hasWorld = false;
+			try {
+				hasWorld = Boolean(await db.world(world));
+			} catch {
+				// Unmigrated development databases use WorldDO's local revision.
+			}
+			let revision: number | undefined;
+			if (hasWorld) {
+				try {
+					revision = await db.setWorldGameMode(world, gameMode);
+				} catch (cause) {
+					console.error("game mode update failed", world, cause);
+					return error("game mode update failed", 500);
+				}
+			}
 			await worlds.getByName(world).setGameMode(gameMode, revision);
 			return json({ gameMode });
 		}
