@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, entitySkins, flameVertices, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { aimedMob, entitySkins, flameVertices, mobInFrustum, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { player } from "./mobs/player.ts";
 import { projectPlayerName } from "./player-names.ts";
-import { viewProjection } from "./math.ts";
+import { frustumPlanes, viewProjection } from "./math.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
@@ -19,6 +19,16 @@ test("entity interpolation clamps tick boundaries and keeps border precision", (
 	const a=[29999998,2,-29999998],b=[29999998.25,3,-29999998.5];
 	assert.deepEqual(interpolateEntity(a,b,-5),a); assert.deepEqual(interpolateEntity(a,b,100),b);
 	assert.deepEqual(interpolateEntity(a,b,25),[29999998.125,2.5,-29999998.25]);
+});
+
+test("mob frustum culling keeps partial models at the edge in camera-relative coordinates", () => {
+	const eye = [29999980, 70, -29999980] as const;
+	const planes = frustumPlanes(viewProjection(0, 0, 90, 1, 0.05, 32));
+	const mob: RenderMob = { kind: 0, position: [eye[0], eye[1], eye[2] + 4], yaw: 0, moving: false, hurt: false, light: [15, 0] };
+	assert.equal(mobInFrustum(mob, eye, planes), true);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0] + 4.2, eye[1], eye[2] + 4] }, eye, planes), true);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0] + 7, eye[1], eye[2] + 4] }, eye, planes), false);
+	assert.equal(mobInFrustum({ ...mob, position: [eye[0], eye[1], eye[2] - 2] }, eye, planes), false);
 });
 
 test("player skin paints every humanoid face and keeps the existing mob layers", () => {

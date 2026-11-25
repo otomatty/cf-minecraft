@@ -269,7 +269,7 @@ fn parse_time_of_day(value: &str) -> Option<i64> {
 }
 
 fn players_keep_chunk(clients: &BTreeMap<u32, Client>, cx: i32, cz: i32) -> bool {
-    clients.values().any(|c| {
+    clients.values().filter(|c| c.joined).any(|c| {
         let (px, pz) = c.center();
         let r = c.view + UNLOAD_MARGIN;
         (cx - px).abs() <= r && (cz - pz).abs() <= r
@@ -5563,6 +5563,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unjoined_connection_does_not_keep_a_chunk_loaded() {
+        let mut s = Server::new(1, Generator::Flat);
+        s.connect(1);
+        let chunk = s.clients[&1].center();
+        assert!(s.ensure_chunk(chunk));
+
+        s.unload_far_chunks();
+
+        assert!(!s.world.chunks.contains_key(&chunk));
     }
 
     #[test]

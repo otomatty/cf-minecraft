@@ -288,7 +288,7 @@ test("open and ops WebSockets strip the untrusted game mode header", async t => 
 	assert.deepEqual(f.forwarded.map(request => request.headers.get("X-MC-Game-Mode-Revision")), [null, null]);
 });
 
-test("debug gamemode uses the open debug route guards and updates the DO", async t => {
+test("debug gamemode uses the open debug route guards and updates D1 and the DO", async t => {
 	const f = await setup(t);
 	const path = "/api/debug/gamemode?world=lobby&mode=survival";
 	assert.equal((await f.request(path, "POST", undefined, { Authorization: "Bearer operator-secret" })).status, 404);
@@ -303,10 +303,28 @@ test("debug gamemode uses the open debug route guards and updates the DO", async
 	const response = await handle(new Request(`https://game.example${path}`, { method: "POST" }), f.deps);
 	assert.equal(response.status, 200);
 	assert.deepEqual(await response.json(), { gameMode: "survival" });
-	assert.deepEqual(f.modeChanges, [["lobby", "survival", undefined]]);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2]]);
 	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "survival");
-	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 2);
 	assert.deepEqual(f.limits, []);
+
+	f.login(owner);
+	assert.equal((await f.request("/api/worlds/lobby", "PATCH", { gameMode: "creative" })).status, 200);
+	assert.deepEqual(f.modeChanges, [["lobby", "survival", 2], ["lobby", "creative", 3]]);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 3);
+	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "creative");
+});
+
+test("debug gamemode updates disposable worlds without creating a D1 row", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const response = await f.request("/api/debug/gamemode?world=disposable&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { gameMode: "survival" });
+	assert.deepEqual(f.modeChanges, [["disposable", "survival", undefined]]);
+	assert.equal(await f.db.world("disposable"), null);
 });
 
 test("Worker replaces spoofed chat names with the verified session, operator or dev display name", async t => {

@@ -2153,6 +2153,17 @@ mod tests {
         receive(S2C::PlayerRemove { id: 2 }, 0x19);
         assert_eq!(client_players(), 0);
         assert_eq!(client_mobs(), 63);
+        receive(
+            S2C::PlayerSpawn {
+                id: 2,
+                name: "ボブ".to_owned(),
+                pos: [8.0, 7.0, 6.0],
+                yaw: 1.0,
+                pitch: 2.0,
+            },
+            0x17,
+        );
+        assert!(client_players() > 0);
         client_reset_world();
         assert_eq!(client_players(), 0);
         assert_eq!(client_mobs(), 0);

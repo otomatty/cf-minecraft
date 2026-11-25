@@ -888,17 +888,21 @@ fn sees_sunlight(world: &World, pos: [f64; 3], head_offset: f64) -> bool {
 
 fn has_loot_support(world: &World, collisions: &impl CollisionWorld, [x, y, z]: [f64; 3]) -> bool {
     let [bx, by, bz] = [x, y - 0.01, z].map(|v| v.floor() as i32);
-    if world.get_block(bx, by, bz).is_none_or(blocks::is_lava) {
-        return false;
-    }
     // The mob's footprint can stay grounded while its center is over an edge.
-    let mut supported = false;
-    collisions.collision_boxes(bx, by, bz, &mut |bounds| {
-        supported |= bounds.max[1] <= y
-            && (bounds.min[0]..bounds.max[0]).contains(&x)
-            && (bounds.min[2]..bounds.max[2]).contains(&z);
-    });
-    supported
+    // Fences can support the center from a block below the cell under the feet.
+    [by, by - 1].into_iter().any(|block_y| {
+        if world.get_block(bx, block_y, bz).is_none_or(blocks::is_lava) {
+            return false;
+        }
+        let mut supported = false;
+        collisions.collision_boxes(bx, block_y, bz, &mut |bounds| {
+            supported |= bounds.max[1] > f64::from(by)
+                && bounds.max[1] <= y
+                && (bounds.min[0]..bounds.max[0]).contains(&x)
+                && (bounds.min[2]..bounds.max[2]).contains(&z);
+        });
+        supported
+    })
 }
 
 /// None means stop. A solid block at foot level can ask physics to jump.
@@ -2928,6 +2932,30 @@ mod tests {
         server.tick();
         assert!(server.entities.is_empty());
         assert!(server.clients[&1].inventory.slots().contains(&Some(stack)));
+    }
+
+    #[test]
+    fn lava_death_drops_loot_on_the_last_dry_fence() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let fence = [8.5, 2.5, 5.5];
+        assert_ne!(server.mobs[&id].last_dry_pos, fence);
+        server.world.set_block(8, 1, 5, blocks::OAK_FENCE);
+        server.mobs.get_mut(&id).unwrap().body.position = fence;
+        server.tick();
+        assert_eq!(server.mobs[&id].last_dry_pos, fence);
+
+        server.world.set_block(10, 1, 5, blocks::LAVA);
+        let cow = server.mobs.get_mut(&id).unwrap();
+        cow.body.position = [10.5, 1.0, 5.5];
+        cow.health = LAVA_DAMAGE;
+        cow.lava_ticks = LAVA_INTERVAL - 1;
+        server.tick();
+
+        assert!(!server.mobs.contains_key(&id));
+        assert_eq!(server.entities.len(), 1);
+        let drop = server.entities.values().next().unwrap();
+        assert_eq!(drop.item, items::by_name("cooked_beef").unwrap());
+        assert_eq!(drop.pos, [fence[0], fence[1] + 0.65, fence[2]]);
     }
 
     #[test]

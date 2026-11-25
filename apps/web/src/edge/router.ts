@@ -150,8 +150,9 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 		if (url.pathname === "/api/debug/gamemode") {
 			const gameMode = url.searchParams.get("mode");
 			if (!isGameMode(gameMode)) return error("invalid game mode", 400);
-			// No D1 row. An omitted revision makes WorldDO use its stored revision plus one.
-			await worlds.getByName(world).setGameMode(gameMode);
+			// Disposable worlds use WorldDO's local revision when there is no D1 row.
+			const revision = await db.world(world) ? await db.setWorldGameMode(world, gameMode) : undefined;
+			await worlds.getByName(world).setGameMode(gameMode, revision);
 			return json({ gameMode });
 		}
 		if (url.pathname === "/api/debug/evict") {

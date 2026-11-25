@@ -465,6 +465,8 @@ mod tests {
     fn movement_within_one_chunk_waits_for_tick_600() {
         let mut source = server();
         source.connect(1);
+        source.clients.get_mut(&1).unwrap().joined = true;
+        source.set_external_generation(1);
         source.spawn_item(1, 5, [3.5, 80.0, 3.5], [0.5, 0.0, 0.0], 40);
         let first = save(&mut source);
         source.game_time = 598;
@@ -554,6 +556,8 @@ mod tests {
         let mut source = server();
         source.set_entity_persistence(false);
         source.connect(1);
+        source.clients.get_mut(&1).unwrap().joined = true;
+        source.set_external_generation(1);
         for cx in [0, 30, 60] {
             source.world.insert_chunk(Chunk::empty(cx, 0));
             let pos = [f64::from(cx * 16) + 2.5, 80.0, 3.5];

@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { entitySkins, explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { entitySkins, explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobInFrustum, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import type { TintRect } from "./tint-map.ts";
@@ -796,9 +796,9 @@ export class Renderer {
 
 		const crackData = digVertices(digs.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], this.crackTextureBase);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
-		const visibleMobs = mobs.slice(0, MAX_RENDER_ITEMS);
 		const heldItems: RenderSprite[] = [];
 		const eye: Vec3 = [camera.x, camera.y, camera.z];
+		const visibleMobs = mobs.filter(mob => mobInFrustum(mob, eye, planes)).slice(0, MAX_RENDER_ITEMS);
 		const visiblePlayers = players.filter(({ position: [x, y, z] }) => boxInFrustum(planes,
 			x - eye[0] - 0.75, y - eye[1] - 0.1, z - eye[2] - 0.75, 1.5, 2.4, 1.5))
 			.slice(0, MAX_RENDER_ITEMS - visibleMobs.length);
