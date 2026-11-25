@@ -102,7 +102,7 @@ fn main() {
                 vertices.len(),
                 counts.iter().sum::<u32>() as usize * WORDS_PER_QUAD
             );
-            for quad in vertices.chunks_exact(WORDS_PER_QUAD) {
+            for quad in vertices.as_chunks::<WORDS_PER_QUAD>().0 {
                 let texture = quad[1] & 4095;
                 let is_dense = Some(texture) == dense;
                 leaf_faces += usize::from(texture == regular || is_dense);
