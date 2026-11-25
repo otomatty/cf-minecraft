@@ -604,7 +604,12 @@ async function protocolMismatch() {
 	const url = `${edge}/play.html?server=ws&world=${world}&view=2`;
 	let navigations = 0;
 	page.on("framenavigated", frame => {
-		if (frame === page.mainFrame() && frame.url() === url) navigations++;
+		if (frame !== page.mainFrame()) return;
+		const { pathname, searchParams } = new URL(frame.url());
+		// The dev server can redirect /play.html to /play.
+		if ((pathname === "/play" || pathname === "/play.html") && searchParams.get("world") === world) {
+			navigations++;
+		}
 	});
 	try {
 		await page.evaluateOnNewDocument((path) => {
@@ -623,7 +628,11 @@ async function protocolMismatch() {
 			document.querySelector("#status.error")?.textContent === "ゲームのバージョンがサーバーと違います。ページを再読み込みしてください",
 			{ timeout: 20000 },
 		);
-		check(navigations === 2, "ws: protocol mismatch reloads once and then shows the error", `${navigations} navigations`);
+		const navigationsAtError = navigations;
+		await new Promise(resolve => setTimeout(resolve, 1500));
+		check(navigationsAtError === 2 && navigations === navigationsAtError,
+			"ws: protocol mismatch reloads once and then shows the error",
+			`${navigationsAtError} navigations at error, ${navigations} after 1.5 s`);
 	} finally {
 		await page.close();
 	}
