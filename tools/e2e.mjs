@@ -1677,26 +1677,30 @@ async function survivalCrafting() {
         await table(10,0);
         for (const slot of [45,48]) await table(slot,1,"right");
         await table(10,2);
-        await page.waitForFunction(() => document.querySelector('#crafting-table-screen [data-slot="50"] canvas').title==="wooden_pickaxe (48 / 48)");
-        check(await page.$eval('#crafting-table-screen [data-slot="50"] canvas',c=>c.title==="wooden_pickaxe (48 / 48)"),"crafting: three planks and two sticks preview wooden pickaxe");
+        await page.waitForFunction(() => document.querySelector('#crafting-table-screen [data-slot="50"] canvas').title==="wooden_pickaxe");
+        check(await page.$eval('#crafting-table-screen [data-slot="50"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: three planks and two sticks preview wooden pickaxe");
         await table(50,0);
         await table(11,1);
-        check(await page.$eval('#crafting-table-screen [data-slot="11"] canvas',c=>c.title==="wooden_pickaxe (48 / 48)"),"crafting: takes wooden pickaxe into inventory");
+        check(await page.$eval('#crafting-table-screen [data-slot="11"] canvas',c=>c.title==="wooden_pickaxe"),"crafting: takes wooden pickaxe into inventory");
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.getElementById("crafting-table-screen").hidden && window.__mc.stats().screen===0);
-        check(await page.evaluate(() => window.__mc.stats().inventory[11]?.count===1 && document.querySelector('#crafting-table-screen [data-slot="11"] canvas').title==="wooden_pickaxe (48 / 48)"),"crafting: wooden pickaxe remains in inventory after closing");
+        check(await page.evaluate(() => window.__mc.stats().inventory[11]?.count===1 && document.querySelector('#crafting-table-screen [data-slot="11"] canvas').title==="wooden_pickaxe"),"crafting: wooden pickaxe remains in inventory after closing");
         await page.waitForFunction(() => document.pointerLockElement?.id === "view");
         await page.keyboard.press("KeyE");
         await page.waitForSelector("#inventory-screen:not([hidden])");
         await inv(11,0);
         await inv(0,1);
+        check(await page.$eval('#inventory-screen [data-slot="11"] canvas', c => !c.hasAttribute("data-durability")),
+            "crafting: moving the pickaxe clears durability from the empty slot");
         await page.keyboard.press("Escape");
         await page.waitForFunction(() => document.pointerLockElement?.id === "view" && window.__mc.stats().screen === 0);
         await page.keyboard.press("Digit1");
         const firstHotbarIcon = "#hotbar canvas:first-child";
         const durabilityPixel = c => [...c.getContext("2d").getImageData(2, c.height - 3, 1, 1).data];
         const freshPixel = await page.$eval(firstHotbarIcon, durabilityPixel);
-        check(await page.evaluate(() => window.__mc.stats().inventory[0]?.damage === 0), "crafting: a new pickaxe has full durability");
+        check(await page.$eval(firstHotbarIcon, c => c.title === "wooden_pickaxe" &&
+            c.dataset.durability === "48/48" && window.__mc.stats().inventory[0]?.damage === 0),
+            "crafting: a new pickaxe has full durability");
         // The table takes time to mine even with a pickaxe.
         await page.evaluate(([x,y,z]) => window.__mc.setCamera(x+1.5,y+1.62,z+0.5,90,Math.atan2(1.12,1)*180/Math.PI),target);
         await page.waitForFunction(([x,y,z]) => {
@@ -1707,7 +1711,9 @@ async function survivalCrafting() {
         await page.mouse.down();
         await page.waitForFunction(([x,y,z]) => window.__mc.getBlock(x,y,z) === 0 && window.__mc.stats().inventory[0]?.damage === 1,{},target);
         await page.mouse.up();
-        check(await page.evaluate(() => window.__mc.stats().inventory[0]?.damage === 1), "crafting: mining consumes one use of the pickaxe");
+        check(await page.$eval(firstHotbarIcon, c => c.title === "wooden_pickaxe" &&
+            c.dataset.durability === "47/48" && window.__mc.stats().inventory[0]?.damage === 1),
+            "crafting: mining consumes one use of the pickaxe");
         const wornPixel = await page.$eval(firstHotbarIcon, durabilityPixel);
         check(wornPixel[1] > wornPixel[0] && wornPixel[1] > wornPixel[2] && wornPixel[3] === 255 &&
             wornPixel.some((value, channel) => value !== freshPixel[channel]), "crafting: worn pickaxe shows a green durability bar in the hotbar");
@@ -2751,7 +2757,7 @@ async function bow() {
 		await page.keyboard.press("KeyE");
 		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 		await page.click('#block-grid [data-block="bow"]');
-		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "bow (128 / 128)");
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "bow");
 		await page.keyboard.press("KeyE");
 		await resumePointerLock(page, "bow: resume after selecting bow");
 		await page.mouse.move(640, 360);

@@ -643,7 +643,9 @@ async function main(): Promise<void> {
 			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
 		}
 		const max = item?.durability ?? null;
-		if (item) c.title = max === null ? item.name : `${item.name} (${max - damage} / ${max})`;
+		if (item) c.title = item.name;
+		if (max === null) delete c.dataset.durability;
+		else c.dataset.durability = `${max - damage}/${max}`;
 		const bar = durabilityBar(damage, max);
 		if (bar) {
 			const ctx = c.getContext("2d")!;
