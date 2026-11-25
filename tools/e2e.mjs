@@ -1,6 +1,7 @@
 // Drives the real client in headless Chrome against a running dev server.
 //
 //   node tools/e2e.mjs [--edge http://localhost:5173] [--shots /tmp/shots]
+// Set MC_E2E_SESSION_COOKIE to a Better Auth session cookie (name=value) from the dev server to test player persistence.
 //
 // Checks, in single player and against the Durable Object:
 //   * a WebGPU device is created and the world around the spawn is meshed and drawn
@@ -596,6 +597,70 @@ async function playthrough(kind) {
 
 	check(errors.length === 0, `${kind}: no page errors`, errors.slice(0, 3).join(" | "));
 	return page;
+}
+
+async function playerPersistence() {
+	const cookie = process.env.MC_E2E_SESSION_COOKIE;
+	if (!cookie) {
+		console.log("skip ws: player persistence requires MC_E2E_SESSION_COOKIE (anonymous connections get new IDs)");
+		return;
+	}
+	const separator = cookie.indexOf("=");
+	if (separator < 1 || separator === cookie.length - 1) throw new Error("MC_E2E_SESSION_COOKIE must be name=value");
+	const context = await browser.createBrowserContext();
+	try {
+		const origin = new URL(edge);
+		await context.setCookie({
+			name: cookie.slice(0, separator), value: cookie.slice(separator + 1),
+			domain: origin.hostname, path: "/", secure: origin.protocol === "https:", httpOnly: true,
+		});
+		const page = await context.newPage();
+		const world = `e2e-player-${run}`;
+		await page.goto(`${edge}/play.html?server=ws&world=${world}&view=2&autopilot=1`);
+		await page.waitForFunction(() => {
+			const api = window.__mc;
+			const spawn = api?.stats().spawn;
+			if (!spawn || api.stats().connection !== "open") return false;
+			const [x, y, z] = spawn.map(Math.floor);
+			return api.getBlock(x, y - 1, z) > 0;
+		}, { timeout: 15000 });
+		const authenticated = await page.evaluate(async () => {
+			const response = await fetch("/api/me");
+			return response.ok && Boolean((await response.json())?.user?.id);
+		});
+		if (!authenticated) throw new Error("MC_E2E_SESSION_COOKIE must identify a signed-in development user");
+
+		const destination = await page.evaluate(() => {
+			const [x, y, z] = window.__mc.stats().spawn;
+			return [x + 0.125, y, z];
+		});
+		const checkPosition = async (label, moveTo) => {
+			const corrections = await page.evaluate(moveTo => {
+				const api = window.__mc;
+				const before = api.stats().positionsCorrected;
+				if (moveTo) api.sendRawPosition(...moveTo);
+				// A rejected move asks the server to report its accepted position.
+				api.sendRawPosition(100000, 200, 100000);
+				return before;
+			}, moveTo ?? null);
+			await page.waitForFunction(before => window.__mc.stats().positionsCorrected > before, { timeout: 10000 }, corrections);
+			const actual = await page.evaluate(() => window.__mc.playerPosition());
+			check(Math.hypot(...actual.map((value, i) => value - destination[i])) < 0.01, label, actual.join(","));
+		};
+		await checkPosition("ws: signed-in player moved away from spawn", destination);
+		for (const action of ["disconnect", "evict"]) {
+			const before = await page.evaluate(() => window.__mc.stats().reconnects);
+			const response = await fetch(`${edge}/api/debug/${action}?world=${world}`, { method: "POST" });
+			check(response.ok, `ws: player persistence debug ${action} accepted`);
+			await page.waitForFunction(before => {
+				const stats = window.__mc.stats();
+				return stats.connection === "open" && stats.reconnects > before;
+			}, { timeout: 15000, polling: 10 }, before);
+			await checkPosition(`ws: accepted player position survived ${action}`);
+		}
+	} finally {
+		await context.close();
+	}
 }
 
 async function protocolMismatch() {
@@ -3330,6 +3395,7 @@ try {
 	check(inBrowser === expected, "scenario fingerprint in Chrome equals Node", `${inBrowser} vs ${expected}`);
 	await page.close();
 	await (await playthrough("ws")).close();
+	await playerPersistence();
 	await protocolMismatch();
 	await gameModeChange();
 } catch (err) {

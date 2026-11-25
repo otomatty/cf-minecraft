@@ -14,12 +14,11 @@ import serverWasm from "../wasm/server.wasm";
 //
 // While players are connected the object stays in memory and runs the core at
 // 20 ticks per second from a timer. All game state lives in the WebAssembly
-// instance; SQLite holds what must survive: edited chunks and the clock.
+// instance; SQLite holds edited chunks, the clock, and player snapshots.
 //
-// Durability: edits are written by an autosave every AUTOSAVE_TICKS, and when
+// Durability: snapshots are written every AUTOSAVE_TICKS, and when
 // the last player leaves. If the object is evicted or redeployed in between,
-// at most that window of edits is lost and players reconnect. (The game itself
-// autosaves every five minutes.)
+// changes since the last successful save can be lost when players reconnect.
 
 // Limit generation work between ticks when RPCs share the same process to reduce timer jitter.
 const MAX_GENERATION_IN_FLIGHT = 8;
@@ -31,6 +30,8 @@ const MAX_CHAT_PACKET_BYTES = 1 + 2 + 1024;
 /** Packets accepted per client per tick before the connection is dropped. */
 const MAX_PACKETS_PER_TICK = 100;
 const AUTOSAVE_TICKS = 100;
+// The current inventory format, including vitals, is 158 bytes.
+const MAX_SAVED_INVENTORY_BYTES = 4096;
 /** Ticks without any player before the loop stops and the object may sleep. */
 const IDLE_STOP_TICKS = 100;
 // Bound how long an in-flight authorization can admit a connection.
@@ -62,6 +63,15 @@ interface RoleRefreshes {
 	latest: PromiseWithResolvers<void> | { changed: number } | { error: unknown };
 }
 
+interface PlayerState {
+	position: [number, number, number] | undefined;
+	inventory: Uint8Array | undefined;
+}
+
+function isEphemeralUser(user: string): boolean {
+	return user.startsWith("ops:") || user.startsWith("dev:");
+}
+
 export class WorldDO extends DurableObject<Env> {
 	private core: ServerCore | null = null;
 	private generation: GenerationDispatcher | null = null;
@@ -73,9 +83,9 @@ export class WorldDO extends DurableObject<Env> {
 	private generator: number = Generator.DebugHills;
 	private readonly sockets = new Map<number, WebSocket>();
 	private readonly users = new Map<number, string>();
-	// Memory only: eviction/recreation starts players at spawn, not a saved position.
-	private readonly inventories = new Map<string, Uint8Array>();
-	private readonly positions = new Map<string, [number, number, number]>();
+	// Reconnects use the latest disconnected snapshot or the cached SQLite row.
+	private readonly pendingPlayers = new Map<string, PlayerState>();
+	private readonly savedPlayers = new Map<string, PlayerState | null>();
 	private readonly sessions = new Map<number, string>();
 	private readonly roleVersions = new Map<string, number>();
 	private readonly roleRefreshes = new Map<string, RoleRefreshes>();
@@ -112,6 +122,14 @@ export class WorldDO extends DurableObject<Env> {
 			CREATE TABLE IF NOT EXISTS meta (
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
+			) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS players (
+				user_id TEXT PRIMARY KEY,
+				x REAL NOT NULL,
+				y REAL NOT NULL,
+				z REAL NOT NULL,
+				inventory BLOB,
+				saved_at INTEGER NOT NULL
 			) WITHOUT ROWID;
 		`);
 		const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(chunks)").toArray();
@@ -251,7 +269,9 @@ export class WorldDO extends DurableObject<Env> {
 			try { displayName = decodeURIComponent(encodedName); }
 			catch { /* Use the core's default name when decoding fails. */ }
 		}
-		core.connect(id, user.startsWith("ops:") || user.startsWith("dev:"), this.positions.get(user), this.inventories.get(user), displayName);
+		const ephemeral = isEphemeralUser(user);
+		const player = ephemeral ? undefined : this.pendingPlayers.get(user) ?? this.loadPlayer(user);
+		core.connect(id, ephemeral, player?.position, player?.inventory, displayName);
 		core.setOperator(id, role === "operator");
 		this.sockets.set(id, server);
 		this.users.set(id, user);
@@ -292,19 +312,38 @@ export class WorldDO extends DurableObject<Env> {
 		if (!this.sockets.delete(id)) return;
 		const core = this.ensureCore();
 		core.returnCrafting(id);
-		this.rememberPosition(id);
+		this.rememberPosition(core, id);
 		this.users.delete(id);
 		this.sessions.delete(id);
 		this.packetCounts.delete(id);
 		core.disconnect(id);
 	}
 
-	private rememberPosition(id: number): void {
+	private rememberPosition(core: ServerCore, id: number): void {
 		const user = this.users.get(id);
-		const position = this.ensureCore().clientPosition(id);
-		if (user !== undefined && position !== undefined) this.positions.set(user, position);
-		const inventory = this.ensureCore().inventoryData(id);
-		if (user !== undefined && inventory !== undefined) this.inventories.set(user, inventory);
+		if (user === undefined || isEphemeralUser(user)) return;
+		const position = core.clientPosition(id);
+		const inventory = core.inventoryData(id);
+		if (position !== undefined) this.pendingPlayers.set(user, { position, inventory });
+	}
+
+	private loadPlayer(user: string): PlayerState | null {
+		const cached = this.savedPlayers.get(user);
+		if (cached !== undefined) return cached;
+		const [row] = this.ctx.storage.sql.exec<{ x: number; y: number; z: number; inventory: ArrayBuffer | null }>(
+			"SELECT x, y, z, inventory FROM players WHERE user_id = ?", user,
+		).toArray();
+		let player: PlayerState | null = null;
+		if (row) {
+			const position: [number, number, number] = [row.x, row.y, row.z];
+			player = {
+				position: position.every(Number.isFinite) ? position : undefined,
+				inventory: row.inventory instanceof ArrayBuffer && row.inventory.byteLength <= MAX_SAVED_INVENTORY_BYTES
+					? new Uint8Array(row.inventory) : undefined,
+			};
+		}
+		this.savedPlayers.set(user, player);
+		return player;
 	}
 
 	revoke(userId: string): number {
@@ -455,8 +494,8 @@ export class WorldDO extends DurableObject<Env> {
 		this.disconnectAll(SERVICE_RESTART, "debug evict");
 		this.save();
 		this.stopTicking();
-		this.positions.clear();
-		this.inventories.clear();
+		// Like pending chunks, disconnected snapshots survive a failed save for retry.
+		this.savedPlayers.clear();
 		this.generation?.reset();
 		this.generation = null;
 		this.core = null;
@@ -627,6 +666,14 @@ export class WorldDO extends DurableObject<Env> {
 			}
 			const clock = { gameTime: core.gameTime, dayTime: core.dayTime };
 			this.pendingClock = clock;
+			const players = new Map(this.pendingPlayers);
+			for (const [id, user] of this.users) {
+				if (isEphemeralUser(user)) continue;
+				const position = core.clientPosition(id);
+				if (position !== undefined) players.set(user, { position, inventory: core.inventoryData(id) });
+			}
+			const writtenPlayers = new Map<string, PlayerState>();
+			const savedAt = Date.now();
 			// No simulation step can interleave with this synchronous transaction.
 			this.ctx.storage.transactionSync(() => {
 				for (const chunk of this.pendingChunks.values()) {
@@ -641,13 +688,38 @@ export class WorldDO extends DurableObject<Env> {
 				}
 				this.setMeta("gameTime", clock.gameTime.toString());
 				this.setMeta("dayTime", clock.dayTime.toString());
+				for (const [user, { position, inventory: snapshot }] of players) {
+					if (!position) continue;
+					let inventory = snapshot;
+					if (inventory && inventory.byteLength > MAX_SAVED_INVENTORY_BYTES) {
+						console.warn("Player inventory exceeds the save size limit", this.worldName, user, inventory.byteLength);
+						inventory = undefined;
+					}
+					const previous = this.loadPlayer(user);
+					const previousPosition = previous?.position;
+					if (previousPosition && position.every((value, i) => value === previousPosition[i])) {
+						const bytes = previous?.inventory;
+						if (inventory === bytes || (inventory && bytes &&
+							inventory.byteLength === bytes.byteLength && inventory.every((byte, i) => byte === bytes[i]))) continue;
+					}
+					const blob = inventory?.buffer.slice(inventory.byteOffset, inventory.byteOffset + inventory.byteLength);
+					this.ctx.storage.sql.exec(
+						"INSERT INTO players (user_id, x, y, z, inventory, saved_at) VALUES (?, ?, ?, ?, ?, ?) " +
+							"ON CONFLICT (user_id) DO UPDATE SET x = excluded.x, y = excluded.y, z = excluded.z, " +
+							"inventory = excluded.inventory, saved_at = excluded.saved_at",
+						user, ...position, blob ?? null, savedAt,
+					);
+					writtenPlayers.set(user, { position, inventory });
+				}
 			});
 			const saved = this.pendingChunks.size;
 			this.pendingChunks.clear();
 			this.pendingClock = null;
+			this.pendingPlayers.clear();
+			for (const [user, player] of writtenPlayers) this.savedPlayers.set(user, player);
 			return saved;
 		} catch (error) {
-			console.warn("Failed to save Durable Object chunks; will retry on next save", this.worldName, error);
+			console.warn("Failed to save Durable Object world state; will retry on next save", this.worldName, error);
 			return null;
 		}
 	}
