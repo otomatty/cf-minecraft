@@ -26,6 +26,7 @@ export interface RouterDeps {
 			refreshRole(userId: string, world: string): Promise<number>;
 			disconnectAll(code: number, reason: string): Promise<number>;
 			getGameMode(): Promise<GameMode>;
+			getGameModeRevision(): Promise<number>;
 			setGameMode(mode: GameMode, revision?: number): Promise<void>;
 			evict(): Promise<void>;
 			scenario(seed: string, ticks: number): Promise<unknown>;
@@ -156,16 +157,18 @@ export async function handle(request: Request, deps: RouterDeps): Promise<Respon
 			} catch {
 				// Unmigrated development databases use WorldDO's local revision.
 			}
+			const worldDO = worlds.getByName(world);
 			let revision: number | undefined;
 			if (hasWorld) {
 				try {
-					revision = await db.setWorldGameMode(world, gameMode);
+					const revisionFloor = await worldDO.getGameModeRevision();
+					revision = await db.setWorldGameMode(world, gameMode, revisionFloor);
 				} catch (cause) {
 					console.error("game mode update failed", world, cause);
 					return error("game mode update failed", 500);
 				}
 			}
-			await worlds.getByName(world).setGameMode(gameMode, revision);
+			await worldDO.setGameMode(gameMode, revision);
 			return json({ gameMode });
 		}
 		if (url.pathname === "/api/debug/evict") {

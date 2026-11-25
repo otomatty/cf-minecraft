@@ -13,6 +13,10 @@ pub struct Stack {
     pub damage: u16,
 }
 impl Stack {
+    fn matches_item_and_damage(self, item: u16, damage: u16) -> bool {
+        self.item == item && self.damage == damage
+    }
+
     pub(crate) fn wire(self) -> protocol::ItemStack {
         (self.item, self.count, self.damage)
     }
@@ -236,22 +240,21 @@ impl Inventory {
             while let Some(result) = self.result() {
                 if shift {
                     let mut next = self.clone();
-                    if next.add(result.item, u32::from(result.count)) != 0 {
+                    if next.add_stack(result) != 0 {
                         break;
                     }
                     self.slots = next.slots;
                 } else {
                     if self.cursor.is_some_and(|s| {
-                        s.item != result.item
+                        !s.matches_item_and_damage(result.item, result.damage)
                             || u16::from(s.count) + u16::from(result.count)
                                 > u16::from(items::info(s.item).unwrap().max_stack)
                     }) {
                         break;
                     }
                     self.cursor = Some(Stack {
-                        item: result.item,
                         count: self.cursor.map_or(0, |s| s.count) + result.count,
-                        damage: 0,
+                        ..result
                     });
                 }
                 self.consume();
@@ -312,7 +315,7 @@ impl Inventory {
                     self.cursor = Some(Stack { count, ..s });
                     subtract(target, count);
                 }
-                (Some(c), t) if t.is_none_or(|s| s.item == c.item) => {
+                (Some(c), t) if t.is_none_or(|s| s.matches_item_and_damage(c.item, c.damage)) => {
                     let present = t.map_or(0, |s| s.count);
                     let count = (items::info(c.item).unwrap().max_stack - present)
                         .min(if button == 0 { c.count } else { 1 });
@@ -368,7 +371,10 @@ impl Inventory {
         }
         if slot == 53 {
             if let Some(s) = f.slots[2] {
-                if self.cursor.is_none_or(|c| c.item == s.item) {
+                if self
+                    .cursor
+                    .is_none_or(|c| c.matches_item_and_damage(s.item, s.damage))
+                {
                     let room =
                         items::info(s.item).unwrap().max_stack - self.cursor.map_or(0, |c| c.count);
                     let count = room.min(if button == 0 {
@@ -746,6 +752,79 @@ mod tests {
     }
 
     #[test]
+    fn clicks_swap_pickaxes_with_different_wear_in_inventory_and_screens() {
+        let item = items::by_name("wooden_pickaxe").unwrap();
+        let fresh = Stack {
+            item,
+            count: 1,
+            damage: 0,
+        };
+        let worn = Stack {
+            damage: items::info(item).unwrap().durability.unwrap() - 1,
+            ..fresh
+        };
+        let furnace = Screen::Furnace { pos: [0; 3] };
+        for (screen, slot) in [
+            (Screen::None, 1),
+            (Screen::None, 36),
+            (Screen::CraftingTable { pos: [0; 3] }, 41),
+            (furnace, 1),
+            (furnace, 51),
+        ] {
+            let mut inv = Inventory::default();
+            inv.set(0, Some(worn)).unwrap();
+            inv.set(1, Some(fresh)).unwrap();
+            inv.screen = screen;
+            let mut f = crate::furnace::Furnace::default();
+            let mut click = |inv: &mut Inventory, slot| {
+                if screen == furnace {
+                    inv.click_furnace(&mut f, slot, 0, false).unwrap();
+                } else {
+                    inv.click(slot, 0, false).unwrap();
+                }
+            };
+            if slot != 1 {
+                click(&mut inv, 1);
+                click(&mut inv, slot);
+            }
+            click(&mut inv, 0);
+            assert_eq!(inv.cursor, Some(worn));
+            click(&mut inv, slot);
+            assert_eq!(inv.cursor, Some(fresh), "{screen:?}, slot {slot}");
+            click(&mut inv, 0);
+            click(&mut inv, slot);
+            assert_eq!(inv.cursor, Some(worn), "{screen:?}, slot {slot}");
+            assert_eq!(inv.slots[0], Some(fresh));
+        }
+    }
+
+    #[test]
+    fn clicking_matching_stacks_respects_the_stack_limit() {
+        let mut inv = Inventory::default();
+        let pickaxe = Stack {
+            item: items::by_name("wooden_pickaxe").unwrap(),
+            count: 1,
+            damage: 1,
+        };
+        inv.set(0, Some(pickaxe)).unwrap();
+        inv.cursor = Some(pickaxe);
+        let before = inv.clone();
+        inv.click(0, 0, false).unwrap();
+        assert_eq!(inv, before);
+
+        let stone = Stack {
+            item: items::by_name("stone").unwrap(),
+            count: 2,
+            damage: 0,
+        };
+        inv.set(0, Some(stone)).unwrap();
+        inv.cursor = Some(stone);
+        inv.click(0, 0, false).unwrap();
+        assert_eq!(inv.slots[0], Some(Stack { count: 4, ..stone }));
+        assert_eq!(inv.cursor, None);
+    }
+
+    #[test]
     fn persistence_is_strict_and_round_trips() {
         let mut inv = Inventory::creative();
         inv.select(8).unwrap();
@@ -776,7 +855,11 @@ fn add_slots(slots: &mut [Option<Stack>], item: u16, mut count: u32, damage: u16
     let Some(info) = items::info(item) else {
         return count;
     };
-    for slot in slots.iter_mut().flatten().filter(|s| s.item == item) {
+    for slot in slots
+        .iter_mut()
+        .flatten()
+        .filter(|s| s.matches_item_and_damage(item, damage))
+    {
         let n = count.min(u32::from(info.max_stack - slot.count)) as u8;
         slot.count += n;
         count -= u32::from(n);

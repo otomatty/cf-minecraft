@@ -449,6 +449,10 @@ export class WorldDO extends DurableObject<Env> {
 		return this.meta("gamemode") === "survival" ? "survival" : "creative";
 	}
 
+	getGameModeRevision(): number {
+		return this.gameModeRevision();
+	}
+
 	private parseRevision(value: string | null): number | null {
 		if (value === null || !/^-?\d+$/.test(value)) return null;
 		const revision = Number(value);

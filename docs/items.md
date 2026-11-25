@@ -224,4 +224,4 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 
 `Hello` はプロトコル番号 29 を使う。`Inventory` の各枠と `EntitySpawn` のアイテム個数の直後に `damage`（ビッグエンディアンの u16）を追加する。`ToolBreak`（S2C、タグ `0x1a`、ペイロードなし）で使ったプレイヤーに破損を通知する。クライアント WASM では枠の消耗を `client_slot_damage`、アイテムの最大耐久値をレジストリの `durability` で取得する。`client_entities` の各レコード末尾にも `damage` が入る。サーバー WASM の ABI は 9。
 
-状態ハッシュには、所持品・一時枠・かまど・落ちているアイテムの `damage` を含める。seed 2026・600 tick の台本の指紋は `7c46257055d8c652` から `3452cbe46d067e47` に変わり、native と Node（WASM）で一致する。ノイズは `d5166400c68a1c45`、地形は `7ec6cedb74055722`。
+状態ハッシュには、所持品・一時枠・かまど・落ちているアイテムの `damage` を含める。耐久値を加えた時点で、seed 2026・600 tick の台本の指紋は `7c46257055d8c652` から `3452cbe46d067e47` に変わった。その後、台本で置いた砂が落ちるようになり、現在の参照値は `c24992e95973fe13`。native と Node（WASM）で一致する。ノイズは `d5166400c68a1c45`、地形は `7ec6cedb74055722`。[落下ブロック](falling-blocks.md)

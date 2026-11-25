@@ -32,7 +32,7 @@ async function setup(t) {
 	const disconnections: [string, number, string][] = [];
 	const evictions: string[] = [];
 	const modeChanges: [string, GameMode, number | undefined][] = [];
-	const modes = new Map<string, GameMode>();
+	const modes = new Map<string, { mode: GameMode; revision: number }>();
 	let modeUpdateFails = false;
 	let revokeFailures = 0;
 	let roleUpdateFails = 0;
@@ -87,12 +87,18 @@ async function setup(t) {
 						return 2;
 					},
 					async getGameMode() {
-						return modes.get(name) ?? "creative";
+						return modes.get(name)?.mode ?? "creative";
+					},
+					async getGameModeRevision() {
+						return modes.get(name)?.revision ?? 0;
 					},
 					async setGameMode(mode, revision?: number) {
 						modeChanges.push([name, mode, revision]);
 						if (modeUpdateFails) throw new Error("game mode update failed");
-						modes.set(name, mode);
+						const current = modes.get(name)?.revision ?? 0;
+						const next = revision ?? current + 1;
+						if (!Number.isSafeInteger(next) || next <= current) return;
+						modes.set(name, { mode, revision: next });
 					},
 					async evict() {
 						evictions.push(name);
@@ -315,6 +321,24 @@ test("debug gamemode uses the open debug route guards and updates D1 and the DO"
 	assert.equal((await f.db.world("lobby"))?.gameMode, "creative");
 	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 3);
 	assert.equal((await (await f.request("/api/worlds/lobby")).json()).gameMode, "creative");
+});
+
+test("debug gamemode applies when the DO revision is ahead of D1", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const world = f.deps.worlds.getByName("lobby");
+	await world.setGameMode("creative", 7);
+	await world.setGameMode("survival", 7);
+	assert.equal(await world.getGameMode(), "creative");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 1);
+
+	const response = await f.request("/api/debug/gamemode?world=lobby&mode=survival", "POST");
+	assert.equal(response.status, 200);
+	assert.equal(await world.getGameMode(), "survival");
+	assert.equal(await world.getGameModeRevision(), 8);
+	assert.equal((await f.db.world("lobby"))?.gameMode, "survival");
+	assert.equal((await f.db.world("lobby"))?.gameModeRevision, 8);
+	assert.deepEqual(f.modeChanges.at(-1), ["lobby", "survival", 8]);
 });
 
 test("debug gamemode updates disposable worlds without creating a D1 row", async t => {

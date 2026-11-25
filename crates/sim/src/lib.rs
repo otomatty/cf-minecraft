@@ -627,7 +627,8 @@ impl Server {
                     return comparisons;
                 }
                 comparisons += 1;
-                if (0..3).all(|axis| (a.pos[axis] - b.pos[axis]).abs() <= 0.5)
+                if a.damage == b.damage
+                    && (0..3).all(|axis| (a.pos[axis] - b.pos[axis]).abs() <= 0.5)
                     && a.count as u16 + b.count as u16 <= max_stack as u16
                 {
                     let b = self.entities.remove(&other).unwrap();

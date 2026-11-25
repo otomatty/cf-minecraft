@@ -1460,9 +1460,11 @@ test("DO game mode RPC persists and only restarts connections on a change", asyn
 	const f = fixture(t, true);
 	const revision = () => f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode_revision'").get()?.value;
 	assert.equal(f.world.getGameMode(), "creative");
+	assert.equal(f.world.getGameModeRevision(), 0);
 	await f.world.setGameMode("survival");
 	assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, "survival");
 	assert.equal(revision(), "1");
+	assert.equal(f.world.getGameModeRevision(), 1);
 	await f.join("first");
 	await f.join("second");
 	await f.world.setGameMode("survival");
@@ -1471,6 +1473,7 @@ test("DO game mode RPC persists and only restarts connections on a change", asyn
 	await f.world.setGameMode("creative");
 	assert.equal(f.sqlite.prepare("SELECT value FROM meta WHERE key = 'gamemode'").get()?.value, "creative");
 	assert.equal(revision(), "3");
+	assert.equal(f.world.getGameModeRevision(), 3);
 	assert.deepEqual(f.closed, Array.from({ length: 2 }, () => [SERVICE_RESTART, "ゲームモードが変わりました"]));
 	assert.deepEqual(f.disconnected, [1, 2]);
 });

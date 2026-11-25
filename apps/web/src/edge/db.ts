@@ -87,11 +87,12 @@ export function createDB(db: D1Database) {
 				throw error;
 			}
 		},
-		async setWorldGameMode(name: string, gameMode: GameMode): Promise<number> {
+		async setWorldGameMode(name: string, gameMode: GameMode, revisionFloor = 0): Promise<number> {
 			const row = await query(
-				"UPDATE world SET game_mode = ?, game_mode_revision = game_mode_revision + 1 " +
+				"UPDATE world SET game_mode = ?, game_mode_revision = max(game_mode_revision, ?) + 1 " +
 					"WHERE name = ? RETURNING game_mode_revision AS gameModeRevision",
 				gameMode,
+				revisionFloor,
 				name,
 			).first<{ gameModeRevision: number }>();
 			const revision = Number(row?.gameModeRevision);
