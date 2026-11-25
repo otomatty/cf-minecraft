@@ -337,6 +337,81 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 	}
 });
 
+function texels(pixels: Uint8Array): Uint8Array[] {
+	return Array.from({ length: pixels.length / 4 }, (_, i) => pixels.subarray(i * 4, i * 4 + 4));
+}
+
+function luminance([r, g, b]: Uint8Array): number {
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () => {
+	const names = [
+		"crafting_table_top", "crafting_table_side", "crafting_table_bottom",
+		"furnace_front", "furnace_side", "furnace_top",
+		"farmland_dry", "farmland_moist", "oak_log_top", "white_wool",
+	];
+	const missing = paintTexture("missing_texture");
+	for (const name of names) {
+		const pixels = paintTexture(name);
+		assert.equal(pixels.length, 16 * 16 * 4, name);
+		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.notDeepEqual(pixels, missing, name);
+		const colors = texels(pixels);
+		assert.ok(colors.every(([, , , a]) => a === 255), name);
+		assert.ok(new Set(colors.map(([r, g, b]) => r << 16 | g << 8 | b)).size >= 5, name);
+	}
+});
+
+test("table and furnace faces are distinct and show their tools and firebox", () => {
+	for (const names of [
+		["crafting_table_top", "crafting_table_side", "crafting_table_bottom"],
+		["furnace_front", "furnace_side", "furnace_top"],
+	]) {
+		const faces = names.map(paintTexture);
+		for (const [i, pixels] of faces.entries()) {
+			for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, faces[j], `${names[i]} vs ${names[j]}`);
+		}
+	}
+	for (const name of ["crafting_table_top", "crafting_table_side"]) {
+		const gray = texels(paintTexture(name)).filter(([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b) <= 10);
+		assert.ok(gray.length >= 8, name);
+	}
+	const front = texels(paintTexture("furnace_front"));
+	const firebox = front.filter((_, i) => i % 16 >= 4 && i % 16 <= 11 && i >= 6 * 16 && i < 13 * 16);
+	assert.ok(firebox.filter(pixel => luminance(pixel) < 45).length >= 12);
+	assert.ok(firebox.some(([r, g, b]) => r >= 170 && r - g >= 40 && g - b >= 30));
+});
+
+test("moist furrows are darker than dry furrows", () => {
+	const averageLuminance = (name: string) => {
+		const pixels = texels(paintTexture(name));
+		return pixels.reduce((sum, pixel) => sum + luminance(pixel), 0) / pixels.length;
+	};
+	assert.ok(averageLuminance("farmland_moist") < averageLuminance("farmland_dry"));
+});
+
+test("wheat cutouts grow denser, keep four grounded stems and ripen gold", () => {
+	const missing = paintTexture("missing_texture");
+	let previousCoverage = 0;
+	for (const name of ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"]) {
+		const pixels = paintTexture(name);
+		assert.equal(pixels.length, 16 * 16 * 4, name);
+		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.notDeepEqual(pixels, missing, name);
+		const colors = texels(pixels);
+		assert.deepEqual(new Set(colors.map(([, , , a]) => a)), new Set([0, 255]), name);
+		const coverage = colors.filter(([, , , a]) => a === 255).length;
+		assert.ok(coverage > previousCoverage, name);
+		previousCoverage = coverage;
+		const bottom = colors.slice(-16);
+		assert.equal(bottom.filter(([, , , a], x) => a === 255 && !bottom[x - 1]?.[3]).length, 4, name);
+		if (name === "wheat_ripe") {
+			assert.ok(colors.some(([r, g, b, a]) => a === 255 && r >= 200 && g >= 150 && g - b >= 50));
+		}
+	}
+});
+
 
 test("tool sprites preserve their grip shapes and distinct colors for each material", () => {
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
