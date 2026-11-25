@@ -26,6 +26,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
+import { setupTexturePack } from "./texture-pack-settings.ts";
 import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -596,6 +597,23 @@ async function main(): Promise<void> {
 		const inventory = core.inventory;
 		paintInventoryScreen();
 		hotbarBlocks = hotbarStates(inventory, items);
+		paintHotbar(inventory);
+		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
+		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
+		if (usingItem) {
+			const stack = inventory[selectedSlot];
+			if (stack?.item !== usingItem.item) {
+				endUsingItem();
+			} else if (usingItem.kind === "food") {
+				if (stack.count < usingItem.count) {
+					usingItem.startedAt = performance.now();
+					eatProgress.value = 0;
+				}
+				usingItem.count = stack.count;
+			}
+		}
+	}
+	function paintHotbar(inventory: typeof core.inventory): void {
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
 			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage);
@@ -617,20 +635,6 @@ async function main(): Promise<void> {
 				ctx.strokeText(String(count), 62, 61);
 				ctx.fillStyle = "white";
 				ctx.fillText(String(count), 62, 61);
-			}
-		}
-		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
-		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
-		if (usingItem) {
-			const stack = inventory[selectedSlot];
-			if (stack?.item !== usingItem.item) {
-				endUsingItem();
-			} else if (usingItem.kind === "food") {
-				if (stack.count < usingItem.count) {
-					usingItem.startedAt = performance.now();
-					eatProgress.value = 0;
-				}
-				usingItem.count = stack.count;
 			}
 		}
 	}
@@ -734,9 +738,10 @@ async function main(): Promise<void> {
 		$("key-bindings").append(label);
 		bindingButtons.set(action, button);
 	}
-	const settingsTabs = ["keys", "mouse", "audio"] as const;
+	const settingsTabs = ["keys", "mouse", "audio", "textures"] as const;
 	function selectSettingsTab(tab: typeof settingsTabs[number]): void {
 		capturing = null;
+		$("settings-reset").hidden = tab === "textures";
 		refreshSettings();
 		for (const name of settingsTabs) {
 			$(name + "-tab").setAttribute("aria-selected", String(name === tab));
@@ -995,6 +1000,13 @@ async function main(): Promise<void> {
 		button.addEventListener("click", () => { if (core.gameMode === "creative") transport.send(core.encodeCreativeSetSlot(selectedSlot, info.id, 1)); });
 		$("block-grid").append(button);
 		pickerButtons.push(button);
+	});
+	setupTexturePack($("textures-tab-panel"), textureNames, tiles => {
+		renderer.applyTexturePack(tiles);
+		icons.clear();
+		paintHotbar(core.inventory);
+		paintInventoryScreen();
+		pickerButtons.forEach((button, i) => paintItemIcon(button.querySelector("canvas")!, items[i].id));
 	});
 	function openPicker(): void {
 		if (core.gameMode !== "creative") return;

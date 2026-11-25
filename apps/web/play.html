@@ -252,7 +252,10 @@
 			#key-bindings label { margin: 0; }
 			#key-bindings .btn { min-width: 100px; min-height: 36px; padding: 6px 12px; font-size: 14px; }
 			#settings-warning { color: #ffcf80; min-height: 1.7em; }
-			[role="tablist"] { display: flex; gap: 4px; border-bottom: 2px solid rgba(255,255,255,.2); }
+			#textures-tab-panel { overflow-wrap: anywhere; }
+			#textures-tab-panel input { display: block; max-width: 100%; margin: 8px 0 12px; }
+			.pack-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+			[role="tablist"] { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 2px solid rgba(255,255,255,.2); }
 			[role="tab"] { background: transparent; border: 0; box-shadow: none; color: #c3cedd; font-family: "DotGothic16", monospace; font-size: 16px; padding: 8px 18px; border-bottom: 3px solid transparent; margin-bottom: -2px; cursor: pointer; }
 			[role="tab"][aria-selected="true"] { color: #fff; border-bottom-color: #7cc35a; }
 			#controls-panel dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 0; }
@@ -354,6 +357,7 @@
 					<button id="keys-tab" type="button" role="tab" aria-selected="true" aria-controls="keys-tab-panel">キー割り当て</button>
 					<button id="mouse-tab" type="button" role="tab" aria-selected="false" aria-controls="mouse-tab-panel" tabindex="-1">マウス・視点</button>
 					<button id="audio-tab" type="button" role="tab" aria-selected="false" aria-controls="audio-tab-panel" tabindex="-1">音量</button>
+					<button id="textures-tab" type="button" role="tab" aria-selected="false" aria-controls="textures-tab-panel" tabindex="-1">テクスチャ</button>
 				</div>
 				<div id="keys-tab-panel" role="tabpanel" aria-labelledby="keys-tab">
 					<div id="key-bindings"></div>
@@ -368,6 +372,17 @@
 					<label>全体 <span><input id="volume-master" type="range" min="0" max="100" step="1" /><output id="volume-master-value"></output></span></label>
 					<label>効果音 <span><input id="volume-effects" type="range" min="0" max="100" step="1" /><output id="volume-effects-value"></output></span></label>
 					<label>音楽 <span><input id="volume-music" type="range" min="0" max="100" step="1" /><output id="volume-music-value"></output></span></label>
+				</div>
+				<div id="textures-tab-panel" role="tabpanel" aria-labelledby="textures-tab" hidden>
+					<output>使用中：標準素材</output>
+					<p>使用権限のある Bedrock パックを選んでください。ブロックとアイテムの PNG をこのブラウザに保存します。</p>
+					<label>ローカルパック（ZIP / .mcpack）<input type="file" accept=".zip,.mcpack" disabled /></label>
+					<div class="pack-actions">
+						<button id="texture-apply" class="btn green" type="button" disabled>適用</button>
+						<button id="texture-standard" class="btn outline" type="button" disabled>標準素材に戻す</button>
+						<button id="texture-delete" class="btn outline" type="button" disabled>パックを削除</button>
+					</div>
+					<p role="status" aria-live="polite"></p>
 				</div>
 				<p id="settings-warning" role="status" aria-live="polite"></p>
 				<div class="panel-actions">
