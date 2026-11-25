@@ -98,6 +98,10 @@ export class WorldAudio {
 				&& before.first === after?.first && state === before.first + 2) {
 				audio.play({ kind: "place", material: materialFor(before.name) }, source);
 			}
+		} else if (id === S2C.EggSound) {
+			const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+			audio.play({ kind: view.getUint8(25) ? "eggBreak" : "eggThrow" },
+				[view.getFloat64(1), view.getFloat64(9), view.getFloat64(17)]);
 		} else if (id === S2C.Shear) {
 			audio.play({ kind: "shear" });
 		} else if (id === S2C.ToolBreak) {

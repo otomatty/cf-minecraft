@@ -34,6 +34,8 @@ const effects: Record<OtherSound, Timbre> = {
 	eat: { duration: 0.23, tone: [169, 300, 0.18, "sine"], noise: [1430, 0.23, "bandpass"] },
 	death: { duration: 0.64, tone: [115, 42, 0.39, "triangle"], noise: [600, 0.18, "lowpass"] },
 	pickup: { duration: 0.14, tone: [610, 1030, 0.27, "sine"] },
+	eggThrow: { duration: 0.12, tone: [335, 130, 0.12, "triangle"], noise: [1320, 0.21, "bandpass"] },
+	eggBreak: { duration: 0.09, tone: [490, 210, 0.18, "triangle"], noise: [2650, 0.37, "highpass"] },
 	arrowShoot: { duration: 0.23, tone: [410, 105, 0.15, "triangle"], noise: [1920, 0.29, "bandpass"] },
 	arrowStick: { duration: 0.12, tone: [290, 109, 0.19, "triangle"], noise: [920, 0.18, "bandpass"] },
 	arrowHit: { duration: 0.20, tone: [163, 70, 0.23, "sine"], noise: [620, 0.30, "lowpass"] },

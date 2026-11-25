@@ -588,3 +588,37 @@ test("WASM arrow records carry freshness and velocity and interpolate from the l
 	core.resetWorld();
 	assert.deepEqual(core.arrows, []);
 });
+
+test("WASM egg positions interpolate and render as a centered flat item", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { ClientCore, S2C } = await import("./client-core.ts");
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const id = 42;
+	const packet = (tag: number, position: number[]) => {
+		const view = new DataView(new ArrayBuffer(29));
+		view.setUint8(0, tag);
+		view.setUint32(1, id);
+		position.forEach((value, i) => view.setFloat64(5 + i * 8, value));
+		return new Uint8Array(view.buffer);
+	};
+	const previous = [4.5, 8, 8.5], current = [5.5, 8.25, 8.5];
+	assert.equal(core.packet(packet(S2C.EggSpawn, previous)), S2C.EggSpawn);
+	assert.deepEqual(core.eggs, [{ id, position: previous, previous }]);
+	assert.equal(core.packet(packet(S2C.EntityMove, current)), S2C.EntityMove);
+	assert.deepEqual(core.eggs, [{ id, position: current, previous }]);
+	const [egg] = core.eggs;
+	const vertices = itemVertices([{
+		position: interpolateEntity(egg.previous, egg.position, 25),
+		texture: 7, flat: true, centered: true, light: [15, 3],
+	}], [5, 8.125, 8.5], 0);
+	assert.equal(vertices.length, 12 * 9);
+	assert.deepEqual([...vertices.subarray(0, 3)], [-0.125, -0.125, 0]);
+	assert.deepEqual([...vertices.subarray(18, 21)], [0.125, 0.125, 0]);
+	assert.ok(component(vertices, 6).every(layer => layer === 7));
+	assert.equal(core.packet(Uint8Array.of(S2C.EntityRemove, 0, 0, 0, id)), S2C.EntityRemove);
+	assert.deepEqual(core.eggs, []);
+	assert.equal(core.packet(packet(S2C.EggSpawn, previous)), S2C.EggSpawn);
+	core.resetWorld();
+	assert.deepEqual(core.eggs, []);
+});

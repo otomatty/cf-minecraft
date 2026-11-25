@@ -232,6 +232,7 @@ pub struct Mob {
     lava_ticks: u8,
     last_dry_pos: [f64; 3],
     egg_ticks: Option<u16>,
+    egg_knockback: bool,
     pub(super) wool_color: WoolColor,
     pub(super) wool_ticks: u16,
     hostile: Option<Hostile>,
@@ -255,6 +256,7 @@ impl Mob {
             lava_ticks: 0,
             last_dry_pos: pos,
             egg_ticks: None,
+            egg_knockback: false,
             wool_color: WoolColor::White,
             wool_ticks: 0,
             hostile: spec.chase_forward.map(|_| Hostile {
@@ -442,6 +444,17 @@ impl Mob {
         self.body.velocity[2] = dz * scale;
         if self.body.is_grounded(&mob_collisions(world)) {
             self.body.velocity[1] = 0.36;
+        }
+    }
+
+    pub(super) fn hit_by_egg(&mut self, [x, _, z]: [f64; 3], seed: i64, id: u32, time: i64) {
+        let length = (x * x + z * z).sqrt();
+        let away = (length > 0.0).then(|| [x / length, z / length]);
+        let [x, z] = away.unwrap_or([0.0; 2]);
+        self.body.velocity = [x * 0.3, 0.2, z * 0.3];
+        self.egg_knockback = true;
+        if self.is_animal() {
+            self.start_fleeing(seed, id, time, away);
         }
     }
 
@@ -676,8 +689,9 @@ impl Mob {
         let before = self.pos();
         let [x, y, z] = before;
         let collisions = mob_collisions(world);
+        let egg_knockback = std::mem::take(&mut self.egg_knockback);
         let mut input = Input {
-            jump: !hold && physics::in_water(&collisions, before),
+            jump: !hold && !egg_knockback && physics::in_water(&collisions, before),
             ..Input::default()
         };
         let fleeing = matches!(self.ai, Wander::Fleeing { .. });
@@ -685,7 +699,7 @@ impl Mob {
         let chasing = chase.is_some();
         if chasing {
             self.ai = Wander::Idle;
-        } else if !knockback && self.ai == Wander::Idle {
+        } else if !knockback && !egg_knockback && self.ai == Wander::Idle {
             let random = sample(seed, id, time, 0);
             if random.is_multiple_of(WALK_CHANCE) {
                 let [dx, dz] = direction(sample(seed, id, time, 1));
@@ -700,7 +714,9 @@ impl Mob {
 
         let spec = spec(self.kind);
         let idle_input = input;
-        let movement = if hold {
+        let movement = if egg_knockback {
+            None
+        } else if hold {
             self.face_hold(chase);
             None
         } else if knockback {
@@ -877,6 +893,9 @@ impl Mob {
         }
         if let Some(egg_ticks) = self.egg_ticks {
             h.bytes(&egg_ticks.to_be_bytes());
+        }
+        if self.egg_knockback {
+            h.bytes(b"egg_knockback");
         }
         if let Some(hostile) = &self.hostile {
             h.u8(hostile.attack_ticks);
@@ -1073,7 +1092,7 @@ fn heading(dx: f64, dz: f64) -> f32 {
 }
 
 /// SplitMix64 finalizer. Separate salts give independent draws without persistent RNG state.
-fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
+pub(super) fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
     let mut bits = (seed as u64)
         ^ u64::from(id).wrapping_mul(0xd1b5_4a32_d192_ed03)
         ^ (time as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -1476,12 +1495,48 @@ impl Server {
         self.spawn_mob(MobKind::Cow, pos);
     }
 
-    fn spawn_herd(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
-        let nearby = self
-            .mobs
+    fn nearby_animal_count(&self, pos: [f64; 3]) -> usize {
+        self.mobs
             .values()
-            .filter(|mob| mob.hostile.is_none() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
-            .count();
+            .filter(|mob| mob.is_animal() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
+            .count()
+    }
+
+    pub(super) fn hatch_chicken(&mut self, pos: [f64; 3]) {
+        let chicken = Mob::new(MobKind::Chicken, pos);
+        let bounds = chicken.bounds();
+        if !chicken.body.is_clear(&mob_collisions(&self.world))
+            || self
+                .mobs
+                .values()
+                .any(|mob| mob.health != 0 && mob.bounds().intersects(bounds))
+            || self.clients.values().any(|client| {
+                client.joined
+                    && !client.health.vitals.dead
+                    && Player::new(client.pos).bounds().intersects(bounds)
+            })
+        {
+            return;
+        }
+
+        let mut near_player = false;
+        for client in self.clients.values().filter(|client| {
+            client.joined
+                && !client.health.vitals.dead
+                && distance_squared(client.pos, pos) <= 64.0 * 64.0
+        }) {
+            near_player = true;
+            if self.nearby_animal_count(client.pos) >= LOCAL_LIMIT {
+                return;
+            }
+        }
+        if near_player || self.nearby_animal_count(pos) < LOCAL_LIMIT {
+            self.spawn_mob(MobKind::Chicken, pos);
+        }
+    }
+
+    fn spawn_herd(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
+        let nearby = self.nearby_animal_count(pos);
         if nearby >= LOCAL_LIMIT {
             return;
         }
@@ -2567,6 +2622,28 @@ mod tests {
         assert_eq!(run(GameMode::Creative, 2), count);
         assert_eq!(run(GameMode::Survival, 2), count);
         assert_eq!(run(GameMode::Survival, 50), count);
+    }
+
+    #[test]
+    fn an_egg_hit_starts_sixty_ticks_of_fleeing_even_during_damage_immunity() {
+        let mut cow = Mob::new(MobKind::Cow, [4.0, 2.0, 5.0]);
+        cow.hurt_ticks = HURT_TICKS;
+        cow.hit_by_egg([3.0, 0.5, 4.0], 2026, 9, 20);
+        let [x, y, z] = cow.velocity();
+        assert!((x - 0.18).abs() < 1e-12 && (z - 0.24).abs() < 1e-12);
+        assert_eq!(y, 0.2);
+        assert_eq!(cow.health, 10);
+        assert_eq!(cow.hurt_ticks, HURT_TICKS);
+        assert_eq!(flee_state(&cow).1, 60);
+
+        // AI would stop at the edge of this block. The egg impulse still moves the cow.
+        let mut world = World::default();
+        world.insert_chunk(world::Chunk::empty(0, 0));
+        world.set_block(3, 1, 4, blocks::STONE);
+        cow.hurt_ticks -= 1;
+        cow.tick(&world, 2026, 9, 21, None);
+        assert!(cow.pos()[0] > 4.0 && cow.pos()[1] > 2.0 && cow.pos()[2] > 5.0);
+        assert_eq!(flee_state(&cow).1, 59);
     }
 
     fn flee_state(cow: &Mob) -> ([f64; 2], u8, u8) {

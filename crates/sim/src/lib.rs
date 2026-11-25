@@ -17,6 +17,7 @@
 //! the same state. `state_hash` makes that checkable.
 
 mod arrow;
+mod egg;
 pub mod entity;
 mod entity_storage;
 mod falling_blocks;
@@ -178,6 +179,8 @@ struct Client {
     dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
+    visible_eggs: BTreeMap<u32, [f64; 3]>,
+    egg_cooldown: u8,
     visible_arrows: BTreeMap<u32, arrow::ArrowMotion>,
     /// Connection ids this client has been told about, with the last sent feet and look.
     visible_players: BTreeMap<u32, ([f64; 3], f32, f32)>,
@@ -301,6 +304,7 @@ pub struct Server {
     entities: BTreeMap<u32, entity::Entity>,
     mobs: BTreeMap<u32, mob::Mob>,
     arrows: BTreeMap<u32, arrow::Arrow>,
+    eggs: BTreeMap<u32, egg::Egg>,
     next_entity_id: u32,
     entity_persistence: bool,
     entity_changes: BTreeSet<ChunkPos>,
@@ -342,6 +346,7 @@ impl Server {
             entities: BTreeMap::new(),
             mobs: BTreeMap::new(),
             arrows: BTreeMap::new(),
+            eggs: BTreeMap::new(),
             next_entity_id: 1,
             entity_persistence: true,
             entity_changes: BTreeSet::new(),
@@ -783,6 +788,8 @@ impl Server {
                 visible_entities: BTreeMap::new(),
                 visible_mobs: BTreeMap::new(),
                 visible_arrows: BTreeMap::new(),
+                visible_eggs: BTreeMap::new(),
+                egg_cooldown: 0,
                 visible_players: BTreeMap::new(),
                 inventory,
                 health: health::Health::new(vitals, pos[1]),
@@ -1184,6 +1191,7 @@ impl Server {
         self.day_time += 1;
         self.tick_arrows();
         self.tick_mobs();
+        self.tick_eggs();
         self.tick_health();
         self.tick_screens();
         self.flush_digs();
@@ -1219,6 +1227,7 @@ impl Server {
         self.sync_mobs();
         self.sync_players();
         self.sync_arrows();
+        self.sync_eggs();
         let changed: Vec<_> = self
             .clients
             .iter()
@@ -2238,6 +2247,8 @@ impl Server {
             });
             self.arrows
                 .retain(|_, arrow| waiting_for_save.binary_search(&arrow.chunk()).is_err());
+            self.eggs
+                .retain(|_, egg| waiting_for_save.binary_search(&egg.chunk()).is_err());
         }
         self.unload_chunks(&removed);
     }
@@ -2255,6 +2266,7 @@ impl Server {
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
             self.mobs.retain(|_, mob| mob.chunk() != (cx, cz));
             self.arrows.retain(|_, arrow| arrow.chunk() != (cx, cz));
+            self.eggs.retain(|_, egg| egg.chunk() != (cx, cz));
         }
     }
 
@@ -2519,6 +2531,10 @@ impl Server {
                 h.bytes(&client.yaw.to_bits().to_be_bytes());
                 h.bytes(&client.pitch.to_bits().to_be_bytes());
             }
+            if client.egg_cooldown != 0 {
+                h.bytes(b"egg");
+                h.u8(client.egg_cooldown);
+            }
             client.survival_movement.hash_into(&mut h);
             h.u8(client.dig.is_some() as u8);
             if let Some(dig) = client.dig {
@@ -2565,6 +2581,7 @@ impl Server {
         }
         self.hash_mobs(&mut h);
         self.hash_arrows(&mut h);
+        self.hash_eggs(&mut h);
         self.world.hash_into(&mut h);
         h.finish()
     }

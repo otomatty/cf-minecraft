@@ -13,6 +13,7 @@ export interface InventorySlot { item: number; count: number; damage: number }
 export interface ItemEntity extends InventorySlot { id: number; position: [number, number, number]; previous: [number, number, number] }
 export type MobKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type WoolColor = 0 | 1 | 2 | 3;
+export interface EggEntity { id: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ArrowEntity { id: number; position: [number, number, number]; previous: [number, number, number]; velocity: [number, number, number]; fresh: boolean }
 export interface MobEntity { id: number; kind: MobKind; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number; fuse: number; burning: boolean; woolColor: WoolColor; sheared: boolean }
 export interface PlayerEntity { id: number; name: string; position: [number, number, number]; previous: [number, number, number]; yaw: number; pitch: number }
@@ -27,6 +28,7 @@ export interface ClientExports {
 	client_mobs(): number;
 	client_players(): number;
 	client_arrows(): number;
+	client_eggs(): number;
 	client_entity_light(x: number, y: number, z: number): number;
 	client_enc_drop_item(x: number, y: number, z: number): number;
 	client_game_mode(): number;
@@ -115,7 +117,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25, ToolBreak: 26, SheepAppearance: 27, Shear: 28 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25, ToolBreak: 26, SheepAppearance: 27, Shear: 28, EggSpawn: 29, EggSound: 30 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -220,6 +222,20 @@ export class ClientCore {
 				previous: [view.getFloat64(base + 32), view.getFloat64(base + 40), view.getFloat64(base + 48)],
 			});
 			offset = base + 56;
+		}
+		return result;
+	}
+
+	get eggs(): EggEntity[] {
+		const bytes = this.out(this.x.client_eggs());
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		const result: EggEntity[] = [];
+		for (let offset = 0; offset < bytes.length; offset += 52) {
+			result.push({
+				id: view.getUint32(offset),
+				position: [view.getFloat64(offset + 4), view.getFloat64(offset + 12), view.getFloat64(offset + 20)],
+				previous: [view.getFloat64(offset + 28), view.getFloat64(offset + 36), view.getFloat64(offset + 44)],
+			});
 		}
 		return result;
 	}

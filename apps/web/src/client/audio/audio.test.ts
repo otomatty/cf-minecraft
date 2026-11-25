@@ -146,20 +146,32 @@ test("only nearby partial pickups count toward inventory gains and play pickup s
 	]);
 });
 
-for (const [tag, kind, filterType, title] of [
-	[S2C.ToolBreak, "toolBreak", "highpass", "an accepted ToolBreak packet plays the synthesized snap"],
-	[S2C.Shear, "shear", "bandpass", "an accepted Shear packet plays the synthesized cut"],
+const eggSound = (broken: boolean): number[] => {
+	const bytes = new Uint8Array(26), view = new DataView(bytes.buffer);
+	bytes[0] = S2C.EggSound;
+	view.setFloat64(1, 2.5);
+	view.setFloat64(9, 4);
+	view.setFloat64(17, -6);
+	bytes[25] = Number(broken);
+	return [...bytes];
+};
+
+for (const [packet, kind, filterType, title, position] of [
+	[[S2C.ToolBreak], "toolBreak", "highpass", "an accepted ToolBreak packet plays the synthesized snap", undefined],
+	[[S2C.Shear], "shear", "bandpass", "an accepted Shear packet plays the synthesized cut", undefined],
+	[eggSound(false), "eggThrow", "bandpass", "a confirmed egg throw synthesizes a sound at the launch position", [2.5, 4, -6]],
+	[eggSound(true), "eggBreak", "highpass", "a confirmed egg break synthesizes a sound at the impact position", [2.5, 4, -6]],
 ] as const) {
 	test(title, async () => {
 		const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../../wasm/client.wasm", import.meta.url)), {});
 		const core = new ClientCore(instance);
-		const played: Sound[] = [];
-		const audio = new WorldAudio(core, [], { play: sound => played.push(sound) });
+		const played: { sound: Sound; position: Vec3 | undefined }[] = [];
+		const audio = new WorldAudio(core, [], { play: (sound, position) => played.push({ sound, position }) });
 		const feet: Vec3 = [0, 0, 0];
 		const ids = new Map();
-		assert.equal(audio.packet(Uint8Array.of(tag, 0), feet, ids), -1);
-		assert.equal(audio.packet(Uint8Array.of(tag), feet, ids), tag);
-		assert.deepEqual(played, [{ kind }]);
+		assert.equal(audio.packet(Uint8Array.of(...packet, 0), feet, ids), -1);
+		assert.equal(audio.packet(Uint8Array.of(...packet), feet, ids), packet[0]);
+		assert.deepEqual(played, [{ sound: { kind }, position }]);
 
 		const starts: string[] = [];
 		const stops: number[] = [];
@@ -183,7 +195,7 @@ for (const [tag, kind, filterType, title] of [
 		};
 		let ended = false;
 		playEffect(context as unknown as AudioContext, node as unknown as AudioNode,
-			{ duration: 2 } as AudioBuffer, played[0], 0.8, 0, () => { ended = true; });
+			{ duration: 2 } as AudioBuffer, played[0].sound, 0.8, 0, () => { ended = true; });
 		assert.deepEqual(starts, ["tone", "noise"]);
 		assert.equal(oscillator.type, "triangle");
 		assert.equal(filter.type, filterType);

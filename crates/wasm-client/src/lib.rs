@@ -39,6 +39,10 @@ struct MobEntity {
     wool_color: WoolColor,
     sheared: bool,
 }
+struct EggEntity {
+    pos: [f64; 3],
+    previous: [f64; 3],
+}
 struct ArrowEntity {
     pos: [f64; 3],
     previous: [f64; 3],
@@ -56,6 +60,7 @@ struct State {
     entities: BTreeMap<u32, ItemEntity>,
     mobs: BTreeMap<u32, MobEntity>,
     arrows: BTreeMap<u32, ArrowEntity>,
+    eggs: BTreeMap<u32, EggEntity>,
     players: BTreeMap<u32, RemotePlayer>,
     mob_hurt_sequence: u32,
     chat: Option<(protocol::ChatKind, String, String)>,
@@ -215,6 +220,7 @@ pub extern "C" fn client_new() {
         entities: BTreeMap::new(),
         mobs: BTreeMap::new(),
         arrows: BTreeMap::new(),
+        eggs: BTreeMap::new(),
         players: BTreeMap::new(),
         mob_hurt_sequence: 0,
         chat: None,
@@ -274,6 +280,7 @@ pub extern "C" fn client_reset_world() {
     st.entities.clear();
     st.mobs.clear();
     st.arrows.clear();
+    st.eggs.clear();
     st.players.clear();
     st.explosions.clear();
     st.mob_hurt_sequence = 0;
@@ -349,10 +356,17 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 },
             );
         }
+        S2C::EggSpawn { id, pos } => {
+            st.eggs.insert(id, EggEntity { pos, previous: pos });
+        }
+        S2C::EggSound { .. } => {}
         S2C::EntityMove { id, x, y, z } => {
             if let Some(e) = st.entities.get_mut(&id) {
                 e.previous = e.pos;
                 e.pos = [x, y, z];
+            } else if let Some(egg) = st.eggs.get_mut(&id) {
+                egg.previous = egg.pos;
+                egg.pos = [x, y, z];
             }
         }
         S2C::EntityCount { id, count } => {
@@ -488,6 +502,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.entities.remove(&id);
             st.mobs.remove(&id);
             st.arrows.remove(&id);
+            st.eggs.remove(&id);
         }
 
         S2C::Inventory {
@@ -1734,6 +1749,21 @@ pub extern "C" fn client_players() -> usize {
         w.f32(player.yaw);
         w.f32(player.pitch);
         for v in player.pos.into_iter().chain(player.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+
+/// Sorted packed records: ID u32, current/previous position as f64 triples.
+#[no_mangle]
+pub extern "C" fn client_eggs() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, egg) in &st.eggs {
+        w.i32(id as i32);
+        for v in egg.pos.into_iter().chain(egg.previous) {
             w.f64(v);
         }
     }

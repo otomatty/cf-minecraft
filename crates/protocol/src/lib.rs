@@ -376,6 +376,14 @@ pub enum S2C {
         pos: [f64; 3],
         velocity: [f64; 3],
     },
+    EggSpawn {
+        id: u32,
+        pos: [f64; 3],
+    },
+    EggSound {
+        pos: [f64; 3],
+        broken: bool,
+    },
     MobHurt {
         id: u32,
     },
@@ -507,6 +515,8 @@ pub mod id {
     pub const S2C_TOOL_BREAK: u8 = 0x1a;
     pub const S2C_SHEEP_APPEARANCE: u8 = 0x1b;
     pub const S2C_SHEAR: u8 = 0x1c;
+    pub const S2C_EGG_SPAWN: u8 = 0x1d;
+    pub const S2C_EGG_SOUND: u8 = 0x1e;
     pub const S2C_PLAYER_REMOVE: u8 = 0x19;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
@@ -766,6 +776,20 @@ impl S2C {
             }
             S2C::ToolBreak => w.u8(id::S2C_TOOL_BREAK),
             S2C::Shear => w.u8(id::S2C_SHEAR),
+            S2C::EggSpawn { id: entity, pos } => {
+                w.u8(id::S2C_EGG_SPAWN);
+                w.i32(*entity as i32);
+                for &axis in pos {
+                    w.f64(axis);
+                }
+            }
+            S2C::EggSound { pos, broken } => {
+                w.u8(id::S2C_EGG_SOUND);
+                for &axis in pos {
+                    w.f64(axis);
+                }
+                w.u8(u8::from(*broken));
+            }
             S2C::EntitySpawn {
                 id: entity,
                 kind,
@@ -1020,6 +1044,18 @@ impl S2C {
         let packet = match r.u8()? {
             id::S2C_TOOL_BREAK => S2C::ToolBreak,
             id::S2C_SHEAR => S2C::Shear,
+            id::S2C_EGG_SPAWN => S2C::EggSpawn {
+                id: entity_id(&mut r)?,
+                pos: entity_pos(&mut r)?,
+            },
+            id::S2C_EGG_SOUND => S2C::EggSound {
+                pos: entity_pos(&mut r)?,
+                broken: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError),
+                },
+            },
             id::S2C_ENTITY_SPAWN => {
                 let id = entity_id(&mut r)?;
                 let kind = r.u8()?;
@@ -2358,6 +2394,40 @@ mod tests {
             slots[0] = Some((item, 1, damage));
             assert!(S2C::decode(&inventory(slots.clone()).encode()).is_err());
             assert!(S2C::decode(&entity(item, damage).encode()).is_err());
+        }
+    }
+
+    #[test]
+    fn egg_packets_round_trip_and_reject_invalid_coordinates_and_flags() {
+        let pos = [2.5, 6.0, -3.125];
+        let spawn = S2C::EggSpawn { id: u32::MAX, pos };
+        let mut expected = vec![0x1d, 255, 255, 255, 255];
+        expected.extend(pos.into_iter().flat_map(f64::to_be_bytes));
+        assert_eq!(spawn.encode(), expected);
+        assert_eq!(S2C::decode(&expected), Ok(spawn));
+        for broken in [false, true] {
+            let sound = S2C::EggSound { pos, broken };
+            let mut expected = vec![0x1e];
+            expected.extend(pos.into_iter().flat_map(f64::to_be_bytes));
+            expected.push(u8::from(broken));
+            assert_eq!(sound.encode(), expected);
+            assert_eq!(S2C::decode(&expected), Ok(sound));
+            assert!(S2C::decode(&expected[..25]).is_err());
+            expected[25] = 2;
+            assert!(S2C::decode(&expected).is_err());
+        }
+        for packet in [
+            S2C::EggSpawn { id: 0, pos },
+            S2C::EggSpawn {
+                id: 1,
+                pos: [f64::NAN, 2.0, 3.0],
+            },
+            S2C::EggSound {
+                pos: [0.0, f64::INFINITY, 0.0],
+                broken: false,
+            },
+        ] {
+            assert!(S2C::decode(&packet.encode()).is_err());
         }
     }
 

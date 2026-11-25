@@ -2902,6 +2902,37 @@ async function bow() {
 	} finally { await page.close(); }
 }
 
+async function eggs() {
+	const { page, errors } = await open(`server=local&world=e2e-eggs-${run}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
+	try {
+		await settle(page, "eggs", chunksInView(4));
+		await resumePointerLock(page, "eggs: initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="egg"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "egg");
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "eggs: resume after selecting egg");
+		await page.mouse.move(640, 360);
+		await page.evaluate(() => {
+			const api = window.__mc;
+			const { x, y, z } = api.stats().camera;
+			api.setCamera(x, y, z, 0, 12);
+		});
+		await page.mouse.click(640, 360, { button: "right" });
+		const thrown = await page.waitForFunction(() => window.__mc.stats().eggs[0]?.id, { timeout: 3000 });
+		const id = await thrown.jsonValue();
+		await thrown.dispose();
+		check(id > 0, "eggs: right-click spawns a flying egg", `id ${id}`);
+		await page.waitForFunction(id => !window.__mc.stats().eggs.some(egg => egg.id === id), { timeout: 3000 }, id);
+		check(true, "eggs: the flying egg disappears within a few seconds");
+		check(errors.length === 0, "eggs: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "eggs", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function mobCombat() {
 	const { page, errors } = await open(`server=local&world=e2e-mob-combat-${run}&mode=survival&gen=flat&seed=2026&view=4&time=6000`);
 	try {
@@ -3468,6 +3499,7 @@ try {
 	await entitySave();
 	await mobCombat();
 	await bow();
+	await eggs();
 	await audio();
 	await chat();
 	await chatCommands();

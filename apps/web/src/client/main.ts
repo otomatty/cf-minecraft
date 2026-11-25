@@ -160,6 +160,7 @@ async function main(): Promise<void> {
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const textureNames = [...core.textureNames(), "bow"];
 	const arrowTexture = textureNames.indexOf("arrow");
+	const eggTexture = textureNames.indexOf("egg");
 	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
@@ -356,7 +357,7 @@ async function main(): Promise<void> {
 				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
 			}
 			if (id === S2C.EntitySpawn || id === S2C.EntityMove || id === S2C.MobSpawn || id === S2C.MobMove ||
-				id === S2C.ArrowSpawn || id === S2C.ArrowMove) {
+				id === S2C.ArrowSpawn || id === S2C.ArrowMove || id === S2C.EggSpawn) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
@@ -1284,6 +1285,12 @@ async function main(): Promise<void> {
 				return;
 			}
 			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
+			if (held?.name === "egg" && blockInteraction(targetBlock?.name, shift) !== "open") {
+				heldButtons.delete(2);
+				sendPosition();
+				transport.send(core.encodeUseItem());
+				return;
+			}
 			const survival = core.gameMode === "survival";
 			const canDraw = held?.name === "bow" && (!survival || inventory.some(slot => slot !== null && slot.item === arrowItemId));
 			const canEat = held?.food && survival && core.food < MAX_FOOD;
@@ -1632,6 +1639,13 @@ async function main(): Promise<void> {
 			texture: arrowTexture,
 			light: core.entityLight(arrow.position),
 		}));
+		const renderEggs = core.eggs.map(egg => ({
+			position: interpolateEntity(egg.previous, egg.position, now - (entityReceivedAt.get(egg.id) ?? now)),
+			texture: eggTexture,
+			flat: true,
+			centered: true,
+			light: core.entityLight(egg.position),
+		}));
 		const renderItems = core.entities.map(entity => {
 			const item = items.find(item => item.id === entity.item);
 			return {
@@ -1661,7 +1675,7 @@ async function main(): Promise<void> {
 		if (joined) audio.updateMusic(dayTime);
 		explosionParticles = explosionParticles.filter(particle => now < particle.startedAt + particle.lifetime);
 		const renderParticles = explosionParticles.filter(particle => now >= particle.startedAt);
-		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs, renderParticles, renderPlayers);
+		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderEggs, ...renderItems], now, renderDigs, renderMobs, renderParticles, renderPlayers);
 		renderedExplosionParticles = renderParticles.length;
 		window.__mc.frames++;
 
@@ -1696,6 +1710,7 @@ async function main(): Promise<void> {
 			aimedMob: aimedMobId(aimedBlock()),
 			players: core.players.map(({ id, name, position }) => ({ id, name, position })),
 			bowDraw: bowDraw(performance.now()),
+			eggs: core.eggs,
 			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),
 			dig: dig.active,
 			inventory: core.inventory,
