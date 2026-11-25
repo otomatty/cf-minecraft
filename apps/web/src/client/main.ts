@@ -27,7 +27,7 @@ import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C }
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
-import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
 import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
@@ -1276,6 +1276,13 @@ async function main(): Promise<void> {
 		const held = stack && items.find(item => item.id === stack.item);
 		const hit = aimedBlock(usesFluidSourceRay(held?.name));
 		if (button === 2 && !repeat && !usingItem && canInteract()) {
+			const mob = useEntityTarget(held?.name, aimedMobId(hit));
+			if (mob !== null) {
+				heldButtons.delete(2);
+				sendPosition();
+				transport.send(core.encodeUseEntity(mob));
+				return;
+			}
 			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
 			const survival = core.gameMode === "survival";
 			const canDraw = held?.name === "bow" && (!survival || inventory.some(slot => slot !== null && slot.item === arrowItemId));
@@ -1579,6 +1586,8 @@ async function main(): Promise<void> {
 					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
 					fuse: mob.fuse,
 					burning: mob.burning,
+					woolColor: mob.woolColor,
+					sheared: mob.sheared,
 					light: core.entityLight(position),
 				};
 			});
@@ -1684,6 +1693,7 @@ async function main(): Promise<void> {
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,
+			aimedMob: aimedMobId(aimedBlock()),
 			players: core.players.map(({ id, name, position }) => ({ id, name, position })),
 			bowDraw: bowDraw(performance.now()),
 			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),

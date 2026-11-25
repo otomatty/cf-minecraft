@@ -2612,7 +2612,7 @@ async function mobs() {
 							|| (ahead > 0 && ahead < 3.9 && Math.abs(side) <= 1);
 					});
 					return {
-						id: target.id,
+						id: target.id, woolColor: target.woolColor,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
 						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [14.5, 20.7, 18.8, 15][kind]],
 					};
@@ -2646,7 +2646,7 @@ async function mobs() {
 			const captureDeadline = Date.now() + 25000;
 			let captureProblem;
 			let lastMobId = "none";
-			let photographedId;
+			let photographedId, photographedColor;
 			for (let attempt = 0; attempt < 4 && Date.now() < captureDeadline; attempt++) {
 				const placement = await page.waitForFunction(
 					mobView, { timeout: Math.max(1, captureDeadline - Date.now()), polling: 100 }, kind, null, true,
@@ -2695,6 +2695,7 @@ async function mobs() {
 					current = await page.evaluate(mobView, kind, aim.id);
 					if (matches(aim, current)) {
 						photographedId = aim.id;
+						photographedColor = current.woolColor;
 						captureProblem = null;
 						break;
 					}
@@ -2702,7 +2703,7 @@ async function mobs() {
 				captureProblem = `aimed at ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking mob ${current?.blockedBy ?? "none"})`;
 			}
 			if (captureProblem !== null) throw new Error(`mobs: could not photograph ${name} ${lastMobId}; ${captureProblem ?? "capture timed out"}`);
-			const featurePixels = await page.evaluate(async (data, kind) => {
+			const featurePixels = await page.evaluate(async (data, kind, woolColor) => {
 				const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
@@ -2716,19 +2717,30 @@ async function mobs() {
 					Math.ceil(width * scale), Math.ceil(height * scale),
 				).data;
 				// Compare the skin's muzzle/beak swatch after the shader's daylight shading.
-				const swatch = [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
+				const swatch = kind === 3
+					? [null, [155, 156, 160], [148, 108, 82], [81, 82, 90]][woolColor]
+					: [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
 				let matching = 0;
 				for (let i = 0; i < pixels.length; i += 4) {
 					const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-					const matchesColor = kind === 3
-						? r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25
-						: r > 100 && Math.abs(g - r * swatch[1] / swatch[0]) < 4 && Math.abs(b - r * swatch[2] / swatch[0]) < 4;
+					let matchesColor;
+					if (kind === 3 && woolColor === 0) {
+						matchesColor = r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25;
+					} else {
+						const min = kind === 3 ? swatch[0] * 0.52 : 100;
+						const max = kind === 3 ? swatch[0] * 1.08 : 255;
+						const tolerance = kind === 3 ? 8 : 4;
+						matchesColor = r > min && r <= max && Math.abs(g - r * swatch[1] / swatch[0]) < tolerance
+							&& Math.abs(b - r * swatch[2] / swatch[0]) < tolerance;
+					}
 					if (matchesColor) matching++;
 				}
 				return matching;
-			}, readFileSync(file).toString("base64"), kind);
-			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"], ["wool", "white"]][kind];
+			}, readFileSync(file).toString("base64"), kind, photographedColor);
+			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"],
+				["wool", ["white", "gray", "brown", "black"][photographedColor]]][kind];
 			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
+			return photographedId;
 		};
 		await photographMob(0, "cow");
 		// Put the player back at spawn so subsequent herds use the original center.
@@ -2770,7 +2782,38 @@ async function mobs() {
 		const sheep = await sheepSpawn.jsonValue();
 		await sheepSpawn.dispose();
 		check(sheep.kind === 3, "mobs: a sheep spawned", `id ${sheep.id} at ${sheep.position.join(", ")}`);
-		await photographMob(3, "sheep");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="shears"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "shears");
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "mobs: resume after selecting shears");
+		await page.mouse.move(640, 360);
+		const sheepId = await photographMob(3, "sheep");
+		const aim = await page.waitForFunction(id => {
+			const api = window.__mc;
+			const { mobs, entities, aimedMob } = api.stats();
+			const target = mobs.find(mob => mob.id === id);
+			if (!target || target.sheared) return false;
+			if (aimedMob === id) {
+				return { wool: [70, 79, 80, 81][target.woolColor], existing: entities.map(entity => entity.id) };
+			}
+			const [x, y, z] = target.position;
+			const angle = target.yaw * Math.PI / 180;
+			api.setCamera(x - Math.sin(angle) * 3.4, y + 1.62, z + Math.cos(angle) * 3.4, target.yaw + 180, 15);
+			return false;
+		}, { timeout: 10000, polling: 100 }, sheepId);
+		const before = await aim.jsonValue();
+		await aim.dispose();
+		await page.mouse.click(640, 360, { button: "right" });
+		const result = await page.waitForFunction((id, { wool, existing }) => {
+			const { mobs, entities } = window.__mc.stats();
+			const target = mobs.find(mob => mob.id === id);
+			const drop = entities.find(entity => entity.item === wool && !existing.includes(entity.id));
+			return target?.sheared && drop?.count >= 1 && drop.count <= 3 && drop;
+		}, { timeout: 10000, polling: 50 }, sheepId, before);
+		await result.dispose();
+		check(true, "mobs: right-clicking with shears removes the fleece and drops 1 to 3 matching wool");
 		check(errors.length === 0, "mobs: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "mobs", err);

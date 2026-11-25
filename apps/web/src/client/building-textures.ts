@@ -25,6 +25,25 @@ const farmlandRows = [
 	"baagbaagbaagaaba",
 ];
 
+const woolRows = [
+	"dedccdeffedcdefe",
+	"effedefgffedcefe",
+	"fgfedfgfffedcdff",
+	"ffedceffeedbcdef",
+	"eddcbdeedcbdccde",
+	"ccdeffedccdeffed",
+	"cdefgffeddeggfed",
+	"defgffedcdefgffd",
+	"deffedbccdeffedc",
+	"cdeedcacdceedbcc",
+	"dcbbddefedcbbdef",
+	"defcdefgffeddegg",
+	"effedefgfffcdefg",
+	"ffedcdeffedcceff",
+	"eedbccdeedcbccde",
+	"edccdeddccadeffd",
+];
+
 const materials = new Map<string, MaterialTile>([
 	["torch", {
 		palette: { a: 0x64351d, b: 0x946039, c: 0xbc8850, d: 0x4c2b1e, f: 0xff7927, g: 0xffbc42, h: 0xffe88c },
@@ -316,24 +335,19 @@ const materials = new Map<string, MaterialTile>([
 	}],
 	["white_wool", {
 		palette: { a: 0xb9bbc0, b: 0xcdd0d2, c: 0xd9dbdc, d: 0xe3e3e2, e: 0xededea, f: 0xf6f4ef, g: 0xfcfaf5 },
-		rows: [
-			"dedccdeffedcdefe",
-			"effedefgffedcefe",
-			"fgfedfgfffedcdff",
-			"ffedceffeedbcdef",
-			"eddcbdeedcbdccde",
-			"ccdeffedccdeffed",
-			"cdefgffeddeggfed",
-			"defgffedcdefgffd",
-			"deffedbccdeffedc",
-			"cdeedcacdceedbcc",
-			"dcbbddefedcbbdef",
-			"defcdefgffeddegg",
-			"effedefgfffcdefg",
-			"ffedcdeffedcceff",
-			"eedbccdeedcbccde",
-			"edccdeddccadeffd",
-		],
+		rows: woolRows,
+	}],
+	["gray_wool", {
+		palette: { a: 0x595a60, b: 0x68696e, c: 0x74757a, d: 0x808186, e: 0x8a8b90, f: 0x96979a, g: 0xa1a2a5 },
+		rows: woolRows,
+	}],
+	["brown_wool", {
+		palette: { a: 0x4f3529, b: 0x5d4031, c: 0x694937, d: 0x75533f, e: 0x815d47, f: 0x8e674f, g: 0x9a7157 },
+		rows: woolRows,
+	}],
+	["black_wool", {
+		palette: { a: 0x242329, b: 0x2a2a30, c: 0x303138, d: 0x36373e, e: 0x3d3e45, f: 0x44454c, g: 0x4b4c53 },
+		rows: woolRows,
 	}],
 	["farmland_dry", {
 		palette: { a: 0x593d29, b: 0x79553b, c: 0x976c4b, d: 0xb8885c, e: 0xc2966a, f: 0x888684, g: 0x644730 },

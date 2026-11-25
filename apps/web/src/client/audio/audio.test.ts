@@ -146,49 +146,54 @@ test("only nearby partial pickups count toward inventory gains and play pickup s
 	]);
 });
 
-test("an accepted ToolBreak packet plays the synthesized snap", async () => {
-	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../../wasm/client.wasm", import.meta.url)), {});
-	const core = new ClientCore(instance);
-	const played: Sound[] = [];
-	const audio = new WorldAudio(core, [], { play: sound => played.push(sound) });
-	const feet: Vec3 = [0, 0, 0];
-	const ids = new Map();
-	assert.equal(audio.packet(Uint8Array.of(S2C.ToolBreak, 0), feet, ids), -1);
-	assert.equal(audio.packet(Uint8Array.of(S2C.ToolBreak), feet, ids), S2C.ToolBreak);
-	assert.deepEqual(played, [{ kind: "toolBreak" }]);
+for (const [tag, kind, filterType, title] of [
+	[S2C.ToolBreak, "toolBreak", "highpass", "an accepted ToolBreak packet plays the synthesized snap"],
+	[S2C.Shear, "shear", "bandpass", "an accepted Shear packet plays the synthesized cut"],
+] as const) {
+	test(title, async () => {
+		const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../../wasm/client.wasm", import.meta.url)), {});
+		const core = new ClientCore(instance);
+		const played: Sound[] = [];
+		const audio = new WorldAudio(core, [], { play: sound => played.push(sound) });
+		const feet: Vec3 = [0, 0, 0];
+		const ids = new Map();
+		assert.equal(audio.packet(Uint8Array.of(tag, 0), feet, ids), -1);
+		assert.equal(audio.packet(Uint8Array.of(tag), feet, ids), tag);
+		assert.deepEqual(played, [{ kind }]);
 
-	const starts: string[] = [];
-	const stops: number[] = [];
-	const node = { connect: () => node, disconnect() {} };
-	const param = { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} };
-	const source = (kind: string) => ({
-		...node,
-		start: () => starts.push(kind),
-		stop: (time: number) => stops.push(time),
-		onended: null as (() => void) | null,
+		const starts: string[] = [];
+		const stops: number[] = [];
+		const node = { connect: () => node, disconnect() {} };
+		const param = { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} };
+		const source = (kind: string) => ({
+			...node,
+			start: () => starts.push(kind),
+			stop: (time: number) => stops.push(time),
+			onended: null as (() => void) | null,
+		});
+		const oscillator = { ...source("tone"), frequency: param, type: "" };
+		const noise = { ...source("noise"), buffer: null };
+		const filter = { ...node, type: "", frequency: { value: 0 } };
+		const context = {
+			currentTime: 1,
+			createGain: () => ({ ...node, gain: { ...param, value: 0 } }),
+			createOscillator: () => oscillator,
+			createBufferSource: () => noise,
+			createBiquadFilter: () => filter,
+		};
+		let ended = false;
+		playEffect(context as unknown as AudioContext, node as unknown as AudioNode,
+			{ duration: 2 } as AudioBuffer, played[0], 0.8, 0, () => { ended = true; });
+		assert.deepEqual(starts, ["tone", "noise"]);
+		assert.equal(oscillator.type, "triangle");
+		assert.equal(filter.type, filterType);
+		assert.equal(stops.length, 2);
+		assert.equal(stops[0], stops[1]);
+		assert.ok(stops[0] > 1);
+		oscillator.onended?.();
+		assert.ok(ended);
 	});
-	const oscillator = { ...source("tone"), frequency: param, type: "" };
-	const noise = { ...source("noise"), buffer: null };
-	const filter = { ...node, type: "", frequency: { value: 0 } };
-	const context = {
-		currentTime: 1,
-		createGain: () => ({ ...node, gain: { ...param, value: 0 } }),
-		createOscillator: () => oscillator,
-		createBufferSource: () => noise,
-		createBiquadFilter: () => filter,
-	};
-	let ended = false;
-	playEffect(context as unknown as AudioContext, node as unknown as AudioNode,
-		{ duration: 2 } as AudioBuffer, played[0], 0.8, 0, () => { ended = true; });
-	assert.deepEqual(starts, ["tone", "noise"]);
-	assert.equal(oscillator.type, "triangle");
-	assert.equal(filter.type, "highpass");
-	assert.equal(stops.length, 2);
-	assert.equal(stops[0], stops[1]);
-	assert.ok(stops[0] > 1);
-	oscillator.onended?.();
-	assert.ok(ended);
-});
+}
 
 test("a user gesture retries a pending resume and only the latest request can complete it", async t => {
 	const requests: Array<ReturnType<typeof Promise.withResolvers<void>>> = [];

@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 /// Item ID, count, and accumulated damage.
 pub type ItemStack = (u16, u8, u16);
 
@@ -77,6 +77,28 @@ impl MobKind {
             4 => Ok(Self::Zombie),
             5 => Ok(Self::Skeleton),
             6 => Ok(Self::Creeper),
+            _ => Err(DecodeError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WoolColor {
+    #[default]
+    White = 0,
+    Gray = 1,
+    Brown = 2,
+    Black = 3,
+}
+
+impl WoolColor {
+    pub fn from_wire_id(id: u8) -> Result<Self, DecodeError> {
+        match id {
+            0 => Ok(Self::White),
+            1 => Ok(Self::Gray),
+            2 => Ok(Self::Brown),
+            3 => Ok(Self::Black),
             _ => Err(DecodeError),
         }
     }
@@ -246,6 +268,9 @@ pub enum C2S {
     Attack {
         id: u32,
     },
+    UseEntity {
+        id: u32,
+    },
     DropItem {
         dir: [f32; 3],
     },
@@ -304,6 +329,7 @@ pub enum S2C {
         stage: u8,
     },
     ToolBreak,
+    Shear,
     EntitySpawn {
         id: u32,
         kind: u8,
@@ -369,6 +395,12 @@ pub enum S2C {
     MobBurning {
         id: u32,
         burning: bool,
+    },
+    /// Sent after a sheep spawns and whenever its fleece changes.
+    SheepAppearance {
+        id: u32,
+        color: WoolColor,
+        sheared: bool,
     },
     /// Blast center. Sent once on the tick the explosion happens.
     Explosion {
@@ -450,6 +482,7 @@ pub mod id {
     pub const C2S_ATTACK: u8 = 0x10;
     pub const C2S_CANCEL_USING_ITEM: u8 = 0x11;
     pub const C2S_CHAT: u8 = 0x12;
+    pub const C2S_USE_ENTITY: u8 = 0x13;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -472,6 +505,8 @@ pub mod id {
     pub const S2C_PLAYER_SPAWN: u8 = 0x17;
     pub const S2C_PLAYER_MOVE: u8 = 0x18;
     pub const S2C_TOOL_BREAK: u8 = 0x1a;
+    pub const S2C_SHEEP_APPEARANCE: u8 = 0x1b;
+    pub const S2C_SHEAR: u8 = 0x1c;
     pub const S2C_PLAYER_REMOVE: u8 = 0x19;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
@@ -534,6 +569,10 @@ impl C2S {
             C2S::DigAbort => w.u8(id::C2S_DIG_ABORT),
             C2S::Attack { id: entity } => {
                 w.u8(id::C2S_ATTACK);
+                w.i32(entity as i32);
+            }
+            C2S::UseEntity { id: entity } => {
+                w.u8(id::C2S_USE_ENTITY);
                 w.i32(entity as i32);
             }
             C2S::DropItem { dir } => {
@@ -633,6 +672,9 @@ impl C2S {
             id::C2S_ATTACK => C2S::Attack {
                 id: r.i32()? as u32,
             },
+            id::C2S_USE_ENTITY => C2S::UseEntity {
+                id: r.i32()? as u32,
+            },
             id::C2S_DROP_ITEM => {
                 let dir = [r.f32()?, r.f32()?, r.f32()?];
                 if !dir.iter().all(|v| v.is_finite()) {
@@ -723,6 +765,7 @@ impl S2C {
                 w.u8(*stage);
             }
             S2C::ToolBreak => w.u8(id::S2C_TOOL_BREAK),
+            S2C::Shear => w.u8(id::S2C_SHEAR),
             S2C::EntitySpawn {
                 id: entity,
                 kind,
@@ -834,6 +877,16 @@ impl S2C {
                 w.u8(id::S2C_MOB_BURNING);
                 w.i32(*entity as i32);
                 w.u8(u8::from(*burning));
+            }
+            S2C::SheepAppearance {
+                id: entity,
+                color,
+                sheared,
+            } => {
+                w.u8(id::S2C_SHEEP_APPEARANCE);
+                w.i32(*entity as i32);
+                w.u8(*color as u8);
+                w.u8(u8::from(*sheared));
             }
             S2C::Explosion { center } => {
                 w.u8(id::S2C_EXPLOSION);
@@ -966,6 +1019,7 @@ impl S2C {
         let mut r = Reader::new(bytes);
         let packet = match r.u8()? {
             id::S2C_TOOL_BREAK => S2C::ToolBreak,
+            id::S2C_SHEAR => S2C::Shear,
             id::S2C_ENTITY_SPAWN => {
                 let id = entity_id(&mut r)?;
                 let kind = r.u8()?;
@@ -1079,6 +1133,16 @@ impl S2C {
                     _ => return Err(DecodeError),
                 };
                 S2C::MobBurning { id, burning }
+            }
+            id::S2C_SHEEP_APPEARANCE => {
+                let id = entity_id(&mut r)?;
+                let color = WoolColor::from_wire_id(r.u8()?)?;
+                let sheared = match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError),
+                };
+                S2C::SheepAppearance { id, color, sheared }
             }
             id::S2C_EXPLOSION => S2C::Explosion {
                 center: entity_pos(&mut r)?,
@@ -1671,7 +1735,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 30);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1901,7 +1965,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 30);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -1939,7 +2003,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 30);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -1963,7 +2027,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 30);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];
@@ -2223,6 +2287,40 @@ mod tests {
             assert!(C2S::decode(&C2S::CreativeSetSlot { slot, item, count }.encode()).is_err());
         }
     }
+    #[test]
+    fn protocol_30_round_trips_use_entity_sheep_appearance_and_shear() {
+        assert_eq!(PROTOCOL_VERSION, 30);
+        let id = 0x8000_0001;
+        let use_entity = C2S::UseEntity { id };
+        assert_eq!(use_entity.encode(), [0x13, 0x80, 0, 0, 1]);
+        assert_eq!(C2S::decode(&use_entity.encode()), Ok(use_entity));
+        assert!(C2S::decode(&[0x13, 0, 0, 0]).is_err());
+
+        for color in [
+            WoolColor::White,
+            WoolColor::Gray,
+            WoolColor::Brown,
+            WoolColor::Black,
+        ] {
+            for sheared in [false, true] {
+                let packet = S2C::SheepAppearance { id, color, sheared };
+                let bytes = packet.encode();
+                assert_eq!(bytes, [0x1b, 0x80, 0, 0, 1, color as u8, u8::from(sheared)]);
+                assert_eq!(S2C::decode(&bytes), Ok(packet));
+            }
+        }
+        for bytes in [
+            [0x1b, 0, 0, 0, 1, 4, 0],
+            [0x1b, 0, 0, 0, 1, 0, 2],
+            [0x1b, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert!(S2C::decode(&bytes).is_err());
+        }
+        assert_eq!(S2C::Shear.encode(), [0x1c]);
+        assert_eq!(S2C::decode(&[0x1c]), Ok(S2C::Shear));
+        assert!(S2C::decode(&[0x1c, 0]).is_err());
+    }
+
     #[test]
     fn protocol_29_round_trips_damage_and_tool_break() {
         let item = world::items::by_name("bow").unwrap();

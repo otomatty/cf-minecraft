@@ -12,7 +12,7 @@ textures = [
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
-  "oak_leaves_dense",
+  "oak_leaves_dense", "gray_wool", "brown_wool", "black_wool",
 ]
 legacy_count = 14
 
@@ -474,3 +474,21 @@ states = [
   { properties = [["facing", "west"]] },
   { properties = [["facing", "east"]] },
 ]
+
+[[blocks]]
+name = "gray_wool"
+id = 82
+dig_ticks = 16
+texture = "gray_wool"
+
+[[blocks]]
+name = "brown_wool"
+id = 83
+dig_ticks = 16
+texture = "brown_wool"
+
+[[blocks]]
+name = "black_wool"
+id = 84
+dig_ticks = 16
+texture = "black_wool"

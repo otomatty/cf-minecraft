@@ -5,7 +5,7 @@ import { ClientCore, type RayHit } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import { paintTexture } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
-import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
@@ -86,7 +86,7 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 82);
+	assert.equal(registry.length, 85);
 	assert.equal(id("water"), 13);
 	for (const [i, level] of [1, 2, 3, 4, 5, 6, 7, "falling"].entries()) {
 		const state = id(`flowing_water[level=${level}]`);
@@ -403,4 +403,12 @@ test("lava buckets place only into air or flowing lava", () => {
 	const pixels = paintTexture("lava_bucket");
 	assert.notDeepEqual(pixels, paintTexture("water_bucket"));
 	assert.notDeepEqual(pixels, paintTexture("missing"));
+});
+
+test("right-click targets a mob only with shears and a clear aim", () => {
+	assert.equal(useEntityTarget("shears", 7), 7);
+	assert.equal(useEntityTarget("shears", null), null);
+	for (const held of [undefined, "bow", "bread", "oak_planks", "bucket"]) {
+		assert.equal(useEntityTarget(held, 7), null);
+	}
 });

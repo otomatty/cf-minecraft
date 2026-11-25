@@ -98,3 +98,8 @@ export function bucketTarget(
     const current = blockName(...adjacent);
     return current === "air" || current === flow ? adjacent : null;
 }
+
+/** Only shears take priority over the usual right-click actions when a mob is in reach. */
+export function useEntityTarget(held: string | undefined, aimedMob: number | null): number | null {
+	return held === "shears" ? aimedMob : null;
+}

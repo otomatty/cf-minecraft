@@ -4,7 +4,7 @@ import { paintMobSkin, type FillRect } from "./skin.ts";
 const quadrupedWalk = { leg0: 80, leg1: -80, leg2: -80, leg3: 80 } as const;
 
 const sheepStride = 0.32 * 180 / Math.PI;
-export const sheep: MobAsset = {
+const sheepModel: Omit<MobAsset, "texture"> = {
 	id: "minecraft:sheep",
 	walkPitch: { leg0: sheepStride, leg1: -sheepStride, leg2: -sheepStride, leg3: sheepStride },
 	bones: [
@@ -24,14 +24,19 @@ export const sheep: MobAsset = {
 			};
 		}),
 	],
-	texture: paintMobSkin(64, 64, rect => {
+};
+
+function sheepSkin(light: number, shadow: number, sheared = false) {
+	return paintMobSkin(64, 64, rect => {
 		// Both fleece boxes share a net of 16×16 faces. The head and hooves use separate nets below.
 		for (let v = 0; v < 56; v++) {
 			for (let u = 0; u < 64; u++) {
 				const x = u % 16, y = v % 16;
 				const tuft = (x * 3 + y * 5) % 7 + (x + y * 2) % 5;
 				const clump = (x % 5 === 2 && y % 4 === 1) || (x % 6 === 4 && y % 5 === 3);
-				rect(u, v, 1, 1, (clump ? 0xd6d2c8 : 0xf8f4ec) - tuft * 0x010101);
+				// The head and leg nets start at row 32 and retain their original colors.
+				const base = v < 32 ? (clump ? shadow : light) : (clump ? 0xd6d2c8 : 0xf8f4ec);
+				rect(u, v, 1, 1, base - (v < 32 && sheared ? tuft % 5 : tuft) * 0x010101);
 			}
 		}
 		for (let y = 0; y < 16; y++) {
@@ -49,7 +54,22 @@ export const sheep: MobAsset = {
 		}
 		rect(52, 32, 4, 4, 0xd6ccba);
 		rect(56, 32, 4, 4, 0x4e3e30);
-	}),
+	});
+}
+
+export const sheep: MobAsset = { ...sheepModel, texture: sheepSkin(0xf8f4ec, 0xd6d2c8) };
+export const coloredSheepSkins = [
+	sheepSkin(0x9b9ca0, 0x7c7e83),
+	sheepSkin(0x946c52, 0x77543f),
+	sheepSkin(0x51525a, 0x3e3f46),
+];
+export const shearedSheep: MobAsset = {
+	...sheepModel,
+	bones: sheepModel.bones.map(bone => bone.name === "body" ? {
+		...bone,
+		cubes: [{ origin: [-4.5, 7.2, -4], size: [9, 7, 10.4], uv: [0, 0], uvSize: [16, 16, 16] }],
+	} : bone),
+	texture: sheepSkin(0xb09e88, 0xa99781, true),
 };
 
 // The four legs share a skin. Bedrock numbers the rear pair first.

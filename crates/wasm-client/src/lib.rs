@@ -9,7 +9,9 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{ItemStack, MobKind, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
+use protocol::{
+    ItemStack, MobKind, WoolColor, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C,
+};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -34,6 +36,8 @@ struct MobEntity {
     hurt: u32,
     fuse: u8,
     burning: bool,
+    wool_color: WoolColor,
+    sheared: bool,
 }
 struct ArrowEntity {
     pos: [f64; 3],
@@ -376,6 +380,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                     hurt: 0,
                     fuse: 0,
                     burning: false,
+                    wool_color: WoolColor::White,
+                    sheared: false,
                 },
             );
         }
@@ -430,6 +436,16 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.burning = burning;
             }
         }
+        S2C::SheepAppearance { id, color, sheared } => {
+            if let Some(mob) = st
+                .mobs
+                .get_mut(&id)
+                .filter(|mob| mob.kind == MobKind::Sheep)
+            {
+                mob.wool_color = color;
+                mob.sheared = sheared;
+            }
+        }
         S2C::Explosion { center } => {
             st.explosions.push(center);
         }
@@ -467,7 +483,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         S2C::PlayerRemove { id } => {
             st.players.remove(&id);
         }
-        S2C::DigProgress { .. } | S2C::ToolBreak => {}
+        S2C::DigProgress { .. } | S2C::ToolBreak | S2C::Shear => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
             st.mobs.remove(&id);
@@ -1447,6 +1463,11 @@ pub extern "C" fn client_enc_attack(id: u32) -> usize {
     emit(state(), C2S::Attack { id }.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_use_entity(id: u32) -> usize {
+    emit(state(), C2S::UseEntity { id }.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
@@ -1678,7 +1699,7 @@ pub extern "C" fn client_entities() -> usize {
     st.out = w.finish();
     st.out.len()
 }
-/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32, fuse u8, burning u8.
+/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32, fuse u8, burning u8, wool color u8, sheared u8.
 #[no_mangle]
 pub extern "C" fn client_mobs() -> usize {
     let st = state();
@@ -1693,6 +1714,8 @@ pub extern "C" fn client_mobs() -> usize {
         w.i32(mob.hurt as i32);
         w.u8(mob.fuse);
         w.u8(u8::from(mob.burning));
+        w.u8(mob.wool_color as u8);
+        w.u8(u8::from(mob.sheared));
     }
     st.out = w.finish();
     st.out.len()
@@ -1820,7 +1843,7 @@ mod tests {
             0x0d,
         );
         for sequence in 0_u32..=2 {
-            assert_eq!(client_mobs(), 63);
+            assert_eq!(client_mobs(), 65);
             assert_eq!(state().out[57..61], sequence.to_be_bytes());
             if sequence < 2 {
                 receive(S2C::MobHurt { id: 7 }, 0x0f);
@@ -1846,7 +1869,7 @@ mod tests {
         }
         .encode();
         assert_eq!(unsafe { client_packet(spawn.as_ptr(), spawn.len()) }, 0x0d);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
         assert_eq!(state().out[4], 4);
         assert_eq!(state().out[61], 0);
 
@@ -1863,21 +1886,21 @@ mod tests {
             unsafe { client_packet(creeper.as_ptr(), creeper.len()) },
             0x0d
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 4], 6);
-        assert_eq!(state().out[63 + 61], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 4], 6);
+        assert_eq!(state().out[65 + 61], 0);
         let fuse = S2C::MobFuse { id: 8, ticks: 12 }.encode();
         assert_eq!(unsafe { client_packet(fuse.as_ptr(), fuse.len()) }, 0x12);
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 61], 12);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 61], 12);
         let cleared = S2C::MobFuse { id: 8, ticks: 0 }.encode();
         assert_eq!(
             unsafe { client_packet(cleared.as_ptr(), cleared.len()) },
             0x12
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 61], 0);
-        assert_eq!(state().out[63 + 62], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 61], 0);
+        assert_eq!(state().out[65 + 62], 0);
         let burning = S2C::MobBurning {
             id: 8,
             burning: true,
@@ -1887,9 +1910,9 @@ mod tests {
             unsafe { client_packet(burning.as_ptr(), burning.len()) },
             0x15
         );
-        assert_eq!(client_mobs(), 63 * 2);
+        assert_eq!(client_mobs(), 65 * 2);
         assert_eq!(state().out[62], 0);
-        assert_eq!(state().out[63 + 62], 1);
+        assert_eq!(state().out[65 + 62], 1);
         let extinguished = S2C::MobBurning {
             id: 8,
             burning: false,
@@ -1899,8 +1922,8 @@ mod tests {
             unsafe { client_packet(extinguished.as_ptr(), extinguished.len()) },
             0x15
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 62], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 62], 0);
 
         let death = protocol::PlayerVitals {
             health: 0,
@@ -2100,7 +2123,7 @@ mod tests {
         let bytes = expected.finish();
         assert_eq!(client_players(), bytes.len());
         assert_eq!(state().out, bytes);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
 
         receive(S2C::EntityRemove { id: 2 }, 0x0a);
         assert_eq!(client_mobs(), 0);
@@ -2152,7 +2175,7 @@ mod tests {
         receive(S2C::PlayerRemove { id: 1 }, 0x19);
         receive(S2C::PlayerRemove { id: 2 }, 0x19);
         assert_eq!(client_players(), 0);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
         receive(
             S2C::PlayerSpawn {
                 id: 2,

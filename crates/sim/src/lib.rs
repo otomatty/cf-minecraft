@@ -1242,7 +1242,11 @@ impl Server {
         if self.clients[&id].health.vitals.dead
             && !matches!(
                 packet,
-                C2S::Hello { .. } | C2S::Respawn | C2S::UseBucket { .. } | C2S::Attack { .. }
+                C2S::Hello { .. }
+                    | C2S::Respawn
+                    | C2S::UseBucket { .. }
+                    | C2S::Attack { .. }
+                    | C2S::UseEntity { .. }
             )
         {
             self.stats.packets_rejected += 1;
@@ -1285,6 +1289,7 @@ impl Server {
                 .health
                 .cancel_using_item(),
             C2S::Attack { id: target } => self.attack(id, target),
+            C2S::UseEntity { id: target } => self.use_entity(id, target),
             C2S::DigAbort => {
                 if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
                     self.stats.packets_rejected += 1;
@@ -1727,17 +1732,25 @@ impl Server {
         }
     }
 
+    fn mob_in_reach(&self, player: u32, id: u32) -> Option<&mob::Mob> {
+        let client = &self.clients[&player];
+        let mob = self.mobs.get(&id)?;
+        (client.joined
+            && !client.health.vitals.dead
+            && self.world.chunks.contains_key(&mob.chunk())
+            && mob.within_attack_reach(client.pos))
+        .then_some(mob)
+    }
+
     fn attack(&mut self, attacker: u32, id: u32) {
+        if self
+            .mob_in_reach(attacker, id)
+            .is_none_or(|mob| mob.hurt_ticks != 0)
+        {
+            return;
+        }
         let client = self.clients.get_mut(&attacker).unwrap();
-        if !client.joined || client.health.vitals.dead {
-            return;
-        }
-        let Some(mob) = self.mobs.get_mut(&id) else {
-            return;
-        };
-        if mob.hurt_ticks != 0 || !mob.within_attack_reach(client.pos) {
-            return;
-        }
+        let mob = self.mobs.get_mut(&id).unwrap();
 
         let tool = client
             .inventory

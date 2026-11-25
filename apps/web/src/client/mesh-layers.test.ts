@@ -363,6 +363,27 @@ test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () =>
 	}
 });
 
+test("colored wool tiles share the white wool tuft pattern and shears have a hand-drawn icon", () => {
+	const white = texels(paintTexture("white_wool")).map(luminance);
+	const ranks = (values: number[]) => {
+		const shades = [...new Set(values)].sort((a, b) => a - b);
+		return values.map(value => shades.indexOf(value));
+	};
+	for (const name of ["gray_wool", "brown_wool", "black_wool"]) {
+		const pixels = paintTexture(name);
+		const colors = texels(pixels);
+		assert.ok(colors.every(([, , , alpha]) => alpha === 255), name);
+		assert.notDeepEqual(pixels, paintTexture("white_wool"), name);
+		assert.deepEqual(ranks(colors.map(luminance)), ranks(white), name);
+	}
+	const shears = itemTexture("shears");
+	assert.ok(shears);
+	const colors = texels(shears);
+	assert.equal(colors.length, 256);
+	assert.ok(colors.some(([, , , alpha]) => alpha === 0));
+	assert.ok(new Set(colors.filter(([, , , alpha]) => alpha === 255).map(pixel => pixel.join(","))).size >= 5);
+});
+
 test("table and furnace faces are distinct and show their tools and firebox", () => {
 	for (const names of [
 		["crafting_table_top", "crafting_table_side", "crafting_table_bottom"],
