@@ -177,13 +177,47 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  browsers:
+    name: Determinism (Chromium, Firefox, WebKit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc -Vv
+          rustup target list --installed
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM
+        run: pnpm build:wasm
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      - name: Determinism (Node and Playwright browsers)
+        run: pnpm check:determinism:browsers
+
   # The one check to mark as required in branch protection. It stays the same
   # when jobs are added or renamed. `always()` matters: without it this job is
   # skipped when a needed job fails, and a skipped check counts as passing.
   required:
     name: required
     if: ${{ always() }}
-    needs: [rust, build, e2e]
+    needs: [rust, build, e2e, browsers]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
