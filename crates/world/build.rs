@@ -68,6 +68,7 @@ struct Block {
     #[serde(default)]
     emission: u8,
     texture: Option<String>,
+    backed_leaf_texture: Option<String>,
     #[serde(alias = "up")]
     top: Option<String>,
     #[serde(alias = "down")]
@@ -157,14 +158,15 @@ fn read<T: DeserializeOwned>(path: &Path) -> T {
     toml::from_str(&data).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 impl Block {
+    fn texture_index(&self, name: &str, atlas: &[String]) -> u16 {
+        atlas
+            .iter()
+            .position(|t| t == name)
+            .unwrap_or_else(|| panic!("blocks.toml: {}: unknown texture {name}", self.name))
+            as u16
+    }
+
     fn textures(&self, state: &State, atlas: &[String]) -> [u16; 6] {
-        let resolve = |name: &String| {
-            atlas
-                .iter()
-                .position(|t| t == name)
-                .unwrap_or_else(|| panic!("blocks.toml: {}: unknown texture {name}", self.name))
-                as u16
-        };
         // Validate even an overridden value, so a typo cannot hide behind a more specific face.
         for name in [
             &self.texture,
@@ -181,7 +183,7 @@ impl Block {
         .into_iter()
         .flatten()
         {
-            resolve(name);
+            self.texture_index(name, atlas);
         }
         [
             &self.bottom,
@@ -210,7 +212,7 @@ impl Block {
                         ["bottom", "top", "north", "south", "west", "east"][i]
                     )
                 });
-            resolve(name)
+            self.texture_index(name, atlas)
         })
         .collect::<Vec<_>>()
         .try_into()
@@ -346,6 +348,7 @@ fn generate(root: &Path, dest: &Path) {
     let mut infos = String::new();
     let mut props = String::new();
     let mut blocks = String::new();
+    let mut backed_leaf_textures = String::new();
     let mut count = 0usize;
     let mut state_names = BTreeSet::new();
     for b in &registry.blocks {
@@ -361,6 +364,10 @@ fn generate(root: &Path, dest: &Path) {
             &b.states
         };
         let tint = b.tint();
+        let backed_leaf_tex = b
+            .backed_leaf_texture
+            .as_deref()
+            .map(|name| b.texture_index(name, textures));
         let layer = match b.layer.as_str() {
             "opaque" => "Opaque",
             "cutout" => "Cutout",
@@ -447,6 +454,9 @@ fn generate(root: &Path, dest: &Path) {
                 format!("Some(crate::items::ToolKind::{})", tool_kind(kind))
             });
             writeln!(infos, "BlockInfo {{ tool: {tool}, min_tier: {}, dig_ticks: {:?}, model: {}, layer: RenderLayer::{layer}, occludes: {}, solid: {}, cull_same: {}, opacity: {opacity}, emission: {}, name: {:?}, tex: {tex:?}, tint: {:?} }},", b.min_tier, b.dig_ticks, model(m), occludes, solid, cull_same, b.emission, b.name, tint).unwrap();
+            if let Some(tex) = backed_leaf_tex {
+                writeln!(backed_leaf_textures, "{count} => Some({tex}),").unwrap();
+            }
             let pairs: Vec<_> = s
                 .properties
                 .iter()
@@ -469,6 +479,18 @@ fn generate(root: &Path, dest: &Path) {
         "blocks.toml: first block must be air at ID 0"
     );
     writeln!(out, "pub const COUNT: BlockState = {count};\nstatic INFO: [BlockInfo; {count}] = [{infos}];\nstatic BLOCKS: &[Block] = &[{blocks}];\nstatic PROPERTIES: &[&[(&str, &str)]] = &[{props}];").unwrap();
+    writeln!(
+        out,
+        "/// Alternate texture for a leaf face with another leaf directly behind it.
+#[inline]
+pub fn backed_leaf_texture(state: BlockState) -> Option<u16> {{
+    match state {{
+        {backed_leaf_textures}
+        _ => None,
+    }}
+}}"
+    )
+    .unwrap();
     fs::write(dest.join("blocks.rs"), out).unwrap();
 
     let items: Items = read(&root.join("items.toml"));
@@ -579,6 +601,7 @@ fn generate(root: &Path, dest: &Path) {
             "none" => "None",
             "round" => "Round",
             "cone" => "Cone",
+            "broad" => "Broad",
             _ => panic!("biomes.toml: unknown tree_shape"),
         };
         if tree_shape == "None" {

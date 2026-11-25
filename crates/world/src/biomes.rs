@@ -17,6 +17,7 @@ pub enum TreeShape {
     None,
     Round,
     Cone,
+    Broad,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

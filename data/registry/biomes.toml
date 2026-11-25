@@ -55,7 +55,7 @@ humidity = [0.8, 0.9]
 [[biomes]]
 name = "sun_steppe"
 tree_density = 0.008
-tree_shape = "round"
+tree_shape = "broad"
 tree_height = [4, 5]
 terrain = "Land"
 surface = "coarse_dirt"

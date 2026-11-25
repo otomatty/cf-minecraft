@@ -311,23 +311,25 @@ async function transparentMaterials() {
 		const stats = await settle(page, "materials surface", chunksInView(3));
 		const center = [Math.floor(stats.spawn[0]), Math.floor(stats.spawn[1]) + 8, Math.floor(stats.spawn[2])];
 		await page.evaluate(() => { document.getElementById("overlay").hidden = true; });
-		const capture = async label => {
+		const capture = async (label, step = 4) => {
 			await new Promise(resolve => setTimeout(resolve, 500));
 			await settle(page, label, chunksInView(3));
 			await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 			const file = join(shots, `${label}.png`);
 			await page.screenshot({ path: file });
-			return page.evaluate(async dataUrl => {
+			return page.evaluate(async ({ dataUrl, step }) => {
 				const img = new Image(); img.src = dataUrl; await img.decode();
 				const canvas = new OffscreenCanvas(img.width, img.height), g = canvas.getContext("2d");
 				g.drawImage(img, 0, 0);
+				const pixels = g.getImageData(img.width / 2 - 80, img.height / 2 - 80, 160, 160).data;
 				const samples = [];
-				for (let y = -80; y < 80; y += 4) for (let x = -80; x < 80; x += 4) {
+				for (let y = -80; y < 80; y += step) for (let x = -80; x < 80; x += step) {
 					if (Math.abs(x) < 16 && Math.abs(y) < 16) continue; // crosshair
-					samples.push(...g.getImageData(img.width / 2 + x, img.height / 2 + y, 1, 1).data.slice(0, 3));
+					const i = ((y + 80) * 160 + x + 80) * 4;
+					samples.push(pixels[i], pixels[i + 1], pixels[i + 2]);
 				}
 				return samples;
-			}, `data:image/png;base64,${readFileSync(file).toString("base64")}`);
+			}, { dataUrl: `data:image/png;base64,${readFileSync(file).toString("base64")}`, step });
 		};
 		const difference = (a, b) => a.reduce((sum, v, i) => sum + Math.abs(v - b[i]), 0) / a.length;
 		for (const [name, material] of [["glass", 11], ["water", 13]]) {
@@ -376,6 +378,32 @@ async function transparentMaterials() {
 				check(difference(warm, bare) > 5, "water: translucent colour is rendered");
 			}
 		}
+		const leafCamera = [center[0] + 0.5, 256.5, center[2] + 0.5];
+		await page.addStyleTag({ content: "body > :not(#view) { visibility: hidden !important; }" });
+		await page.evaluate(camera => window.__mc.setCamera(...camera, 0, -10), leafCamera);
+		const sky = await capture("leaves-sky", 1);
+		check(sky.length > 0 && sky.every((v, i) => i % 3 !== 2 || (v > sky[i - 1] && sky[i - 1] > sky[i - 2])),
+			"leaves: clear sky fills the central sample before placement");
+		const wall = [];
+		for (let dz = 4; dz <= 5; dz++) for (let dy = -1; dy <= 3; dy++) for (let dx = -2; dx <= 2; dx++) {
+			wall.push([Math.floor(leafCamera[0]) + dx, Math.floor(leafCamera[1]) + dy, Math.floor(leafCamera[2]) + dz]);
+		}
+		await page.evaluate(wall => {
+			const api = window.__mc;
+			const leaves = api.stateId("placed_oak_leaves");
+			for (const pos of wall) api.setBlock(...pos, leaves);
+		}, wall);
+		const covered = await capture("leaves-wall", 1);
+		check(await page.evaluate(wall => {
+			const api = window.__mc;
+			return wall.every(pos => api.getBlock(...pos) === api.stateId("placed_oak_leaves"));
+		}, wall), "leaves: both layers of the leaf wall are placed");
+		let skyPixels = 0;
+		for (let i = 0; i < covered.length; i += 3) {
+			if ([0, 1, 2].every(c => Math.abs(covered[i + c] - sky[i + c]) < 4)) skyPixels++;
+		}
+		check(covered.length === sky.length && skyPixels === 0,
+			"leaves: no sky pixels show through the center of the two-block-thick wall", `${skyPixels} sky pixels`);
 		check(errors.length === 0, "materials: no page errors", errors.slice(0, 3).join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "materials", err);
@@ -1567,16 +1595,25 @@ async function leafDecay() {
 			const api = window.__mc;
 			const [sx, , sz] = api.stats().spawn.map(Math.floor);
 			const log = api.stateId("oak_log");
-			// Match survivalCrafting's radius and clear east-side approach.
+			// Use an accessible trunk without nearby logs that could sustain its crown.
 			for (let z = sz - 24; z <= sz + 24; z++) for (let x = sx - 24; x <= sx + 24; x++) {
 				for (let y = 57; y < 319; y++) {
 					if (api.getBlock(x, y, z) !== log || api.getBlock(x, y - 1, z) === log) continue;
 					if ([1, 2].some(dy => api.getBlock(x, y + dy, z) !== log)) continue;
+					if (api.getBlock(x, y - 1, z) <= 0) continue;
 					const floor = api.getBlock(x + 1, y - 1, z);
 					if (floor <= 0 || floor === api.stateId("water")) continue;
 					if ([0, 1, 2].some(dy => api.getBlock(x + 1, y + dy, z) !== 0)) continue;
 					let top = y + 2;
 					while (api.getBlock(x, top + 1, z) === log) top++;
+					let nearbyLog = false;
+					for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+						if (dx === 0 && dz === 0) continue;
+						for (let wy = y; wy <= top + 2; wy++) {
+							if (api.getBlock(x + dx, wy, z + dz) === log) nearbyLog = true;
+						}
+					}
+					if (nearbyLog) continue;
 					return { x, y, z, top };
 				}
 			}
@@ -1651,7 +1688,7 @@ async function leafDecay() {
 			const leaves = api.stateId("oak_leaves");
 			let count = 0;
 			for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
-				for (let wy = y - 1; wy <= top + 3; wy++) {
+				for (let wy = y; wy <= top + 2; wy++) {
 					if (api.getBlock(x + dx, wy, z + dz) === leaves) count++;
 				}
 			}

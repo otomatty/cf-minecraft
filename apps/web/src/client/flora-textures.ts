@@ -43,7 +43,7 @@ const grassFringe = pixelTile([
 	empty, empty, empty, empty, empty, empty, empty, empty, empty, empty, empty, empty,
 ], turf);
 
-const oakLeaves = pixelTile([
+const oakLeafRows = [
 	"dea..b..bfefa.af",
 	"ba.dfed.ac...ced",
 	"..aefeb...a.ceba",
@@ -60,7 +60,9 @@ const oakLeaves = pixelTile([
 	"fed..befe..feedc",
 	"edb.a.edba.fda..",
 	".ba.dedac..ba..d",
-], foliage);
+];
+const oakLeaves = pixelTile(oakLeafRows, foliage);
+const oakLeavesDense = pixelTile(oakLeafRows.map(row => row.replaceAll(".", "g")), { ...foliage, g: 0x484848 });
 
 const shortGrass = pixelTile([
 	empty, empty,
@@ -121,6 +123,7 @@ const dandelion = pixelTile([
 const tiles = new Map<string, Uint8Array>([
 	["grass_block_top", grassTop],
 	["oak_leaves", oakLeaves],
+	["oak_leaves_dense", oakLeavesDense],
 	["short_grass", shortGrass],
 	["red_flower", poppy],
 	["yellow_flower", dandelion],

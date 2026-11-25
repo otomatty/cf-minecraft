@@ -470,12 +470,13 @@ impl TerrainGenerator {
                 }
             }
         }
+        let mut surface = self.chunk_surface_sampler(cx, cz, &grid, &heights);
         let entrances = if caves || trees {
             self.entrances_for_chunk_with_surface(
                 cx,
                 cz,
-                crate::trees::MAX_CROWN_RADIUS,
-                self.chunk_surface_sampler(cx, cz, &grid, &heights),
+                crate::trees::TREE_ENTRANCE_HALO,
+                &mut surface,
             )
         } else {
             Vec::new()
@@ -489,11 +490,7 @@ impl TerrainGenerator {
         }
         if trees {
             self.plant_trees(&mut chunk, cx, cz, &entrances, |x, z| {
-                if (-1..=16).contains(&x) && (-1..=16).contains(&z) {
-                    heights[(z + 1) as usize][(x + 1) as usize]
-                } else {
-                    Self::top(&column(x, z))
-                }
+                surface(cx * 16 + x, cz * 16 + z)
             });
         }
         chunk
@@ -1417,6 +1414,6 @@ mod tests {
 
     #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0x6aa960f51ded69b6);
+        assert_eq!(terrain_fingerprint(2026), 0x7ec6cedb74055722);
     }
 }

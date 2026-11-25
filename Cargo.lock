@@ -45,6 +45,7 @@ name = "mesher"
 version = "0.0.1"
 dependencies = [
  "world",
+ "worldgen",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ textures = [
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
+  "oak_leaves_dense",
 ]
 legacy_count = 14
 
@@ -121,6 +122,7 @@ dig_ticks = 6
 id = 12
 layer = "cutout"
 texture = "oak_leaves"
+backed_leaf_texture = "oak_leaves_dense"
 cull_same = true
 opacity = 1
 tint = true
@@ -340,6 +342,7 @@ id = 51
 dig_ticks = 6
 layer = "cutout"
 texture = "oak_leaves"
+backed_leaf_texture = "oak_leaves_dense"
 cull_same = true
 opacity = 1
 tint = true

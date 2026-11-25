@@ -9,7 +9,8 @@ export const TEX_SIZE = 16;
 
 const iconTints = new Map<string, readonly number[]>([
 	["grass_block_top", CARRIED_GRASS_TOP_TINT], ["short_grass", CARRIED_SHORT_GRASS_TINT],
-	["oak_leaves", CARRIED_LEAVES_TINT], ["water", WATER_TINT], ["water_flow", WATER_TINT],
+	["oak_leaves", CARRIED_LEAVES_TINT], ["oak_leaves_dense", CARRIED_LEAVES_TINT],
+	["water", WATER_TINT], ["water_flow", WATER_TINT],
 ]);
 
 /** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
@@ -27,7 +28,7 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? cropTexture(name) ?? itemTexture(name) ?? proceduralBlockTexture(name);
+		?? itemTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -98,88 +99,6 @@ export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
 				const shade = (lit ? 225 : 24) * crater;
 				pixels.set([shade * 0.94, shade * 0.97, shade, radius < 0.88 ? 255 : 0], i);
 			}
-		}
-	}
-	return pixels;
-}
-
-type Rgb = readonly [number, number, number];
-type Painter = (x: number, y: number, rand: () => number) => Rgb;
-
-function mulberry32(seed: number): () => number {
-	let a = seed >>> 0;
-	return () => {
-		a = (a + 0x6d2b79f5) >>> 0;
-		let t = a;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
-function hashName(name: string): number {
-	let h = 2166136261;
-	for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 16777619);
-	return h >>> 0;
-}
-
-const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-const shade = (c: Rgb, f: number): Rgb => [c[0] * f, c[1] * f, c[2] * f];
-
-function cropTexture(name: string): Uint8Array | undefined {
-	const stage = ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].indexOf(name);
-	if (stage < 0) return undefined;
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	const paint = (x: number, y: number, color: Rgb) =>
-		pixels.set([...color, 255], (y * TEX_SIZE + x) * 4);
-	for (const [i, base] of [3, 6, 9, 12].entries()) {
-		const tip = 12 - stage * 3 + i % 2;
-		const lean = i % 2 === 0 ? -1 : 1;
-		for (let y = tip; y < TEX_SIZE; y++) {
-			const x = y < 12 ? base + lean : base;
-			paint(x, y, stage === 3 ? [154, 119, 51] : [56, 108, 49]);
-			if (stage === 3 && y < tip + 5) {
-				paint(x + lean, y, y % 2 ? [221, 164, 72] : [247, 198, 101]);
-				paint(x, y, [191, 139, 59]);
-			} else if (y === tip + 1 || (stage > 0 && y === 12)) {
-				paint(x + lean, y, [100, 156, 61]);
-			}
-		}
-	}
-	return pixels;
-}
-
-const furrow = (color: Rgb): Painter => (x, y, rand) => {
-	const ridge = (x + Math.floor((y + x % 3) / 5)) % 5;
-	return shade(color, (ridge === 0 ? .65 : ridge === 1 ? .83 : 1.1) + rand() * .19);
-};
-
-const PROCEDURAL_BLOCK_TEXTURES: Record<string, (rand: () => number) => Painter> = {
-	white_wool: () => (x, y) => {
-		const grain = ((x * 3 + y * 5) % 7 + (x + y * 2) % 5) % 6;
-		return (x + y) % 4 === 0
-			? [226 - grain, 222 - grain, 214 - grain]
-			: [252 - grain, 249 - grain, 242 - grain];
-	},
-	farmland_dry: () => furrow([137, 91, 58]),
-	farmland_moist: () => furrow([86, 56, 48]),
-    furnace_top: () => (x,y,r) => shade([111, 116, 125], x < 2 || y < 2 || x > 13 || y > 13 ? .68 : .9+r()*.2),
-    furnace_side: () => (x,y,r) => shade([108, 113, 121], y%5 === 0 || (x+(Math.floor(y/5)%2)*4)%8 === 0 ? .65 : .9+r()*.2),
-    furnace_front: () => (x,y,r) => x >= 3 && x <= 12 && y >= 6 && y <= 12 ? [31, 29, 34] : shade([112, 118, 126], y === 4 || y === 14 ? .65 : .9+r()*.2),
-    crafting_table_top: () => (x,y,r) => shade([174, 128, 70], x < 2 || y < 2 || x > 13 || y > 13 ? .62 : x % 5 === 2 || y % 5 === 2 ? .75 : .94+r()*.12),
-    crafting_table_side: () => (x,y,r) => shade([146, 103, 57], x < 3 || x > 12 ? .66 : y < 3 ? 1.2 : y === 7 || y === 12 ? .72 : .94+r()*.12),
-    crafting_table_bottom: () => (x,y) => shade([124, 87, 49], x === y || x+y === 15 ? .65 : y%4 === 0 ? .82 : 1),
-};
-
-function proceduralBlockTexture(name: string): Uint8Array | undefined {
-	if (!Object.hasOwn(PROCEDURAL_BLOCK_TEXTURES, name)) return undefined;
-	const rand = mulberry32(hashName(name));
-	const paint = PROCEDURAL_BLOCK_TEXTURES[name](rand);
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let y = 0; y < TEX_SIZE; y++) {
-		for (let x = 0; x < TEX_SIZE; x++) {
-			const [r, g, b] = paint(x, y, rand);
-			pixels.set([clamp(r), clamp(g), clamp(b), 255], (y * TEX_SIZE + x) * 4);
 		}
 	}
 	return pixels;

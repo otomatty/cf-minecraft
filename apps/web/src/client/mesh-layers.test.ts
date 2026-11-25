@@ -8,7 +8,7 @@ import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { ClientCore } from "./client-core.ts";
-import { filterVisibleSections, outlineBox, terrainShader, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { filterVisibleSections, outlineBox, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);
@@ -55,7 +55,20 @@ test("terrain tint layers follow texture names when the texture array is reorder
 	assert.ok(!shader.includes("g.grassTint"));
 	const absent = terrainShader(["stone"]);
 	assert.ok(absent.includes("if (out.layer == 4294967295u || out.layer == 4294967295u)"));
+	assert.ok(absent.includes("if (false) { tintLayer = 1; }"));
 	assert.doesNotMatch(absent, /__[A-Z_]+__/);
+});
+
+test("dense and regular leaves share terrain tint and cap rotation", () => {
+	for (const [names, predicate] of [
+		[["oak_leaves", "water", "oak_leaves_dense"], "out.layer == 0u || out.layer == 2u"],
+		[["water", "oak_leaves_dense", "stone", "oak_leaves"], "out.layer == 1u || out.layer == 3u"],
+	]) {
+		const shader = terrainShader(names);
+		assert.ok(shader.includes(`if (${predicate}) { tintLayer = 1; }`));
+		assert.ok(shader.includes(`face <= 1u && (${predicate})`));
+		assert.doesNotMatch(shader, /__LEAVES_LAYERS__/);
+	}
 });
 
 test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
@@ -273,6 +286,28 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 	assert.equal(downsample(new Uint8Array([255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170]), 2)[3], 170);
 });
 
+test("dense leaves fill only the original holes with a darker opaque gray", () => {
+	const regular = paintTexture("oak_leaves");
+	let dense = paintTexture("oak_leaves_dense");
+	assert.equal(dense.length, 16 * 16 * 4);
+	const darkest = Math.min(...regular.filter((_, i) => i % 4 === 0 && regular[i + 3] === 255));
+	for (let i = 0; i < dense.length; i += 4) {
+		assert.equal(dense[i + 3], 255);
+		if (regular[i + 3] === 255) {
+			assert.deepEqual(dense.subarray(i, i + 4), regular.subarray(i, i + 4));
+		} else {
+			assert.equal(dense[i], dense[i + 1]);
+			assert.equal(dense[i], dense[i + 2]);
+			assert.ok(dense[i] < darkest);
+		}
+	}
+	assert.ok(usesCutoutMips("oak_leaves_dense"));
+	for (let size = 16; size > 1; size >>= 1) {
+		dense = downsample(dense, size, true);
+		assert.ok(dense.every((v, i) => i % 4 !== 3 || v === 255));
+	}
+});
+
 
 test("section visibility filters every layer before frustum tests and translucent sorting", () => {
     const meshes = new Map([["-1,4,2", { counts: [3,2,1] }], ["0,4,2", { counts: [1,0,2] }]]);
@@ -299,6 +334,81 @@ test("four original ore textures are opaque stone with distinct mineral grains",
 		}
 		assert.ok(stone > 128 && mineral > 0, names[i]);
 		for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, textures[j]);
+	}
+});
+
+function texels(pixels: Uint8Array): Uint8Array[] {
+	return Array.from({ length: pixels.length / 4 }, (_, i) => pixels.subarray(i * 4, i * 4 + 4));
+}
+
+function luminance([r, g, b]: Uint8Array): number {
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () => {
+	const names = [
+		"crafting_table_top", "crafting_table_side", "crafting_table_bottom",
+		"furnace_front", "furnace_side", "furnace_top",
+		"farmland_dry", "farmland_moist", "oak_log_top", "white_wool",
+	];
+	const missing = paintTexture("missing_texture");
+	for (const name of names) {
+		const pixels = paintTexture(name);
+		assert.equal(pixels.length, 16 * 16 * 4, name);
+		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.notDeepEqual(pixels, missing, name);
+		const colors = texels(pixels);
+		assert.ok(colors.every(([, , , a]) => a === 255), name);
+		assert.ok(new Set(colors.map(([r, g, b]) => r << 16 | g << 8 | b)).size >= 5, name);
+	}
+});
+
+test("table and furnace faces are distinct and show their tools and firebox", () => {
+	for (const names of [
+		["crafting_table_top", "crafting_table_side", "crafting_table_bottom"],
+		["furnace_front", "furnace_side", "furnace_top"],
+	]) {
+		const faces = names.map(paintTexture);
+		for (const [i, pixels] of faces.entries()) {
+			for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, faces[j], `${names[i]} vs ${names[j]}`);
+		}
+	}
+	for (const name of ["crafting_table_top", "crafting_table_side"]) {
+		const gray = texels(paintTexture(name)).filter(([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b) <= 10);
+		assert.ok(gray.length >= 8, name);
+	}
+	const front = texels(paintTexture("furnace_front"));
+	const firebox = front.filter((_, i) => i % 16 >= 4 && i % 16 <= 11 && i >= 6 * 16 && i < 13 * 16);
+	assert.ok(firebox.filter(pixel => luminance(pixel) < 45).length >= 12);
+	assert.ok(firebox.some(([r, g, b]) => r >= 170 && r - g >= 40 && g - b >= 30));
+});
+
+test("moist furrows are darker than dry furrows", () => {
+	const averageLuminance = (name: string) => {
+		const pixels = texels(paintTexture(name));
+		return pixels.reduce((sum, pixel) => sum + luminance(pixel), 0) / pixels.length;
+	};
+	assert.ok(averageLuminance("farmland_moist") < averageLuminance("farmland_dry"));
+});
+
+test("wheat cutouts grow denser, keep four grounded stems and ripen gold", () => {
+	const missing = paintTexture("missing_texture");
+	let previousCoverage = 0;
+	for (const name of ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"]) {
+		const pixels = paintTexture(name);
+		assert.equal(pixels.length, 16 * 16 * 4, name);
+		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.notDeepEqual(pixels, missing, name);
+		const colors = texels(pixels);
+		assert.deepEqual(new Set(colors.map(([, , , a]) => a)), new Set([0, 255]), name);
+		const coverage = colors.filter(([, , , a]) => a === 255).length;
+		assert.ok(coverage > previousCoverage, name);
+		previousCoverage = coverage;
+		const bottom = colors.slice(-16);
+		assert.equal(bottom.filter(([, , , a], x) => a === 255 && !bottom[x - 1]?.[3]).length, 4, name);
+		if (name === "wheat_ripe") {
+			assert.ok(colors.some(([r, g, b, a]) => a === 255 && r >= 200 && g >= 150 && g - b >= 50));
+		}
 	}
 });
 
