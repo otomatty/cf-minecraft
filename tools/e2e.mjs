@@ -1595,16 +1595,25 @@ async function leafDecay() {
 			const api = window.__mc;
 			const [sx, , sz] = api.stats().spawn.map(Math.floor);
 			const log = api.stateId("oak_log");
-			// Match survivalCrafting's radius and clear east-side approach.
+			// Use an accessible trunk without nearby logs that could sustain its crown.
 			for (let z = sz - 24; z <= sz + 24; z++) for (let x = sx - 24; x <= sx + 24; x++) {
 				for (let y = 57; y < 319; y++) {
 					if (api.getBlock(x, y, z) !== log || api.getBlock(x, y - 1, z) === log) continue;
 					if ([1, 2].some(dy => api.getBlock(x, y + dy, z) !== log)) continue;
+					if (api.getBlock(x, y - 1, z) <= 0) continue;
 					const floor = api.getBlock(x + 1, y - 1, z);
 					if (floor <= 0 || floor === api.stateId("water")) continue;
 					if ([0, 1, 2].some(dy => api.getBlock(x + 1, y + dy, z) !== 0)) continue;
 					let top = y + 2;
 					while (api.getBlock(x, top + 1, z) === log) top++;
+					let nearbyLog = false;
+					for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+						if (dx === 0 && dz === 0) continue;
+						for (let wy = y; wy <= top + 2; wy++) {
+							if (api.getBlock(x + dx, wy, z + dz) === log) nearbyLog = true;
+						}
+					}
+					if (nearbyLog) continue;
 					return { x, y, z, top };
 				}
 			}
@@ -1679,7 +1688,7 @@ async function leafDecay() {
 			const leaves = api.stateId("oak_leaves");
 			let count = 0;
 			for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
-				for (let wy = y - 1; wy <= top + 3; wy++) {
+				for (let wy = y; wy <= top + 2; wy++) {
 					if (api.getBlock(x + dx, wy, z + dz) === leaves) count++;
 				}
 			}

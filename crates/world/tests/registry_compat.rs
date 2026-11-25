@@ -234,7 +234,7 @@ fn biome_tree_recipes_match_original_specification() {
         (0.03, Round, [4, 6]),
         (0.0, None, [0, 0]),
         (0.32, Round, [6, 9]),
-        (0.008, Round, [4, 5]),
+        (0.008, Broad, [4, 5]),
         (0.08, Cone, [6, 9]),
         (0.12, Round, [4, 6]),
         (0.0, None, [0, 0]),

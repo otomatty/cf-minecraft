@@ -601,6 +601,7 @@ pub fn backed_leaf_texture(state: BlockState) -> Option<u16> {{
             "none" => "None",
             "round" => "Round",
             "cone" => "Cone",
+            "broad" => "Broad",
             _ => panic!("biomes.toml: unknown tree_shape"),
         };
         if tree_shape == "None" {

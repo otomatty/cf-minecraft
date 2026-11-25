@@ -1,15 +1,20 @@
 //! World-aligned feature plots. A tree is a pure description; chunks only clip it.
 use jmath::mix_stafford13;
+use std::collections::VecDeque;
 use world::{
     biomes::{TreeShape, BIOMES},
     blocks, BlockState, Chunk, HEIGHT, MIN_Y,
 };
 
-use crate::{TerrainGenerator, SEA_LEVEL};
+use crate::{entrances::Entrance, TerrainGenerator, SEA_LEVEL};
 
 pub(crate) const PLOT_SIZE: i32 = 4;
 pub(crate) const MAX_CROWN_RADIUS: i32 = 3;
 const _: () = assert!(MAX_CROWN_RADIUS <= 3 && MAX_CROWN_RADIUS < PLOT_SIZE);
+const EXIT_CLEARANCE: i32 = 3;
+// The root and far edge of its crown can both extend beyond this chunk.
+pub(crate) const TREE_ENTRANCE_HALO: i32 = 2 * MAX_CROWN_RADIUS + EXIT_CLEARANCE;
+const CROWN_WIDTH: usize = (2 * MAX_CROWN_RADIUS + 1) as usize;
 const TREE_SALT: u64 = 0x19ac_62e7_d403_b58f;
 
 fn plot_hash(seed: i64, qx: i32, qz: i32) -> u64 {
@@ -45,8 +50,71 @@ struct Tree {
     height: i32,
     shape: TreeShape,
     tip: i32,
+    large: bool,
+    legacy: bool,
 }
+
 impl Tree {
+    fn new(root: Candidate, top: i32, shape: TreeShape, [min, max]: [u8; 2]) -> Self {
+        let size = mix_stafford13(root.variation ^ 0x834e_06a7_d1c2_5fb9);
+        let large = shape == TreeShape::Round && size.is_multiple_of(40);
+        let height = if large {
+            i32::from(max) + 3 + (size / 40 % 3) as i32
+        } else {
+            Self::normal_height(root, [min, max])
+        };
+        let tip = if shape == TreeShape::Cone {
+            1 + ((root.variation >> 8) & 1) as i32
+        } else {
+            1
+        };
+        Self {
+            root,
+            top,
+            height,
+            shape,
+            tip,
+            large,
+            legacy: false,
+        }
+    }
+
+    fn normal_height(root: Candidate, [min, max]: [u8; 2]) -> i32 {
+        i32::from(min) + (root.variation % u64::from(max - min + 1)) as i32
+    }
+
+    fn fits_world(&self) -> bool {
+        self.top + self.height + self.tip < MIN_Y + HEIGHT
+    }
+
+    fn obstructs(
+        &self,
+        entrances: &[Entrance],
+        protected: fn(&Entrance, i32, i32, i32) -> bool,
+    ) -> bool {
+        let mut obstructs = false;
+        self.blocks(|x, y, z, _| {
+            obstructs |= entrances.iter().any(|e| protected(e, x, y, z));
+        });
+        obstructs
+    }
+
+    fn obstructs_exit(entrance: &Entrance, x: i32, y: i32, z: i32) -> bool {
+        if entrance.contains(x, y, z) {
+            return true;
+        }
+        // Check towards the passage so the tree also leaves room to land
+        // just outside the opening.
+        let dx = entrance.root[0] - x;
+        let dz = entrance.root[2] - z;
+        let (step_x, step_z) = if dx.abs() >= dz.abs() {
+            (dx.signum(), 0)
+        } else {
+            (0, dz.signum())
+        };
+        (1..=EXIT_CLEARANCE).any(|step| entrance.contains(x + step_x * step, y, z + step_z * step))
+    }
+
     fn blocks(&self, mut emit: impl FnMut(i32, i32, i32, BlockState)) {
         let mut put = |dx: i32, y, dz: i32, state| {
             debug_assert!(dx.abs() <= MAX_CROWN_RADIUS && dz.abs() <= MAX_CROWN_RADIUS);
@@ -56,11 +124,144 @@ impl Tree {
         for y in self.top + 1..=crown {
             put(0, y, 0, blocks::OAK_LOG);
         }
+        if self.legacy {
+            self.legacy_crown(crown, &mut put);
+            return;
+        }
+        match self.shape {
+            TreeShape::Round => {
+                let radii = self.round_radii();
+                let bottom = crown + 2 - radii.len() as i32;
+                for (dy, &radius) in radii.iter().enumerate() {
+                    self.crown_layer(bottom + dy as i32, crown, radius, true, &mut put);
+                }
+                if self.height >= 7 || self.large {
+                    self.branches(bottom, &mut put);
+                }
+            }
+            TreeShape::Cone => {
+                let profile = mix_stafford13(self.root.variation ^ 0x1bf5_902e_76ac_43d8);
+                let width = if profile & 1 == 0 {
+                    3
+                } else {
+                    1 + ((profile >> 1) & 1) as i32
+                };
+                let depth = self.height / 2 + 1;
+                for dy in 0..=depth {
+                    let taper = (width * (depth - dy) + depth - 1) / depth;
+                    let radius = (taper - dy % 2).max(0);
+                    self.crown_layer(crown - depth + dy, crown, radius, false, &mut put);
+                }
+                for dy in 1..=self.tip {
+                    put(0, crown + dy, 0, blocks::OAK_LEAVES);
+                }
+            }
+            TreeShape::Broad => {
+                let depth =
+                    (mix_stafford13(self.root.variation ^ 0xc46a_3758_9db1_02ef) & 1) as i32;
+                for y in crown - depth..=crown {
+                    self.crown_layer(y, crown, 3, true, &mut put);
+                }
+                self.crown_layer(crown + 1, crown, 2, true, &mut put);
+            }
+            TreeShape::None => unreachable!(),
+        }
+    }
+
+    fn round_radii(&self) -> &[i32] {
+        if self.large {
+            let radii = &[1, 2, 3, 3, 3, 3, 2, 1];
+            // Leave room below the crown for branches even with the
+            // shortest permitted registry heights.
+            &radii[radii.len().saturating_sub((self.height - 1) as usize)..]
+        } else if self.height >= 6 {
+            &[1, 2, 3, 3, 2, 1]
+        } else {
+            &[1, 2, 2, 1]
+        }
+    }
+
+    fn blocks_above_ground(
+        &self,
+        mut height_at: impl FnMut(i32, i32) -> i32,
+        mut emit: impl FnMut(i32, i32, i32, BlockState),
+    ) {
+        let bottom = self.top
+            + match (self.shape, self.legacy) {
+                (TreeShape::Cone, true) => 1 + self.height / 2,
+                (_, true) => self.height - 2,
+                (TreeShape::Cone, false) => self.height - self.height / 2 - 1,
+                (TreeShape::Broad, false) => self.height - 1,
+                (TreeShape::Round, false) => {
+                    let crown_depth = self.round_radii().len() as i32;
+                    let branch_depth = if self.height >= 7 || self.large { 2 } else { 0 };
+                    self.height + 2 - crown_depth - branch_depth
+                }
+                (TreeShape::None, false) => unreachable!(),
+            };
+        let x0 = self.root.x - MAX_CROWN_RADIUS;
+        let z0 = self.root.z - MAX_CROWN_RADIUS;
+        let y0 = self.top + 1;
+        let heights: [[i32; CROWN_WIDTH]; CROWN_WIDTH] = std::array::from_fn(|z| {
+            std::array::from_fn(|x| height_at(x0 + x as i32, z0 + z as i32))
+        });
+        if heights.iter().flatten().all(|&height| height < bottom) {
+            self.blocks(emit);
+            return;
+        }
+
+        // A slope may cut a face path through a crown. Start at every
+        // placeable log and emit only the leaves it can still support.
+        let mut cells =
+            vec![[[blocks::AIR; CROWN_WIDTH]; CROWN_WIDTH]; (self.height + self.tip) as usize];
+        let mut queue = VecDeque::new();
+        self.blocks(|x, y, z, state| {
+            let [ix, iy, iz] = [(x - x0) as usize, (y - y0) as usize, (z - z0) as usize];
+            if y <= heights[iz][ix] {
+                return;
+            }
+            let cell = &mut cells[iy][iz][ix];
+            if *cell != blocks::OAK_LOG {
+                *cell = state;
+                if state == blocks::OAK_LOG {
+                    emit(x, y, z, state);
+                    queue.push_back(([ix as i32, iy as i32, iz as i32], 0));
+                }
+            }
+        });
+        while let Some(([x, y, z], distance)) = queue.pop_front() {
+            if distance == 6 {
+                continue;
+            }
+            for [nx, ny, nz] in [
+                [x - 1, y, z],
+                [x + 1, y, z],
+                [x, y - 1, z],
+                [x, y + 1, z],
+                [x, y, z - 1],
+                [x, y, z + 1],
+            ] {
+                if let Some(cell) = cells
+                    .get_mut(ny as usize)
+                    .and_then(|layer| layer.get_mut(nz as usize))
+                    .and_then(|row| row.get_mut(nx as usize))
+                    .filter(|cell| **cell == blocks::OAK_LEAVES)
+                {
+                    *cell = blocks::AIR;
+                    emit(x0 + nx, y0 + ny, z0 + nz, blocks::OAK_LEAVES);
+                    queue.push_back(([nx, ny, nz], distance + 1));
+                }
+            }
+        }
+    }
+
+    // Keep the original footprint for tree eligibility beside entrances and
+    // for trees that need it to leave the exit clear.
+    fn legacy_crown(&self, crown: i32, put: &mut impl FnMut(i32, i32, i32, BlockState)) {
         let mut layer = |y: i32, radius: i32, cross: bool| {
             for dz in -radius..=radius {
                 for dx in -radius..=radius {
                     let corner = dx.abs() == radius && dz.abs() == radius;
-                    // The four round crown corners vary independently per layer.
                     let bit =
                         ((dx + 2) + (dz + 2) * 5 + (y - crown + 3) * 25).rem_euclid(64) as u32;
                     if (cross && dx.abs() + dz.abs() > radius)
@@ -72,26 +273,75 @@ impl Tree {
                 }
             }
         };
-        match self.shape {
-            TreeShape::Round => {
-                layer(crown - 2, 2, false);
-                layer(crown - 1, 2, false);
-                layer(crown, 1, false);
-                layer(crown + 1, 1, true);
+        if self.shape == TreeShape::Cone {
+            let start = self.top + 1 + self.height / 2;
+            for y in start..=crown {
+                let radius = (2 - (y - start) % 3).min((crown - y + 1) / 2);
+                layer(y, radius, (y & 1) == (self.root.variation & 1) as i32);
             }
-            TreeShape::Cone => {
-                let start = self.top + 1 + self.height / 2;
-                for y in start..=crown {
-                    let remaining = crown - y;
-                    let radius = (2 - (y - start) % 3).min((remaining + 1) / 2);
-                    // Alternate full and cross tiers as the cone narrows upward.
-                    layer(y, radius, (y & 1) == (self.root.variation & 1) as i32);
+            for dy in 1..=self.tip {
+                layer(crown + dy, 0, false);
+            }
+        } else {
+            for (dy, radius, cross) in [(-2, 2, false), (-1, 2, false), (0, 1, false), (1, 1, true)]
+            {
+                layer(crown + dy, radius, cross);
+            }
+        }
+    }
+
+    fn crown_layer(
+        &self,
+        y: i32,
+        crown: i32,
+        radius: i32,
+        sparse: bool,
+        put: &mut impl FnMut(i32, i32, i32, BlockState),
+    ) {
+        let outer = radius * (radius + 1);
+        // Keep the radius-one cross intact. Every outer cell touches the
+        // retained inner disk by a face, even if its outer neighbours are gone.
+        let inner = ((radius - 1) * radius).max(1);
+        let layer_key = ((y - crown + 8) as u64) << 6;
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                let distance = dx * dx + dz * dz;
+                if distance > outer {
+                    continue;
                 }
-                for dy in 1..=self.tip {
-                    layer(crown + dy, 0, false);
+                if sparse && distance > inner {
+                    let cell = layer_key | ((dz + 3) as u64) << 3 | (dx + 3) as u64;
+                    if mix_stafford13(self.root.variation ^ cell) & 3 == 0 {
+                        continue;
+                    }
+                }
+                put(dx, y, dz, blocks::OAK_LEAVES);
+            }
+        }
+    }
+
+    fn branches(&self, bottom: i32, put: &mut impl FnMut(i32, i32, i32, BlockState)) {
+        let style = mix_stafford13(self.root.variation ^ 0x742d_6c0b_a9f1_358e);
+        let count = if self.large { 2 + style % 2 } else { style % 3 };
+        let start = ((style >> 8) & 3) as usize;
+        let directions = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+        for branch in 0..count as usize {
+            let (dx, dz) = directions[(start + branch) % directions.len()];
+            let bits = style >> (12 + 2 * branch);
+            let length = 1 + (bits & 1) as i32;
+            let y = bottom - 1 - ((bits >> 1) & 1) as i32;
+            for step in 1..=length {
+                put(dx * step, y, dz * step, blocks::OAK_LOG);
+            }
+            let (x, z) = (dx * length, dz * length);
+            for oz in -1..=1_i32 {
+                for ox in -1..=1_i32 {
+                    put(x + ox, y, z + oz, blocks::OAK_LEAVES);
+                    if ox.abs() + oz.abs() <= 1 {
+                        put(x + ox, y + 1, z + oz, blocks::OAK_LEAVES);
+                    }
                 }
             }
-            TreeShape::None => unreachable!(),
         }
     }
 }
@@ -100,8 +350,8 @@ impl TerrainGenerator {
     fn tree(
         &self,
         root: Candidate,
-        entrances: &[crate::entrances::Entrance],
-        height_at: impl Fn(i32, i32) -> i32,
+        entrances: &[Entrance],
+        mut height_at: impl FnMut(i32, i32) -> i32,
     ) -> Option<Tree> {
         let top = height_at(root.x, root.z);
         if top <= SEA_LEVEL {
@@ -140,27 +390,28 @@ impl TerrainGenerator {
         {
             return None;
         }
-        let [min, max] = b.tree_height;
-        let height = i32::from(min) + (root.variation % u64::from(max - min + 1)) as i32;
-        let tip = if b.tree_shape == TreeShape::Cone {
-            1 + ((root.variation >> 8) & 1) as i32
-        } else {
-            1
+        let tree = Tree::new(root, top, b.tree_shape, b.tree_height);
+        if entrances.is_empty() && tree.fits_world() {
+            return Some(tree);
+        }
+
+        let legacy = Tree {
+            height: Tree::normal_height(root, b.tree_height),
+            large: false,
+            legacy: true,
+            ..tree
         };
-        let tree = (top + height + tip < MIN_Y + HEIGHT).then_some(Tree {
-            root,
-            top,
-            height,
-            shape: b.tree_shape,
-            tip,
-        })?;
-        // Preserve the stair passage's jump clearance, including crowns whose
-        // roots are outside the passage or in a neighbouring chunk.
-        let mut obstructs = false;
-        tree.blocks(|x, y, z, _| {
-            obstructs |= entrances.iter().any(|e| e.contains(x, y, z));
-        });
-        (!obstructs).then_some(tree)
+        if !legacy.fits_world()
+            || (!entrances.is_empty() && legacy.obstructs(entrances, Entrance::contains))
+        {
+            return None;
+        }
+        if !tree.fits_world()
+            || (!entrances.is_empty() && tree.obstructs(entrances, Tree::obstructs_exit))
+        {
+            return Some(legacy);
+        }
+        Some(tree)
     }
 
     pub(crate) fn plant_trees(
@@ -168,9 +419,10 @@ impl TerrainGenerator {
         chunk: &mut Chunk,
         cx: i32,
         cz: i32,
-        entrances: &[crate::entrances::Entrance],
-        height_at: impl Fn(i32, i32) -> i32,
+        entrances: &[Entrance],
+        mut local_height: impl FnMut(i32, i32) -> i32,
     ) {
+        let mut height_at = |x, z| local_height(x - cx * 16, z - cz * 16);
         let max_density = BIOMES.iter().map(|b| b.tree_density).fold(0.0, f64::max);
         // Four interior plots plus one halo plot on each side: exactly 6 x 6.
         for qz in cz * 4 - 1..=cz * 4 + 4 {
@@ -183,10 +435,8 @@ impl TerrainGenerator {
                 {
                     continue;
                 }
-                if let Some(tree) =
-                    self.tree(root, entrances, |x, z| height_at(x - cx * 16, z - cz * 16))
-                {
-                    tree.blocks(|x, y, z, state| {
+                if let Some(tree) = self.tree(root, entrances, &mut height_at) {
+                    tree.blocks_above_ground(&mut height_at, |x, y, z, state| {
                         let (x, z) = (x - cx * 16, z - cz * 16);
                         if (0..16).contains(&x) && (0..16).contains(&z) {
                             let old = chunk.get(x as usize, y, z as usize);
@@ -209,10 +459,11 @@ impl TerrainGenerator {
         let entrances = self.entrances_for_chunk(
             root.x.div_euclid(16),
             root.z.div_euclid(16),
-            MAX_CROWN_RADIUS,
+            TREE_ENTRANCE_HALO,
         );
-        if let Some(tree) = self.tree(root, &entrances, |x, z| self.surface_y(x, z)) {
-            tree.blocks(|x, y, z, state| result.push((x, y, z, state)));
+        let mut surface = self.surface_sampler();
+        if let Some(tree) = self.tree(root, &entrances, &mut surface) {
+            tree.blocks_above_ground(surface, |x, y, z, state| result.push((x, y, z, state)));
         }
         result
     }
@@ -221,7 +472,7 @@ impl TerrainGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::BTreeMap;
 
     #[test]
     fn generated_tree_shapes_have_leaf_paths_to_logs_within_six_steps() {
@@ -235,43 +486,89 @@ mod tests {
                         continue;
                     }
                     trees += 1;
-                    // Match placement precedence where the trunk and crown overlap.
-                    let mut blocks = BTreeMap::new();
-                    let mut queue = VecDeque::new();
-                    for (x, y, z, state) in emitted {
-                        let pos = [x, y, z];
-                        if state == blocks::OAK_LOG {
-                            blocks.insert(pos, 0);
-                            queue.push_back((pos, 0));
-                        } else {
-                            blocks.entry(pos).or_insert(7);
-                        }
-                    }
-                    while let Some(([x, y, z], distance)) = queue.pop_front() {
-                        if distance == 6 {
-                            continue;
-                        }
-                        for pos in [
-                            [x - 1, y, z],
-                            [x + 1, y, z],
-                            [x, y - 1, z],
-                            [x, y + 1, z],
-                            [x, y, z - 1],
-                            [x, y, z + 1],
-                        ] {
-                            if let Some(steps @ 7) = blocks.get_mut(&pos) {
-                                *steps = distance + 1;
-                                queue.push_back((pos, *steps));
-                            }
-                        }
-                    }
-                    for (pos, steps) in blocks {
-                        assert!(steps <= 6, "seed={seed}, plot={qx},{qz}, leaf={pos:?}");
-                    }
+                    assert_leaf_paths(emitted, (seed, qx, qz));
                 }
             }
         }
         assert!(trees > 100);
+        for shape in [TreeShape::Round, TreeShape::Cone, TreeShape::Broad] {
+            for variation in 0..128 {
+                for height in 3..=12 {
+                    let tree = sample_tree(shape, height, variation);
+                    let mut emitted = Vec::new();
+                    tree.blocks(|x, y, z, state| emitted.push((x, y, z, state)));
+                    assert_leaf_paths(emitted, (shape, height, variation));
+                }
+            }
+        }
+    }
+
+    fn assert_leaf_paths(
+        emitted: impl IntoIterator<Item = (i32, i32, i32, BlockState)>,
+        context: impl std::fmt::Debug,
+    ) {
+        // Match placement precedence where the logs and leaves overlap.
+        let mut blocks = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        for (x, y, z, state) in emitted {
+            let pos = [x, y, z];
+            if state == blocks::OAK_LOG {
+                blocks.insert(pos, 0);
+                queue.push_back((pos, 0));
+            } else {
+                blocks.entry(pos).or_insert(7);
+            }
+        }
+        while let Some(([x, y, z], distance)) = queue.pop_front() {
+            if distance == 6 {
+                continue;
+            }
+            for pos in [
+                [x - 1, y, z],
+                [x + 1, y, z],
+                [x, y - 1, z],
+                [x, y + 1, z],
+                [x, y, z - 1],
+                [x, y, z + 1],
+            ] {
+                if let Some(steps @ 7) = blocks.get_mut(&pos) {
+                    *steps = distance + 1;
+                    queue.push_back((pos, *steps));
+                }
+            }
+        }
+        for (pos, steps) in blocks {
+            assert!(steps <= 6, "{context:?}, leaf={pos:?}");
+        }
+    }
+
+    #[test]
+    fn slopes_cannot_leave_an_isolated_leaf() {
+        let isolated = (2, 104, 16, blocks::OAK_LEAVES);
+        let tree = (0..128)
+            .map(|variation| sample_tree(TreeShape::Broad, 4, variation))
+            .find(|tree| {
+                let mut reaches_edge = false;
+                tree.blocks(|x, y, z, state| reaches_edge |= (x, y, z, state) == isolated);
+                reaches_edge
+            })
+            .unwrap();
+        let mut emitted = Vec::new();
+        tree.blocks_above_ground(
+            |x, z| {
+                if x <= tree.root.x || (x, z) == (2, 16) {
+                    100
+                } else {
+                    105
+                }
+            },
+            |x, y, z, state| emitted.push((x, y, z, state)),
+        );
+        assert!(!emitted.contains(&isolated));
+        assert!(emitted
+            .iter()
+            .any(|&(_, _, _, state)| state == blocks::OAK_LEAVES));
+        assert_leaf_paths(emitted, "crown clipped by a slope");
     }
 
     #[test]
@@ -399,40 +696,137 @@ mod tests {
         }
     }
 
+    fn sample_tree(shape: TreeShape, height: u8, variation: u64) -> Tree {
+        Tree::new(
+            Candidate {
+                x: -1,
+                z: 16,
+                r: 0.0,
+                variation: mix_stafford13(variation),
+            },
+            100,
+            shape,
+            [height, height],
+        )
+    }
+
     #[test]
-    fn both_shapes_vary_and_respect_height_and_radius() {
-        for shape in [TreeShape::Round, TreeShape::Cone] {
+    fn all_shapes_vary_and_respect_height_and_radius() {
+        let (mut large, mut branched, mut wide_cone, mut narrow_cone) = (0, 0, 0, 0);
+        for shape in [TreeShape::Round, TreeShape::Cone, TreeShape::Broad] {
             let mut counts = Vec::new();
-            for variation in 0..64 {
+            for variation in 0..128 {
                 for height in 3..=12 {
-                    let tree = Tree {
-                        root: Candidate {
-                            x: -1,
-                            z: 16,
-                            r: 0.0,
-                            variation,
-                        },
-                        top: 100,
-                        height,
-                        shape,
-                        tip: 1 + (variation & 1) as i32,
-                    };
+                    let tree = sample_tree(shape, height, variation);
+                    if tree.large {
+                        large += 1;
+                        assert!(
+                            (i32::from(height) + 3..=i32::from(height) + 5).contains(&tree.height)
+                        );
+                    } else {
+                        assert_eq!(tree.height, i32::from(height));
+                    }
+                    let mut trunk = Vec::new();
+                    let mut branch_starts = 0;
+                    let mut max_radius = 0;
                     let mut count = 0;
                     tree.blocks(|x, y, z, state| {
-                        assert!(
-                            (x + 1).abs() <= MAX_CROWN_RADIUS && (z - 16).abs() <= MAX_CROWN_RADIUS
-                        );
+                        let (dx, dz) = ((x - tree.root.x).abs(), (z - tree.root.z).abs());
+                        let radius = dx.max(dz);
+                        max_radius = max_radius.max(radius);
+                        assert!(radius <= MAX_CROWN_RADIUS);
+                        assert!((101..=100 + tree.height + tree.tip).contains(&y));
                         if state == blocks::OAK_LOG {
-                            assert_eq!((x, z), (-1, 16));
-                            assert!((101..=100 + height).contains(&y));
+                            assert!(y <= 100 + tree.height);
+                            if radius == 0 {
+                                trunk.push(y);
+                            } else {
+                                assert_eq!(shape, TreeShape::Round);
+                                assert!(tree.height >= 7 || tree.large);
+                                assert!(dx + dz <= 2);
+                                branch_starts += usize::from(radius == 1);
+                            }
                         }
                         count += 1;
                     });
+                    assert_eq!(trunk, (101..=100 + tree.height).collect::<Vec<_>>());
+                    if tree.large {
+                        assert!((2..=3).contains(&branch_starts));
+                    } else {
+                        assert!(branch_starts <= 2);
+                        branched += usize::from(branch_starts > 0);
+                    }
+                    if shape == TreeShape::Cone {
+                        wide_cone += usize::from(max_radius == 3);
+                        narrow_cone += usize::from((1..=2).contains(&max_radius));
+                    }
                     counts.push(count);
                 }
             }
             assert!(counts.windows(2).any(|w| w[0] != w[1]));
         }
+        assert!(
+            large > 0 && branched > 0 && wide_cone > 0 && narrow_cone > 0,
+            "large={large}, branched={branched}, wide={wide_cone}, narrow={narrow_cone}"
+        );
+    }
+
+    #[test]
+    fn taller_trees_have_more_crown_leaves_on_average() {
+        for shape in [TreeShape::Round, TreeShape::Cone] {
+            let totals = [4, 9].map(|height| {
+                (0..128)
+                    .map(|variation| sample_tree(shape, height, variation))
+                    .filter(|tree| !tree.large)
+                    .map(|tree| {
+                        let mut placed = BTreeMap::new();
+                        tree.blocks(|x, y, z, state| {
+                            if state == blocks::OAK_LOG {
+                                placed.insert((x, y, z), state);
+                            } else {
+                                placed.entry((x, y, z)).or_insert(state);
+                            }
+                        });
+                        placed
+                            .values()
+                            .filter(|&&state| state == blocks::OAK_LEAVES)
+                            .count()
+                    })
+                    .sum::<usize>()
+            });
+            assert!(totals[1] > totals[0], "{shape:?}: {totals:?}");
+        }
+    }
+
+    #[test]
+    fn real_plots_have_large_and_branched_trees_and_repeat_exactly() {
+        let terrain = TerrainGenerator::new(2026);
+        let (mut large, mut branched) = (0, 0);
+        for qz in -12..16 {
+            for qx in -12..16 {
+                let root = Candidate::new(2026, qx, qz);
+                let emitted = terrain.tree_blocks(qx, qz);
+                assert_eq!(emitted, terrain.tree_blocks(qx, qz));
+                let max_height = BIOMES[terrain.biome_at(root.x, root.z) as usize].tree_height[1];
+                let mut trunk = 0;
+                let mut branch = false;
+                for (x, _, z, state) in emitted {
+                    if state == blocks::OAK_LOG {
+                        if (x, z) == (root.x, root.z) {
+                            trunk += 1;
+                        } else {
+                            branch = true;
+                        }
+                    }
+                }
+                large += usize::from(trunk > max_height);
+                branched += usize::from(trunk <= max_height && branch);
+            }
+        }
+        assert!(
+            large > 0 && branched > 0,
+            "large={large}, branched={branched}"
+        );
     }
 
     #[test]
