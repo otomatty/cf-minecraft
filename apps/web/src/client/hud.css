@@ -1,0 +1,103 @@
+:root { --hud-pixel: 2px; }
+@media (max-width: 375px) {
+	:root { --hud-pixel: 1px; }
+}
+
+#crosshair, #eat-progress, #hotbar, #vitals {
+	position: fixed;
+	left: 50%;
+	transform: translateX(-50%);
+	pointer-events: none;
+	image-rendering: pixelated;
+}
+#crosshair {
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 18px;
+	height: 18px;
+	background: url("./vanilla/hud/crosshair.png") center / contain no-repeat;
+	mix-blend-mode: difference;
+}
+#hotbar {
+	bottom: 10px;
+	display: flex;
+	padding: 0 var(--hud-pixel);
+	background: url("./vanilla/hud/hotbar.png") center / 100% 100%;
+}
+#hotbar canvas {
+	width: calc(16 * var(--hud-pixel));
+	height: calc(16 * var(--hud-pixel));
+	padding: calc(3 * var(--hud-pixel)) calc(2 * var(--hud-pixel));
+	box-sizing: content-box;
+	image-rendering: pixelated;
+}
+#hotbar::after {
+	content: "";
+	position: absolute;
+	left: calc((20 * var(--selected-slot, 0) - 1) * var(--hud-pixel));
+	top: calc(-1 * var(--hud-pixel));
+	width: calc(24 * var(--hud-pixel));
+	height: calc(24 * var(--hud-pixel));
+	background: url("./vanilla/hud/selected_hotbar_slot.png") center / contain;
+}
+#vitals {
+	bottom: calc(14px + 22 * var(--hud-pixel));
+	width: calc(182 * var(--hud-pixel));
+}
+.vital-row, #vital-meters { display: flex; }
+#vital-meters { justify-content: space-between; }
+#food, #air { flex-direction: row-reverse; }
+#air { margin-bottom: var(--hud-pixel); }
+.vital-row[hidden], .vital-row span[hidden] { display: none; }
+.heart, .food, .bubble {
+	width: calc(9 * var(--hud-pixel));
+	height: calc(9 * var(--hud-pixel));
+	image-rendering: pixelated;
+	background-size: 100% 100%;
+}
+.heart + .heart { margin-left: calc(-1 * var(--hud-pixel)); }
+.food + .food, .bubble + .bubble { margin-right: calc(-1 * var(--hud-pixel)); }
+.heart { background-image: var(--fill, none), url("./vanilla/hud/heart_background.png"); }
+.heart[data-state="full"] { --fill: url("./vanilla/hud/heart.png"); }
+.heart[data-state="half"] { --fill: url("./vanilla/hud/heart_half.png"); }
+.food { background-image: var(--fill, none), url("./vanilla/hud/hunger_background.png"); }
+.food[data-state="full"] { --fill: url("./vanilla/hud/hunger_full.png"); }
+.food[data-state="half"] { --fill: url("./vanilla/hud/hunger_half.png"); }
+.bubble { background-image: url("./vanilla/hud/bubble.png"); }
+
+#eat-progress {
+	top: calc(50% + 18px);
+	width: 52px;
+	height: 10px;
+	border: 0;
+	appearance: none;
+	background: url("./vanilla/hud/empty_progress_bar.png") center / 100% 100%;
+}
+#eat-progress::-webkit-progress-bar { background: transparent; }
+#eat-progress::-webkit-progress-value { background: url("./vanilla/hud/filled_progress_bar.png") left / 52px 10px; }
+#eat-progress::-moz-progress-bar { background: url("./vanilla/hud/filled_progress_bar.png") left / 52px 10px; }
+
+.furnace-gauges { display: flex; align-items: start; gap: 20px; margin: 8px 0 14px; }
+.furnace-gauges label { display: grid; justify-items: center; gap: 4px; }
+.furnace-meter {
+	position: relative;
+	image-rendering: pixelated;
+	background-size: 100% 100%;
+}
+.furnace-meter::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background-size: 100% 100%;
+}
+.furnace-meter progress { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
+.furnace-burn { width: 26px; height: 26px; background-image: url("./vanilla/hud/flame_empty_image.png"); }
+.furnace-burn::after {
+	background-image: url("./vanilla/hud/flame_full_image.png");
+	clip-path: inset(calc(100% - var(--progress, 0%)) 0 0);
+}
+.furnace-smelt { width: 44px; height: 30px; background-image: url("./vanilla/hud/arrow_inactive.png"); }
+.furnace-smelt::after {
+	background-image: url("./vanilla/hud/arrow_active.png");
+	clip-path: inset(0 calc(100% - var(--progress, 0%)) 0 0);
+}

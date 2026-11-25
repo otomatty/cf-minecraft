@@ -9,6 +9,9 @@ export interface MobCube {
 	/** Width, height and depth of the UV net in texels when they differ from the model dimensions. */
 	readonly uvSize?: Vec3;
 	readonly mirror?: boolean;
+	/** Quarter turn about X in the Bedrock rest pose, applied before the bone pose. */
+	readonly pitch90Around?: Vec3;
+	readonly inflate?: number;
 }
 
 export interface MobBone {
@@ -30,8 +33,7 @@ export interface MobBone {
 export interface MobSkin {
 	readonly width: number;
 	readonly height: number;
-	/** Get a new top-down RGBA8 buffer when uploading the skin. */
-	pixels(): Uint8Array<ArrayBuffer>;
+	readonly url: URL;
 }
 
 export interface MobAsset {

@@ -22,8 +22,7 @@ import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection, type Vec3 } from "./math.ts";
 import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
-import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels } from "./flora-textures.ts";
+import { fluidFrame, FLUID_FRAMES, grassSideAtlasPixels } from "./block-textures.ts";
 import { hasItemTexture } from "./item-textures.ts";
 import type { PlayerNames } from "./player-names.ts";
 
@@ -49,7 +48,7 @@ struct Globals {
 	camFrac: vec4<f32>,
 	fogColor: vec4<f32>,
 	fogRange: vec4<f32>,
-	waterLayers: vec4<u32>,
+	fluidLayers: vec4<u32>,
 	skyColor: vec4<f32>,
 	sunset: vec4<f32>,
 	celestial: vec4<f32>,
@@ -124,13 +123,15 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	if (__ISOTROPIC_FACE__) {
 		out.uv = rotatedBlockUV(origins[section].xyz + vec3<i32>(local), face, out.uv);
 	}
+	if (out.layer == __LAVA_LAYER__u) { out.layer = g.fluidLayers.z; }
+	else if (out.layer == __LAVA_FLOW_LAYER__u) { out.layer = g.fluidLayers.w; }
 	out.tintColor = vec3<f32>(1.0);
 	if (((a.y >> 12u) & 1u) == 1u) {
 		var tintLayer = 0;
 		if (__LEAVES_LAYERS__) { tintLayer = 1; }
 		if (out.layer == __WATER_LAYER__u || out.layer == __FLOW_LAYER__u) {
 			tintLayer = 2;
-			out.layer = select(g.waterLayers.x, g.waterLayers.y, out.layer == __FLOW_LAYER__u);
+			out.layer = select(g.fluidLayers.x, g.fluidLayers.y, out.layer == __FLOW_LAYER__u);
 		}
 		let worldXZ = vec2<f32>(origins[section].xz & vec2<i32>(1023)) + local.xz;
 		let uv = worldXZ / 4.0 / 256.0;
@@ -147,7 +148,7 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 }
 
 override renderLayer: u32 = 0u;
-// 0 = terrain, 1 = drops and crack overlays, 2 = mob skins, 3 = flames and explosion particles.
+// 0 = terrain, 1 = drops, 2 = mob skins, 3 = flames and explosion particles, 4 = mining overlays.
 override entityPass: u32 = 0u;
 
 @vertex
@@ -166,6 +167,8 @@ fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
+	// Unmarked texels are white. Multiply the already lit block by the crack mask.
+	if (entityPass == 4u) { return vec4<f32>(mix(vec3<f32>(1.0), pixel.rgb, pixel.a), 1.0); }
 	var color = pixel.rgb;
 	var shade = in.shade;
 	if (entityPass == 2u) {
@@ -206,12 +209,14 @@ export function terrainShader(textureNames: readonly string[]): string {
 		.replace("__DROP_ALPHA_TEST__", dropAlphaTest(textureNames))
 		.replace("__LEAVES_LAYERS__", matches(leaves))
 		.replaceAll("__FLOW_LAYER__", String(textureNames.indexOf("water_flow") >>> 0))
+		.replace("__LAVA_FLOW_LAYER__", String(textureNames.indexOf("lava_flow") >>> 0))
+		.replace("__LAVA_LAYER__", String(textureNames.indexOf("lava") >>> 0))
 		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
 }
 
 const cutoutBlockTextures = new Set([
 	"glass", "oak_leaves", "oak_leaves_dense", "red_flower", "yellow_flower", "short_grass",
-	"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe",
+	"wheat_sprout", "wheat_stage_1", "wheat_shoot", "wheat_stage_3", "wheat_stage_4", "wheat_green", "wheat_stage_6", "wheat_ripe",
 ]);
 
 export function usesCutoutMips(name: string): boolean {
@@ -239,7 +244,7 @@ struct Globals {
 	camFrac: vec4<f32>,
 	fogColor: vec4<f32>,
 	fogRange: vec4<f32>,
-	waterLayers: vec4<u32>,
+	fluidLayers: vec4<u32>,
 	skyColor: vec4<f32>,
 	sunset: vec4<f32>,
 	celestial: vec4<f32>,
@@ -419,6 +424,7 @@ export class Renderer {
 	private readonly globalsF32 = new Float32Array(this.globalsData);
 	private readonly globalsI32 = new Int32Array(this.globalsData);
 	private readonly firstWaterFrame: number;
+	private readonly firstLavaFrame: number;
 	private readonly firstFlameFrame: number;
 	private readonly firstExplosionFrame: number;
 	/** Pixels of every texture layer, for UI thumbnails. */
@@ -427,7 +433,7 @@ export class Renderer {
 
 	private readonly heldItemTextures: ReadonlyMap<string, number>;
 
-	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[], playerNames: PlayerNames) {
+	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[], playerNames: PlayerNames, skins: ImageBitmap[]) {
 		this.playerNames = playerNames;
 		this.heldItemTextures = new Map(textureNames.map((name, index) => [name, index]));
 		this.crackTextureBase = textureNames.length;
@@ -468,8 +474,14 @@ export class Renderer {
 			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
 		});
 		if (textureNames.includes("water") || textureNames.includes("water_flow")) {
-			for (const flowing of [false, true]) {
-				for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) tiles.push(waterTextureFrame(frame, flowing));
+			for (const name of ["water", "water_flow"] as const) {
+				for (let frame = 0; frame < FLUID_FRAMES[name]; frame++) tiles.push(fluidFrame(name, frame));
+			}
+		}
+		this.firstLavaFrame = tiles.length;
+		if (textureNames.includes("lava") || textureNames.includes("lava_flow")) {
+			for (const name of ["lava", "lava_flow"] as const) {
+				for (let frame = 0; frame < FLUID_FRAMES[name]; frame++) tiles.push(fluidFrame(name, frame));
 			}
 		}
 		this.firstFlameFrame = tiles.length;
@@ -509,11 +521,11 @@ export class Renderer {
 		// Keep each UV island at native resolution, including the chicken's half-height skin.
 		const mobSkins = device.createTexture({
 			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, entitySkins.length], format: "rgba8unorm",
-			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
 		});
-		for (const [layer, skin] of entitySkins.entries()) {
-			device.queue.writeTexture({ texture: mobSkins, origin: [0, 0, layer] }, skin.pixels(),
-				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
+		for (const [layer, skin] of skins.entries()) {
+			device.queue.copyExternalImageToTexture({ source: skin }, { texture: mobSkins, origin: [0, 0, layer] },
+				[skin.width, skin.height]);
 		}
 
 		const skyArt = device.createTexture({ size: [TEX_SIZE, TEX_SIZE, 10], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -592,16 +604,17 @@ export class Renderer {
 			},
 			fragment: {
 				module: terrainModule, entryPoint: "fs",
-				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
+				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "cracks" ? 4 : kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
 				targets: [{
 					format: this.format,
 					...(kind === "cracks" ? { blend: {
-						color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const },
-						alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const },
+						color: { srcFactor: "dst" as const, dstFactor: "zero" as const },
+						alpha: { srcFactor: "zero" as const, dstFactor: "one" as const },
 					} } : {}),
 				}],
 			},
-			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
+			// Bedrock cutout skins can put a leg or a rib on just one face of its box.
+			primitive: { topology: "triangle-list", cullMode: kind === "mobs" ? "none" : "back", frontFace: "ccw" },
 			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks", depthCompare: "less" },
 		});
 		this.items = entityPipeline("drops");
@@ -680,7 +693,21 @@ export class Renderer {
 		const device = await adapter.requestDevice();
 		const info = adapter.info;
 		const label = [info.vendor, info.architecture, info.description].filter(Boolean).join(" ") || "unknown adapter";
-		return new Renderer(canvas, device, label, textureNames, playerNames);
+		const skins = await Promise.all(entitySkins.map(async ({ url, width, height }) => {
+			const response = await fetch(url);
+			if (!response.ok) throw new Error(`Failed to load mob skin: ${url.pathname} (${response.status})`);
+			const image = await createImageBitmap(await response.blob(), { colorSpaceConversion: "none" });
+			if (image.width !== width || image.height !== height) {
+				image.close();
+				throw new Error(`Unexpected mob skin dimensions: ${url.pathname}`);
+			}
+			return image;
+		}));
+		try {
+			return new Renderer(canvas, device, label, textureNames, playerNames, skins);
+		} finally {
+			for (const skin of skins) skin.close();
+		}
 	}
 
 	/** Replaces (or removes, when empty) the mesh of one section. */
@@ -774,8 +801,11 @@ export class Renderer {
 		const fogEnd = viewDistance * 16;
 		f.set([fogEnd * 0.75, fogEnd, 0, 0], 28);
 		const tick = Math.floor(dayTime);
-		i[32] = this.firstWaterFrame + Math.floor(tick / 2) % WATER_FRAME_COUNT;
-		i[33] = this.firstWaterFrame + WATER_FRAME_COUNT + tick % WATER_FRAME_COUNT;
+		// Power-of-two flipbooks also wrap when a world clock starts before tick zero.
+		i[32] = this.firstWaterFrame + (Math.floor(tick / 2) & (FLUID_FRAMES.water - 1));
+		i[33] = this.firstWaterFrame + FLUID_FRAMES.water + (tick & (FLUID_FRAMES.water_flow - 1));
+		i[34] = this.firstLavaFrame + (Math.floor(tick / 16) & (FLUID_FRAMES.lava - 1));
+		i[35] = this.firstLavaFrame + FLUID_FRAMES.lava + (Math.floor(tick / 10) & (FLUID_FRAMES.lava_flow - 1));
 		f.set([...sky.skyColor, sky.skyBrightness], 36);
 		f.set([...sky.sunsetColor, sky.sunsetStrength], 40);
 		f.set([sky.angle, sky.starBrightness, sky.moonPhase, 0], 44);

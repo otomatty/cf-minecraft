@@ -738,9 +738,10 @@ mod tests {
             assert_eq!(mesh_section_layers(&padded, None, &mut out), [10, 0, 0]);
             let mut tops = 0;
             for vertex in out.as_chunks::<2>().0 {
-                assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[UP]));
+                let face = ((vertex[0] >> 27) & 7) as usize;
+                assert_eq!(vertex[1] & 4095, u32::from(blocks::info(state).tex[face]));
                 assert_eq!((vertex[1] >> 12) & 1, 0);
-                if (vertex[0] >> 27) & 7 == UP as u32 {
+                if face == UP {
                     assert_eq!(position(vertex)[1], 80 + height);
                     assert_eq!(vertex[1] >> 31, lowered);
                     tops += 1;

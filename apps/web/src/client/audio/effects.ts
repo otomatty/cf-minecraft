@@ -26,6 +26,8 @@ const mobs: readonly Timbre[] = [
 	{ duration: 0.39, tone: [81, 51, 0.22, "sawtooth"], noise: [330, 0.21, "bandpass"] },
 	{ duration: 0.17, tone: [440, 170, 0.12, "triangle"], noise: [2430, 0.34, "bandpass"] },
 	{ duration: 0.23, noise: [950, 0.35, "highpass"] },
+	{ duration: 0.40, tone: [72, 44, 0.22, "sawtooth"], noise: [380, 0.22, "bandpass"] }, // husk
+	{ duration: 0.19, tone: [415, 160, 0.12, "triangle"], noise: [2180, 0.34, "bandpass"] }, // stray
 ];
 
 type OtherSound = Exclude<Sound["kind"], "break" | "place" | "dig" | "step" | "mobHurt" | "mobDeath">;

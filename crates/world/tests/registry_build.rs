@@ -259,12 +259,12 @@ fn crop_states_resolve_their_overrides_and_hoes_build_as_tools() {
     }
     for (age, texture) in [
         "wheat_sprout",
-        "wheat_sprout",
+        "wheat_stage_1",
         "wheat_shoot",
-        "wheat_shoot",
+        "wheat_stage_3",
+        "wheat_stage_4",
         "wheat_green",
-        "wheat_green",
-        "wheat_green",
+        "wheat_stage_6",
         "wheat_ripe",
     ]
     .into_iter()
@@ -299,7 +299,27 @@ fn crop_states_resolve_their_overrides_and_hoes_build_as_tools() {
 
 #[test]
 fn farming_preserves_existing_generated_block_entries() {
-    let output = generate_fixture(BLOCKS, BIOMES).unwrap();
+    // The workbench subsequently gained distinct north/south artwork. Check the
+    // current faces, then compare the original prefix under its historical mapping.
+    let faces = world::blocks::info(world::blocks::CRAFTING_TABLE)
+        .tex
+        .map(|i| world::blocks::TEXTURES[i as usize]);
+    assert_eq!(
+        faces,
+        [
+            "crafting_table_bottom",
+            "crafting_table_top",
+            "crafting_table_front",
+            "crafting_table_front",
+            "crafting_table_side",
+            "crafting_table_side"
+        ]
+    );
+    let historical = BLOCKS.replace(
+        "north = \"crafting_table_front\"\nsouth = \"crafting_table_front\"\n",
+        "",
+    );
+    let output = generate_fixture(&historical, BIOMES).unwrap();
     let mut lines = output.lines();
     let mut hash = world::Fnv64::new();
     let mut add = |line: &str| {

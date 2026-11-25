@@ -27,6 +27,7 @@ import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C }
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
+import { itemTexture } from "./item-textures.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
@@ -539,11 +540,20 @@ async function main(): Promise<void> {
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
 	const arrowItemId = items.find(item => item.name === "arrow")?.id;
+	const bowFrames = [0, 1, 2].map(stage => new ImageData(
+		new Uint8ClampedArray(itemTexture(`bow_pulling_${stage}`)!), TEX_SIZE, TEX_SIZE,
+	));
+	let shownBowStage = -1;
 	let usingItem: { kind: "food" | "bow"; item: number; count: number; startedAt: number } | null = null;
 	function endUsingItem(release = false): void {
 		if (!usingItem) return;
 		const bow = usingItem.kind === "bow";
 		usingItem = null;
+		if (bow && shownBowStage >= 0) {
+			const stack = core.inventory[selectedSlot];
+			paintItemIcon(slots[selectedSlot], stack?.item, stack?.damage);
+			shownBowStage = -1;
+		}
 		eatProgress.hidden = true;
 		if (connection !== "open") return;
 		if (bow && !release) {
@@ -591,11 +601,13 @@ async function main(): Promise<void> {
 		selectedSlot = slot;
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
+		hotbar.style.setProperty("--selected-slot", String(slot));
 	}
 	function syncInventory(): void {
 		const inventory = core.inventory;
 		paintInventoryScreen();
 		hotbarBlocks = hotbarStates(inventory, items);
+		shownBowStage = -1;
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
 			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage);
@@ -634,13 +646,16 @@ async function main(): Promise<void> {
 			}
 		}
 	}
-	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0): void {
+	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0, frame?: ImageData): void {
 		const item = items.find(item => item.id === id);
 		paintIcon(c, item?.block ?? 0);
 		if (item?.texture) {
 			c.width = c.height = TEX_SIZE;
-			const pixels = renderer.texturePixels.get(item.texture);
-			if (pixels) c.getContext("2d")!.putImageData(new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE), 0, 0);
+			if (!frame) {
+				const pixels = renderer.texturePixels.get(item.texture);
+				if (pixels) frame = new ImageData(textureIconPixels(item.texture, pixels), TEX_SIZE, TEX_SIZE);
+			}
+			if (frame) c.getContext("2d")!.putImageData(frame, 0, 0);
 		}
 		const max = item?.durability ?? null;
 		if (item) c.title = item.name;
@@ -899,7 +914,10 @@ async function main(): Promise<void> {
 				progress.setAttribute("aria-label", name);
 				progress.setAttribute("aria-valuemin", "0");
 				label.htmlFor = progress.id;
-				label.append(name, progress);
+				const art = document.createElement("span");
+				art.className = `furnace-meter ${progress.id}`;
+				art.append(progress);
+				label.append(name, art);
 				meters.append(label);
 				gauges.push(progress);
 			}
@@ -945,6 +963,7 @@ async function main(): Promise<void> {
 			const max = index === 0 ? total : 160;
 			gauge.max = Math.max(1, max);
 			gauge.value = value;
+			gauge.parentElement!.style.setProperty("--progress", `${100 * gauge.position}%`);
 			gauge.setAttribute("aria-valuenow", String(value));
 			gauge.setAttribute("aria-valuemax", String(max));
 			gauge.textContent = `${value} / ${max}`;
@@ -1589,6 +1608,14 @@ async function main(): Promise<void> {
 
 		// Include worker replies/uploads between frames as well as this frame's dispatch.
 		mainThreadMeshMs = fallbackMeshMs + meshPool.takeMainThreadMs();
+		if (usingItem?.kind === "bow") {
+			const draw = bowDraw(now);
+			const stage = draw >= 18 ? 2 : draw >= 14 ? 1 : 0;
+			if (stage !== shownBowStage) {
+				paintItemIcon(slots[selectedSlot], held?.item, held?.damage, bowFrames[stage]);
+				shownBowStage = stage;
+			}
+		}
 		if (usingItem?.kind === "food") eatProgress.value = Math.min(eatProgress.max, now - usingItem.startedAt);
 		if (core.gameMode === "survival" && !core.dead) {
 			const hit = mob === null ? block : null;

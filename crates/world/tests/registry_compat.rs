@@ -116,7 +116,17 @@ fn lava_and_obsidian_are_appended_with_their_render_mining_and_item_properties()
         assert_eq!(lava.emission, info(LAMP_BLOCK).emission);
         assert_eq!(lava.dig_ticks, None);
         assert_eq!(lava.tint, [false; 6]);
-        assert!(lava.tex.iter().all(|&tex| TEXTURES[tex as usize] == "lava"));
+        assert_eq!(
+            lava.tex.map(|tex| TEXTURES[tex as usize]),
+            [
+                "lava",
+                "lava",
+                "lava_flow",
+                "lava_flow",
+                "lava_flow",
+                "lava_flow"
+            ]
+        );
     }
     let obsidian = info(OBSIDIAN);
     assert!(is_full_opaque_cube(OBSIDIAN));

@@ -325,8 +325,7 @@ test("crop states and farming items use distinct painted textures", () => {
 	const crops = registry.filter(block => block.name === "wheat");
 	assert.deepEqual(crops.map(block => block.stateName), Array.from({ length: 8 }, (_, age) => `wheat[age=${age}]`));
 	assert.deepEqual(crops.map(block => block.texture), [
-		"wheat_sprout", "wheat_sprout", "wheat_shoot", "wheat_shoot",
-		"wheat_green", "wheat_green", "wheat_green", "wheat_ripe",
+		"wheat_sprout", "wheat_stage_1", "wheat_shoot", "wheat_stage_3", "wheat_stage_4", "wheat_green", "wheat_stage_6", "wheat_ripe",
 	]);
 	assert.notDeepEqual(paintTexture("farmland_dry"), paintTexture("farmland_moist"));
 	for (const name of ["wooden_hoe", "stone_hoe", "copper_hoe", "iron_hoe", "wheat_seeds", "wheat", "bread"]) {

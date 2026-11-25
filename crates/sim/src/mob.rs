@@ -31,6 +31,20 @@ struct MobSpec {
     loot: &'static [(u16, u8, u8)],
 }
 
+const ZOMBIE_SPEC: MobSpec = MobSpec {
+    width: 0.6,
+    height: 1.95,
+    head_offset: 1.74,
+    health: 20,
+    walk_forward: 0.5,
+    flee_forward: 0.0,
+    chase_forward: Some(0.6),
+    max_fall_speed: None,
+    takes_fall_damage: true,
+    burns_in_sunlight: true,
+    loot: items::ZOMBIE_LOOT,
+};
+
 const fn spec(kind: MobKind) -> &'static MobSpec {
     match kind {
         MobKind::Cow => &MobSpec {
@@ -85,20 +99,12 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             burns_in_sunlight: false,
             loot: items::SHEEP_LOOT,
         },
-        MobKind::Zombie => &MobSpec {
-            width: 0.6,
-            height: 1.95,
-            head_offset: 1.74,
-            health: 20,
-            walk_forward: 0.5,
-            flee_forward: 0.0,
-            chase_forward: Some(0.6),
-            max_fall_speed: None,
-            takes_fall_damage: true,
-            burns_in_sunlight: true,
-            loot: items::ZOMBIE_LOOT,
+        MobKind::Zombie => &ZOMBIE_SPEC,
+        MobKind::Husk => &MobSpec {
+            burns_in_sunlight: false,
+            ..ZOMBIE_SPEC
         },
-        MobKind::Skeleton => &MobSpec {
+        MobKind::Skeleton | MobKind::Stray => &MobSpec {
             width: 0.6,
             height: 1.99,
             head_offset: 1.74,
@@ -251,7 +257,8 @@ impl Mob {
             last_dry_pos: pos,
             egg_ticks: None,
             hostile: spec.chase_forward.map(|_| Hostile {
-                shot_ticks: (kind == MobKind::Skeleton).then_some(SKELETON_INITIAL_SHOT_TICKS),
+                shot_ticks: matches!(kind, MobKind::Skeleton | MobKind::Stray)
+                    .then_some(SKELETON_INITIAL_SHOT_TICKS),
                 fuse: (kind == MobKind::Creeper).then_some(0),
                 ..Hostile::default()
             }),
@@ -663,7 +670,7 @@ impl Mob {
             None
         } else if let Some(target) = chase {
             let [tx, ty, tz] = target;
-            if self.kind == MobKind::Skeleton
+            if matches!(self.kind, MobKind::Skeleton | MobKind::Stray)
                 && distance_squared(before, target) <= SKELETON_STOP_RANGE * SKELETON_STOP_RANGE
                 && clear_sight(world, self.eye(), [tx, ty + physics::EYE_HEIGHT, tz])
             {
@@ -1039,6 +1046,14 @@ fn hostile_kind(seed: i64, player: u32, time: i64) -> MobKind {
         0 => MobKind::Zombie,
         1 => MobKind::Skeleton,
         _ => MobKind::Creeper,
+    }
+}
+
+fn biome_hostile(kind: MobKind, biome: &str) -> MobKind {
+    match (kind, biome) {
+        (MobKind::Zombie, "dry_sands") => MobKind::Husk,
+        (MobKind::Skeleton, "quiet_snow" | "white_crest") => MobKind::Stray,
+        _ => kind,
     }
 }
 
@@ -1454,7 +1469,15 @@ impl Server {
         if self.world.local_block_light([x, candidate[1] as i32, z]) > 0 {
             return;
         }
-        self.spawn_mob(hostile_kind(self.seed, id, self.game_time), candidate);
+        let kind = hostile_kind(self.seed, id, self.game_time);
+        let kind = match &self.terrain {
+            Some(terrain) if !(roll >> 32).is_multiple_of(5) => biome_hostile(
+                kind,
+                world::biomes::BIOMES[terrain.biome_at(x, z) as usize].name,
+            ),
+            _ => kind,
+        };
+        self.spawn_mob(kind, candidate);
     }
 
     fn spawn_hostile_dark(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
@@ -4062,6 +4085,36 @@ mod tests {
         assert!(!decoded(&mut server)
             .iter()
             .any(|(_, packet)| matches!(packet, S2C::MobBurning { .. })));
+    }
+
+    #[test]
+    fn desert_and_snow_surface_variants_keep_their_combat_roles() {
+        assert_eq!(biome_hostile(MobKind::Zombie, "dry_sands"), MobKind::Husk);
+        assert_eq!(
+            biome_hostile(MobKind::Skeleton, "quiet_snow"),
+            MobKind::Stray
+        );
+        assert_eq!(
+            biome_hostile(MobKind::Skeleton, "white_crest"),
+            MobKind::Stray
+        );
+        assert_eq!(
+            biome_hostile(MobKind::Zombie, "quiet_snow"),
+            MobKind::Zombie
+        );
+        assert_eq!(
+            biome_hostile(MobKind::Skeleton, "dry_sands"),
+            MobKind::Skeleton
+        );
+        assert!(!spec(MobKind::Husk).burns_in_sunlight);
+        assert!(spec(MobKind::Stray).burns_in_sunlight);
+        let husk = Mob::new(MobKind::Husk, [0.0; 3]);
+        let stray = Mob::new(MobKind::Stray, [0.0; 3]);
+        assert!(husk.hostile.unwrap().shot_ticks.is_none());
+        assert_eq!(
+            stray.hostile.unwrap().shot_ticks,
+            Some(SKELETON_INITIAL_SHOT_TICKS)
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ textures = [
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
   "oak_leaves_dense",
+  "crafting_table_front", "wheat_stage_1", "wheat_stage_3", "wheat_stage_4", "wheat_stage_6", "lava_flow",
 ]
 legacy_count = 14
 
@@ -325,6 +326,8 @@ tool = "axe"
 min_tier = 0
 top = "crafting_table_top"
 side = "crafting_table_side"
+north = "crafting_table_front"
+south = "crafting_table_front"
 bottom = "crafting_table_bottom"
 
 [[blocks]]
@@ -372,12 +375,12 @@ layer = "cutout"
 texture = "wheat_sprout"
 states = [
   { properties = [["age", "0"]] },
-  { properties = [["age", "1"]] },
+  { properties = [["age", "1"]], texture = "wheat_stage_1" },
   { properties = [["age", "2"]], texture = "wheat_shoot" },
-  { properties = [["age", "3"]], texture = "wheat_shoot" },
-  { properties = [["age", "4"]], texture = "wheat_green" },
+  { properties = [["age", "3"]], texture = "wheat_stage_3" },
+  { properties = [["age", "4"]], texture = "wheat_stage_4" },
   { properties = [["age", "5"]], texture = "wheat_green" },
-  { properties = [["age", "6"]], texture = "wheat_green" },
+  { properties = [["age", "6"]], texture = "wheat_stage_6" },
   { properties = [["age", "7"]], texture = "wheat_ripe" },
 ]
 
@@ -407,6 +410,7 @@ name = "lava"
 id = 70
 unbreakable = true
 texture = "lava"
+side = "lava_flow"
 solid = false
 occludes = false
 cull_same = true
@@ -418,6 +422,7 @@ name = "flowing_lava"
 id = 71
 unbreakable = true
 texture = "lava"
+side = "lava_flow"
 solid = false
 occludes = false
 cull_same = true

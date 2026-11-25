@@ -31,28 +31,12 @@ test("mob frustum culling keeps partial models at the edge in camera-relative co
 	assert.equal(mobInFrustum({ ...mob, position: [eye[0], eye[1], eye[2] - 2] }, eye, planes), false);
 });
 
-test("player skin paints every humanoid face and keeps the existing mob layers", () => {
-	const { texture } = player;
-	assert.equal(texture.width, 64);
-	assert.equal(texture.height, 32);
+test("Steve uses the classic 64×64 skin and independent left limb UV islands", () => {
+	const { texture, bones } = player;
+	assert.deepEqual([texture.width, texture.height], [64, 64]);
 	assert.deepEqual(entitySkins, [...mobAssetsByKind.map(asset => asset.texture), texture]);
-	const pixels = texture.pixels();
-	assert.deepEqual(pixels, texture.pixels());
-	for (const bone of player.bones) {
-		for (const { uv: [u, v], size: [w, h, d] } of bone.cubes ?? []) {
-			for (const [x, y, width, height] of [[u + d, v, 2 * w, d], [u, v + d, 2 * (w + d), h]]) {
-				for (let row = y; row < y + height; row++) {
-					for (let col = x; col < x + width; col++) {
-						assert.equal(pixels[(row * texture.width + col) * 4 + 3], 255, `${bone.name} at ${col},${row}`);
-					}
-				}
-			}
-		}
-	}
-	const pixel = (x: number, y: number) => [...pixels.subarray((y * texture.width + x) * 4, (y * texture.width + x) * 4 + 3)];
-	const [red, green, blue] = pixel(22, 23);
-	assert.ok(green > blue && blue > red, "green jacket");
-	assert.notDeepEqual(pixel(9, 12), pixel(11, 12), "visible eyes");
+	assert.deepEqual(bones.find(bone => bone.name === "leftArm")?.cubes?.[0].uv, [32, 48]);
+	assert.deepEqual(bones.find(bone => bone.name === "leftLeg")?.cubes?.[0].uv, [16, 48]);
 });
 
 test("player head pitches independently and arms swing opposite their legs", () => {
@@ -224,15 +208,15 @@ test("non-block drops are rotating double-sided planes with full sprite UVs", ()
 
 const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
-const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95, 1.99, 1.625] as const;
+const renderedHeights = [1.3, 0.9, 0.7, 1.3, 1.95, 1.99, 1.625, 1.95, 1.99] as const;
 
 function component(vertices: Float32Array, index: number) {
 	return vertices.filter((_, i) => i % 9 === index);
 }
 
 test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton", "minecraft:creeper"]);
-	for (const kind of [0, 1, 2, 3, 4, 5, 6] as const) {
+	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton", "minecraft:creeper", "minecraft:husk", "minecraft:stray"]);
+	for (const kind of [0, 1, 2, 3, 4, 5, 6, 7, 8] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = mobAssetsByKind[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
@@ -304,10 +288,10 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 	const snoutFront = still.subarray(boxFloats + faceFloats, boxFloats + 2 * faceFloats);
 	const scale = 0.9 / 16;
 	assert.deepEqual([...new Set(component(snoutFront, 2))], [Math.fround(12 * scale)]);
-	// In the catalog, the snout's front stretches from u=33..37 and v=1..4.
+	// In the catalog, the snout's front stretches from u=17..21 and v=17..20.
 	for (let i = 0; i < snoutFront.length; i += 9) {
-		assert.equal(snoutFront[i + 3] * MOB_SKIN_SIZE, snoutFront[i] < 0.25 ? 33 : 37);
-		assert.equal(snoutFront[i + 4] * MOB_SKIN_SIZE, snoutFront[i + 1] === Math.fround(12 * scale) ? 1 : 4);
+		assert.equal(snoutFront[i + 3] * MOB_SKIN_SIZE, snoutFront[i] < 0.25 ? 17 : 21);
+		assert.equal(snoutFront[i + 4] * MOB_SKIN_SIZE, snoutFront[i + 1] === Math.fround(12 * scale) ? 17 : 20);
 	}
 
 	// A reflected model has to reverse triangle winding to survive back-face culling.
@@ -322,8 +306,8 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 		assert.ok(nx * (ax - centre[0]) + ny * (ay - centre[1]) + nz * (az - centre[2]) > 0);
 	}
 	// Opposite legs mirror their side rectangles as well as the horizontal UV.
-	assert.equal(still[3 * boxFloats + 3] * MOB_SKIN_SIZE, 44);
-	assert.equal(still[4 * boxFloats + 3] * MOB_SKIN_SIZE, 56);
+	assert.equal(still[3 * boxFloats + 3] * MOB_SKIN_SIZE, 0);
+	assert.equal(still[4 * boxFloats + 3] * MOB_SKIN_SIZE, 12);
 });
 
 test("walking swings the catalog leg bones around their pivots while the body and wings keep their pose", () => {
@@ -333,8 +317,12 @@ test("walking swings the catalog leg bones around their pivots while the body an
 		const moving = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
 		assert.deepEqual(mobVertices([{ ...mob, moving: true }], [0, 0, 0], 0), still);
 		const asset = mobAssetsByKind[kind];
-		const modelHeight = Math.max(...asset.bones.flatMap(b => (b.cubes ?? []).map(c => c.origin[1] + c.size[1])));
-		const scale = renderedHeights[kind] / modelHeight;
+		// The first leg reaches the ground, so its rest height exposes the rendered scale
+		// independently of torso cube rotations and fleece inflation.
+		const leg = asset.bones.find(b => b.name === "leg0")!;
+		const legIndex = asset.bones.slice(0, asset.bones.indexOf(leg)).reduce((n, b) => n + (b.cubes?.length ?? 0), 0);
+		const legTop = Math.max(...component(still.subarray(legIndex * boxFloats, (legIndex + 1) * boxFloats), 1));
+		const scale = legTop / leg.cubes![0].size[1];
 		let offset = 0;
 		for (const bone of asset.bones) {
 			const end = offset + (bone.cubes?.length ?? 0) * boxFloats;
@@ -359,31 +347,17 @@ test("walking swings the catalog leg bones around their pivots while the body an
 	}
 });
 
-test("sheep mesh keeps two fleece boxes, a forward face and four hooves at the world border", () => {
+test("sheep fleece wraps the body, head and upper legs while leaving the face and hooves exposed", () => {
 	const sheep: RenderMob = { kind: 3, position: [29999998.25, 1, -29999998.5], yaw: 0, moving: false, hurt: false, light: [15, 3] };
-	const still = mobVertices([sheep], sheep.position, 0);
-	assert.equal(still.length, 7 * boxFloats);
-	for (const [axis, min, max] of [[0, -0.42, 0.42], [1, 0, 1.2], [2, -0.4, 0.45]]) {
-		const coordinates = still.filter((_, i) => i % 9 === axis);
-		assert.equal(Math.min(...coordinates), Math.fround(min));
-		assert.equal(Math.max(...coordinates), Math.fround(max));
-	}
-	const frontFace = (box: number) => still.subarray(box * boxFloats + 6 * 9, box * boxFloats + 12 * 9);
-	for (const [box, left, top, width, height] of [
-		[0, 16, 16, 16, 16], [1, 16, 16, 16, 16], [2, 8, 40, 16, 16], [3, 52, 36, 4, 16],
-	]) {
-		const face = frontFace(box);
-		const u = component(face, 3), v = component(face, 4);
-		assert.equal(Math.min(...u) * MOB_SKIN_SIZE, left);
-		assert.equal(Math.max(...u) * MOB_SKIN_SIZE, left + width);
-		assert.equal(Math.min(...v) * MOB_SKIN_SIZE, top);
-		assert.equal(Math.max(...v) * MOB_SKIN_SIZE, top + height);
-	}
-	assert.ok(component(frontFace(2), 2).every(z => z === Math.fround(0.45)));
-	const moving = mobVertices([{ ...sheep, moving: true }], sheep.position, quarterStride);
-	for (const [leg, direction] of [[3, -1], [4, 1], [5, 1], [6, -1]]) {
-		const foot = leg * boxFloats + 9; // second vertex is at floor height
-		assert.equal(Math.sign(moving[foot + 2] - still[foot + 2]), direction);
+	const mesh = mobVertices([sheep], sheep.position, 0);
+	assert.equal(mesh.length, 12 * boxFloats);
+	const coords = (box: number, axis: number) => component(mesh.subarray(box * boxFloats, (box + 1) * boxFloats), axis);
+	assert.ok(Math.max(...coords(1, 0)) > Math.max(...coords(0, 0)));
+	assert.ok(Math.max(...coords(2, 2)) > Math.max(...coords(3, 2)));
+	for (const leg of [4, 6, 8, 10]) {
+		assert.equal(Math.min(...coords(leg, 1)), 0);
+		assert.ok(Math.min(...coords(leg + 1, 1)) > 0);
+		assert.ok(Math.max(...coords(leg + 1, 0)) > Math.max(...coords(leg, 0)));
 	}
 });
 

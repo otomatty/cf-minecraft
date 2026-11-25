@@ -1,21 +1,37 @@
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mobAssets } from "./catalog.ts";
 import { itemTexture } from "../item-textures.ts";
 
 test("adult mob visuals can be looked up by Bedrock identifier", () => {
-	for (const name of ["pig", "cow", "chicken", "sheep", "zombie", "skeleton", "creeper"]) {
+	for (const name of ["pig", "cow", "chicken", "sheep", "zombie", "skeleton", "creeper", "husk", "stray"]) {
 		const id = `minecraft:${name}`;
 		assert.equal(mobAssets.get(id)?.id, id);
 	}
 	assert.equal(mobAssets.get("minecraft:unknown"), undefined);
 });
 
+// PNGs from Bedrock Samples v1.26.60.5. Sheep is the white-fleece conversion of sheep.tga.
+const fingerprints: Record<string, string> = {
+	"minecraft:stray": "5dcb0c2ab92826a6a4f4d35fd7dc6891a8c9b620ad03cdcd813a6911566edc8a",
+	"minecraft:husk": "461af7ce595331d0e5d4d1a60ba28eedcb222ee7e43c4a50cd4545653f6e9ba0",
+	"minecraft:chicken": "487a9bed72731b586bbbd365b78320fbe04e4c44aeb840e7d2f3a828a0906c9d",
+	"minecraft:cow": "7b8ceb1ab4d202a17318351110b7f2fd55f6948758094e5a4abc0899aa5e5749",
+	"minecraft:creeper": "de7cb032dc9a81732535c66aaf55dba03e29a4463219403d6d9573018191790a",
+	"minecraft:pig": "4e2891d9e7d7ac592c911a43c419e9bc6c91918fad3c45a1e8db2021b5553f0d",
+	"minecraft:sheep": "9dc17a0b20d07186bd58d3c72e6a05ce44621dbdbc58c8368616cdd55cd2a456",
+	"minecraft:skeleton": "850d5eb0178465c2661e5bf0bde5d9485f8de23c4a75590205acc968f7e000b1",
+	"minecraft:zombie": "b172ff1b50c3ce0587cf82a2865bb05b9a22fc54a78d446b7bfcab13ffcea0ab",
+};
+
 for (const [id, { bones, texture, walkPitch }] of mobAssets) {
 	test(`${id} has the expected box UVs and a bone for every walk channel`, () => {
-		const pixels = texture.pixels(), names = new Set<string>();
-		assert.equal(pixels.length, texture.width * texture.height * 4);
-		assert.deepEqual(pixels, texture.pixels());
+		const png = readFileSync(texture.url);
+		assert.equal(createHash("sha256").update(png).digest("hex"), fingerprints[id]);
+		assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [texture.width, texture.height]);
+		const names = new Set<string>();
 		for (const bone of bones) {
 			assert.ok(!names.has(bone.name), `duplicate ${bone.name}`);
 			if (bone.parent) assert.ok(names.has(bone.parent), `missing parent for ${bone.name}`);
@@ -28,19 +44,6 @@ for (const [id, { bones, texture, walkPitch }] of mobAssets) {
 				assert.ok([w, h, d].every(n => Number.isInteger(n) && n > 0));
 				assert.ok(cube.uv.every(n => Number.isInteger(n) && n >= 0));
 				assert.ok(u + 2 * (w + d) <= texture.width && v + d + h <= texture.height);
-				for (const [x, y, width, height] of [
-					[u + d, v, w, d], [u + d + w, v, w, d],
-					[u, v + d, d, h], [u + d, v + d, w, h],
-					[u + d + w, v + d, d, h], [u + 2 * d + w, v + d, w, h],
-				]) {
-					let visible = false;
-					for (let row = y; row < y + height; row++) {
-						const start = 4 * (row * texture.width + x);
-						for (let i = start + 3; i < start + width * 4; i += 4) visible ||= pixels[i] !== 0;
-					}
-					const openRibcage = id === "minecraft:skeleton" && bone.name === "body" && x === u + d && y === v;
-					assert.equal(visible, !openRibcage, `${bone.name} face at ${x},${y}`);
-				}
 			}
 		}
 		const peaks = Object.values(walkPitch);
@@ -50,19 +53,6 @@ for (const [id, { bones, texture, walkPitch }] of mobAssets) {
 		}
 	});
 }
-
-test("undead faces have a light brow above two one-texel-high dark eyes", () => {
-	for (const id of ["minecraft:zombie", "minecraft:skeleton"]) {
-		const { texture } = mobAssets.get(id)!;
-		const pixels = texture.pixels();
-		const green = (x: number, y: number) => pixels[(y * texture.width + x) * 4 + 1];
-		// Head front starts at (8, 8). The dark eyes sit in the fifth row.
-		for (const x of [9, 10, 13, 14]) {
-			assert.ok(green(x, 12) + 55 < green(x, 11), id);
-			assert.ok(green(x, 12) + 55 < green(x, 13), id);
-		}
-	}
-});
 
 test("adult zombie extends both arms and the idle skeleton grips a bow in its right hand", () => {
 	const zombie = mobAssets.get("minecraft:zombie")!;

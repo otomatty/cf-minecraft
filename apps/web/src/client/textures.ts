@@ -1,8 +1,8 @@
+import { decodeTile } from "./vanilla/decode-tile.ts";
+import mining from "./vanilla/mining-tiles.json" with { type: "json" };
 import { CARRIED_GRASS_TOP_TINT, CARRIED_LEAVES_TINT, CARRIED_SHORT_GRASS_TINT, WATER_TINT } from "./block-tints.ts";
-import { buildingTexture } from "./building-textures.ts";
-import { floraTexture } from "./flora-textures.ts";
+import { blockTexture } from "./block-textures.ts";
 import { itemTexture } from "./item-textures.ts";
-import { terrainTexture } from "./terrain-textures.ts";
 
 export { GRASS_TINT, LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
 export const TEX_SIZE = 16;
@@ -25,10 +25,9 @@ export function textureIconPixels(name: string, pixels: Uint8Array): Uint8Clampe
 	return icon;
 }
 
-/** Original pixel art in atlas row order, with a checker for missing materials. */
+/** Block and item art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
-	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? itemTexture(name);
+	const pixels = blockTexture(name) ?? itemTexture(name);
 	if (pixels) return pixels;
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
@@ -104,17 +103,8 @@ export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
 	return pixels;
 }
 
-/** Original branching fissures: each stage adds a branch to the same 16x16 pattern. */
+/** Bedrock mining overlays in stage order, from the first hit to the last. */
 export function paintCracks(stage: number): Uint8Array {
-	if (!Number.isInteger(stage) || stage < 0 || stage > 9) throw new RangeError("crack stage");
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let branch = 0; branch <= stage; branch++) {
-		for (let step = 0; step < 9; step++) {
-			const x = (3 + branch * 5 + step + Math.floor(step / 3)) % TEX_SIZE;
-			const y = (1 + branch * 3 + step * (branch % 2 ? 2 : 1)) % TEX_SIZE;
-			const at = (y * TEX_SIZE + x) * 4;
-			pixels.set([28, 23, 31, 210], at);
-		}
-	}
-	return pixels;
+	if (!Number.isInteger(stage) || stage < 0 || stage >= mining.stages.length) throw new RangeError("crack stage");
+	return decodeTile(mining.stages[stage]);
 }

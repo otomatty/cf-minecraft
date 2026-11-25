@@ -75,7 +75,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 
 ## 道具アイテム
 
-ホットバー、インベントリ、地面に落ちた非ブロックアイテムは、`items.toml` の `texture` で同じ16×16のドット絵を引く。道具の柄の傾きや素材ごとの色、インゴットの陰影などは統合版のアイテム画像を参考に描いている。[アイテムの描画コード](../apps/web/src/client/item-textures.ts)・[Bedrock Samples v1.26.60.5 のアイテム画像](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/textures/items)
+ホットバー、インベントリ、地面に落ちた非ブロックアイテムは、`items.toml` の `texture` で同じ16×16のドット絵を引く。専用アイコンの43種には Bedrock Samples の原画を使い、松明はブロック用の原画を共有する。木の道具や肉類など、プロジェクトと配布元で異なるファイル名は取り込み時に対応づける。弓を引くと選択枠の絵が3段階で切り替わる。[アイテムの描画コード](../apps/web/src/client/item-textures.ts)・[Bedrock Samples v1.26.60.5 のアイテム画像](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/textures/items)
 
 温帯の家畜のドロップと産卵には以下のキーを使う。今後アイテムを追加するときは、用意済みのキーを `items.toml` の `texture` に指定する。
 
@@ -163,7 +163,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 57 | bucket（空のバケツ） | bucket | 16 |
 | 58 | water_bucket（水入りバケツ） | water_bucket | 1 |
 
-どちらも対応するブロックを持たず、絵は `item-textures.ts` で生成する。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
+どちらも対応するブロックを持たず、絵はアイテム用アトラスから読み出す。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
 
 ## 溶岩と黒曜石
 

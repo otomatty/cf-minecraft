@@ -45,10 +45,11 @@ test("cracks have ten deterministic, strictly growing masks", () => {
 		const pixels = paintCracks(stage);
 		assert.deepEqual(pixels, paintCracks(stage));
 		assert.equal(pixels.length, TEX_SIZE * TEX_SIZE * 4);
+		// Neutral white texels in the Bedrock overlay have alpha 1/255.
 		let current = 0;
 		for (let i = 3; i < pixels.length; i += 4) {
-			if (pixels[i]) current++;
-			if (previous[i]) assert.ok(pixels[i]);
+			if (pixels[i] >= 128) current++;
+			if (previous[i] >= 128) assert.ok(pixels[i] >= 128);
 		}
 		assert.ok(current > count);
 		previous = pixels; count = current;

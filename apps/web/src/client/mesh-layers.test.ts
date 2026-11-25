@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
 import { paintTexture, downsample, textureIconPixels } from "./textures.ts";
 import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
-import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels } from "./flora-textures.ts";
+import { fluidFrame, FLUID_FRAMES, grassSideAtlasPixels } from "./block-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { ClientCore } from "./client-core.ts";
 import { filterVisibleSections, outlineBox, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
@@ -74,10 +74,9 @@ test("dense and regular leaves share terrain tint and cap rotation", () => {
 test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
 	let packed = grassSideAtlasPixels();
 	let icon = paintTexture("grass_block_side");
-	const dirt = paintTexture("dirt");
+	assert.deepEqual([...packed.slice(-4)], [89, 61, 41, 0]);
 	for (let i = 0; i < packed.length; i += 4) {
-		if (packed[i + 3] === 0) assert.deepEqual(packed.subarray(i, i + 3), dirt.subarray(i, i + 3));
-		else assert.deepEqual([...packed.subarray(i, i + 3)], [0, 0, 0]);
+		if (packed[i + 3] !== 0) assert.deepEqual([...packed.subarray(i, i + 3)], [0, 0, 0]);
 	}
 	assert.ok(packed[3] > 0 && packed.at(-1) === 0);
 	for (let size = 16; size >= 1; size >>= 1) {
@@ -92,20 +91,22 @@ test("grass side keeps soil colour and reproduces the tinted fringe through all 
 	}
 });
 
-test("water has separate, looping animation frames for its surface and sides", () => {
-	assert.equal(WATER_FRAME_COUNT, 32);
-	for (const [name, flowing] of [["water", false], ["water_flow", true]]) {
+test("water and lava use separate, looping flipbooks for their tops and sides", () => {
+	assert.deepEqual(FLUID_FRAMES, {water: 32, water_flow: 32, lava: 32, lava_flow: 16});
+	for (const name of ["water", "water_flow", "lava", "lava_flow"]) {
+		const count = FLUID_FRAMES[name];
 		const first = paintTexture(name);
-		assert.deepEqual(first, waterTextureFrame(0, flowing));
-		assert.deepEqual(first, waterTextureFrame(WATER_FRAME_COUNT, flowing));
+		assert.deepEqual(first, fluidFrame(name, 0));
+		assert.deepEqual(first, fluidFrame(name, count));
 		const frames = new Set();
-		for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) {
-			const pixels = waterTextureFrame(frame, flowing);
+		for (let frame = 0; frame < count; frame++) {
+			const pixels = fluidFrame(name, frame);
 			assert.equal(pixels.length, 16 * 16 * 4);
-			assert.ok(pixels[3] > 0 && pixels[3] < 255);
+			assert.ok(name.startsWith("lava") ? pixels[3] === 255 : pixels[3] > 0 && pixels[3] < 255);
 			frames.add(Buffer.from(pixels).toString("base64"));
 		}
-		assert.equal(frames.size, WATER_FRAME_COUNT);
+		// Four still-lava frames repeat in the vanilla flipbook.
+		assert.equal(frames.size, name === "lava" ? 28 : count);
 	}
 	assert.notDeepEqual(paintTexture("water"), paintTexture("water_flow"));
 });
@@ -262,12 +263,12 @@ test("original glass and leaf textures contain holes; water stays grayscale and 
 		assert.ok(alpha.includes(0) && alpha.includes(255));
 		assert.deepEqual(pixels, paintTexture(name));
 	}
-	for (const name of ["oak_leaves", "water"]) {
+	for (const name of ["water", "water_flow"]) {
 		const pixels = paintTexture(name);
 		for (let i = 0; i < pixels.length; i += 4) {
 			assert.equal(pixels[i], pixels[i + 1]);
 			assert.equal(pixels[i], pixels[i + 2]);
-			if (name === "water") assert.ok(pixels[i + 3] / 255 >= 0.6 && pixels[i + 3] / 255 <= 0.75);
+			assert.ok(pixels[i + 3] / 255 >= 0.6 && pixels[i + 3] / 255 <= 0.75);
 		}
 	}
 });
@@ -286,19 +287,16 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 	assert.equal(downsample(new Uint8Array([255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170, 255, 255, 255, 170]), 2)[3], 170);
 });
 
-test("dense leaves fill only the original holes with a darker opaque gray", () => {
+test("dense leaves fill only the original holes with the opaque Bedrock leaf colour", () => {
 	const regular = paintTexture("oak_leaves");
 	let dense = paintTexture("oak_leaves_dense");
 	assert.equal(dense.length, 16 * 16 * 4);
-	const darkest = Math.min(...regular.filter((_, i) => i % 4 === 0 && regular[i + 3] === 255));
 	for (let i = 0; i < dense.length; i += 4) {
 		assert.equal(dense[i + 3], 255);
 		if (regular[i + 3] === 255) {
 			assert.deepEqual(dense.subarray(i, i + 4), regular.subarray(i, i + 4));
 		} else {
-			assert.equal(dense[i], dense[i + 1]);
-			assert.equal(dense[i], dense[i + 2]);
-			assert.ok(dense[i] < darkest);
+			assert.deepEqual([...dense.subarray(i, i + 4)], [104, 99, 104, 255]);
 		}
 	}
 	assert.ok(usesCutoutMips("oak_leaves_dense"));
@@ -317,22 +315,21 @@ test("section visibility filters every layer before frustum tests and translucen
     assert.deepEqual(filterVisibleSections(meshes, null), [...meshes.values()]);
 });
 
-test("four original ore textures are opaque stone with distinct mineral grains", () => {
+test("ore tiles match the decoded ore PNGs in Bedrock Samples v1.26.60.5", () => {
 	const names = ["coal_ore", "copper_ore", "iron_ore", "gold_ore"];
 	const textures = names.map(paintTexture);
-	const plainStone = paintTexture("stone");
+	const hashes = [
+		"a0c6c6a853a5fc0a7ce931cd3f0cd0f37a197e19f4981df9f879a9196cbc46b4",
+		"cfce1de24e88045cf23e960cbca03f971ada8a5cfbb4470a6ae7959c5f68835a",
+		"e4d7f021910adb113e2542d3ac3284d4a434047bbd5af500baaa66be429ab733",
+		"e84ade8121dae8e074cd883739f63885a83c6005172049d28a575f7332f70ab5",
+	];
 	const unknown = paintTexture("unknown_ore");
 	for (const [i, pixels] of textures.entries()) {
 		assert.equal(pixels.length, 16 * 16 * 4);
 		assert.deepEqual(pixels, paintTexture(names[i]));
 		assert.notDeepEqual(pixels, unknown);
-		let stone = 0, mineral = 0;
-		for (let p = 0; p < pixels.length; p += 4) {
-			assert.equal(pixels[p + 3], 255);
-			if (pixels[p] === plainStone[p] && pixels[p + 1] === plainStone[p + 1] && pixels[p + 2] === plainStone[p + 2]) stone++;
-			else mineral++;
-		}
-		assert.ok(stone > 128 && mineral > 0, names[i]);
+		assert.equal(createHash("sha256").update(pixels).digest("hex"), hashes[i]);
 		for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, textures[j]);
 	}
 });
@@ -363,24 +360,13 @@ test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () =>
 	}
 });
 
-test("table and furnace faces are distinct and show their tools and firebox", () => {
-	for (const names of [
-		["crafting_table_top", "crafting_table_side", "crafting_table_bottom"],
-		["furnace_front", "furnace_side", "furnace_top"],
-	]) {
-		const faces = names.map(paintTexture);
-		for (const [i, pixels] of faces.entries()) {
-			for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, faces[j], `${names[i]} vs ${names[j]}`);
-		}
-	}
-	for (const name of ["crafting_table_top", "crafting_table_side"]) {
-		const gray = texels(paintTexture(name)).filter(([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b) <= 10);
-		assert.ok(gray.length >= 8, name);
-	}
-	const front = texels(paintTexture("furnace_front"));
-	const firebox = front.filter((_, i) => i % 16 >= 4 && i % 16 <= 11 && i >= 6 * 16 && i < 13 * 16);
-	assert.ok(firebox.filter(pixel => luminance(pixel) < 45).length >= 12);
-	assert.ok(firebox.some(([r, g, b]) => r >= 170 && r - g >= 40 && g - b >= 30));
+test("crafting table and unlit furnace faces match the Bedrock source PNGs", () => {
+	const names = ["crafting_table_top", "crafting_table_side", "crafting_table_front", "crafting_table_bottom",
+		"furnace_front", "furnace_side", "furnace_top"];
+	const hash = createHash("sha256");
+	for (const name of names) hash.update(paintTexture(name));
+	assert.equal(hash.digest("hex"), "e43cca4b9c0c954ea34ad25eb48138a864a96e349dac682465956bd6eddb2248");
+	assert.deepEqual(paintTexture("crafting_table_bottom"), paintTexture("oak_planks"));
 });
 
 test("moist furrows are darker than dry furrows", () => {
@@ -391,10 +377,10 @@ test("moist furrows are darker than dry furrows", () => {
 	assert.ok(averageLuminance("farmland_moist") < averageLuminance("farmland_dry"));
 });
 
-test("wheat cutouts grow denser, keep four grounded stems and ripen gold", () => {
+test("all eight Bedrock wheat stages grow denser, stay grounded and ripen gold", () => {
 	const missing = paintTexture("missing_texture");
 	let previousCoverage = 0;
-	for (const name of ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"]) {
+	for (const name of ["wheat_sprout", "wheat_stage_1", "wheat_shoot", "wheat_stage_3", "wheat_stage_4", "wheat_green", "wheat_stage_6", "wheat_ripe"]) {
 		const pixels = paintTexture(name);
 		assert.equal(pixels.length, 16 * 16 * 4, name);
 		assert.deepEqual(pixels, paintTexture(name), name);
@@ -405,7 +391,7 @@ test("wheat cutouts grow denser, keep four grounded stems and ripen gold", () =>
 		assert.ok(coverage > previousCoverage, name);
 		previousCoverage = coverage;
 		const bottom = colors.slice(-16);
-		assert.equal(bottom.filter(([, , , a], x) => a === 255 && !bottom[x - 1]?.[3]).length, 4, name);
+		assert.ok(bottom.some(([, , , a]) => a === 255), name);
 		if (name === "wheat_ripe") {
 			assert.ok(colors.some(([r, g, b, a]) => a === 255 && r >= 200 && g >= 150 && g - b >= 50));
 		}
@@ -427,8 +413,7 @@ test("tool sprites preserve their grip shapes and distinct colors for each mater
 			assert.ok(core.textureNames().includes(name));
 			const pixels = paintTexture(name);
 			assert.equal(pixels.length, 16 * 16 * 4);
-			const gripX = kind === "hoe" ? 8 : 2;
-			assert.equal(pixels[(12 * 16 + gripX) * 4 + 3], 255, name);
+			assert.equal(pixels[(12 * 16 + 4) * 4 + 3], 255, name);
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 0));
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 255));
 			assert.deepEqual(paintTexture(name), pixels);
@@ -438,18 +423,20 @@ test("tool sprites preserve their grip shapes and distinct colors for each mater
 	}
 });
 
-test("registered item sprites and prepared mob drops resolve through the atlas painter", () => {
+test("item atlas matches the Bedrock item, drop and bow sprites", () => {
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 	const keys = core.itemRegistry().flatMap(item => item.texture ? [item.texture] : []);
-	const futureDrops = ["arrow", "bone", "gunpowder", "leather", "rotten_flesh"];
-	for (const name of [...keys, ...futureDrops, "bow"]) {
+	const checksum = createHash("sha256");
+	for (const name of [...keys, "leather", "bow_pulling_0", "bow_pulling_1", "bow_pulling_2"].sort()) {
 		const pixels = itemTexture(name);
 		assert.ok(pixels, name);
 		assert.equal(pixels.length, 16 * 16 * 4);
 		const alpha = pixels.filter((_, i) => i % 4 === 3);
 		assert.deepEqual(new Set(alpha), new Set([0, 255]), name);
 		assert.deepEqual(paintTexture(name), pixels, name);
+		checksum.update(pixels);
 	}
+	assert.equal(checksum.digest("hex"), "269bc6250b98bef8c2eac58c4b3e29a90c220c281500f71ca352d5d5d5ea288a");
 	assert.equal(itemTexture("unknown_item"), undefined);
 });
 
