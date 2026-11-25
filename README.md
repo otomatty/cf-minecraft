@@ -65,6 +65,7 @@ pnpm dev          # WASMをビルドして http://localhost:5173 で起動
 ```sh
 pnpm test                 # Rust 40件 + ホスト側 94件（10ファイル）
 pnpm typecheck
+pnpm check:determinism:browsers # 準備は docs/browsers.md を参照
 pnpm dev                  # 以下は開発サーバーを起動した状態で実行
 node tools/determinism.mjs --edge http://localhost:5173
 node tools/tick-probe.mjs --players 8 --seconds 60 --view 8

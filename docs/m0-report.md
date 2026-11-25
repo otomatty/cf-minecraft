@@ -39,7 +39,7 @@ M0 の目的は、設計の前提が成り立つかを実物で確かめるこ�
 
 シード2026・600tickの現在の台本では、ブロック変更2,184件、チャンク保存24件、再読込16件が発生します。
 
-WASM の3ホストはいずれも V8 です。Firefox（SpiderMonkey）と Safari（JavaScriptCore）では未確認で、ゲーム内の `F8` で同じハッシュが出るかを確かめられます。
+上の表で比較した WASM の3ホストはいずれも V8 です。現在の CI では、Playwright の Chromium（V8）、Firefox（SpiderMonkey）、WebKit（JavaScriptCore）でもサーバーの WASM を実行し、台本・ノイズ・地形のフィンガープリントを Node と比較します。実機での確認状況は [ブラウザごとの確認結果](browsers.md) にまとめています。
 
 ## 2. Java 互換の乱数
 
