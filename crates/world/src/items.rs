@@ -26,6 +26,7 @@ pub struct ItemInfo {
     pub id: u16,
     pub name: &'static str,
     pub max_stack: u8,
+    pub durability: Option<u16>,
     pub block: Option<BlockState>,
 }
 include!(concat!(env!("OUT_DIR"), "/items.rs"));

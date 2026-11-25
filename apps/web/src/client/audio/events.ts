@@ -19,7 +19,7 @@ export function materialFor(block: string): Material {
 type BlockSound = { kind: "break" | "place" | "dig" | "step"; material: Material };
 type MobSound = { kind: "mobHurt" | "mobDeath"; mob: MobKind };
 export type Sound = BlockSound | MobSound | {
-	kind: "playerHurt" | "eat" | "death" | "pickup" | "arrowShoot" | "arrowStick" | "arrowHit" | "fuse" | "explosion" | "click";
+	kind: "playerHurt" | "eat" | "death" | "pickup" | "arrowShoot" | "arrowStick" | "arrowHit" | "fuse" | "explosion" | "toolBreak" | "click";
 };
 
 export function blockSound(before: string | undefined, after: string | undefined): BlockSound | null {

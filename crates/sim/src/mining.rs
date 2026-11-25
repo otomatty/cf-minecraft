@@ -113,6 +113,7 @@ fn obsidian_requires_an_iron_pickaxe_and_drops_itself() {
         let stack = held.map(|name| Stack {
             item: items::by_name(name).unwrap(),
             count: 1,
+            damage: 0,
         });
         s.clients
             .get_mut(&1)
@@ -136,6 +137,7 @@ fn obsidian_requires_an_iron_pickaxe_and_drops_itself() {
             Some(Stack {
                 item: pickaxe,
                 count: 1,
+                damage: 0,
             }),
         )
         .unwrap();
@@ -484,6 +486,7 @@ fn seeds_place_at_age_zero_only_in_air_above_farmland_in_both_modes() {
             let seeds = Stack {
                 item: items::by_name("wheat_seeds").unwrap(),
                 count: 2,
+                damage: 0,
             };
             s.clients
                 .get_mut(&1)
@@ -521,6 +524,7 @@ fn hoe_uses_grass_and_dirt_in_both_modes_and_interrupts_mining() {
             let hoe = Stack {
                 item: items::by_name("wooden_hoe").unwrap(),
                 count: 1,
+                damage: 0,
             };
             s.clients
                 .get_mut(&1)
@@ -538,7 +542,13 @@ fn hoe_uses_grass_and_dirt_in_both_modes_and_interrupts_mining() {
             });
             s.apply(1, C2S::UseBlock { x, y, z });
             assert_eq!(s.get_block(x, y, z), Some(blocks::FARMLAND));
-            assert_eq!(s.clients[&1].inventory.selected_stack(), Some(hoe));
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack {
+                    damage: u16::from(mode == GameMode::Survival),
+                    ..hoe
+                })
+            );
             assert_eq!(s.clients[&1].inventory.screen, inventory::Screen::None);
             assert_eq!(s.stats.packets_rejected, 0);
             assert_eq!(s.stats.blocks_changed, 1);
@@ -590,6 +600,7 @@ fn hoe_use_rejections_resend_inventory_and_workstations_still_open() {
         let stack = Stack {
             item: items::by_name(item).unwrap(),
             count: 1,
+            damage: 0,
         };
         client.inventory.set(0, Some(stack)).unwrap();
         client.inventory.screen = screen;
@@ -779,6 +790,7 @@ fn held_item_count_changes_preserve_the_original_completion_tick() {
                     Some(Stack {
                         item: dirt,
                         count: if pickup { 3 } else { 1 },
+                        damage: 0,
                     })
                 );
             }
@@ -793,5 +805,107 @@ fn held_item_count_changes_preserve_the_original_completion_tick() {
         assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
         assert!(s.clients[&1].dig.is_none());
         assert_eq!(s.stats.blocks_changed, 1);
+    }
+}
+
+#[test]
+fn mining_wears_any_durable_item_except_on_instant_breaks() {
+    for mode in [GameMode::Survival, GameMode::Creative] {
+        let (mut s, [x, y, z]) = setup();
+        s.set_game_mode(mode);
+        let bow = Stack {
+            item: items::by_name("bow").unwrap(),
+            count: 1,
+            damage: 0,
+        };
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, Some(bow))
+            .unwrap();
+
+        for (block, nonzero_ticks) in [(blocks::SHORT_GRASS, false), (blocks::WHITE_WOOL, true)] {
+            s.world.set_block(x, y, z, block);
+            let (ticks, _) = items::mining(block, Some(bow.item)).unwrap();
+            assert_eq!(ticks > 0, nonzero_ticks);
+            match mode {
+                GameMode::Survival => {
+                    s.apply(1, C2S::DigStart { x, y, z });
+                    s.game_time += i64::from(ticks);
+                    s.tick_digs();
+                }
+                GameMode::Creative => s.apply(
+                    1,
+                    C2S::SetBlock {
+                        x,
+                        y,
+                        z,
+                        state: blocks::AIR,
+                    },
+                ),
+            }
+            assert_eq!(s.get_block(x, y, z), Some(blocks::AIR));
+            assert_eq!(
+                s.clients[&1].inventory.selected_stack(),
+                Some(Stack {
+                    damage: u16::from(nonzero_ticks && mode == GameMode::Survival),
+                    ..bow
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn last_use_finishes_mining_or_tilling_and_sends_break_and_empty_slot() {
+    for (name, block, expected) in [
+        ("wooden_pickaxe", blocks::STONE, blocks::AIR),
+        ("wooden_hoe", blocks::DIRT, blocks::FARMLAND),
+    ] {
+        let (mut s, [x, y, z]) = setup();
+        let item = items::by_name(name).unwrap();
+        let damage = items::info(item).unwrap().durability.unwrap() - 1;
+        s.clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(
+                0,
+                Some(Stack {
+                    item,
+                    count: 1,
+                    damage,
+                }),
+            )
+            .unwrap();
+        s.world.set_block(x, y, z, block);
+        if expected == blocks::AIR {
+            s.apply(1, C2S::DigStart { x, y, z });
+            s.game_time += i64::from(s.clients[&1].dig.unwrap().ticks);
+            s.tick_digs();
+            assert_eq!(
+                s.entities.values().next().unwrap().item,
+                items::by_name("cobblestone").unwrap()
+            );
+        } else {
+            s.apply(1, C2S::UseBlock { x, y, z });
+        }
+        assert_eq!(s.get_block(x, y, z), Some(expected));
+        assert!(s.clients[&1].inventory.selected_stack().is_none());
+        assert!(s.clients[&1].inventory_dirty);
+        s.send_inventory(1);
+        let packets = s.take_outbox();
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|(_, p)| S2C::decode(p) == Ok(S2C::ToolBreak))
+                .collect::<Vec<_>>(),
+            [&(1, S2C::ToolBreak.encode())]
+        );
+        assert!(packets.iter().any(|(id, p)| {
+            *id == 1
+                && matches!(S2C::decode(p), Ok(S2C::Inventory { slots, .. }) if slots[0].is_none())
+        }));
     }
 }

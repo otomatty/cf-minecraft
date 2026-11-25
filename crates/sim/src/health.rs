@@ -372,6 +372,7 @@ impl Server {
         let arrow = Arrow::from_bow(id, survival, power, client.pos, client.yaw, client.pitch);
         let arrow_id = self.allocate_entity_id().unwrap();
         self.arrows.insert(arrow_id, arrow);
+        self.wear_held_item(id);
     }
 
     pub(crate) fn tick_health(&mut self) {
@@ -865,7 +866,14 @@ mod tests {
         client.health.vitals.food = food;
         client
             .inventory
-            .set(0, Some(Stack { item, count: 2 }))
+            .set(
+                0,
+                Some(Stack {
+                    item,
+                    count: 2,
+                    damage: 0,
+                }),
+            )
             .unwrap();
         s
     }
@@ -879,6 +887,7 @@ mod tests {
                 Some(Stack {
                     item: items::by_name("bow").unwrap(),
                     count: 1,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -889,6 +898,7 @@ mod tests {
                     Some(Stack {
                         item: items::by_name("arrow").unwrap(),
                         count,
+                        damage: 0,
                     }),
                 )
                 .unwrap();
@@ -1022,7 +1032,8 @@ mod tests {
             s.clients[&1].inventory.selected_stack(),
             Some(Stack {
                 item: bread,
-                count: 1
+                count: 1,
+                damage: 0,
             })
         );
     }
@@ -1037,7 +1048,11 @@ mod tests {
             assert_eq!(vitals(&s).food, 10 + restored);
             assert_eq!(
                 s.clients[&1].inventory.selected_stack(),
-                Some(Stack { item, count: 1 })
+                Some(Stack {
+                    item,
+                    count: 1,
+                    damage: 0
+                })
             );
         }
     }
@@ -1184,16 +1199,39 @@ mod tests {
                 blocks::CRAFTING_TABLE
             };
             s.world.set_block(pos[0], pos[1], pos[2], block);
-            let furnace_stack = Some(Stack { item: 1, count: 7 });
+            let furnace_stack = Some(Stack {
+                item: 1,
+                count: 7,
+                damage: 0,
+            });
             s.furnaces.entry(pos).or_default().slots[0] = furnace_stack;
             let client = s.clients.get_mut(&1).unwrap();
             client
                 .inventory
-                .set(35, Some(Stack { item: 1, count: 2 }))
+                .set(
+                    35,
+                    Some(Stack {
+                        item: 1,
+                        count: 2,
+                        damage: 0,
+                    }),
+                )
                 .unwrap();
-            client.inventory.crafting[0] = Some(Stack { item: 5, count: 3 });
-            client.inventory.table[8] = Some(Stack { item: 8, count: 4 });
-            client.inventory.cursor = Some(Stack { item: 43, count: 5 });
+            client.inventory.crafting[0] = Some(Stack {
+                item: 5,
+                count: 3,
+                damage: 0,
+            });
+            client.inventory.table[8] = Some(Stack {
+                item: 8,
+                count: 4,
+                damage: 0,
+            });
+            client.inventory.cursor = Some(Stack {
+                item: 43,
+                count: 5,
+                damage: 0,
+            });
             client.inventory.screen = screen;
             client.dig = Some(Dig {
                 pos: [2, 79, 2],
@@ -1336,7 +1374,7 @@ mod tests {
             assert!(statuses(packets(&mut s)).contains(&dead.packet()));
 
             let mut bytes = s.inventory_data(1).unwrap();
-            assert_eq!(bytes[0], 5);
+            assert_eq!(bytes[0], 6);
             assert_eq!(bytes[bytes.len() - 2], 5);
             assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
             let cause = bytes.len() - 2;

@@ -83,6 +83,13 @@ test("inventory and game mode cross the server/client ABI and survive reconnect"
 	server.setGameMode("creative"); join(new Uint8Array([0]));
 	const items = client.itemRegistry();
 	assert.equal(items.find(i => i.id === client.inventory[0]!.item)?.name, "stone");
+	for (const [tier, max] of [["wooden", 48], ["stone", 96], ["copper", 160], ["iron", 256]] as const) {
+		for (const kind of ["pickaxe", "axe", "shovel", "hoe"]) {
+			assert.equal(items.find(i => i.name === `${tier}_${kind}`)?.durability, max);
+		}
+	}
+	assert.equal(items.find(i => i.name === "bow")?.durability, 128);
+	assert.equal(items.find(i => i.name === "bucket")?.durability, null);
 	const slab = items.find(i => i.name === "oak_slab")!;
 	assert.equal(slab.maxStack, 64);
 	assert.equal(client.blockRegistry()[slab.block!].name, "oak_slab");
@@ -90,14 +97,37 @@ test("inventory and game mode cross the server/client ABI and survive reconnect"
 	server.packet(1, client.encodeCreativeSetSlot(35, slab.id, 17)); server.tick();
 	assert.equal(server.takeOutbox().filter(p => p.data[0] === 6).length, 1);
 	const saved = server.inventoryData(1)!;
-	assert.equal(saved[0], 5);
-	assert.equal(saved.length, 158);
+	assert.equal(saved[0], 6);
+	assert.equal(saved.length, 258);
 	server.disconnect(1);
 	assert.equal(server.inventoryData(1), undefined);
 	join(saved);
 	assert.equal(client.selectedSlot, 8);
-	assert.deepEqual(client.inventory[35], { item: slab.id, count: 17 });
+	assert.deepEqual(client.inventory[35], { item: slab.id, count: 17, damage: 0 });
 	assert.deepEqual(server.inventoryData(1), saved);
+});
+
+test("a worn tool survives the WASM player save and inventory packet", () => {
+	const server = ServerCore.fromModule(module);
+	const client = new ClientCore(new WebAssembly.Instance(clientModule, {}));
+	server.start(2026n, Generator.Flat);
+	server.setGameMode("survival");
+	const item = client.itemRegistry().find(i => i.name === "iron_pickaxe")!.id;
+	const damage = 217;
+	const save = new Uint8Array(258);
+	const view = new DataView(save.buffer);
+	save[0] = 6;
+	view.setUint16(2, item);
+	save[4] = 1;
+	view.setUint16(5, damage);
+	save.set([20, 1, 44, 0, 0, 20], 252);
+
+	server.connect(1, false, undefined, save);
+	server.packet(1, client.encodeHello(2));
+	server.tick();
+	for (const { data } of server.takeOutbox()) client.packet(data);
+	assert.deepEqual(client.inventory[0], { item, count: 1, damage });
+	assert.deepEqual(server.inventoryData(1), save);
 });
 
 test("returnCrafting clears transient stacks before taking a multiplayer snapshot", () => {
@@ -109,12 +139,12 @@ test("returnCrafting clears transient stacks before taking a multiplayer snapsho
 	for (const slot of [4, 36, 2]) server.packet(1, client.encodeClickSlot(slot, 0, false));
 	server.tick(); server.takeOutbox();
 	const before = server.inventoryData(1)!;
-	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(110), 8);
-	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(122), 5);
+	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(182), 8);
+	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(202), 5);
 	server.returnCrafting(1);
 	const saved = server.inventoryData(1)!;
-	assert.equal(saved[0], 5);
-	assert.ok(saved.slice(110, 152).every(byte => byte === 0));
+	assert.equal(saved[0], 6);
+	assert.ok(saved.slice(182, 252).every(byte => byte === 0));
 	server.disconnect(1);
 	server.connect(1, false, undefined, saved);
 	assert.deepEqual(server.inventoryData(1), saved);
@@ -136,14 +166,14 @@ test("crafting table screen and grid cross the WASM ABI and return before multip
 	assert.equal(client.screen, 1);
 	server.packet(1, client.encodeClickSlot(4, 0, false));
 	server.packet(1, client.encodeClickSlot(49, 0, false)); server.tick(); receive();
-	assert.deepEqual(client.table[8], { item: 8, count: 1 });
-	assert.deepEqual(client.craftingResult, { item: 5, count: 4 });
+	assert.deepEqual(client.table[8], { item: 8, count: 1, damage: 0 });
+	assert.deepEqual(client.craftingResult, { item: 5, count: 4, damage: 0 });
 	const before = server.inventoryData(1)!;
-	assert.equal(before[0], 5);
-	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(149), 8);
+	assert.equal(before[0], 6);
+	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(247), 8);
 	server.returnCrafting(1);
 	const saved = server.inventoryData(1)!;
-	assert.ok(saved.slice(110, 152).every(byte => byte === 0));
+	assert.ok(saved.slice(182, 252).every(byte => byte === 0));
 	server.disconnect(1);
 	server.connect(1, false, undefined, saved);
 	server.packet(1, client.encodeHello(2)); server.tick(); receive();

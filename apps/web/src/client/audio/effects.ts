@@ -39,6 +39,7 @@ const effects: Record<OtherSound, Timbre> = {
 	arrowHit: { duration: 0.20, tone: [163, 70, 0.23, "sine"], noise: [620, 0.30, "lowpass"] },
 	fuse: { duration: 1.4, noise: [3400, 0.35, "highpass"] },
 	explosion: { duration: 0.9, tone: [74, 32, 0.64, "sine"], noise: [280, 0.68, "lowpass"] },
+	toolBreak: { duration: 0.21, tone: [720, 185, 0.24, "triangle"], noise: [2150, 0.43, "highpass"] },
 	click: { duration: 0.055, tone: [850, 570, 0.13, "sine"] },
 };
 

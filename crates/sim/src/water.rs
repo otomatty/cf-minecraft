@@ -240,7 +240,14 @@ impl Server {
             if count == 1 {
                 client
                     .inventory
-                    .set(client.inventory.selected(), Some(Stack { item, count: 1 }))
+                    .set(
+                        client.inventory.selected(),
+                        Some(Stack {
+                            item,
+                            count: 1,
+                            damage: 0,
+                        }),
+                    )
                     .expect("bucket fits in the selected slot");
             } else {
                 client.inventory.take_selected();
@@ -949,6 +956,7 @@ mod tests {
         Stack {
             item: items::by_name(name).unwrap(),
             count,
+            damage: 0,
         }
     }
 

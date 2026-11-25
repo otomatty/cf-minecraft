@@ -614,6 +614,53 @@ mod tests {
     }
 
     #[test]
+    fn bow_wears_only_on_a_survival_shot_and_fires_on_its_last_use() {
+        let bow = items::by_name("bow").unwrap();
+        let damage = items::info(bow).unwrap().durability.unwrap() - 2;
+        let stack = Stack {
+            item: bow,
+            count: 1,
+            damage,
+        };
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let mut server = with_players(mode, &[(1, [5.0, 2.0, 5.0])]);
+            let inv = &mut server.clients.get_mut(&1).unwrap().inventory;
+            inv.set(0, Some(stack)).unwrap();
+            inv.add(items::by_name("arrow").unwrap(), 2);
+
+            server.apply(1, C2S::UseItem);
+            server.apply(1, C2S::StopUsingItem);
+            assert!(server.arrows.is_empty());
+            assert_eq!(server.clients[&1].inventory.selected_stack(), Some(stack));
+            for shots in 1..=2 {
+                server.apply(1, C2S::UseItem);
+                for _ in 0..3 {
+                    server.tick_health();
+                }
+                server.apply(1, C2S::StopUsingItem);
+                assert_eq!(server.arrows.len(), shots);
+                let broken = shots == 2 && mode == GameMode::Survival;
+                let worn = if mode == GameMode::Survival {
+                    damage + 1
+                } else {
+                    damage
+                };
+                assert_eq!(
+                    server.clients[&1].inventory.selected_stack(),
+                    (!broken).then_some(Stack {
+                        damage: worn,
+                        ..stack
+                    })
+                );
+                assert_eq!(
+                    server.take_outbox().contains(&(1, S2C::ToolBreak.encode())),
+                    broken
+                );
+            }
+        }
+    }
+
+    #[test]
     fn bow_spawn_is_fresh_only_on_the_release_tick_even_on_impact() {
         let feet = [5.0, 2.0, 5.0];
         let mut server = with_players(GameMode::Creative, &[(1, feet), (2, [5.0, 2.0, 160.0])]);
@@ -828,6 +875,7 @@ mod tests {
                         Some(Stack {
                             item: stone,
                             count: 64,
+                            damage: 0,
                         }),
                     )
                     .unwrap();
@@ -857,7 +905,11 @@ mod tests {
         assert!(server.arrows.is_empty());
         assert_eq!(
             server.clients[&2].inventory.slots()[35],
-            Some(Stack { item, count: 1 })
+            Some(Stack {
+                item,
+                count: 1,
+                damage: 0
+            })
         );
         assert!(server.clients[&2].inventory_dirty);
         assert_eq!(server.clients[&3].inventory.slots()[35], None);
@@ -875,6 +927,7 @@ mod tests {
                 Some(Stack {
                     item: stone,
                     count: 64,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -888,6 +941,7 @@ mod tests {
                 Some(Stack {
                     item: stone,
                     count: 64,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -925,7 +979,11 @@ mod tests {
         let item = items::by_name("arrow").unwrap();
         assert_eq!(
             server.clients[&1].inventory.slots()[0],
-            Some(Stack { item, count: 1 })
+            Some(Stack {
+                item,
+                count: 1,
+                damage: 0
+            })
         );
         for _ in 11..99 {
             server.tick_arrows();
@@ -935,7 +993,11 @@ mod tests {
         assert!(server.arrows.is_empty());
         assert_eq!(
             server.clients[&1].inventory.slots()[0],
-            Some(Stack { item, count: 1 })
+            Some(Stack {
+                item,
+                count: 1,
+                damage: 0
+            })
         );
     }
 
@@ -952,6 +1014,7 @@ mod tests {
                     Some(Stack {
                         item: items::by_name(name).unwrap(),
                         count: 1,
+                        damage: 0,
                     }),
                 )
                 .unwrap();

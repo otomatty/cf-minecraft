@@ -2187,6 +2187,7 @@ mod tests {
                 Some(crate::Stack {
                     item: items::by_name(item).unwrap(),
                     count: 1,
+                    damage: 0,
                 }),
             )
             .unwrap();
@@ -2262,7 +2263,14 @@ mod tests {
                         .get_mut(&1)
                         .unwrap()
                         .inventory
-                        .set(1, Some(crate::Stack { item, count: 1 }))
+                        .set(
+                            1,
+                            Some(crate::Stack {
+                                item,
+                                count: 1,
+                                damage: 0,
+                            }),
+                        )
                         .unwrap();
                     server.handle_packet(1, &C2S::SelectSlot { slot: 1 }.encode());
                     attack(&mut server, id);
@@ -2276,6 +2284,51 @@ mod tests {
             attack(&mut server, id);
             server.tick();
             assert_eq!(server.mobs[&id].health, 9);
+        }
+    }
+
+    #[test]
+    fn melee_wear_requires_a_landed_survival_hit() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut server, id) = combat(mode);
+            let item = items::by_name("wooden_axe").unwrap();
+            let damage = items::info(item).unwrap().durability.unwrap() - 2;
+            let stack = crate::Stack {
+                item,
+                count: 1,
+                damage,
+            };
+            server
+                .clients
+                .get_mut(&1)
+                .unwrap()
+                .inventory
+                .set(0, Some(stack))
+                .unwrap();
+            for attempt in 0..3 {
+                if attempt == 2 {
+                    server.mobs.get_mut(&id).unwrap().hurt_ticks = 0;
+                }
+                server.apply(1, C2S::Attack { id });
+                assert_eq!(server.mobs[&id].health, if attempt == 2 { 4 } else { 7 });
+                let broken = attempt == 2 && mode == GameMode::Survival;
+                let worn = if mode == GameMode::Survival {
+                    damage + 1
+                } else {
+                    damage
+                };
+                assert_eq!(
+                    server.clients[&1].inventory.selected_stack(),
+                    (!broken).then_some(crate::Stack {
+                        damage: worn,
+                        ..stack
+                    })
+                );
+                assert_eq!(
+                    server.take_outbox().contains(&(1, S2C::ToolBreak.encode())),
+                    broken
+                );
+            }
         }
     }
 
@@ -2805,6 +2858,7 @@ mod tests {
             let stack = crate::Stack {
                 item: drop.item,
                 count: drop.count,
+                damage: 0,
             };
             for _ in 0..10 {
                 server.tick();
@@ -2859,6 +2913,7 @@ mod tests {
         let stack = crate::Stack {
             item: drop.item,
             count: drop.count,
+            damage: 0,
         };
         assert_eq!(stack.item, items::by_name("cooked_beef").unwrap());
         assert!((1..=3).contains(&stack.count));
@@ -4627,6 +4682,7 @@ mod tests {
                     Some(crate::inventory::Stack {
                         item: coal,
                         count: 3,
+                        damage: 0,
                     }),
                     None,
                     None,

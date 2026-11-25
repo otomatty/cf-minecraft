@@ -613,3 +613,40 @@ fn loot_requires_known_mobs_and_items_and_an_ordered_range() {
         assert!(error.contains(message), "{error}");
     }
 }
+
+#[test]
+fn durability_requires_a_single_item_stack_and_a_nonzero_u16() {
+    let items = include_str!("../../../data/registry/items.toml");
+    let error = generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("id = 1\n", "id = 1\ndurability = 48\n", 1),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("durability requires max_stack = 1"),
+        "{error}"
+    );
+    for value in ["0", "65536", "-1", "1.5"] {
+        let error = generate_items_fixture(
+            BLOCKS,
+            BIOMES,
+            &items.replacen("durability = 48", &format!("durability = {value}"), 1),
+        )
+        .unwrap_err();
+        assert!(error.contains("items.toml"), "{error}");
+    }
+    assert!(generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("durability = 48", "durability = 65535", 1)
+    )
+    .is_ok());
+    let error = generate_items_fixture(
+        BLOCKS,
+        BIOMES,
+        &items.replacen("durability = 48", "durabilitty = 48", 1),
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown field `durabilitty`"), "{error}");
+}

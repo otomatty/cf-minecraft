@@ -98,6 +98,8 @@ export class WorldAudio {
 				&& before.first === after?.first && state === before.first + 2) {
 				audio.play({ kind: "place", material: materialFor(before.name) }, source);
 			}
+		} else if (id === S2C.ToolBreak) {
+			audio.play({ kind: "toolBreak" });
 		} else if (id === S2C.PlayerStatus && priorVitals) {
 			for (const sound of playerSounds(priorVitals, core)) {
 				audio.play(sound);

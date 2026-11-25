@@ -7,10 +7,10 @@ import type { DigBounds } from "./dig.ts";
 // Wrapper around the client WebAssembly module (crates/wasm-client): the
 // local mirror of the world, packet codec, mesher and ray casts.
 
-export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null; food: number | null }
-export interface InventorySlot { item: number; count: number }
+export interface ItemInfo { id: number; name: string; maxStack: number; block: number | null; texture: string | null; food: number | null; durability: number | null }
+export interface InventorySlot { item: number; count: number; damage: number }
 
-export interface ItemEntity { id: number; item: number; count: number; position: [number, number, number]; previous: [number, number, number] }
+export interface ItemEntity extends InventorySlot { id: number; position: [number, number, number]; previous: [number, number, number] }
 export type MobKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export interface ArrowEntity { id: number; position: [number, number, number]; previous: [number, number, number]; velocity: [number, number, number]; fresh: boolean }
 export interface MobEntity { id: number; kind: MobKind; position: [number, number, number]; previous: [number, number, number]; yaw: number; hurt: number; fuse: number; burning: boolean }
@@ -46,6 +46,7 @@ export interface ClientExports {
 	client_selected_slot(): number;
 	client_slot_item(slot: number): number;
 	client_slot_count(slot: number): number;
+	client_slot_damage(slot: number): number;
 	client_item_registry(): number;
 	client_enc_select_slot(slot: number): number;
 	client_enc_creative_set_slot(slot: number, item: number, count: number): number;
@@ -112,7 +113,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25, ToolBreak: 26 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -164,10 +165,10 @@ export class ClientCore {
 		const bytes = this.out(this.x.client_entities());
 		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		const result: ItemEntity[] = [];
-		// Each packed record has a seven-byte header followed by six f64 coordinates.
-		for (let offset = 0; offset < bytes.length; offset += 55) {
+		// Each packed record has a seven-byte header followed by six f64 coordinates and two bytes of damage.
+		for (let offset = 0; offset < bytes.length; offset += 57) {
 			result.push({
-				id: view.getUint32(offset), item: view.getUint16(offset + 4), count: view.getUint8(offset + 6),
+				id: view.getUint32(offset), item: view.getUint16(offset + 4), count: view.getUint8(offset + 6), damage: view.getUint16(offset + 55),
 				position: [view.getFloat64(offset + 7), view.getFloat64(offset + 15), view.getFloat64(offset + 23)],
 				previous: [view.getFloat64(offset + 31), view.getFloat64(offset + 39), view.getFloat64(offset + 47)],
 			});
@@ -545,7 +546,7 @@ export class ClientCore {
 	get inventorySlots(): Array<InventorySlot | null> {
 		return Array.from({ length: 54 }, (_, i) => {
 			const item = this.x.client_slot_item(i);
-			return item ? { item, count: this.x.client_slot_count(i) } : null;
+			return item ? { item, count: this.x.client_slot_count(i), damage: this.x.client_slot_damage(i) } : null;
 		});
 	}
 	encodeClickSlot(slot: number, button: number, shift: boolean): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_click_slot(slot, button, Number(shift))); }

@@ -16,6 +16,7 @@ struct Item {
     block: Option<String>,
     texture: Option<String>,
     tool: Option<Tool>,
+    durability: Option<u16>,
     fuel: Option<u32>,
     food: Option<u8>,
 }
@@ -540,6 +541,13 @@ pub fn backed_leaf_texture(state: BlockState) -> Option<u16> {{
                 tool.tier
             )
         });
+        if let Some(durability) = item.durability {
+            assert!(durability != 0, "items.toml: durability must be 1..=65535");
+            assert!(
+                item.max_stack == 1,
+                "items.toml: durability requires max_stack = 1"
+            );
+        }
         let texture = item
             .texture
             .as_ref()
@@ -554,8 +562,8 @@ pub fn backed_leaf_texture(state: BlockState) -> Option<u16> {{
         });
         writeln!(
             out,
-            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?}, food: {:?} }},",
-            item.id, item.name, item.max_stack, block, item.fuel, item.food
+            "ItemInfo {{ id: {}, name: {:?}, max_stack: {}, block: {:?}, texture: {texture}, tool: {tool}, fuel: {:?}, food: {:?}, durability: {:?} }},",
+            item.id, item.name, item.max_stack, block, item.fuel, item.food, item.durability
         )
         .unwrap();
     }

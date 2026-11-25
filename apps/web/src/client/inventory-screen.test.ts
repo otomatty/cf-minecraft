@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { bindInventorySlot, containerScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
+import { durabilityBar } from "./hotbar.ts";
 import { paintTexture } from "./textures.ts";
 
 test("inventory display maps all wire slots without mutating server state", () => {
-    const slots = Array.from({length:42},(_,item) => ({item:item+1,count:item+1}));
+    const slots = Array.from({length:42},(_,item) => ({item:item+1,count:item+1,damage:0}));
     const before = structuredClone(slots);
     const view = inventoryDisplay(slots);
     assert.deepEqual(INVENTORY_ROWS.map(row => row.length),[27,9,4,1]);
@@ -47,23 +48,23 @@ test("WASM Inventory carries crafting preview and cursor through server-confirme
     send(client.encodeHello(2));
     const log = client.itemRegistry().find(item=>item.name==="oak_log")!.id;
     const planks = client.itemRegistry().find(item=>item.name==="oak_planks")!.id;
-    assert.deepEqual(client.inventorySlots[4],{item:log,count:1});
+    assert.deepEqual(client.inventorySlots[4],{item:log,count:1, damage: 0});
     const packet = client.encodeClickSlot(4,0,false);
-    assert.deepEqual(client.inventorySlots[4],{item:log,count:1}); // Encoding does not predict changes.
+    assert.deepEqual(client.inventorySlots[4],{item:log,count:1, damage: 0}); // Encoding does not predict changes.
     send(packet);
     assert.equal(client.inventorySlots[4],null);
-    assert.deepEqual(client.inventorySlots[41],{item:log,count:1});
+    assert.deepEqual(client.inventorySlots[41],{item:log,count:1, damage: 0});
     send(client.encodeClickSlot(36,0,false));
-    assert.deepEqual(client.inventorySlots[36],{item:log,count:1});
-    assert.deepEqual(client.inventorySlots[40],{item:planks,count:4});
+    assert.deepEqual(client.inventorySlots[36],{item:log,count:1, damage: 0});
+    assert.deepEqual(client.inventorySlots[40],{item:planks,count:4, damage: 0});
     assert.equal(client.inventorySlots[41],null);
     send(client.encodeClickSlot(40,1,false));
     assert.equal(client.inventorySlots[36],null);
     assert.equal(client.inventorySlots[40],null);
-    assert.deepEqual(client.inventorySlots[41],{item:planks,count:4});
+    assert.deepEqual(client.inventorySlots[41],{item:planks,count:4, damage: 0});
     send(client.encodeCloseInventory());
     assert.equal(client.inventorySlots[41],null);
-    assert.deepEqual(client.inventorySlots[2],{item:planks,count:5});
+    assert.deepEqual(client.inventorySlots[2],{item:planks,count:5, damage: 0});
     assert.equal(client.inventory.length,36);
 });
 
@@ -99,7 +100,7 @@ test("slot activation sends exactly once for pointer and keyboard event sequence
 
 
 test("table display maps wire 41–50 without confusing materials, result and cursor", () => {
-    const slots = Array.from({ length: 51 }, (_, i) => ({ item: i + 1, count: i + 1 }));
+    const slots = Array.from({ length: 51 }, (_, i) => ({ item: i + 1, count: i + 1, damage: 0 }));
     const before = structuredClone(slots);
     const view = inventoryDisplay(slots, 1);
     assert.deepEqual(TABLE_ROWS.map(row => row.length), [27, 9, 9, 1]);
@@ -153,7 +154,7 @@ test(`container ${kind}: a rejected use request leaves the screen closed`, () =>
 }
 
 test("furnace display uses wire 51–53 directly and keeps cursor separate", () => {
-    const slots = Array.from({ length: 54 }, (_, i) => ({ item: i + 1, count: i + 1 }));
+    const slots = Array.from({ length: 54 }, (_, i) => ({ item: i + 1, count: i + 1, damage: 0 }));
     const before = structuredClone(slots);
     const view = inventoryDisplay(slots, 2);
     assert.deepEqual(FURNACE_ROWS.map(row => row.length), [27, 9, 2, 1]);
@@ -179,4 +180,13 @@ test("furnace item and block textures are deterministic and distinct", () => {
         assert.notDeepEqual(pixels, paintTexture("unknown_texture"));
         for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, images[j]);
     }
+});
+
+
+test("durability bars hide on new items and use the remaining fraction for width and color", () => {
+    assert.equal(durabilityBar(0, 48), null);
+    assert.equal(durabilityBar(1, null), null);
+    assert.deepEqual(durabilityBar(1, 48), { fraction: 47 / 48, color: "hsl(118, 85%, 55%)" });
+    assert.deepEqual(durabilityBar(24, 48), { fraction: 0.5, color: "hsl(60, 85%, 55%)" });
+    assert.deepEqual(durabilityBar(47, 48), { fraction: 1 / 48, color: "hsl(3, 85%, 55%)" });
 });

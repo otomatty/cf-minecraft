@@ -117,7 +117,7 @@ mod tests {
         // No water flows in this script. Hashing the empty scheduled-tick count
         // changes the fingerprint from d36da50f11b5eb81.
         // The lava damage counter is zero in this script, but now contributes to the hash.
-        assert_eq!(run(2026, 600), 0x7c46257055d8c652);
+        assert_eq!(run(2026, 600), 0x3452cbe46d067e47);
     }
 
     #[test]
