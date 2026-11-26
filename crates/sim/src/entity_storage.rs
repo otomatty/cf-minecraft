@@ -1,4 +1,5 @@
 //! Entity records in the simulation's chunk save format.
+use protocol::MobKind;
 use world::io::{DecodeError, Reader, Writer};
 use world::{items, HEIGHT, MIN_Y};
 
@@ -13,6 +14,7 @@ const MAX_SAVED_Y: f64 = (MIN_Y + HEIGHT + 64) as f64;
 const ANIMAL: u8 = 0;
 const ITEM: u8 = 1;
 const DAMAGED_ITEM: u8 = 2;
+const SHEEP: u8 = 3;
 const MIN_RECORD_BYTES: usize = 1 + 2 + 1 + 6 * 8 + 2 * 4;
 
 pub(super) enum SavedEntity<M = Mob, I = Entity> {
@@ -61,7 +63,9 @@ pub(super) fn read_saved_entities(
     let mut entities = Vec::new();
     for _ in 0..count {
         entities.push(match r.u8()? {
-            ANIMAL => SavedEntity::Animal(Mob::read_saved(chunk, &mut r)?),
+            tag @ (ANIMAL | SHEEP) => {
+                SavedEntity::Animal(Mob::read_saved(chunk, &mut r, tag == SHEEP)?)
+            }
             tag @ (ITEM | DAMAGED_ITEM) => {
                 let item = r.u16()?;
                 let count = r.u8()?;
@@ -128,7 +132,11 @@ impl Server {
         for (_, entity) in entities {
             match entity {
                 SavedEntity::Animal(mob) => {
-                    w.u8(ANIMAL);
+                    w.u8(if mob.kind == MobKind::Sheep {
+                        SHEEP
+                    } else {
+                        ANIMAL
+                    });
                     mob.write_saved(w);
                 }
                 SavedEntity::Item(item) => {
@@ -197,7 +205,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::MobKind;
+    use protocol::WoolColor;
     use world::Chunk;
     use worldgen::Generator;
 
@@ -212,6 +220,56 @@ mod tests {
         let (cx, cz, bytes) = server.take_dirty().unwrap();
         assert_eq!((cx, cz), (0, 0));
         bytes
+    }
+
+    #[test]
+    fn saved_sheep_retains_color_and_regrowth_ticks_while_unloaded() {
+        let mut source = server();
+        source.spawn_mob(MobKind::Sheep, [2.5, 4.0, 3.5]);
+        let sheep = source.mobs.get_mut(&1).unwrap();
+        sheep.wool_color = WoolColor::Black;
+        sheep.wool_ticks = 1379;
+        source.unload_far_chunks();
+        let (cx, cz, bytes) = source.take_dirty().unwrap();
+        assert_eq!((cx, cz), (0, 0));
+        assert!(source.mobs.is_empty());
+        assert!(!source.world.chunks.contains_key(&(0, 0)));
+        source.game_time += 2400;
+        assert!(source.load_chunk(cx, cz, &bytes));
+        let sheep = &source.mobs[&2];
+        assert_eq!(
+            (sheep.wool_color, sheep.wool_ticks),
+            (WoolColor::Black, 1379)
+        );
+        source.tick_mobs();
+        assert_eq!(source.mobs[&2].wool_ticks, 1378);
+    }
+
+    #[test]
+    fn legacy_animal_record_reads_sheep_as_white_with_fleece() {
+        let mut w = Writer::new();
+        w.varint(1);
+        w.u8(ANIMAL);
+        w.u8(MobKind::Sheep.wire_id());
+        for value in [2.5, 4.0, 3.5, 0.0, 0.0, 0.0] {
+            w.f64(value);
+        }
+        w.f32(90.0);
+        w.u8(8);
+        w.i32(42);
+        w.u8(1);
+        w.u16(0);
+        let bytes = w.finish();
+        let records = read_saved_entities((0, 0), &mut Reader::new(&bytes)).unwrap();
+        let [SavedEntity::Animal(sheep)] = records.as_slice() else {
+            panic!("expected one saved animal");
+        };
+        assert_eq!(sheep.kind, MobKind::Sheep);
+        assert_eq!((sheep.wool_color, sheep.wool_ticks), (WoolColor::White, 0));
+        assert_eq!(
+            (sheep.pos(), sheep.yaw, sheep.health, sheep.age),
+            ([2.5, 4.0, 3.5], 90.0, 8, 42)
+        );
     }
 
     #[test]

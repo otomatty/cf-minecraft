@@ -12,7 +12,7 @@ textures = [
   "sandstone_top", "sandstone_bottom", "water_flow",
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
-  "oak_leaves_dense",
+  "oak_leaves_dense", "gray_wool", "brown_wool", "black_wool",
 ]
 legacy_count = 14
 
@@ -167,6 +167,7 @@ states = [
 
 [[blocks]]
 name = "red_flower"
+washes_away = true
 dig_ticks = 0
 id = 20
 model = "cross"
@@ -175,6 +176,7 @@ texture = "red_flower"
 
 [[blocks]]
 name = "yellow_flower"
+washes_away = true
 dig_ticks = 0
 id = 21
 model = "cross"
@@ -183,6 +185,7 @@ texture = "yellow_flower"
 
 [[blocks]]
 name = "short_grass"
+washes_away = true
 dig_ticks = 0
 id = 22
 model = "cross"
@@ -365,6 +368,7 @@ states = [
 
 [[blocks]]
 name = "wheat"
+washes_away = true
 id = 54
 dig_ticks = 0
 model = "cross"
@@ -447,6 +451,7 @@ texture = "white_wool"
 
 [[blocks]]
 name = "torch"
+washes_away = true
 id = 77
 drop = "torch"
 dig_ticks = 0
@@ -459,6 +464,7 @@ emission = 14
 
 [[blocks]]
 name = "wall_torch"
+washes_away = true
 id = 78
 drop = "torch"
 dig_ticks = 0
@@ -474,3 +480,21 @@ states = [
   { properties = [["facing", "west"]] },
   { properties = [["facing", "east"]] },
 ]
+
+[[blocks]]
+name = "gray_wool"
+id = 82
+dig_ticks = 16
+texture = "gray_wool"
+
+[[blocks]]
+name = "brown_wool"
+id = 83
+dig_ticks = 16
+texture = "brown_wool"
+
+[[blocks]]
+name = "black_wool"
+id = 84
+dig_ticks = 16
+texture = "black_wool"

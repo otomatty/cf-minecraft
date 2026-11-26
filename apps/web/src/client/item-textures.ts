@@ -546,6 +546,28 @@ sprites.set("torch_item", {
 	],
 });
 
+sprites.set("shears", {
+	palette: { ...materials.iron, 5: 0xa0a1a5 },
+	rows: [
+		"................",
+		"..1..........1..",
+		"..131......131..",
+		"...141....141...",
+		"....141..141....",
+		".....141141.....",
+		"......1431......",
+		"......1251......",
+		".....131131.....",
+		"...a1cb..bc1a...",
+		"..abca....acba..",
+		"..ac.a....a.ca..",
+		"..ab.a....a.ba..",
+		"...abca..acba...",
+		"....aa....aa....",
+		"................",
+	],
+});
+
 for (const [material, palette] of Object.entries(materials)) {
 	for (const [kind, rows] of Object.entries(tools)) {
 		sprites.set(`${material}_${kind}`, { palette, rows });

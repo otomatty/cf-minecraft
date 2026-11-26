@@ -1,7 +1,9 @@
-import type { MobKind, RayHit } from "./client-core.ts";
+import { blockItemTint, type BlockItemTint } from "./block-tints.ts";
+import type { ItemInfo, MobKind, RayHit, WoolColor } from "./client-core.ts";
 import { boxInFrustum } from "./math.ts";
+import type { BlockStateInfo } from "./placement.ts";
 
-import { chicken, cow, pig, sheep } from "./mobs/farm.ts";
+import { chicken, coloredSheepSkins, cow, pig, sheep, shearedSheep } from "./mobs/farm.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { creeper, skeleton, zombie } from "./mobs/hostile.ts";
@@ -71,7 +73,10 @@ export function mobBeforeBlock(origin: readonly number[], dir: readonly number[]
 export interface RenderItem {
 	position: [number, number, number];
 	texture: number;
+	blockFaces?: readonly { name: string; texture: number }[];
+	cellTint?: BlockItemTint | null;
 	flat?: boolean;
+	centered?: boolean;
 	velocity?: Vec3;
 	/** Sky light first, block light second; lightmap UVs use the reverse order. */
 	light: [sky: number, block: number];
@@ -84,6 +89,15 @@ export interface RenderSprite {
 }
 
 export const MAX_RENDER_ITEMS = 1024;
+export const ITEM_VERTEX_FLOATS = 10;
+
+/** Biome-tinted block drops use the block's own face materials. */
+export function dropBlockFaces(item: ItemInfo, registry: readonly BlockStateInfo[], textureNames: readonly string[]): RenderItem["blockFaces"] {
+	if (item.texture !== null || item.block === null) return undefined;
+	const faces = registry[item.block]?.faces;
+	if (!faces?.some(name => blockItemTint(name))) return undefined;
+	return faces.map(name => ({ name, texture: textureNames.indexOf(name) }));
+}
 
 /** Keep vertex uploads within the item buffer capacity, preserving input order. */
 export function limitRenderItems(items: readonly RenderItem[]): readonly RenderItem[] {
@@ -94,10 +108,11 @@ const corners = [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], [0, 1, 0], [1, 1, 0
 // Down, up, north, south, west, east; counterclockwise from outside each face.
 const faces = [[0, 1, 2, 3], [7, 6, 5, 4], [1, 0, 4, 5], [3, 2, 6, 7], [0, 3, 7, 4], [2, 1, 5, 6]];
 
-function writeSprite(out: number[], { corners, texture, light }: RenderSprite): void {
+function writeSprite(out: number[], { corners, texture, light }: RenderSprite, drop = false): void {
 	for (const index of [0, 1, 2, 0, 2, 3, 1, 0, 3, 1, 3, 2]) {
 		out.push(...corners[index], [0, 1, 1, 0][index], [1, 1, 0, 0][index], 1, texture,
 			(light[1] + 0.5) / 16, (light[0] + 0.5) / 16);
+		if (drop) out.push(0);
 	}
 }
 
@@ -127,26 +142,31 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 	const angle = timeMs / 2000, c = Math.cos(angle), s = Math.sin(angle);
 	for (const item of items) {
 		if (item.velocity) {
-			writeSprite(out, { ...item, corners: arrowCorners(item.position, item.velocity, camera) });
+			writeSprite(out, { ...item, corners: arrowCorners(item.position, item.velocity, camera) }, true);
 			continue;
 		}
 		const itemCorners = item.flat ? [[0,0,.5],[1,0,.5],[1,1,.5],[0,1,.5]] : corners;
 		const itemFaces = item.flat ? [[0,1,2,3],[1,0,3,2]] : faces;
+		const y = item.position[1] - camera[1];
 		for (const [face, indices] of itemFaces.entries()) {
+			const material = item.blockFaces?.[item.flat ? 1 : face];
+			const rgb = material && blockItemTint(material.name, item.cellTint);
+			// Zero marks untinted vertices. All RGB8 values plus one fit exactly in f32.
+			const tint = rgb ? 1 + (rgb[0] | rgb[1] << 8 | rgb[2] << 16) : 0;
 			for (const i of [0, 1, 2, 0, 2, 3]) {
 				const vertex = itemCorners[indices[i]];
 				const x = (vertex[0] - 0.5) * 0.25, z = (vertex[2] - 0.5) * 0.25;
 				out.push(
 					item.position[0] - camera[0] + x * c - z * s,
-					item.position[1] - camera[1] + vertex[1] * 0.25 + 0.04 + Math.sin(timeMs / 500) * 0.03,
+					item.centered ? y + (vertex[1] - 0.5) * 0.25 : y + vertex[1] * 0.25 + 0.04 + Math.sin(timeMs / 500) * 0.03,
 					item.position[2] - camera[2] + x * s + z * c,
-					[0, 1, 1, 0][i], [1, 1, 0, 0][i], (item.flat ? 1 : [0.5, 1, 0.8, 0.8, 0.6, 0.6][face]), item.texture,
-					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16,
+					[0, 1, 1, 0][i], [1, 1, 0, 0][i], (item.flat ? 1 : [0.5, 1, 0.8, 0.8, 0.6, 0.6][face]), material?.texture ?? item.texture,
+					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16, tint,
 				);
 			}
 		}
 	}
-	for (const sprite of sprites.slice(0, MAX_RENDER_ITEMS - items.length)) writeSprite(out, sprite);
+	for (const sprite of sprites.slice(0, MAX_RENDER_ITEMS - items.length)) writeSprite(out, sprite, true);
 	return new Float32Array(out);
 }
 
@@ -162,6 +182,8 @@ export interface RenderMob extends RenderPose {
 	hurt: boolean;
 	fuse?: number;
 	burning?: boolean;
+	woolColor?: WoolColor;
+	sheared?: boolean;
 }
 
 export interface RenderPlayer extends RenderPose {
@@ -260,7 +282,10 @@ export function explosionVertices(particles: readonly ExplosionParticle[], camer
 // The 64×32 skins occupy the upper half of a layer at their original texel scale.
 export const mobAssetsByKind = [cow, pig, chicken, sheep, zombie, skeleton, creeper] as const satisfies Record<MobKind, MobAsset>;
 const playerSkinLayer = mobAssetsByKind.length;
-export const entitySkins = [...mobAssetsByKind, player].map(asset => asset.texture);
+const coloredSheepLayer = playerSkinLayer + 1;
+const shearedSheepLayer = coloredSheepLayer + coloredSheepSkins.length;
+export const entitySkins = [...mobAssetsByKind.map(asset => asset.texture), player.texture,
+	...coloredSheepSkins, shearedSheep.texture];
 export const MOB_SKIN_SIZE = 64;
 
 // Corners for each face in image order: top-left, top-right, bottom-right, bottom-left.
@@ -333,10 +358,19 @@ function compileMob(asset: MobAsset, { height, width }: { height: number; width:
 }
 
 const mobMeshes = mobAssetsByKind.map((asset, kind) => compileMob(asset, mobHitboxes[kind]));
+const shearedSheepMesh = compileMob(shearedSheep, mobHitboxes[3]);
 const playerMesh = compileMob(player, { height: 2, width: 0.6 });
 
 function meshFor(entity: RenderMob | RenderPlayer) {
-	return "kind" in entity ? mobMeshes[entity.kind] : playerMesh;
+	if (!("kind" in entity)) return playerMesh;
+	return entity.kind === 3 && entity.sheared ? shearedSheepMesh : mobMeshes[entity.kind];
+}
+
+function skinFor(entity: RenderMob | RenderPlayer): number {
+	if (!("kind" in entity)) return playerSkinLayer;
+	if (entity.kind !== 3) return entity.kind;
+	if (entity.sheared) return shearedSheepLayer;
+	return entity.woolColor ? coloredSheepLayer + entity.woolColor - 1 : 3;
 }
 
 export function mobVertices(mobs: readonly (RenderMob | RenderPlayer)[], camera: readonly number[], timeMs: number,
@@ -345,7 +379,7 @@ export function mobVertices(mobs: readonly (RenderMob | RenderPlayer)[], camera:
 	let i = 0;
 	for (const mob of mobs) {
 		const { bones, scale, centerZ } = meshFor(mob);
-		const skinLayer = "kind" in mob ? mob.kind : playerSkinLayer;
+		const skinLayer = skinFor(mob);
 		const headPitch = "pitch" in mob ? mob.pitch : 0;
 		const fuse = Math.min(("fuse" in mob ? mob.fuse : undefined) ?? 0, 30);
 		const swell = 1 + 0.2 * fuse / 30;

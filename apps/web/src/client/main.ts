@@ -23,21 +23,22 @@ import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { setupTexturePack } from "./texture-pack-settings.ts";
-import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
-import { blockInteraction, bucketTarget, canTill, placementState, usesFluidSourceRay } from "./placement.ts";
+import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
+import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
+import { dropBlockFaces, interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
 import { PlayerNames } from "./player-names.ts";
 import { forward, type Vec3 } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
+import { blockItemTint, type BlockItemTint } from "./block-tints.ts";
 import { LocalTransport, type ServerStats, type Transport, type TransportHandlers, WebSocketTransport } from "./transport.ts";
 import { pageCacheActions, type PageCacheAction } from "./page-cache.ts";
 import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
@@ -161,11 +162,13 @@ async function main(): Promise<void> {
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const textureNames = [...core.textureNames(), "bow"];
 	const arrowTexture = textureNames.indexOf("arrow");
+	const eggTexture = textureNames.indexOf("egg");
 	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
 	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
+	const dropFaces = new Map(items.map(item => [item.id, dropBlockFaces(item, registry, textureNames)]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -357,7 +360,7 @@ async function main(): Promise<void> {
 				for (const [player, d] of remoteDigs) if ((d.x >> 4) === v.getInt32(1) && (d.z >> 4) === v.getInt32(5)) remoteDigs.delete(player);
 			}
 			if (id === S2C.EntitySpawn || id === S2C.EntityMove || id === S2C.MobSpawn || id === S2C.MobMove ||
-				id === S2C.ArrowSpawn || id === S2C.ArrowMove) {
+				id === S2C.ArrowSpawn || id === S2C.ArrowMove || id === S2C.EggSpawn) {
 				const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 				entityReceivedAt.set(view.getUint32(1), performance.now());
 			}
@@ -537,6 +540,9 @@ async function main(): Promise<void> {
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
+	const biomeIcons = new Map<number, ImageData>();
+	let packedGrassSide = false;
+	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
 	const arrowItemId = items.find(item => item.name === "arrow")?.id;
@@ -561,15 +567,16 @@ async function main(): Promise<void> {
 	}
 	let dig = newDigState();
 	let heldInventory = "";
-	function paintIcon(c: HTMLCanvasElement, state: number): void {
+	function paintIcon(c: HTMLCanvasElement, state: number, tint?: BlockItemTint | null): void {
 		c.width = c.height = ICON_SIZE;
 		c.title = "";
 		if (!state) return;
 		const info = registry[state];
-		let icon = icons.get(state);
+		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
+		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels), ICON_SIZE, ICON_SIZE);
-			icons.set(state, icon);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint, packedGrassSide), ICON_SIZE, ICON_SIZE);
+			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
 		c.title = info.name;
@@ -593,30 +600,10 @@ async function main(): Promise<void> {
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
 	}
-	function syncInventory(): void {
-		const inventory = core.inventory;
-		paintInventoryScreen();
-		hotbarBlocks = hotbarStates(inventory, items);
-		paintHotbar(inventory);
-		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
-		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
-		if (usingItem) {
-			const stack = inventory[selectedSlot];
-			if (stack?.item !== usingItem.item) {
-				endUsingItem();
-			} else if (usingItem.kind === "food") {
-				if (stack.count < usingItem.count) {
-					usingItem.startedAt = performance.now();
-					eatProgress.value = 0;
-				}
-				usingItem.count = stack.count;
-			}
-		}
-	}
-	function paintHotbar(inventory: typeof core.inventory): void {
+	function paintHotbar(inventory: readonly (InventorySlot | null)[]): void {
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
-			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage);
+			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage, iconTint);
 			const count = inventory[i]?.count ?? 0;
 			c.dataset.count = String(count);
 			if (count >= 2) {
@@ -638,9 +625,29 @@ async function main(): Promise<void> {
 			}
 		}
 	}
-	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0): void {
+	function syncInventory(): void {
+		const inventory = core.inventory;
+		paintInventoryScreen();
+		hotbarBlocks = hotbarStates(inventory, items);
+		paintHotbar(inventory);
+		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
+		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
+		if (usingItem) {
+			const stack = inventory[selectedSlot];
+			if (stack?.item !== usingItem.item) {
+				endUsingItem();
+			} else if (usingItem.kind === "food") {
+				if (stack.count < usingItem.count) {
+					usingItem.startedAt = performance.now();
+					eatProgress.value = 0;
+				}
+				usingItem.count = stack.count;
+			}
+		}
+	}
+	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0, tint?: BlockItemTint | null): void {
 		const item = items.find(item => item.id === id);
-		paintIcon(c, item?.block ?? 0);
+		paintIcon(c, item?.block ?? 0, tint);
 		if (item?.texture) {
 			c.width = c.height = TEX_SIZE;
 			const pixels = renderer.texturePixels.get(item.texture);
@@ -940,7 +947,7 @@ async function main(): Promise<void> {
 		const display = inventoryDisplay(core.inventorySlots, active.kind);
 		for (const group of display.groups) for (const {slot,stack} of group) {
 			const view = active.buttons.get(slot)!;
-			paintItemIcon(view.canvas, stack?.item, stack?.damage);
+			paintItemIcon(view.canvas, stack?.item, stack?.damage, iconTint);
 			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
 			view.canvas.dataset.count = String(stack?.count ?? 0);
 		}
@@ -954,7 +961,7 @@ async function main(): Promise<void> {
 			gauge.setAttribute("aria-valuemax", String(max));
 			gauge.textContent = `${value} / ${max}`;
 		}
-		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage);
+		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage, iconTint);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
 		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
 	}
@@ -1003,7 +1010,9 @@ async function main(): Promise<void> {
 	});
 	setupTexturePack($("textures-tab-panel"), textureNames, tiles => {
 		renderer.applyTexturePack(tiles);
+		packedGrassSide = tiles.has("grass_block_side");
 		icons.clear();
+		biomeIcons.clear();
 		paintHotbar(core.inventory);
 		paintInventoryScreen();
 		pickerButtons.forEach((button, i) => paintItemIcon(button.querySelector("canvas")!, items[i].id));
@@ -1288,7 +1297,20 @@ async function main(): Promise<void> {
 		const held = stack && items.find(item => item.id === stack.item);
 		const hit = aimedBlock(usesFluidSourceRay(held?.name));
 		if (button === 2 && !repeat && !usingItem && canInteract()) {
+			const mob = useEntityTarget(held?.name, aimedMobId(hit));
+			if (mob !== null) {
+				heldButtons.delete(2);
+				sendPosition();
+				transport.send(core.encodeUseEntity(mob));
+				return;
+			}
 			const targetBlock = hit ? registry[core.getBlock(hit.x, hit.y, hit.z)] : undefined;
+			if (held?.name === "egg" && blockInteraction(targetBlock?.name, shift) !== "open") {
+				heldButtons.delete(2);
+				sendPosition();
+				transport.send(core.encodeUseItem());
+				return;
+			}
 			const survival = core.gameMode === "survival";
 			const canDraw = held?.name === "bow" && (!survival || inventory.some(slot => slot !== null && slot.item === arrowItemId));
 			const canEat = held?.food && survival && core.food < MAX_FOOD;
@@ -1319,7 +1341,7 @@ async function main(): Promise<void> {
 			if (held?.name === "bucket" || held?.name === "water_bucket" || held?.name === "lava_bucket") {
 				if (!repeat) {
 					heldButtons.delete(2);
-					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)]?.name, shift);
+					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)], shift);
 					if (target) {
 						sendPosition();
 						transport.send(core.encodeUseBucket(...target));
@@ -1591,6 +1613,8 @@ async function main(): Promise<void> {
 					hurt: mob.hurt !== 0 && now - (mobHurtAt.get(mob.id) ?? -Infinity) < MOB_HURT_MS,
 					fuse: mob.fuse,
 					burning: mob.burning,
+					woolColor: mob.woolColor,
+					sheared: mob.sheared,
 					light: core.entityLight(position),
 				};
 			});
@@ -1629,17 +1653,35 @@ async function main(): Promise<void> {
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
+		const nextIconTint = joined ? tintMap.tint(position[0], position[2]) : null;
+		if (iconTintChanged(iconTint, nextIconTint)) {
+			iconTint = nextIconTint;
+			biomeIcons.clear();
+			paintHotbar(core.inventory);
+			if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) paintInventoryScreen();
+		}
 		const renderArrows = core.arrows.map(arrow => ({
 			position: interpolateEntity(arrow.previous, arrow.position, now - (entityReceivedAt.get(arrow.id) ?? now)),
 			velocity: arrow.velocity,
 			texture: arrowTexture,
 			light: core.entityLight(arrow.position),
 		}));
+		const renderEggs = core.eggs.map(egg => ({
+			position: interpolateEntity(egg.previous, egg.position, now - (entityReceivedAt.get(egg.id) ?? now)),
+			texture: eggTexture,
+			flat: true,
+			centered: true,
+			light: core.entityLight(egg.position),
+		}));
 		const renderItems = core.entities.map(entity => {
 			const item = items.find(item => item.id === entity.item);
+			const dropPosition = interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now));
+			const blockFaces = dropFaces.get(entity.item);
 			return {
-				position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
+				position: dropPosition,
 				texture: itemTextures.get(entity.item) ?? 0,
+				blockFaces,
+				cellTint: blockFaces ? tintMap.tint(dropPosition[0], dropPosition[2]) : null,
 				flat: item?.texture != null || item?.block == null,
 				light: core.entityLight(entity.position),
 			};
@@ -1664,7 +1706,7 @@ async function main(): Promise<void> {
 		if (joined) audio.updateMusic(dayTime);
 		explosionParticles = explosionParticles.filter(particle => now < particle.startedAt + particle.lifetime);
 		const renderParticles = explosionParticles.filter(particle => now >= particle.startedAt);
-		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderItems], now, renderDigs, renderMobs, renderParticles, renderPlayers);
+		frame = renderer.render(camera, viewDistance, target, fov, dayTime, [...renderArrows, ...renderEggs, ...renderItems], now, renderDigs, renderMobs, renderParticles, renderPlayers);
 		renderedExplosionParticles = renderParticles.length;
 		window.__mc.frames++;
 
@@ -1696,8 +1738,10 @@ async function main(): Promise<void> {
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,
+			aimedMob: aimedMobId(aimedBlock()),
 			players: core.players.map(({ id, name, position }) => ({ id, name, position })),
 			bowDraw: bowDraw(performance.now()),
+			eggs: core.eggs,
 			arrows: core.arrows.map(({ id, position, velocity }) => ({ id, position, velocity })),
 			dig: dig.active,
 			inventory: core.inventory,

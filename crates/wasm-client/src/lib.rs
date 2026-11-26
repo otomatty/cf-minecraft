@@ -9,7 +9,9 @@ use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mesher::{padded_index, PADDED_LEN};
-use protocol::{ItemStack, MobKind, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C};
+use protocol::{
+    ItemStack, MobKind, WoolColor, C2S, MAX_AIR, MAX_FOOD, MAX_HEALTH, PROTOCOL_VERSION, S2C,
+};
 use world::biomes::BIOMES;
 use world::io::Reader;
 use world::{blocks, Chunk, World, HEIGHT, MIN_Y, SECTIONS};
@@ -34,6 +36,12 @@ struct MobEntity {
     hurt: u32,
     fuse: u8,
     burning: bool,
+    wool_color: WoolColor,
+    sheared: bool,
+}
+struct EggEntity {
+    pos: [f64; 3],
+    previous: [f64; 3],
 }
 struct ArrowEntity {
     pos: [f64; 3],
@@ -52,6 +60,7 @@ struct State {
     entities: BTreeMap<u32, ItemEntity>,
     mobs: BTreeMap<u32, MobEntity>,
     arrows: BTreeMap<u32, ArrowEntity>,
+    eggs: BTreeMap<u32, EggEntity>,
     players: BTreeMap<u32, RemotePlayer>,
     mob_hurt_sequence: u32,
     chat: Option<(protocol::ChatKind, String, String)>,
@@ -211,6 +220,7 @@ pub extern "C" fn client_new() {
         entities: BTreeMap::new(),
         mobs: BTreeMap::new(),
         arrows: BTreeMap::new(),
+        eggs: BTreeMap::new(),
         players: BTreeMap::new(),
         mob_hurt_sequence: 0,
         chat: None,
@@ -270,6 +280,7 @@ pub extern "C" fn client_reset_world() {
     st.entities.clear();
     st.mobs.clear();
     st.arrows.clear();
+    st.eggs.clear();
     st.players.clear();
     st.explosions.clear();
     st.mob_hurt_sequence = 0;
@@ -345,10 +356,17 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 },
             );
         }
+        S2C::EggSpawn { id, pos } => {
+            st.eggs.insert(id, EggEntity { pos, previous: pos });
+        }
+        S2C::EggSound { .. } => {}
         S2C::EntityMove { id, x, y, z } => {
             if let Some(e) = st.entities.get_mut(&id) {
                 e.previous = e.pos;
                 e.pos = [x, y, z];
+            } else if let Some(egg) = st.eggs.get_mut(&id) {
+                egg.previous = egg.pos;
+                egg.pos = [x, y, z];
             }
         }
         S2C::EntityCount { id, count } => {
@@ -376,6 +394,8 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                     hurt: 0,
                     fuse: 0,
                     burning: false,
+                    wool_color: WoolColor::White,
+                    sheared: false,
                 },
             );
         }
@@ -430,6 +450,16 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
                 mob.burning = burning;
             }
         }
+        S2C::SheepAppearance { id, color, sheared } => {
+            if let Some(mob) = st
+                .mobs
+                .get_mut(&id)
+                .filter(|mob| mob.kind == MobKind::Sheep)
+            {
+                mob.wool_color = color;
+                mob.sheared = sheared;
+            }
+        }
         S2C::Explosion { center } => {
             st.explosions.push(center);
         }
@@ -467,11 +497,12 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
         S2C::PlayerRemove { id } => {
             st.players.remove(&id);
         }
-        S2C::DigProgress { .. } | S2C::ToolBreak => {}
+        S2C::DigProgress { .. } | S2C::ToolBreak | S2C::Shear => {}
         S2C::EntityRemove { id } => {
             st.entities.remove(&id);
             st.mobs.remove(&id);
             st.arrows.remove(&id);
+            st.eggs.remove(&id);
         }
 
         S2C::Inventory {
@@ -1447,6 +1478,11 @@ pub extern "C" fn client_enc_attack(id: u32) -> usize {
     emit(state(), C2S::Attack { id }.encode())
 }
 
+#[no_mangle]
+pub extern "C" fn client_enc_use_entity(id: u32) -> usize {
+    emit(state(), C2S::UseEntity { id }.encode())
+}
+
 /// Output: newline-separated texture names in atlas layer order.
 #[no_mangle]
 pub extern "C" fn client_texture_names() -> usize {
@@ -1493,9 +1529,9 @@ pub extern "C" fn client_block_registry() -> usize {
                 |b| boxes.push([b.min, b.max]));
             boxes
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"washesAway":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
+            info.occludes, info.washes_away, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }
@@ -1678,7 +1714,7 @@ pub extern "C" fn client_entities() -> usize {
     st.out = w.finish();
     st.out.len()
 }
-/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32, fuse u8, burning u8.
+/// Sorted packed records: ID u32, kind u8, yaw f32, current/previous f64 triples, hurt sequence u32, fuse u8, burning u8, wool color u8, sheared u8.
 #[no_mangle]
 pub extern "C" fn client_mobs() -> usize {
     let st = state();
@@ -1693,6 +1729,8 @@ pub extern "C" fn client_mobs() -> usize {
         w.i32(mob.hurt as i32);
         w.u8(mob.fuse);
         w.u8(u8::from(mob.burning));
+        w.u8(mob.wool_color as u8);
+        w.u8(u8::from(mob.sheared));
     }
     st.out = w.finish();
     st.out.len()
@@ -1711,6 +1749,21 @@ pub extern "C" fn client_players() -> usize {
         w.f32(player.yaw);
         w.f32(player.pitch);
         for v in player.pos.into_iter().chain(player.previous) {
+            w.f64(v);
+        }
+    }
+    st.out = w.finish();
+    st.out.len()
+}
+
+/// Sorted packed records: ID u32, current/previous position as f64 triples.
+#[no_mangle]
+pub extern "C" fn client_eggs() -> usize {
+    let st = state();
+    let mut w = world::io::Writer::new();
+    for (&id, egg) in &st.eggs {
+        w.i32(id as i32);
+        for v in egg.pos.into_iter().chain(egg.previous) {
             w.f64(v);
         }
     }
@@ -1820,7 +1873,7 @@ mod tests {
             0x0d,
         );
         for sequence in 0_u32..=2 {
-            assert_eq!(client_mobs(), 63);
+            assert_eq!(client_mobs(), 65);
             assert_eq!(state().out[57..61], sequence.to_be_bytes());
             if sequence < 2 {
                 receive(S2C::MobHurt { id: 7 }, 0x0f);
@@ -1846,7 +1899,7 @@ mod tests {
         }
         .encode();
         assert_eq!(unsafe { client_packet(spawn.as_ptr(), spawn.len()) }, 0x0d);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
         assert_eq!(state().out[4], 4);
         assert_eq!(state().out[61], 0);
 
@@ -1863,21 +1916,21 @@ mod tests {
             unsafe { client_packet(creeper.as_ptr(), creeper.len()) },
             0x0d
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 4], 6);
-        assert_eq!(state().out[63 + 61], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 4], 6);
+        assert_eq!(state().out[65 + 61], 0);
         let fuse = S2C::MobFuse { id: 8, ticks: 12 }.encode();
         assert_eq!(unsafe { client_packet(fuse.as_ptr(), fuse.len()) }, 0x12);
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 61], 12);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 61], 12);
         let cleared = S2C::MobFuse { id: 8, ticks: 0 }.encode();
         assert_eq!(
             unsafe { client_packet(cleared.as_ptr(), cleared.len()) },
             0x12
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 61], 0);
-        assert_eq!(state().out[63 + 62], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 61], 0);
+        assert_eq!(state().out[65 + 62], 0);
         let burning = S2C::MobBurning {
             id: 8,
             burning: true,
@@ -1887,9 +1940,9 @@ mod tests {
             unsafe { client_packet(burning.as_ptr(), burning.len()) },
             0x15
         );
-        assert_eq!(client_mobs(), 63 * 2);
+        assert_eq!(client_mobs(), 65 * 2);
         assert_eq!(state().out[62], 0);
-        assert_eq!(state().out[63 + 62], 1);
+        assert_eq!(state().out[65 + 62], 1);
         let extinguished = S2C::MobBurning {
             id: 8,
             burning: false,
@@ -1899,8 +1952,8 @@ mod tests {
             unsafe { client_packet(extinguished.as_ptr(), extinguished.len()) },
             0x15
         );
-        assert_eq!(client_mobs(), 63 * 2);
-        assert_eq!(state().out[63 + 62], 0);
+        assert_eq!(client_mobs(), 65 * 2);
+        assert_eq!(state().out[65 + 62], 0);
 
         let death = protocol::PlayerVitals {
             health: 0,
@@ -2100,7 +2153,7 @@ mod tests {
         let bytes = expected.finish();
         assert_eq!(client_players(), bytes.len());
         assert_eq!(state().out, bytes);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
 
         receive(S2C::EntityRemove { id: 2 }, 0x0a);
         assert_eq!(client_mobs(), 0);
@@ -2152,7 +2205,7 @@ mod tests {
         receive(S2C::PlayerRemove { id: 1 }, 0x19);
         receive(S2C::PlayerRemove { id: 2 }, 0x19);
         assert_eq!(client_players(), 0);
-        assert_eq!(client_mobs(), 63);
+        assert_eq!(client_mobs(), 65);
         receive(
             S2C::PlayerSpawn {
                 id: 2,

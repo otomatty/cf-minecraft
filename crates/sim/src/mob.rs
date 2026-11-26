@@ -5,7 +5,7 @@ use std::ops::RangeInclusive;
 use jmath::sin_table::{cos, sin};
 use physics::{BlockWorld, CollisionWorld, Input, Player};
 pub use protocol::MobKind;
-use protocol::{DeathCause, S2C};
+use protocol::{DeathCause, WoolColor, S2C};
 use world::{blocks, items, smelting, Fnv64, World, HEIGHT, MIN_Y};
 
 use crate::{
@@ -141,6 +141,9 @@ const HERD_KIND_SALT: u64 = 17;
 const HERD_KINDS: [MobKind; 4] = [MobKind::Cow, MobKind::Pig, MobKind::Chicken, MobKind::Sheep];
 const LOCAL_LIMIT: usize = 8;
 const EGG_INTERVAL_SALT: u64 = 22;
+const WOOL_COLOR_SALT: u64 = 28;
+const SHEAR_LOOT_SALT: u64 = 29;
+const WOOL_REGROW_TICKS: u16 = 2400;
 const MIN_EGG_TICKS: u16 = 6000;
 const MAX_EGG_TICKS: u16 = 12000;
 const HOSTILE_SPAWN_INTERVAL: i64 = 200;
@@ -229,6 +232,9 @@ pub struct Mob {
     lava_ticks: u8,
     last_dry_pos: [f64; 3],
     egg_ticks: Option<u16>,
+    egg_knockback: bool,
+    pub(super) wool_color: WoolColor,
+    pub(super) wool_ticks: u16,
     hostile: Option<Hostile>,
     /// Visual flame. Derived each tick from sunlight and lava, so it is not hashed or saved.
     burning: bool,
@@ -250,6 +256,9 @@ impl Mob {
             lava_ticks: 0,
             last_dry_pos: pos,
             egg_ticks: None,
+            egg_knockback: false,
+            wool_color: WoolColor::White,
+            wool_ticks: 0,
             hostile: spec.chase_forward.map(|_| Hostile {
                 shot_ticks: (kind == MobKind::Skeleton).then_some(SKELETON_INITIAL_SHOT_TICKS),
                 fuse: (kind == MobKind::Creeper).then_some(0),
@@ -286,11 +295,16 @@ impl Mob {
         w.i32(self.age as i32);
         w.u8(u8::from(self.body.on_ground));
         w.u16(self.egg_ticks.unwrap_or(0));
+        if self.kind == MobKind::Sheep {
+            w.u8(self.wool_color as u8);
+            w.u16(self.wool_ticks);
+        }
     }
 
     pub(super) fn read_saved(
         chunk: crate::ChunkPos,
         r: &mut world::io::Reader,
+        has_wool: bool,
     ) -> Result<Self, world::io::DecodeError> {
         use crate::entity_storage::read_motion;
         use world::io::DecodeError;
@@ -327,11 +341,43 @@ impl Mob {
         mob.age = age;
         mob.fall_start_y = Some(pos[1]);
         mob.egg_ticks = egg_ticks;
+        if has_wool {
+            if kind != MobKind::Sheep {
+                return Err(DecodeError);
+            }
+            mob.wool_color = WoolColor::from_wire_id(r.u8()?)?;
+            mob.wool_ticks = r.u16()?;
+            if mob.wool_ticks > WOOL_REGROW_TICKS {
+                return Err(DecodeError);
+            }
+        }
         Ok(mob)
     }
 
     pub(crate) fn bounds(&self) -> physics::Aabb {
         self.body.bounds()
+    }
+
+    fn sheared(&self) -> bool {
+        self.wool_ticks != 0
+    }
+
+    fn sheep_appearance(&self, id: u32) -> S2C {
+        S2C::SheepAppearance {
+            id,
+            color: self.wool_color,
+            sheared: self.sheared(),
+        }
+    }
+
+    fn wool_item(&self) -> u16 {
+        let block = match self.wool_color {
+            WoolColor::White => blocks::WHITE_WOOL,
+            WoolColor::Gray => blocks::GRAY_WOOL,
+            WoolColor::Brown => blocks::BROWN_WOOL,
+            WoolColor::Black => blocks::BLACK_WOOL,
+        };
+        items::for_block(block).unwrap()
     }
 
     pub(crate) fn within_attack_reach(&self, mut eye: [f64; 3]) -> bool {
@@ -398,6 +444,17 @@ impl Mob {
         self.body.velocity[2] = dz * scale;
         if self.body.is_grounded(&mob_collisions(world)) {
             self.body.velocity[1] = 0.36;
+        }
+    }
+
+    pub(super) fn hit_by_egg(&mut self, [x, _, z]: [f64; 3], seed: i64, id: u32, time: i64) {
+        let length = (x * x + z * z).sqrt();
+        let away = (length > 0.0).then(|| [x / length, z / length]);
+        let [x, z] = away.unwrap_or([0.0; 2]);
+        self.body.velocity = [x * 0.3, 0.2, z * 0.3];
+        self.egg_knockback = true;
+        if self.is_animal() {
+            self.start_fleeing(seed, id, time, away);
         }
     }
 
@@ -632,8 +689,9 @@ impl Mob {
         let before = self.pos();
         let [x, y, z] = before;
         let collisions = mob_collisions(world);
+        let egg_knockback = std::mem::take(&mut self.egg_knockback);
         let mut input = Input {
-            jump: !hold && physics::in_water(&collisions, before),
+            jump: !hold && !egg_knockback && physics::in_water(&collisions, before),
             ..Input::default()
         };
         let fleeing = matches!(self.ai, Wander::Fleeing { .. });
@@ -641,7 +699,7 @@ impl Mob {
         let chasing = chase.is_some();
         if chasing {
             self.ai = Wander::Idle;
-        } else if !knockback && self.ai == Wander::Idle {
+        } else if !knockback && !egg_knockback && self.ai == Wander::Idle {
             let random = sample(seed, id, time, 0);
             if random.is_multiple_of(WALK_CHANCE) {
                 let [dx, dz] = direction(sample(seed, id, time, 1));
@@ -656,7 +714,9 @@ impl Mob {
 
         let spec = spec(self.kind);
         let idle_input = input;
-        let movement = if hold {
+        let movement = if egg_knockback {
+            None
+        } else if hold {
             self.face_hold(chase);
             None
         } else if knockback {
@@ -826,8 +886,16 @@ impl Mob {
         for v in self.last_dry_pos {
             h.bytes(&v.to_bits().to_be_bytes());
         }
+        if self.kind == MobKind::Sheep {
+            h.u8(self.wool_color as u8);
+            h.u8(u8::from(self.sheared()));
+            h.bytes(&self.wool_ticks.to_be_bytes());
+        }
         if let Some(egg_ticks) = self.egg_ticks {
             h.bytes(&egg_ticks.to_be_bytes());
+        }
+        if self.egg_knockback {
+            h.bytes(b"egg_knockback");
         }
         if let Some(hostile) = &self.hostile {
             h.u8(hostile.attack_ticks);
@@ -1024,7 +1092,7 @@ fn heading(dx: f64, dz: f64) -> f32 {
 }
 
 /// SplitMix64 finalizer. Separate salts give independent draws without persistent RNG state.
-fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
+pub(super) fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
     let mut bits = (seed as u64)
         ^ u64::from(id).wrapping_mul(0xd1b5_4a32_d192_ed03)
         ^ (time as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -1338,13 +1406,52 @@ impl Server {
         &self.mobs
     }
 
+    fn spawn_mob_drop(&mut self, item: u16, count: u8, [x, y, z]: [f64; 3], height: f64) {
+        self.spawn_item(item, count, [x, y + height / 2.0, z], [0.0, 0.1, 0.0], 10);
+    }
+
+    pub(super) fn use_entity(&mut self, player: u32, id: u32) {
+        let Some(mob) = self.mob_in_reach(player, id) else {
+            return;
+        };
+        if mob.kind != MobKind::Sheep
+            || mob.sheared()
+            || self.clients[&player]
+                .inventory
+                .selected_stack()
+                .is_none_or(|stack| items::info(stack.item).unwrap().name != "shears")
+            || self.remaining_entity_ids() == 0
+        {
+            return;
+        }
+
+        let item = mob.wool_item();
+        let pos = mob.pos();
+        let chunk = mob.chunk();
+        let count = 1 + (sample(self.seed, id, self.game_time, SHEAR_LOOT_SALT) % 3) as u8;
+        self.spawn_mob_drop(item, count, pos, spec(MobKind::Sheep).height);
+        self.mobs.get_mut(&id).unwrap().wool_ticks = WOOL_REGROW_TICKS;
+        self.dirty_entity_chunk(chunk);
+        self.send_sheep_appearance(id);
+        self.outbox.push((player, S2C::Shear.encode()));
+        self.wear_held_item(player);
+    }
+
     pub(crate) fn drop_mob_loot(&mut self, id: u32, mob: Mob, burned: bool) {
         if mob.is_animal() {
             self.dirty_entity_chunk(mob.chunk());
         }
         let spec = spec(mob.kind);
-        let [x, y, z] = if burned { mob.last_dry_pos } else { mob.pos() };
+        let pos = if burned { mob.last_dry_pos } else { mob.pos() };
         for (index, &(item, min, max)) in spec.loot.iter().enumerate() {
+            let item = if mob.kind == MobKind::Sheep && Some(item) == items::by_name("white_wool") {
+                if mob.sheared() {
+                    continue;
+                }
+                mob.wool_item()
+            } else {
+                item
+            };
             let range = u64::from(max) - u64::from(min) + 1;
             let roll = sample(self.seed, id, self.game_time, LOOT_SALT + index as u64);
             let mut count = min + (roll % range) as u8;
@@ -1356,13 +1463,7 @@ impl Server {
             let max_stack = items::info(item).unwrap().max_stack;
             while count != 0 {
                 let stack = count.min(max_stack);
-                self.spawn_item(
-                    item,
-                    stack,
-                    [x, y + spec.height / 2.0, z],
-                    [0.0, 0.1, 0.0],
-                    10,
-                );
+                self.spawn_mob_drop(item, stack, pos, spec.height);
                 count -= stack;
             }
         }
@@ -1373,6 +1474,14 @@ impl Server {
             let mut mob = Mob::new(kind, pos);
             if kind == MobKind::Chicken {
                 mob.egg_ticks = Some(egg_interval(self.seed, id, self.game_time));
+            } else if kind == MobKind::Sheep {
+                mob.wool_color = match sample(self.seed, id, self.game_time, WOOL_COLOR_SALT) % 100
+                {
+                    0..=69 => WoolColor::White,
+                    70..=84 => WoolColor::Gray,
+                    85..=94 => WoolColor::Brown,
+                    _ => WoolColor::Black,
+                };
             }
             if mob.is_animal() {
                 self.dirty_entity_chunk(mob.chunk());
@@ -1386,12 +1495,48 @@ impl Server {
         self.spawn_mob(MobKind::Cow, pos);
     }
 
-    fn spawn_herd(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
-        let nearby = self
-            .mobs
+    fn nearby_animal_count(&self, pos: [f64; 3]) -> usize {
+        self.mobs
             .values()
-            .filter(|mob| mob.hostile.is_none() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
-            .count();
+            .filter(|mob| mob.is_animal() && distance_squared(mob.pos(), pos) <= 64.0 * 64.0)
+            .count()
+    }
+
+    pub(super) fn hatch_chicken(&mut self, pos: [f64; 3]) {
+        let chicken = Mob::new(MobKind::Chicken, pos);
+        let bounds = chicken.bounds();
+        if !chicken.body.is_clear(&mob_collisions(&self.world))
+            || self
+                .mobs
+                .values()
+                .any(|mob| mob.health != 0 && mob.bounds().intersects(bounds))
+            || self.clients.values().any(|client| {
+                client.joined
+                    && !client.health.vitals.dead
+                    && Player::new(client.pos).bounds().intersects(bounds)
+            })
+        {
+            return;
+        }
+
+        let mut near_player = false;
+        for client in self.clients.values().filter(|client| {
+            client.joined
+                && !client.health.vitals.dead
+                && distance_squared(client.pos, pos) <= 64.0 * 64.0
+        }) {
+            near_player = true;
+            if self.nearby_animal_count(client.pos) >= LOCAL_LIMIT {
+                return;
+            }
+        }
+        if near_player || self.nearby_animal_count(pos) < LOCAL_LIMIT {
+            self.spawn_mob(MobKind::Chicken, pos);
+        }
+    }
+
+    fn spawn_herd(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
+        let nearby = self.nearby_animal_count(pos);
         if nearby >= LOCAL_LIMIT {
             return;
         }
@@ -1521,11 +1666,18 @@ impl Server {
         let mut changed = Vec::new();
         let mut knockbacks = Vec::new();
         let mut burning_updates = Vec::new();
+        let mut wool_updates = Vec::new();
         let daytime = day < 12000;
         for (&id, mob) in &mut self.mobs {
             let from = mob.chunk();
             if !self.world.chunks.contains_key(&from) || mob.pos()[1] < VOID_Y {
                 continue;
+            }
+            if mob.sheared() {
+                mob.wool_ticks -= 1;
+                if !mob.sheared() {
+                    wool_updates.push(id);
+                }
             }
             let target = if mob.hostile.is_some() && self.game_mode == GameMode::Survival {
                 let pos = mob.pos();
@@ -1648,6 +1800,12 @@ impl Server {
                 self.send_mob_hurt(id);
             }
         }
+        for id in wool_updates {
+            if let Some(mob) = self.mobs.get(&id) {
+                self.dirty_entity_chunk(mob.chunk());
+                self.send_sheep_appearance(id);
+            }
+        }
         let mut eggs = Vec::new();
         self.mobs.retain(|&id, mob| {
             let stays = mob.pos()[1] >= VOID_Y
@@ -1708,6 +1866,10 @@ impl Server {
                         self.outbox
                             .push((client, S2C::MobFuse { id, ticks }.encode()));
                     }
+                    if self.mobs[&id].kind == MobKind::Sheep {
+                        self.outbox
+                            .push((client, self.mobs[&id].sheep_appearance(id).encode()));
+                    }
                     if self.mobs[&id].burning {
                         self.outbox
                             .push((client, S2C::MobBurning { id, burning: true }.encode()));
@@ -1722,6 +1884,15 @@ impl Server {
         let packet = S2C::MobFuse { id, ticks }.encode();
         for (&viewer, client) in &self.clients {
             if client.visible_mobs.contains_key(&id) {
+                self.outbox.push((viewer, packet.clone()));
+            }
+        }
+    }
+
+    fn send_sheep_appearance(&mut self, id: u32) {
+        let packet = self.mobs[&id].sheep_appearance(id).encode();
+        for (&viewer, client) in &self.clients {
+            if client.joined && client.visible_mobs.contains_key(&id) {
                 self.outbox.push((viewer, packet.clone()));
             }
         }
@@ -2453,6 +2624,28 @@ mod tests {
         assert_eq!(run(GameMode::Survival, 50), count);
     }
 
+    #[test]
+    fn an_egg_hit_starts_sixty_ticks_of_fleeing_even_during_damage_immunity() {
+        let mut cow = Mob::new(MobKind::Cow, [4.0, 2.0, 5.0]);
+        cow.hurt_ticks = HURT_TICKS;
+        cow.hit_by_egg([3.0, 0.5, 4.0], 2026, 9, 20);
+        let [x, y, z] = cow.velocity();
+        assert!((x - 0.18).abs() < 1e-12 && (z - 0.24).abs() < 1e-12);
+        assert_eq!(y, 0.2);
+        assert_eq!(cow.health, 10);
+        assert_eq!(cow.hurt_ticks, HURT_TICKS);
+        assert_eq!(flee_state(&cow).1, 60);
+
+        // AI would stop at the edge of this block. The egg impulse still moves the cow.
+        let mut world = World::default();
+        world.insert_chunk(world::Chunk::empty(0, 0));
+        world.set_block(3, 1, 4, blocks::STONE);
+        cow.hurt_ticks -= 1;
+        cow.tick(&world, 2026, 9, 21, None);
+        assert!(cow.pos()[0] > 4.0 && cow.pos()[1] > 2.0 && cow.pos()[2] > 5.0);
+        assert_eq!(flee_state(&cow).1, 59);
+    }
+
     fn flee_state(cow: &Mob) -> ([f64; 2], u8, u8) {
         match cow.ai {
             Wander::Fleeing {
@@ -2716,6 +2909,209 @@ mod tests {
             assert_eq!(&drops[1..], feathers.as_slice());
         }
         assert_eq!(items::CHICKEN_LOOT, [(67, 1, 1), (69, 0, 2)]);
+    }
+
+    #[test]
+    fn sheep_spawn_colors_follow_the_weighted_distribution_and_repeat() {
+        let spawn = || {
+            let mut server = Server::new(2026, Generator::Flat);
+            for _ in 0..10_000 {
+                server.spawn_mob(MobKind::Sheep, [0.5, 1.0, 0.5]);
+            }
+            server
+                .mobs
+                .values()
+                .map(|mob| mob.wool_color)
+                .collect::<Vec<_>>()
+        };
+        let colors = spawn();
+        assert_eq!(colors, spawn());
+        let mut totals = [0; 4];
+        for color in colors {
+            totals[color as usize] += 1;
+        }
+        for (actual, expected) in totals.into_iter().zip([7000_i32, 1500, 1000, 500]) {
+            assert!((actual - expected).abs() <= 150, "{totals:?}");
+        }
+    }
+
+    fn brown_sheep(mode: GameMode) -> (Server, u32) {
+        let (mut server, id) = combat(mode);
+        let mut sheep = Mob::new(MobKind::Sheep, server.mobs[&id].pos());
+        sheep.wool_color = WoolColor::Brown;
+        server.mobs.insert(id, sheep);
+        (server, id)
+    }
+
+    #[test]
+    fn shearing_drops_the_colored_wool_and_wears_or_breaks_shears_only_in_survival() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            for damage in [0, 119] {
+                let (mut server, id) = brown_sheep(mode);
+                hold(&mut server, "shears");
+                let inventory = &mut server.clients.get_mut(&1).unwrap().inventory;
+                let stack = crate::Stack {
+                    damage,
+                    ..inventory.selected_stack().unwrap()
+                };
+                inventory.set(0, Some(stack)).unwrap();
+                let [x, y, z] = server.mobs[&id].pos();
+                let hash = server.state_hash();
+                server.apply(1, C2S::UseEntity { id });
+                assert_ne!(server.state_hash(), hash);
+                assert_eq!(server.mobs[&id].wool_ticks, WOOL_REGROW_TICKS);
+                assert_eq!(server.entities.len(), 1);
+                let drop = server.entities.values().next().unwrap();
+                assert_eq!(drop.item, items::by_name("brown_wool").unwrap());
+                assert!((1..=3).contains(&drop.count));
+                assert_eq!(
+                    drop.count,
+                    1 + (sample(server.seed, id, server.game_time, SHEAR_LOOT_SALT) % 3) as u8
+                );
+                assert_eq!(drop.pos, [x, y + spec(MobKind::Sheep).height / 2.0, z]);
+                assert_eq!(drop.velocity, [0.0, 0.1, 0.0]);
+                assert_eq!(drop.pickup_delay, 10);
+                let remaining = match (mode, damage) {
+                    (GameMode::Survival, 119) => None,
+                    (GameMode::Survival, _) => Some(crate::Stack {
+                        damage: damage + 1,
+                        ..stack
+                    }),
+                    (GameMode::Creative, _) => Some(stack),
+                };
+                assert_eq!(server.clients[&1].inventory.selected_stack(), remaining);
+                let packets = decoded(&mut server);
+                assert!(packets.contains(&(1, S2C::Shear)));
+                assert!(packets.contains(&(
+                    1,
+                    S2C::SheepAppearance {
+                        id,
+                        color: WoolColor::Brown,
+                        sheared: true
+                    }
+                )));
+                assert_eq!(packets.contains(&(1, S2C::ToolBreak)), remaining.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn use_entity_ignores_invalid_targets_tools_and_connections_like_attack() {
+        let (mut server, id) = brown_sheep(GameMode::Survival);
+        let pos = server.mobs[&id].pos();
+        let use_shears = C2S::UseEntity { id };
+        let rejected = server.stats.packets_rejected;
+        hold(&mut server, "stick");
+        server.apply(1, use_shears.clone());
+        assert!(!server.mobs[&id].sheared());
+
+        hold(&mut server, "shears");
+        server.spawn_cow(pos);
+        server.apply(1, C2S::UseEntity { id: id + 1 });
+        server.apply(1, C2S::UseEntity { id: 0 });
+        server.mobs.get_mut(&id).unwrap().wool_ticks = 1;
+        server.apply(1, use_shears.clone());
+        assert_eq!(server.mobs[&id].wool_ticks, 1);
+        server.mobs.get_mut(&id).unwrap().wool_ticks = 0;
+
+        server.mobs.get_mut(&id).unwrap().body.position = [14.0, 1.0, 5.5];
+        server.apply(1, use_shears.clone());
+        assert!(!server.mobs[&id].sheared());
+        server.mobs.get_mut(&id).unwrap().body.position = [160.5, 1.0, 5.5];
+        assert!(!server.world.chunks.contains_key(&(10, 0)));
+        let client = server.clients.get_mut(&1).unwrap();
+        let player_pos = client.pos;
+        client.pos[0] = 159.5;
+        server.apply(1, use_shears.clone());
+        assert!(!server.mobs[&id].sheared());
+        server.mobs.get_mut(&id).unwrap().body.position = pos;
+
+        let client = server.clients.get_mut(&1).unwrap();
+        client.pos = player_pos;
+        client.joined = false;
+        server.apply(1, use_shears.clone());
+        assert!(!server.mobs[&id].sheared());
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.health.vitals.dead = true;
+        server.apply(1, use_shears);
+        assert!(!server.mobs[&id].sheared());
+        assert!(server.entities.is_empty());
+        assert_eq!(
+            server.clients[&1]
+                .inventory
+                .selected_stack()
+                .unwrap()
+                .damage,
+            0
+        );
+        assert_eq!(server.stats.packets_rejected, rejected);
+        assert!(decoded(&mut server).is_empty());
+    }
+
+    #[test]
+    fn sheep_regrows_wool_after_2400_loaded_ticks_and_can_be_sheared_again() {
+        let (mut server, id) = brown_sheep(GameMode::Creative);
+        hold(&mut server, "shears");
+        let packet = C2S::UseEntity { id }.encode();
+        server.handle_packet(1, &packet);
+        server.handle_packet(1, &packet);
+        server.tick();
+        assert_eq!(server.entities.len(), 1);
+        assert_eq!(server.mobs[&id].wool_ticks, 2399);
+        let hash = server.state_hash();
+        let mob = server.mobs.get_mut(&id).unwrap();
+        mob.wool_ticks -= 1;
+        assert_ne!(server.state_hash(), hash);
+        server.mobs.get_mut(&id).unwrap().wool_ticks += 1;
+        assert_eq!(server.state_hash(), hash);
+        server.mobs.get_mut(&id).unwrap().wool_color = WoolColor::Gray;
+        assert_ne!(server.state_hash(), hash);
+        server.mobs.get_mut(&id).unwrap().wool_color = WoolColor::Brown;
+        for _ in 1..2399 {
+            server.game_time += 1;
+            server.tick_mobs();
+        }
+        assert_eq!(server.mobs[&id].wool_ticks, 1);
+        server.take_outbox();
+        server.game_time += 1;
+        server.tick_mobs();
+        assert_eq!(server.mobs[&id].wool_ticks, 0);
+        assert!(decoded(&mut server).contains(&(
+            1,
+            S2C::SheepAppearance {
+                id,
+                color: WoolColor::Brown,
+                sheared: false
+            }
+        )));
+        server.clients.get_mut(&1).unwrap().pos = server.mobs[&id].pos();
+        server.apply(1, C2S::UseEntity { id });
+        assert!(server.mobs[&id].sheared());
+        assert_eq!(server.entities.len(), 2);
+    }
+
+    #[test]
+    fn sheep_death_uses_fleece_color_or_omits_wool_without_changing_mutton_roll() {
+        for sheared in [false, true] {
+            let (mut server, id) = brown_sheep(GameMode::Survival);
+            let mob = server.mobs.get_mut(&id).unwrap();
+            mob.health = 1;
+            mob.wool_ticks = u16::from(sheared);
+            let meat = 1 + (sample(server.seed, id, server.game_time, LOOT_SALT + 1) % 2) as u8;
+            server.apply(1, C2S::Attack { id });
+            assert!(!server.mobs.contains_key(&id));
+            let drops: Vec<_> = server
+                .entities
+                .values()
+                .map(|drop| (drop.item, drop.count))
+                .collect();
+            let mut expected = vec![(items::by_name("raw_mutton").unwrap(), meat)];
+            if !sheared {
+                expected.insert(0, (items::by_name("brown_wool").unwrap(), 1));
+            }
+            assert_eq!(drops, expected);
+        }
     }
 
     #[test]
@@ -5506,6 +5902,47 @@ mod tests {
         );
         assert_eq!(hostile_dark_feet(&world, 4, 4, MIN_Y - 4), None);
         assert_eq!(hostile_dark_feet(&world, 32, 4, 20), None);
+    }
+
+    #[test]
+    fn dark_hostiles_cannot_spawn_on_in_or_next_to_lava() {
+        let mut server = joined(GameMode::Creative);
+        let floor = -41;
+        server.clients.get_mut(&1).unwrap().pos[1] = f64::from(floor - 10);
+        let pos = server.clients[&1].pos;
+        let (time, x, z) = (200..40_000)
+            .step_by(200)
+            .find_map(|time| {
+                let roll = sample(2026, 1, time, HOSTILE_DARK_COLUMN_SALT);
+                let (x, z) = ring_column(roll, pos);
+                (dark_start_y(roll, pos) == floor && column_in_ring(pos, x, z))
+                    .then_some((time, x, z))
+            })
+            .expect("dark spawn attempt at the lava level");
+        seal_dark_room(&mut server.world, x, floor, z);
+        for y in MIN_Y + 4..floor {
+            server.world.set_block(x, y, z, blocks::STONE);
+        }
+        let feet = [x, floor + 1, z];
+        assert_eq!(server.world.local_sky_light(feet), 0);
+        assert_eq!(server.world.local_block_light(feet), 0);
+        tick_spawn(&mut server, time, 6000);
+        assert_eq!(hostiles(&server).len(), 1);
+
+        server.world.set_block(x + 1, floor, z, blocks::LAVA);
+        assert!(hostile_dark_feet(&server.world, x, z, floor).is_some());
+        assert_eq!(server.world.local_block_light(feet), 13);
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty());
+        server.world.set_block(x + 1, floor, z, blocks::STONE);
+
+        for y in [floor, floor + 1] {
+            let old = server.world.set_block(x, y, z, blocks::LAVA).unwrap();
+            assert_eq!(hostile_dark_feet(&server.world, x, z, floor), None);
+            tick_spawn(&mut server, time, 6000);
+            assert!(hostiles(&server).is_empty());
+            server.world.set_block(x, y, z, old);
+        }
     }
 
     #[test]

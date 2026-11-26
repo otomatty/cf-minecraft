@@ -462,3 +462,25 @@ id = 78
 block = "torch"
 texture = "torch_item"
 max_stack = 64
+
+[[items]]
+name = "gray_wool"
+id = 79
+block = "gray_wool"
+
+[[items]]
+name = "brown_wool"
+id = 80
+block = "brown_wool"
+
+[[items]]
+name = "black_wool"
+id = 81
+block = "black_wool"
+
+[[items]]
+name = "shears"
+id = 82
+texture = "shears"
+max_stack = 1
+durability = 120

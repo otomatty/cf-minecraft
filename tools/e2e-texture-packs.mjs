@@ -79,17 +79,31 @@ export async function testTexturePacks(browser, edge, shots) {
 		const defaults = await pixels(b);
 		assert.deepEqual(await pixels(a), defaults);
 		await openSettings(a);
+		// Populate the biome-specific icon cache before changing the atlas.
+		await a.waitForFunction(() => {
+			const [x, , z] = window.__mc.playerPosition();
+			return window.__mc.tint(x, z) !== null;
+		});
+		await a.$eval('[data-block="grass_block"]', el => el.click());
+		await a.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "grass_block");
 		const frameStart = frames.length;
 		await (await a.$(input)).uploadFile(join(dir, name));
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("2 枚"), {}, notice);
+		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, notice);
 		assert.deepEqual(await pixels(a), defaults);
 		await a.click("#texture-apply");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("2 枚"), {}, selected);
+		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, selected);
 		const changed = await pixels(a);
 		assert.deepEqual(changed.worldStone, stoneRGB);
 		assert.notEqual(changed.stone, defaults.stone);
 		assert.notEqual(changed.apple, defaults.apple);
 		assert.equal(changed.dirt, defaults.dirt);
+		// Both blocks use the same pack PNG on their sides. The cached grass icon must repaint
+		// without replacing that face with the built-in biome-coloured grass fringe.
+		const sidePixel = c => Array.from(c.getContext("2d").getImageData(20, 32, 1, 1).data);
+		const stoneSide = await a.$eval('[data-block="stone"] canvas', sidePixel);
+		for (const selector of ["#hotbar canvas.selected", '#inventory-screen [data-slot="0"] canvas']) {
+			assert.deepEqual(await a.$eval(selector, sidePixel), stoneSide);
+		}
 		assert.deepEqual(await pixels(b), defaults);
 		const sprite = await a.$eval('[data-block="apple"] canvas', c => [...c.getContext("2d").getImageData(0, 0, 1, 1).data]);
 		assert.deepEqual(sprite, [...appleRGB, 255]);
@@ -144,14 +158,14 @@ export async function testTexturePacks(browser, edge, shots) {
 			await observer.waitForFunction((pos, state) => window.__mc.getBlock(...pos) === state, { polling: 100 }, target, state);
 		}
 		await a.reload();
-		await a.waitForFunction(() => window.__mc?.stats().joined && document.querySelector("#textures-tab-panel output").textContent.includes("2 枚"));
+		await a.waitForFunction(() => window.__mc?.stats().joined && document.querySelector("#textures-tab-panel output").textContent.includes("3 枚"));
 		assert.deepEqual(await pixels(a), changed);
 		await openSettings(a);
 		await a.click("#texture-standard");
 		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("保存済み"), {}, selected);
 		assert.deepEqual(await pixels(a), defaults);
 		await a.click("#texture-apply");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("2 枚"), {}, selected);
+		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, selected);
 		await a.click("#texture-delete");
 		await a.waitForFunction(sel => document.querySelector(sel).textContent === "使用中：標準素材", {}, selected);
 		await a.reload();

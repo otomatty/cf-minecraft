@@ -25,7 +25,7 @@ export function solidPng(rgb, { width = 1, description = "" } = {}) {
 }
 export const stoneRGB = [222, 17, 145], appleRGB = [37, 212, 129];
 export const testEntries = [
-	["sample/textures/terrain_texture.json", '// local test\n{"texture_data":{"stone":{"textures":[{"path":"textures/blocks/sample"}]}}}'],
+	["sample/textures/terrain_texture.json", '// local test\n{"texture_data":{"stone":{"textures":[{"path":"textures/blocks/sample"}]},"grass_side":{"textures":"textures/blocks/sample"}}}'],
 	["sample/textures/blocks/sample.png", solidPng(stoneRGB)],
 	["sample/textures/items/apple.png", solidPng(appleRGB)],
 ];

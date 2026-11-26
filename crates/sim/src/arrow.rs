@@ -63,23 +63,7 @@ impl Arrow {
         yaw: f32,
         pitch: f32,
     ) -> Self {
-        let yaw = f64::from(yaw);
-        let degrees = (yaw - (yaw / 360.0).floor() * 360.0).clamp(0.0, 360.0);
-        let radians = std::f32::consts::PI / 180.0;
-        let yaw = degrees as f32 * radians;
-        let direction = if pitch == 90.0 || pitch == -90.0 {
-            [0.0, -f64::from(pitch) / 90.0, 0.0]
-        } else {
-            let pitch = pitch * radians;
-            let cp = f64::from(cos(pitch));
-            let [x, y, z] = [
-                -f64::from(sin(yaw)) * cp,
-                -f64::from(sin(pitch)),
-                f64::from(cos(yaw)) * cp,
-            ];
-            let length = (x * x + y * y + z * z).sqrt();
-            [x / length, y / length, z / length]
-        };
+        let direction = look_direction(yaw, pitch);
         feet[1] += physics::EYE_HEIGHT;
         let pos = std::array::from_fn(|axis| feet[axis] + 0.3 * direction[axis]);
         let speed = 0.6 + 2.4 * power;
@@ -198,6 +182,26 @@ enum ArrowTick {
     Keep,
     Remove,
     Hit(u32),
+}
+
+pub(crate) fn look_direction(yaw: f32, pitch: f32) -> [f64; 3] {
+    let yaw = f64::from(yaw);
+    let degrees = (yaw - (yaw / 360.0).floor() * 360.0).clamp(0.0, 360.0);
+    let radians = std::f32::consts::PI / 180.0;
+    let yaw = degrees as f32 * radians;
+    if pitch == 90.0 || pitch == -90.0 {
+        [0.0, -f64::from(pitch) / 90.0, 0.0]
+    } else {
+        let pitch = pitch * radians;
+        let cp = f64::from(cos(pitch));
+        let [x, y, z] = [
+            -f64::from(sin(yaw)) * cp,
+            -f64::from(sin(pitch)),
+            f64::from(cos(yaw)) * cp,
+        ];
+        let length = (x * x + y * y + z * z).sqrt();
+        [x / length, y / length, z / length]
+    }
 }
 
 fn difference(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {

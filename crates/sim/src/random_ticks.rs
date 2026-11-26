@@ -152,12 +152,18 @@ impl Server {
     }
 
     fn change_block_naturally_inner(&mut self, [x, y, z]: [i32; 3], state: u16, exploded: bool) {
-        if self
+        if let Some(old) = self
             .world
             .set_block(x, y, z, state)
-            .is_some_and(|old| old != state)
+            .filter(|&old| old != state)
         {
             self.abort_digs_at([x, y, z]);
+            if blocks::is_water(state)
+                && blocks::info(old).washes_away
+                && (blocks::torch_face(old).is_none() || self.game_mode == GameMode::Survival)
+            {
+                self.spawn_mining_drops_at_height([x, y, z], old, false, 0.5);
+            }
             self.finish_block_change([x, y, z], state, exploded);
         }
     }

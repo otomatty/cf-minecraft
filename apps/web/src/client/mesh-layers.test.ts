@@ -3,7 +3,10 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
 import { paintTexture, downsample, textureIconPixels } from "./textures.ts";
-import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
+import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT, type BlockItemTint } from "./block-tints.ts";
+import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
+import { iconTintChanged } from "./hotbar.ts";
+import type { CellTint } from "./tint-map.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
 import { grassSideAtlasPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
@@ -35,6 +38,71 @@ test("icons use carried colours without changing alpha or shared terrain pixels"
 	}
 	const stone = paintTexture("stone");
 	assert.deepEqual([...textureIconPixels("stone", stone)], [...stone]);
+});
+
+test("block icon materials use the supplied grass or leaves RGB and preserve alpha", () => {
+	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
+	for (const [name, tint] of [["grass_block_top", cell.grass], ["short_grass", cell.grass],
+		["oak_leaves", cell.leaves], ["oak_leaves_dense", cell.leaves]] as const) {
+		const pixels = paintTexture(name);
+		const original = pixels.slice();
+		const icon = textureIconPixels(name, pixels, cell);
+		for (let i = 0; i < pixels.length; i += 4) {
+			assert.equal(icon[i + 3], pixels[i + 3]);
+			for (let c = 0; c < 3; c++) assert.equal(icon[i + c], Math.round(pixels[i + c] * tint[c] / 255));
+		}
+		assert.deepEqual(pixels, original);
+	}
+	for (const name of ["stone", "water", "water_flow", "water_bucket"]) {
+		const pixels = paintTexture(name);
+		assert.deepEqual(textureIconPixels(name, pixels, cell), textureIconPixels(name, pixels));
+	}
+});
+
+test("grass block side icons recolor the fringe and keep the dirt pixels", () => {
+	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
+	const packed = grassSideAtlasPixels();
+	const original = paintTexture("grass_block_side");
+	const side = textureIconPixels("grass_block_side", original, cell);
+	for (let i = 0; i < side.length; i += 4) {
+		assert.equal(side[i + 3], original[i + 3]);
+		for (let c = 0; c < 3; c++) {
+			assert.equal(side[i + c], packed[i + c] + Math.round(packed[i + 3] * cell.grass[c] / 255));
+			if (packed[i + 3] === 0) assert.equal(side[i + c], original[i + c]);
+		}
+	}
+	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
+	const block = core.blockRegistry().find(block => block.name === "grass_block")!;
+	const atlas = new Map(block.faces.map(name => [name, paintTexture(name)]));
+	const carried = blockIconPixels(block, atlas);
+	const tinted = blockIconPixels(block, atlas, cell);
+	const pixel = (image: Uint8ClampedArray, y: number) => image.subarray((y * ICON_SIZE + 20) * 4, (y * ICON_SIZE + 21) * 4);
+	assert.notDeepEqual(pixel(tinted, 19), pixel(carried, 19));
+	assert.equal(pixel(tinted, 32)[3], 255);
+	assert.deepEqual(pixel(tinted, 32), pixel(carried, 32));
+});
+
+test("icons repaint for RGB changes and transitions to or from the fallback", () => {
+	const previous: CellTint = { grass: [72, 170, 74], leaves: [53, 145, 71], biome: 1, water: [1, 2, 3] };
+	const next: CellTint = { grass: [72, 170, 74], leaves: [53, 145, 71], biome: 2, water: [0, 0, 0] };
+	assert.equal(iconTintChanged(previous, next), false);
+	assert.equal(iconTintChanged(previous, { ...next, grass: [124, 184, 84] }), true);
+	assert.equal(iconTintChanged(previous, { ...next, leaves: [54, 145, 71] }), true);
+	assert.equal(iconTintChanged(null, previous), true);
+	assert.equal(iconTintChanged(previous, null), true);
+	assert.equal(iconTintChanged(null, null), false);
+});
+
+test("drop shader decodes marked colors and keeps the grass side opaque", () => {
+	for (const names of [["water_bucket", "grass_block_side", "oak_leaves"], ["grass_block_side", "water_bucket"], ["stone"]]) {
+		const shader = terrainShader(names);
+		assert.match(shader, /fn vsDrop\(.*@location\(5\) tint: f32\)/);
+		assert.match(shader, /if \(tint > 0\.0\) \{\s+out\.tintColor = unpack4x8unorm\(u32\(tint\) - 1u\)\.rgb;/);
+		assert.match(shader, new RegExp(`in.layer == ${names.indexOf("grass_block_side") >>> 0}u`));
+		assert.ok(shader.includes("color += pixel.a * in.tintColor"));
+		assert.ok(shader.includes("!(entityPass == 1u && grassSide)"));
+		assert.doesNotMatch(shader, /__[A-Z_]+__/);
+	}
 });
 
 test("terrain tint layers follow texture names when the texture array is reordered", () => {
@@ -361,6 +429,27 @@ test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () =>
 		assert.ok(colors.every(([, , , a]) => a === 255), name);
 		assert.ok(new Set(colors.map(([r, g, b]) => r << 16 | g << 8 | b)).size >= 5, name);
 	}
+});
+
+test("colored wool tiles share the white wool tuft pattern and shears have a hand-drawn icon", () => {
+	const white = texels(paintTexture("white_wool")).map(luminance);
+	const ranks = (values: number[]) => {
+		const shades = [...new Set(values)].sort((a, b) => a - b);
+		return values.map(value => shades.indexOf(value));
+	};
+	for (const name of ["gray_wool", "brown_wool", "black_wool"]) {
+		const pixels = paintTexture(name);
+		const colors = texels(pixels);
+		assert.ok(colors.every(([, , , alpha]) => alpha === 255), name);
+		assert.notDeepEqual(pixels, paintTexture("white_wool"), name);
+		assert.deepEqual(ranks(colors.map(luminance)), ranks(white), name);
+	}
+	const shears = itemTexture("shears");
+	assert.ok(shears);
+	const colors = texels(shears);
+	assert.equal(colors.length, 256);
+	assert.ok(colors.some(([, , , alpha]) => alpha === 0));
+	assert.ok(new Set(colors.filter(([, , , alpha]) => alpha === 255).map(pixel => pixel.join(","))).size >= 5);
 });
 
 test("table and furnace faces are distinct and show their tools and firebox", () => {

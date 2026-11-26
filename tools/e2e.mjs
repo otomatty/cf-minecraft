@@ -1388,7 +1388,7 @@ async function biomeTints() {
 		name: entry.match(/name = "([^"]+)"/)[1],
 		grass: JSON.parse(entry.match(/grass_color = (\[[^\]]+\])/)[1]),
 	}));
-	const { page, errors } = await open(`server=local&world=e2e-tint-${run}&seed=2026&view=3&time=6000`);
+	const { page, errors } = await open(`server=local&world=e2e-tint-${run}&mode=creative&seed=2026&view=3&time=6000`);
 	try {
 		await settle(page, "tint Terrain", chunksInView(3));
 		await page.waitForFunction(() => {
@@ -1465,12 +1465,25 @@ async function biomeTints() {
 			return { logs, crowns };
 		});
 		check(trees.logs > 0 && trees.crowns > 0, "trees: Terrain seed 2026 has logs and leaves within 24 blocks of spawn", JSON.stringify(trees));
+		await resumePointerLock(page, "tint initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="grass_block"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "grass_block");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+		const iconColors = [];
 		for (const [z, name, grass] of [[0, "rain_grove", [72, 170, 74]], [144, "mild_meadow", [124, 184, 84]]]) {
 			await page.evaluate(z => window.__mc.setCamera(0, 140, z, 0, 0), z);
 			await page.waitForFunction(z => window.__mc.tint(0, z) !== null, {}, z);
 			const tint = await page.evaluate(z => window.__mc.tint(0, z), z);
 			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
+			const pixel = await page.$eval("#hotbar canvas.selected", canvas =>
+				Array.from(canvas.getContext("2d").getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height * 0.15), 1, 1).data));
+			check(pixel[3] === 255, `tint: ${name} grass hotbar icon has an opaque top pixel`, JSON.stringify(pixel));
+			iconColors.push(pixel.slice(0, 3));
 		}
+		check(JSON.stringify(iconColors[0]) !== JSON.stringify(iconColors[1]), "tint: grass hotbar icon changes between biome cells", JSON.stringify(iconColors));
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "tint-terrain", err);
@@ -2044,7 +2057,8 @@ async function waterFlow() {
 		const { spawn } = await settle(page, "water flow", chunksInView(2));
 		await resumePointerLock(page, "water flow: initial pointer lock");
 		const source = [Math.floor(spawn[0]) + 1, Math.floor(spawn[1]), Math.floor(spawn[2])];
-		const selectBucket = async name => {
+		const flower = [source[0] + 1, source[1], source[2]];
+		const selectItem = async (name, pos) => {
 			await page.keyboard.press("KeyE");
 			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 			await page.click(`#block-grid [data-block="${name}"]`);
@@ -2053,21 +2067,30 @@ async function waterFlow() {
 			await page.keyboard.press("KeyE");
 			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
 			await resumePointerLock(page, `water flow: resume after selecting ${name}`);
-			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), source);
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), pos);
 		};
-		await selectBucket("water_bucket");
+		await selectItem("red_flower", flower);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(pos => {
+			const api = window.__mc;
+			return api.getBlock(...pos) === api.stateId("red_flower");
+		}, { timeout: 5000 }, flower);
+
+		await selectItem("water_bucket", source);
 		await page.waitForFunction(([x, y, z]) => {
 			const api = window.__mc;
 			return api.getBlock(x, y - 1, z) === api.stateId("grass_block") && api.getBlock(x, y, z) === 0;
 		}, { timeout: 5000 }, source);
 		await page.mouse.click(640, 360, { button: "right" });
-		await page.waitForFunction(([x, y, z]) => {
+		await page.waitForFunction(({ source: [x, y, z], flower }) => {
 			const api = window.__mc;
+			const flow = api.stateId("flowing_water[level=1]");
 			return api.getBlock(x, y, z) === api.stateId("water")
-				&& api.getBlock(x + 1, y, z) === api.stateId("flowing_water[level=1]");
-		}, { timeout: 5000 }, source);
-		check(true, "water flow: a filled bucket places a source and water spreads");
-		await selectBucket("bucket");
+				&& api.getBlock(x - 1, y, z) === flow
+				&& api.getBlock(...flower) === flow;
+		}, { timeout: 5000 }, { source, flower });
+		check(true, "water flow: a filled bucket places a source that spreads and washes away the adjacent flower");
+		await selectItem("bucket", source);
 		await page.mouse.click(640, 360, { button: "right" });
 		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, { timeout: 5000 }, source);
 		check(true, "water flow: an empty bucket collects the source");
@@ -2613,7 +2636,7 @@ async function mobs() {
 							|| (ahead > 0 && ahead < 3.9 && Math.abs(side) <= 1);
 					});
 					return {
-						id: target.id,
+						id: target.id, woolColor: target.woolColor,
 						position: target.position, yaw: target.yaw, blockedBy: occluder?.id ?? null,
 						camera: [x + forwardX * 3.4, y + 1.62, z + forwardZ * 3.4, target.yaw + 180, [14.5, 20.7, 18.8, 15][kind]],
 					};
@@ -2647,7 +2670,7 @@ async function mobs() {
 			const captureDeadline = Date.now() + 25000;
 			let captureProblem;
 			let lastMobId = "none";
-			let photographedId;
+			let photographedId, photographedColor;
 			for (let attempt = 0; attempt < 4 && Date.now() < captureDeadline; attempt++) {
 				const placement = await page.waitForFunction(
 					mobView, { timeout: Math.max(1, captureDeadline - Date.now()), polling: 100 }, kind, null, true,
@@ -2696,6 +2719,7 @@ async function mobs() {
 					current = await page.evaluate(mobView, kind, aim.id);
 					if (matches(aim, current)) {
 						photographedId = aim.id;
+						photographedColor = current.woolColor;
 						captureProblem = null;
 						break;
 					}
@@ -2703,7 +2727,7 @@ async function mobs() {
 				captureProblem = `aimed at ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking mob ${current?.blockedBy ?? "none"})`;
 			}
 			if (captureProblem !== null) throw new Error(`mobs: could not photograph ${name} ${lastMobId}; ${captureProblem ?? "capture timed out"}`);
-			const featurePixels = await page.evaluate(async (data, kind) => {
+			const featurePixels = await page.evaluate(async (data, kind, woolColor) => {
 				const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
@@ -2717,19 +2741,30 @@ async function mobs() {
 					Math.ceil(width * scale), Math.ceil(height * scale),
 				).data;
 				// Compare the skin's muzzle/beak swatch after the shader's daylight shading.
-				const swatch = [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
+				const swatch = kind === 3
+					? [null, [155, 156, 160], [148, 108, 82], [81, 82, 90]][woolColor]
+					: [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
 				let matching = 0;
 				for (let i = 0; i < pixels.length; i += 4) {
 					const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-					const matchesColor = kind === 3
-						? r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25
-						: r > 100 && Math.abs(g - r * swatch[1] / swatch[0]) < 4 && Math.abs(b - r * swatch[2] / swatch[0]) < 4;
+					let matchesColor;
+					if (kind === 3 && woolColor === 0) {
+						matchesColor = r > 200 && g > 195 && b > 185 && r - b < 40 && Math.abs(r - g) < 25;
+					} else {
+						const min = kind === 3 ? swatch[0] * 0.52 : 100;
+						const max = kind === 3 ? swatch[0] * 1.08 : 255;
+						const tolerance = kind === 3 ? 8 : 4;
+						matchesColor = r > min && r <= max && Math.abs(g - r * swatch[1] / swatch[0]) < tolerance
+							&& Math.abs(b - r * swatch[2] / swatch[0]) < tolerance;
+					}
 					if (matchesColor) matching++;
 				}
 				return matching;
-			}, readFileSync(file).toString("base64"), kind);
-			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"], ["wool", "white"]][kind];
+			}, readFileSync(file).toString("base64"), kind, photographedColor);
+			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"],
+				["wool", ["white", "gray", "brown", "black"][photographedColor]]][kind];
 			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
+			return photographedId;
 		};
 		await photographMob(0, "cow");
 		// Put the player back at spawn so subsequent herds use the original center.
@@ -2771,7 +2806,38 @@ async function mobs() {
 		const sheep = await sheepSpawn.jsonValue();
 		await sheepSpawn.dispose();
 		check(sheep.kind === 3, "mobs: a sheep spawned", `id ${sheep.id} at ${sheep.position.join(", ")}`);
-		await photographMob(3, "sheep");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="shears"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "shears");
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "mobs: resume after selecting shears");
+		await page.mouse.move(640, 360);
+		const sheepId = await photographMob(3, "sheep");
+		const aim = await page.waitForFunction(id => {
+			const api = window.__mc;
+			const { mobs, entities, aimedMob } = api.stats();
+			const target = mobs.find(mob => mob.id === id);
+			if (!target || target.sheared) return false;
+			if (aimedMob === id) {
+				return { wool: [70, 79, 80, 81][target.woolColor], existing: entities.map(entity => entity.id) };
+			}
+			const [x, y, z] = target.position;
+			const angle = target.yaw * Math.PI / 180;
+			api.setCamera(x - Math.sin(angle) * 3.4, y + 1.62, z + Math.cos(angle) * 3.4, target.yaw + 180, 15);
+			return false;
+		}, { timeout: 10000, polling: 100 }, sheepId);
+		const before = await aim.jsonValue();
+		await aim.dispose();
+		await page.mouse.click(640, 360, { button: "right" });
+		const result = await page.waitForFunction((id, { wool, existing }) => {
+			const { mobs, entities } = window.__mc.stats();
+			const target = mobs.find(mob => mob.id === id);
+			const drop = entities.find(entity => entity.item === wool && !existing.includes(entity.id));
+			return target?.sheared && drop?.count >= 1 && drop.count <= 3 && drop;
+		}, { timeout: 10000, polling: 50 }, sheepId, before);
+		await result.dispose();
+		check(true, "mobs: right-clicking with shears removes the fleece and drops 1 to 3 matching wool");
 		check(errors.length === 0, "mobs: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "mobs", err);
@@ -2856,6 +2922,37 @@ async function bow() {
 		check(errors.length === 0, "bow: no page errors", errors.join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "bow", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
+async function eggs() {
+	const { page, errors } = await open(`server=local&world=e2e-eggs-${run}&mode=creative&gen=flat&seed=2026&view=4&time=6000`);
+	try {
+		await settle(page, "eggs", chunksInView(4));
+		await resumePointerLock(page, "eggs: initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="egg"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "egg");
+		await page.keyboard.press("KeyE");
+		await resumePointerLock(page, "eggs: resume after selecting egg");
+		await page.mouse.move(640, 360);
+		await page.evaluate(() => {
+			const api = window.__mc;
+			const { x, y, z } = api.stats().camera;
+			api.setCamera(x, y, z, 0, 12);
+		});
+		await page.mouse.click(640, 360, { button: "right" });
+		const thrown = await page.waitForFunction(() => window.__mc.stats().eggs[0]?.id, { timeout: 3000 });
+		const id = await thrown.jsonValue();
+		await thrown.dispose();
+		check(id > 0, "eggs: right-click spawns a flying egg", `id ${id}`);
+		await page.waitForFunction(id => !window.__mc.stats().eggs.some(egg => egg.id === id), { timeout: 3000 }, id);
+		check(true, "eggs: the flying egg disappears within a few seconds");
+		check(errors.length === 0, "eggs: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "eggs", err);
 		throw err;
 	} finally { await page.close(); }
 }
@@ -3427,6 +3524,7 @@ try {
 	await entitySave();
 	await mobCombat();
 	await bow();
+	await eggs();
 	await audio();
 	await chat();
 	await chatCommands();
