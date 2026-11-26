@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appleRGB, fixtureArtRGB, fixtureFilename, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
+import { LOAD_TIMEOUT } from "./e2e-title.mjs";
 
 const panel = "#textures-tab-panel";
 const input = panel + " input";
@@ -129,14 +130,14 @@ async function assertWorldFrame(page, variant, spawn) {
 }
 
 export async function installFixture(page, edge, bytes) {
-	await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
-	await page.waitForSelector("#texture-drop");
+	await page.goto(edge + "/", { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+	await page.waitForSelector("#texture-drop", { timeout: LOAD_TIMEOUT });
 	await page.$eval("#texture-drop", (target, base64, filename) => {
 		const transfer = new DataTransfer();
 		transfer.items.add(new File([Uint8Array.from(atob(base64), char => char.charCodeAt(0))], filename));
 		target.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
 	}, Buffer.from(bytes).toString("base64"), fixtureFilename);
-	await page.waitForSelector('.pack-summary');
+	await page.waitForSelector(".pack-summary", { timeout: LOAD_TIMEOUT });
 }
 
 export async function testTexturePacks(browser, edge, shots, initialFixture) {
@@ -233,13 +234,14 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 					: req.continue();
 				await page.setRequestInterception(true);
 				page.on("request", unauthenticated);
-				await page.goto(url, { waitUntil: "domcontentloaded" });
-				await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン");
+				await page.goto(url, { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+				await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン",
+					{ timeout: LOAD_TIMEOUT });
 				assertPlayNext(page.url(), url);
 				page.off("request", unauthenticated);
 				await page.setRequestInterception(false);
-				await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
-				await page.waitForSelector("#texture-drop");
+				await page.goto(edge + "/", { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+				await page.waitForSelector("#texture-drop", { timeout: LOAD_TIMEOUT });
 				const assertLocked = async () => {
 					assert.equal(await page.$eval("#panel h2", node => node.textContent), "テクスチャをインストール");
 					assert.doesNotMatch(await page.$eval("#panel", node => node.textContent), /シングルプレイ|マルチプレイ|メニューに戻る/);
@@ -247,8 +249,8 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				};
 				await assertLocked();
 				for (const play of [edge + "/play.html", url]) {
-					await page.goto(play, { waitUntil: "domcontentloaded" });
-					await page.waitForSelector("#texture-drop");
+					await page.goto(play, { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+					await page.waitForSelector("#texture-drop", { timeout: LOAD_TIMEOUT });
 					assertPlayNext(page.url(), play);
 					await assertLocked();
 				}
@@ -278,8 +280,8 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 					} finally { db.close(); }
 				};
 				await page.evaluate(oldSelection, true);
-				await page.reload({ waitUntil: "domcontentloaded" });
-				await page.waitForSelector("#texture-drop");
+				await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+				await page.waitForSelector("#texture-drop", { timeout: LOAD_TIMEOUT });
 				await assertLocked();
 				assert.equal(await page.evaluate(oldSelection, false), undefined);
 				for (const [filename, , reason] of rejected) {
@@ -302,11 +304,11 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				await page.waitForFunction(() => document.querySelector("#texture-error-reason")?.textContent.includes("保存できません"));
 				await assertLocked();
 				await (await page.$("#texture-file")).uploadFile(join(dir, fixtureFilename));
-				await page.waitForSelector(".pack-summary");
+				await page.waitForSelector(".pack-summary", { timeout: LOAD_TIMEOUT });
 				assert.equal(await page.$eval("#panel [role=status]", node => node.textContent), "テクスチャを適用しました");
 				assert.match(await page.$eval(".pack-summary", node => node.textContent), /Bedrock Samples v1\.26\.60\.5/);
-				await page.reload({ waitUntil: "domcontentloaded" });
-				await page.waitForSelector(".pack-summary");
+				await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+				await page.waitForSelector(".pack-summary", { timeout: LOAD_TIMEOUT });
 				assert.equal(await page.$("#texture-drop"), null);
 				await page.click(".pack-summary button");
 				await page.waitForSelector("#texture-drop");
@@ -485,16 +487,17 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		await survival.close();
 
 		// Install a partial pack from the title, reload, then enter the world using it.
-		await a.goto(edge + "/?" + new URLSearchParams({ next: new URL(url).pathname + new URL(url).search }));
-		await a.waitForSelector(".pack-summary button");
+		await a.goto(edge + "/?" + new URLSearchParams({ next: new URL(url).pathname + new URL(url).search }),
+			{ timeout: LOAD_TIMEOUT });
+		await a.waitForSelector(".pack-summary button", { timeout: LOAD_TIMEOUT });
 		await a.click(".pack-summary button");
 		await a.waitForSelector("#texture-file");
 		await (await a.$("#texture-file")).uploadFile(join(dir, partialFilename));
 		const missing = ".pack-summary [data-pack-missing]";
-		await a.waitForSelector(missing);
+		await a.waitForSelector(missing, { timeout: LOAD_TIMEOUT });
 		assert.equal(await a.$eval(missing, node => node.textContent), partialNotice);
-		await a.reload();
-		await a.waitForSelector(missing);
+		await a.reload({ timeout: LOAD_TIMEOUT });
+		await a.waitForSelector(missing, { timeout: LOAD_TIMEOUT });
 		assert.equal(await a.$eval(missing, node => node.textContent), partialNotice);
 		await a.click('#panel a[href*="server=ws"]');
 		await a.waitForFunction(() => window.__mc?.stats().joined && window.__mc.stats().chunks >= 9);

@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
-import { testTitleBackground } from "./e2e-title.mjs";
+import { LOAD_TIMEOUT, testTitleBackground } from "./e2e-title.mjs";
 import { installFixture, testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
@@ -114,7 +114,7 @@ async function settle(page, label, chunks) {
 				const autopilot = new URLSearchParams(location.search).get("autopilot") === "1";
 				return s.joined && typeof s.server?.biome === "string" && s.server.biome.length > 0 && (!autopilot || s.autopilotStarted) && s.chunks >= chunks && s.sections > 0 && s.meshQueue === 0 && s.lightQueue === 0 && window.__mc.frames > 5 ? s : false;
 			},
-			{ timeout: 120000, polling: 250 },
+			{ timeout: LOAD_TIMEOUT, polling: 250 },
 			chunks,
 		);
 	} catch (err) {

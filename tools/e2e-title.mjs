@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fixtureFilename, fixturePack } from "../apps/web/test/texture-pack-fixture.mjs";
 
-const timeout = 120_000;
+export const LOAD_TIMEOUT = 120_000;
 
 async function waitForTitleFrame(page, terrain) {
 	await page.waitForFunction(terrain => {
 		const canvas = document.querySelector("#title-background");
 		return canvas && !canvas.hidden && document.body.classList.contains("terrain-background") === terrain;
-	}, { timeout }, terrain);
+	}, { timeout: LOAD_TIMEOUT }, terrain);
 }
 
 async function screenshot(page, path) {
@@ -49,20 +49,21 @@ async function frameColors(page, png) {
 
 async function waitForStillFrame(page) {
 	await page.waitForFunction(() => document.body.classList.contains("terrain-background") &&
-		performance.now() - window.titleFrameSubmittedAt > 1500, { timeout, polling: 250 });
+		performance.now() - window.titleFrameSubmittedAt > 1500, { timeout: LOAD_TIMEOUT, polling: 250 });
 }
 
 export async function testTitleBackground(browser, edge, shots, initialFixture) {
 	const dir = await mkdtemp(join(tmpdir(), "cf-title-test-"));
-	const context = await browser.createBrowserContext();
+	let context, page;
 	try {
+		context = await browser.createBrowserContext();
 		const file = join(dir, fixtureFilename);
 		const replacement = join(dir, "bedrock-samples-v1.26.60.6-full.zip");
 		await writeFile(file, initialFixture);
 		await writeFile(replacement, await fixturePack({ artVariant: true, colors: {
 			grass_block_top: [241, 155, 44], dirt: [190, 36, 42], water: [130, 95, 200],
 		} }));
-		const page = await context.newPage();
+		page = await context.newPage();
 		await page.setViewport({ width: 960, height: 640 });
 		await page.bringToFront();
 		const errors = [];
@@ -103,14 +104,17 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		const reduce = [{ name: "prefers-reduced-motion", value: "reduce" }];
 		await page.emulateMediaFeatures(reduce);
 		const foreground = await context.newPage();
-		await foreground.bringToFront();
-		await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
-		assert.equal(await page.evaluate(() => document.hidden), true, "title opened in a background tab");
-		await page.waitForFunction(() => document.querySelector("#texture-drop"), { timeout, polling: 100 });
-		assert.equal(await page.evaluate(() => document.hidden), true, "the install screen opens while the title is still hidden");
-		assert.equal(await page.$eval("#title-background", canvas => canvas.hidden), true, "the hidden title has not rendered");
-		await page.bringToFront();
-		await foreground.close();
+		try {
+			await foreground.bringToFront();
+			await page.goto(edge + "/", { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+			assert.equal(await page.evaluate(() => document.hidden), true, "title opened in a background tab");
+			await page.waitForFunction(() => document.querySelector("#texture-drop"), { timeout: LOAD_TIMEOUT, polling: 100 });
+			assert.equal(await page.evaluate(() => document.hidden), true, "the install screen opens while the title is still hidden");
+			assert.equal(await page.$eval("#title-background", canvas => canvas.hidden), true, "the hidden title has not rendered");
+			await page.bringToFront();
+		} finally {
+			if (!foreground.isClosed()) await foreground.close();
+		}
 		assert.equal(await page.evaluate(() => crossOriginIsolated), false, "title works without COEP");
 		await waitForTitleFrame(page, false);
 		assert.equal(await page.$eval(".shade", node => getComputedStyle(node).display), "none");
@@ -119,7 +123,7 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 
 		await page.evaluate(() => { window.titleDocumentMarker = true; });
 		await (await page.$("#texture-file")).uploadFile(file);
-		await page.waitForSelector('a[href="/play.html"]', { timeout });
+		await page.waitForSelector('a[href="/play.html"]', { timeout: LOAD_TIMEOUT });
 		await waitForTitleFrame(page, true);
 		assert.equal(await page.evaluate(() => window.titleDocumentMarker), true, "install swaps the background in place");
 		assert.equal(await page.$eval(".shade", node => getComputedStyle(node).display), "block");
@@ -129,12 +133,12 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		assert(!land.entirelyBlue && land.count > sky.count, JSON.stringify({ sky, land }));
 		await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "no-preference" }]);
 		const started = await page.evaluate(() => performance.now());
-		await page.waitForFunction(start => window.titleFrameSubmittedAt > start + 2000, { timeout }, started);
+		await page.waitForFunction(start => window.titleFrameSubmittedAt > start + 2000, { timeout: LOAD_TIMEOUT }, started);
 		const second = await screenshot(page, join(shots, "title-rotated.png"));
 		assert.notEqual(second, first, "the rotating title frame changes");
 
 		await page.emulateMediaFeatures(reduce);
-		await page.reload({ waitUntil: "domcontentloaded" });
+		await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
 		await waitForStillFrame(page);
 		const still = await screenshot(page, join(shots, "title-still.png"));
 		await delay(1800);
@@ -143,7 +147,7 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		await page.evaluate(() => { window.titleDocumentMarker = true; });
 		await page.$eval("#panel", panel => [...panel.querySelectorAll("button")].find(button => button.textContent === "入れ直す").click());
 		await (await page.$("#texture-file")).uploadFile(replacement);
-		await page.waitForSelector('a[href="/play.html"]', { timeout });
+		await page.waitForSelector('a[href="/play.html"]', { timeout: LOAD_TIMEOUT });
 		await waitForStillFrame(page);
 		assert.equal(await page.evaluate(() => window.titleDocumentMarker), true, "replacement keeps the same document");
 		assert.notEqual(await screenshot(page), still, "reinstalling redraws the same viewpoint with the new pack");
@@ -154,8 +158,8 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		assert.match(await page.$eval(".thumbnail", node => node.style.backgroundColor), /^rgb\(/);
 
 		signedIn = false;
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン", { timeout });
+		await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
+		await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン", { timeout: LOAD_TIMEOUT });
 		await waitForTitleFrame(page, true);
 		assert.deepEqual(await page.evaluate(async () => {
 			const root = await navigator.storage.getDirectory();
@@ -165,9 +169,17 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		}), [], "the title never creates OPFS world data");
 		assert.deepEqual(sockets, [], "the title never opens a game or other non-HMR WebSocket");
 		assert.deepEqual(errors, []);
-		console.log("ok  title: sky without a pack, live install and replacement, rotation, reduced motion, login and worlds, no world I/O");
 	} finally {
-		await context.close();
-		await rm(dir, { recursive: true, force: true });
+		try {
+			// Wait for the title page and its workers to go away before closing the context.
+			if (page && !page.isClosed()) await page.close();
+		} finally {
+			try {
+				await context?.close();
+			} finally {
+				await rm(dir, { recursive: true, force: true });
+			}
+		}
 	}
+	console.log("ok  title: sky without a pack, live install and replacement, rotation, reduced motion, login and worlds, no world I/O");
 }
