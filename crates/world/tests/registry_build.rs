@@ -100,6 +100,11 @@ fn data_errors_identify_the_problem() {
         ("solid = false", "typo = false", "unknown field `typo`"),
         (
             "name = \"oak_slab\"",
+            "name = \"oak_slab\"\nwashes_away = true",
+            "oak_slab: washes_away requires a block without collision",
+        ),
+        (
+            "name = \"oak_slab\"",
             "name = \"oak_slab\"\nfalls = true",
             "oak_slab: falls requires a solid cube",
         ),
@@ -329,8 +334,8 @@ fn farming_preserves_existing_generated_block_entries() {
         }
     }
     // Fingerprint of the original atlas prefix, state constants, metadata and
-    // properties, now including the falls field.
-    assert_eq!(hash.finish(), 0xb628_304c_3ea4_c340);
+    // properties, including the falls and washes_away fields.
+    assert_eq!(hash.finish(), 0xd7b9_19b7_4709_cce3);
 }
 
 #[test]

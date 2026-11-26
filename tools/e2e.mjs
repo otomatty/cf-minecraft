@@ -2043,7 +2043,8 @@ async function waterFlow() {
 		const { spawn } = await settle(page, "water flow", chunksInView(2));
 		await resumePointerLock(page, "water flow: initial pointer lock");
 		const source = [Math.floor(spawn[0]) + 1, Math.floor(spawn[1]), Math.floor(spawn[2])];
-		const selectBucket = async name => {
+		const flower = [source[0] + 1, source[1], source[2]];
+		const selectItem = async (name, pos) => {
 			await page.keyboard.press("KeyE");
 			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
 			await page.click(`#block-grid [data-block="${name}"]`);
@@ -2052,21 +2053,30 @@ async function waterFlow() {
 			await page.keyboard.press("KeyE");
 			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
 			await resumePointerLock(page, `water flow: resume after selecting ${name}`);
-			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), source);
+			await page.evaluate(([x, y, z]) => window.__mc.setCamera(x + 0.5, y + 3, z + 0.5, 0, 90), pos);
 		};
-		await selectBucket("water_bucket");
+		await selectItem("red_flower", flower);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(pos => {
+			const api = window.__mc;
+			return api.getBlock(...pos) === api.stateId("red_flower");
+		}, { timeout: 5000 }, flower);
+
+		await selectItem("water_bucket", source);
 		await page.waitForFunction(([x, y, z]) => {
 			const api = window.__mc;
 			return api.getBlock(x, y - 1, z) === api.stateId("grass_block") && api.getBlock(x, y, z) === 0;
 		}, { timeout: 5000 }, source);
 		await page.mouse.click(640, 360, { button: "right" });
-		await page.waitForFunction(([x, y, z]) => {
+		await page.waitForFunction(({ source: [x, y, z], flower }) => {
 			const api = window.__mc;
+			const flow = api.stateId("flowing_water[level=1]");
 			return api.getBlock(x, y, z) === api.stateId("water")
-				&& api.getBlock(x + 1, y, z) === api.stateId("flowing_water[level=1]");
-		}, { timeout: 5000 }, source);
-		check(true, "water flow: a filled bucket places a source and water spreads");
-		await selectBucket("bucket");
+				&& api.getBlock(x - 1, y, z) === flow
+				&& api.getBlock(...flower) === flow;
+		}, { timeout: 5000 }, { source, flower });
+		check(true, "water flow: a filled bucket places a source that spreads and washes away the adjacent flower");
+		await selectItem("bucket", source);
 		await page.mouse.click(640, 360, { button: "right" });
 		await page.waitForFunction(([x, y, z]) => window.__mc.getBlock(x, y, z) === 0, { timeout: 5000 }, source);
 		check(true, "water flow: an empty bucket collects the source");

@@ -1641,16 +1641,26 @@ impl Server {
     }
 
     fn spawn_mining_drops(&mut self, pos: [i32; 3], state: u16, exploded: bool) {
+        self.spawn_mining_drops_at_height(pos, state, exploded, 0.25);
+    }
+
+    fn spawn_mining_drops_at_height(
+        &mut self,
+        pos: [i32; 3],
+        state: u16,
+        exploded: bool,
+        height: f64,
+    ) {
         let mut blast_random = exploded.then(|| self.block_drop_random(pos));
         if state == blocks::SHORT_GRASS {
             if self.block_drop_random(pos).next_int_bound(8) == 0 {
                 let seeds = items::by_name("wheat_seeds").unwrap();
-                self.spawn_block_drop_with_random(seeds, 1, pos, 0.25, blast_random.as_mut());
+                self.spawn_block_drop_with_random(seeds, 1, pos, height, blast_random.as_mut());
             }
         } else if let Some(mut item) = items::mining_drop(state) {
             let count = if state == blocks::RIPE_WHEAT {
                 let wheat = items::by_name("wheat").unwrap();
-                self.spawn_block_drop_with_random(wheat, 1, pos, 0.25, blast_random.as_mut());
+                self.spawn_block_drop_with_random(wheat, 1, pos, height, blast_random.as_mut());
                 1 + self.block_drop_random(pos).next_int_bound(2) as u8
             } else {
                 if state == blocks::OAK_LEAVES
@@ -1663,7 +1673,7 @@ impl Server {
                 }
                 1
             };
-            self.spawn_block_drop_with_random(item, count, pos, 0.25, blast_random.as_mut());
+            self.spawn_block_drop_with_random(item, count, pos, height, blast_random.as_mut());
         }
     }
 

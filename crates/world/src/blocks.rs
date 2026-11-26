@@ -57,6 +57,7 @@ pub struct BlockInfo {
     /// Collides with players.
     pub solid: bool,
     pub falls: bool,
+    pub washes_away: bool,
     /// Suppress internal faces against the same block state.
     pub cull_same: bool,
     /// Light absorption and emission, each in 0..=15.

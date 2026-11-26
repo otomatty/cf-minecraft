@@ -1529,9 +1529,9 @@ pub extern "C" fn client_block_registry() -> usize {
                 |b| boxes.push([b.min, b.max]));
             boxes
         };
-        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
+        format!(r#"{{"name":"{}","stateName":"{}","first":{},"count":{},"model":"{}","occludes":{},"washesAway":{},"digTicks":{},"texture":"{}","faces":{faces:?},"boxes":{boxes:?}}}"#,
             block.name, blocks::state_name(state), block.first, block.count, model,
-            info.occludes, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
+            info.occludes, info.washes_away, info.dig_ticks.map(|n| n.to_string()).unwrap_or_else(|| "null".into()), faces[1])
     }).collect();
     emit(state(), format!("[{}]", entries.join(",")).into_bytes())
 }

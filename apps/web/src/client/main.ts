@@ -1321,7 +1321,7 @@ async function main(): Promise<void> {
 			if (held?.name === "bucket" || held?.name === "water_bucket" || held?.name === "lava_bucket") {
 				if (!repeat) {
 					heldButtons.delete(2);
-					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)]?.name, shift);
+					const target = bucketTarget(held.name, hit, (x, y, z) => registry[core.getBlock(x, y, z)], shift);
 					if (target) {
 						sendPosition();
 						transport.send(core.encodeUseBucket(...target));

@@ -9,6 +9,7 @@ export interface BlockStateInfo {
 	count: number;
 	model: "cube" | "boxes" | "cross" | "stairs" | "fence" | "torch";
 	occludes: boolean;
+	washesAway: boolean;
 	texture: string;
 	/** Texture names in mesher order: down, up, north, south, west, east. */
 	faces: [string, string, string, string, string, string];
@@ -84,19 +85,21 @@ export function usesFluidSourceRay(heldName: string | undefined): boolean {
 
 /** Empty buckets use a fluid-source-inclusive hit. Filled buckets use a normal hit. */
 export function bucketTarget(
-    heldName: string, hit: RayHit | null, blockName: (x: number, y: number, z: number) => string | undefined,
+    heldName: string, hit: RayHit | null,
+    blockAt: (x: number, y: number, z: number) => Pick<BlockStateInfo, "name" | "washesAway"> | undefined,
     shift: boolean,
 ): [number, number, number] | null {
     if (!hit) return null;
     const { x, y, z, face } = hit;
-    const target = blockName(x, y, z);
-    if (heldName === "bucket") return target === "water" || target === "lava" ? [x, y, z] : null;
+    const target = blockAt(x, y, z);
+    if (heldName === "bucket") return target?.name === "water" || target?.name === "lava" ? [x, y, z] : null;
     const normal = FACE_NORMALS[face];
     const flow = heldName === "water_bucket" ? "flowing_water" : heldName === "lava_bucket" ? "flowing_lava" : null;
-    if (!flow || !normal || blockInteraction(target, shift) === "open") return null;
+    if (!flow || !normal || blockInteraction(target?.name, shift) === "open") return null;
+    if (target?.washesAway) return [x, y, z];
     const adjacent: [number, number, number] = [x + normal[0], y + normal[1], z + normal[2]];
-    const current = blockName(...adjacent);
-    return current === "air" || current === flow ? adjacent : null;
+    const current = blockAt(...adjacent);
+    return current?.name === "air" || current?.name === flow || current?.washesAway ? adjacent : null;
 }
 
 /** Only shears take priority over the usual right-click actions when a mob is in reach. */
