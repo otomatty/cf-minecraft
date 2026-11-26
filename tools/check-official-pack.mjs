@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { inflateSync } from "node:zlib";
 import { ClientCore, gameTextureLayout } from "../apps/web/src/client/client-core.ts";
-import { importTexturePack, packArtDimensions } from "../apps/web/src/client/texture-pack.ts";
+import { importTexturePack, missingEntityArt, packArtDimensions } from "../apps/web/src/client/texture-pack.ts";
+import { entityNames } from "../apps/web/src/client/mobs/catalog.ts";
 import { TEX_SIZE } from "../apps/web/src/client/textures.ts";
 import { crc32 } from "../apps/web/src/client/world-archive.ts";
 
@@ -58,12 +59,16 @@ async function checkPack(path) {
 	const layout = gameTextureLayout(new ClientCore(instance));
 	const names = [...new Set(layout.names)];
 	const art = [...packArtDimensions.keys()];
-	const required = [...names, ...art];
+	const required = [...names, ...art, ...entityNames, "fire", "explosion"];
 	const file = new File([await openAsBlob(path)], basename(path));
 	const pack = await importTexturePack(file, layout, undefined, async () => new Uint8Array(TEX_SIZE ** 2 * 4), checkPng);
+	const missingVisuals = missingEntityArt(pack);
 	report(pack.version, required, [...names.filter(name => !pack.tiles.has(name)),
-		...art.filter(path => !pack.art.has(path)).map(path => path + ".png")]);
+		...art.filter(path => !pack.art.has(path)).map(path => path + ".png"), ...missingVisuals]);
 	console.log(`Cracks, sky and HUD: ${pack.art.size}/${art.length}`);
+	for (const name of [...entityNames, "fire", "explosion"]) {
+		console.log(`${name}: ${missingVisuals.includes(name) ? "missing" : "resolved"}`);
+	}
 }
 
 const [path] = process.argv.slice(2);

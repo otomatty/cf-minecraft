@@ -13,9 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { entitySkins, explosionVertices, flameVertices, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobInFrustum, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
-import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
-import { flameFrames } from "./mobs/flame.ts";
+import { explosionVertices, flameVertices, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, mobInFrustum, mobVertices, prepareEntityModels, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
@@ -195,6 +193,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 			shade = shade - sign(shade) * 2.0;
 		}
 		if (shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
+	} else if (entityPass == 3u) {
+		if (pixel.a == 0.0) { discard; }
+		color *= shade;
 	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
 		color += pixel.a * in.tintColor;
@@ -438,7 +439,9 @@ export class Renderer {
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
 	private mobBuffer: GPUBuffer | null = null;
-	private readonly mobBind: GPUBindGroup;
+	private mobBind?: GPUBindGroup;
+	private effectBind?: GPUBindGroup;
+	private entityModels!: ReturnType<typeof prepareEntityModels>;
 	private readonly playerNames: PlayerNames;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
@@ -461,8 +464,9 @@ export class Renderer {
 	private readonly globalsF32 = new Float32Array(this.globalsData);
 	private readonly globalsI32 = new Int32Array(this.globalsData);
 	private readonly firstWaterFrame: number;
-	private readonly firstFlameFrame: number;
-	private readonly firstExplosionFrame: number;
+	private flame: readonly [number, number] = [0, 0];
+	private explosion: readonly [number, number] = [0, 0];
+	private smoke: readonly [number, number] = [0, 0];
 	private sunSize = 0;
 	private moonSize = 0;
 	private hasClouds = false;
@@ -514,10 +518,7 @@ export class Renderer {
 
 		this.firstWaterFrame = this.crackTextureBase + crackPaths.length;
 		const waterLayers = waterNames.some(name => textureNames.includes(name)) ? waterNames.length * WATER_FRAME_COUNT : 0;
-		this.firstFlameFrame = this.firstWaterFrame + waterLayers;
-		this.firstExplosionFrame = this.firstFlameFrame + flameFrames.length;
-		const effects = [...flameFrames, ...blastFrames, ...smokeFrames];
-		const missingLayer = this.firstFlameFrame + effects.length;
+		const missingLayer = this.firstWaterFrame + waterLayers;
 		const materialLayers = device.createBuffer({
 			size: Math.max(1, textureNames.length) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
 		});
@@ -530,16 +531,53 @@ export class Renderer {
 		const skyArt = device.createTexture({ size: [32, 32, 9], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		const cloudArt = device.createTexture({ size: [256, 256], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		const transparent = new Uint8Array(TEX_SIZE ** 2 * 4);
+		const solidEffect = new Uint8Array(TEX_SIZE ** 2 * 4);
+		for (let i = 0; i < solidEffect.length; i += 4) solidEffect.set([150, 150, 150, 255], i);
+		let mobSkins: GPUTexture | undefined, effectArt: GPUTexture | undefined;
 		this.applyTexturePack = pack => {
+			this.entityModels = prepareEntityModels(pack?.entities);
+			const { width, height, skins } = this.entityModels;
+			const nextSkins = device.createTexture({
+				size: [width, height, Math.max(2, skins.length)], format: "rgba8unorm",
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			for (const [layer, skin] of skins.entries()) {
+				device.queue.writeTexture({ texture: nextSkins, origin: [0, 0, layer] }, skin.pixels,
+					{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
+			}
+			this.mobBind = bindAtlas(nextSkins);
+			mobSkins?.destroy();
+			mobSkins = nextSkins;
 			const { tiles, cracks, water, sun, moon, clouds } = preparePackTextures(textureNames, pack);
 			this.crackStages = cracks;
 			for (const [layer, name] of textureNames.entries()) this.texturePixels.set(name, tiles[layer]);
 			// Remap missing surfaces to a shared layer so grass masks and biome tint skip the marker.
 			if (tiles.length) device.queue.writeBuffer(materialLayers, 0,
 				Uint32Array.from(tiles, (pixels, layer) => pixels === missingTile ? missingLayer : layer));
-			const layers = [...tiles, ...cracks.map(pixels => pixels ?? transparent), ...water, ...effects, missingTile];
-			const cutouts = layers.map((_, layer) => usesCutoutMips(layout, layer) ||
-				(layer >= this.firstFlameFrame && layer < missingLayer));
+			const effects: Uint8Array[] = [solidEffect];
+			const appendFrames = (name: "fire" | "explosion" | "smoke"): readonly [number, number] => {
+				const start = effects.length;
+				const frames = pack?.effects.get(name) ?? [];
+				effects.push(...frames);
+				return [start, frames.length];
+			};
+			this.flame = appendFrames("fire");
+			this.explosion = appendFrames("explosion");
+			this.smoke = appendFrames("smoke");
+			const nextEffects = device.createTexture({
+				size: [TEX_SIZE, TEX_SIZE, Math.max(2, effects.length)], format: "rgba8unorm",
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			for (const [layer, pixels] of effects.entries()) {
+				device.queue.writeTexture({ texture: nextEffects, origin: [0, 0, layer] }, pixels,
+					{ bytesPerRow: TEX_SIZE * 4 }, [TEX_SIZE, TEX_SIZE, 1]);
+			}
+			this.effectBind = bindAtlas(nextEffects);
+			effectArt?.destroy();
+			effectArt = nextEffects;
+
+			const layers = [...tiles, ...cracks.map(pixels => pixels ?? transparent), ...water, missingTile];
+			const cutouts = layers.map((_, layer) => usesCutoutMips(layout, layer));
 			// Upload the entire array in five writes, including the animation frames.
 			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS; level++, size >>= 1) {
 				const tileBytes = size * size * 4;
@@ -565,7 +603,6 @@ export class Renderer {
 			}
 			if (clouds) device.queue.writeTexture({ texture: cloudArt }, clouds, { bytesPerRow: 1024 }, [256, 256, 1]);
 		};
-		this.applyTexturePack(pack);
 		const sampler = device.createSampler({
 			magFilter: "nearest",
 			minFilter: "nearest",
@@ -573,16 +610,6 @@ export class Renderer {
 			addressModeU: "clamp-to-edge",
 			addressModeV: "clamp-to-edge",
 		});
-		// Keep each UV island at native resolution, including the chicken's half-height skin.
-		const mobSkins = device.createTexture({
-			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, entitySkins.length], format: "rgba8unorm",
-			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-		});
-		for (const [layer, skin] of entitySkins.entries()) {
-			device.queue.writeTexture({ texture: mobSkins, origin: [0, 0, layer] }, skin.pixels(),
-				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
-		}
-
 		const skyModule = device.createShaderModule({ code: SKY_WGSL });
 		const skyLayout = device.createBindGroupLayout({ entries: [
 			{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
@@ -659,25 +686,26 @@ export class Renderer {
 			},
 			fragment: {
 				module: terrainModule, entryPoint: "fs",
-				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
+				constants: { renderLayer: kind === "cracks" || kind === "flames" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
 				targets: [{
 					format: this.format,
-					...(kind === "cracks" ? { blend: {
+					...(kind === "cracks" || kind === "flames" ? { blend: {
 						color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const },
 						alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const },
 					} } : {}),
 				}],
 			},
 			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
-			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks", depthCompare: "less" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks" && kind !== "flames", depthCompare: "less" },
 		});
 		this.items = entityPipeline("drops");
 		this.cracks = entityPipeline("cracks");
 		this.mobs = entityPipeline("mobs");
 		this.flames = entityPipeline("flames");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-		// Each drop uses up to 36 vertices, each burning mob two double-sided quads, and each particle one.
-		const itemBytes = MAX_RENDER_ITEMS * 36 * ITEM_VERTEX_FLOATS * 4;
+		// Each drop uses up to 36 vertices and each held item uses up to 12.
+		const itemBytes = MAX_RENDER_ITEMS * (36 + 12) * ITEM_VERTEX_FLOATS * 4;
+		// Each burning mob uses two double-sided quads and each particle uses one.
 		const effectBytes = (MAX_RENDER_ITEMS * 24 + MAX_EXPLOSION_PARTICLES * 12) * 36;
 		this.itemBuffer = device.createBuffer({ size: itemBytes + effectBytes, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
@@ -702,7 +730,7 @@ export class Renderer {
 			],
 		});
 		this.terrainBind = bindAtlas(texture);
-		this.mobBind = bindAtlas(mobSkins);
+		this.applyTexturePack(pack);
 
 		const outlineModule = device.createShaderModule({ code: OUTLINE_WGSL });
 		this.outline = device.createRenderPipeline({
@@ -899,10 +927,10 @@ export class Renderer {
 			x - eye[0] - 0.75, y - eye[1] - 0.1, z - eye[2] - 0.75, 1.5, 2.4, 1.5))
 			.slice(0, MAX_RENDER_ITEMS - visibleMobs.length);
 		this.playerNames.update(players, visiblePlayers, eye, viewProj);
-		const mobData = mobVertices([...visibleMobs, ...visiblePlayers], eye, now, { output: heldItems, textures: this.heldItemTextures });
+		const mobData = mobVertices(this.entityModels, [...visibleMobs, ...visiblePlayers], eye, now, { output: heldItems, textures: this.heldItemTextures });
 		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
-		const flameData = flameVertices(visibleMobs, eye, now, this.firstFlameFrame);
-		const explosionData = explosionVertices(particles, eye, side, up, now, this.firstExplosionFrame);
+		const flameData = flameVertices(visibleMobs, eye, now, ...this.flame);
+		const explosionData = explosionVertices(particles, eye, side, up, now, this.explosion, this.smoke, 0);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		if (flameData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength, flameData);
 		if (explosionData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength + flameData.byteLength, explosionData);
@@ -962,16 +990,16 @@ export class Renderer {
 					pass.setVertexBuffer(0, this.itemBuffer);
 					pass.draw(itemData.length / ITEM_VERTEX_FLOATS);
 				}
-				if (this.mobBuffer && mobData.length) {
+				if (this.mobBind && this.mobBuffer && mobData.length) {
 					pass.setPipeline(this.mobs);
 					pass.setBindGroup(0, this.mobBind);
 					pass.setVertexBuffer(0, this.mobBuffer);
 					pass.draw(mobData.length / 9);
 				}
 				const effectVertices = (flameData.length + explosionData.length) / 9;
-				if (effectVertices) {
+				if (effectVertices && this.effectBind) {
 					pass.setPipeline(this.flames);
-					pass.setBindGroup(0, this.terrainBind);
+					pass.setBindGroup(0, this.effectBind);
 					pass.setVertexBuffer(0, this.itemBuffer, itemData.byteLength);
 					pass.draw(effectVertices);
 				}

@@ -1,4 +1,6 @@
 import { BlobReader, ZipReader, type FileEntry } from "@zip.js/zip.js/lib/zip-core-custom.js";
+import { entityNames, type EntityAssetKey } from "./mobs/catalog.ts";
+import { geometryDefinitions, imageDimensions, record, resolveGeometry, vector, type GeometryDefinition, type MobAsset, type NativeImage } from "./mobs/model.ts";
 import { TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
 
 const MiB = 1024 ** 2;
@@ -11,6 +13,8 @@ export interface TexturePack {
 	waterFrames: Map<string, Uint8Array[]>;
 	/** Native-size RGBA pixels, keyed by path within the textures directory. */
 	art: Map<string, Uint8Array>;
+	entities: Map<EntityAssetKey, MobAsset>;
+	effects: Map<EffectName, Uint8Array[]>;
 }
 
 export const crackPaths = Array.from({ length: 10 }, (_, stage) => "environment/destroy_stage_" + stage);
@@ -69,10 +73,6 @@ const currentBlockKeys = new Map([
 	["furnace_front", "furnace_front_off"],
 ]);
 
-function record(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseJson(bytes: Uint8Array): unknown {
 	// Bedrock Samples uses JSON with comments. Preserve quoted strings (including URLs).
 	const json = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
@@ -98,6 +98,10 @@ function imagePath(name: string, atlas: Record<string, unknown>, item: boolean):
 		path = Array.isArray(entry.textures) ? entry.textures[variant] : entry.textures;
 		if (record(path)) path = path.path;
 	}
+	return texturePath(path);
+}
+
+function texturePath(path: unknown): string | undefined {
 	if (typeof path !== "string" || !path.startsWith("textures/")) return;
 	if (path.split("/").some(part => !/^[\w.-]+$/.test(part) || part === "." || part === "..")) return;
 	return path.replace(/\.(png|tga)$/, "");
@@ -120,16 +124,12 @@ async function readEntry(entry: FileEntry, limit: number): Promise<Uint8Array<Ar
 	return bytes;
 }
 
-function supportedDimensions(width: number, height: number): boolean {
-	return width > 0 && width <= 512 && height > 0 && height <= 4096 && width * height <= 1024 ** 2;
-}
-
 function pngDimensions(bytes: Uint8Array): [number, number] {
 	const signature = [137, 80, 78, 71, 13, 10, 26, 10];
 	if (bytes.length < 33 || !signature.every((byte, i) => bytes[i] === byte)) throw new Error("PNG が破損しています");
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const width = view.getUint32(16), height = view.getUint32(20);
-	if (view.getUint32(8) !== 13 || view.getUint32(12) !== 0x49484452 || !supportedDimensions(width, height)) {
+	if (view.getUint32(8) !== 13 || view.getUint32(12) !== 0x49484452 || !imageDimensions(width, height)) {
 		throw new Error("PNG の寸法に対応していません");
 	}
 	return [width, height];
@@ -188,26 +188,28 @@ function prepareArt(path: string, pixels: Uint8Array): Uint8Array {
 	return pixels;
 }
 
-function tgaFrames(bytes: Uint8Array, maxFrames: number): Uint8Array[] {
-	if (bytes.length < 18) return [];
+function decodeTga(bytes: Uint8Array): NativeImage | undefined {
+	if (bytes.length < 18) return;
 	const type = bytes[2], descriptor = bytes[17];
 	// Reject right-to-left and interleaved images. Bit 5 marks the vertical origin.
-	if (bytes[1] !== 0 || (type !== 2 && type !== 10) || bytes[16] !== 32 || (descriptor & 0xd0)) return [];
+	if (bytes[1] !== 0 || (type !== 2 && type !== 10) || bytes[16] !== 32 || (descriptor & 0xd0)) return;
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const width = view.getUint16(12, true), height = view.getUint16(14, true);
-	if (!supportedDimensions(width, height)) return [];
+	if (!imageDimensions(width, height)) return;
 	const total = width * height;
 	let source = 18 + bytes[0];
 	const pixels = new Uint8Array(total * 4);
 	for (let pixel = 0; pixel < total;) {
-		if (source >= bytes.length) return [];
+		if (source >= bytes.length) return;
 		const packet = type === 10 ? bytes[source++] : 0;
 		const repeat = (packet & 0x80) !== 0;
 		const count = type === 2 ? total : (packet & 0x7f) + 1;
 		const end = source + 4 * (repeat ? 1 : count);
-		if (pixel + count > total || end > bytes.length) return [];
+		if (pixel + count > total || end > bytes.length) return;
 		for (let i = 0; i < count; i++, pixel++) {
-			const dest = pixel * 4, p = source + (repeat ? 0 : i * 4);
+			const x = pixel % width, y = Math.floor(pixel / width);
+			const dest = ((descriptor & 0x20 ? y : height - 1 - y) * width + x) * 4;
+			const p = source + (repeat ? 0 : i * 4);
 			pixels[dest] = bytes[p + 2];
 			pixels[dest + 1] = bytes[p + 1];
 			pixels[dest + 2] = bytes[p];
@@ -215,21 +217,53 @@ function tgaFrames(bytes: Uint8Array, maxFrames: number): Uint8Array[] {
 		}
 		source = end;
 	}
-	const size = Math.min(width, height);
-	const frames: Uint8Array[] = [];
-	for (let frame = 0; frame < Math.min(maxFrames, Math.floor(height / size)); frame++) {
-		const tile = new Uint8Array(TEX_SIZE ** 2 * 4);
-		for (let y = 0; y < TEX_SIZE; y++) {
-			const row = frame * size + Math.floor((y + 0.5) * size / TEX_SIZE);
-			const offset = (descriptor & 0x20 ? row : height - 1 - row) * width;
-			for (let x = 0; x < TEX_SIZE; x++) {
-				const p = (offset + Math.floor((x + 0.5) * size / TEX_SIZE)) * 4;
-				tile.set(pixels.subarray(p, p + 4), (y * TEX_SIZE + x) * 4);
-			}
+	return { width, height, pixels };
+}
+
+function sampleTile(image: NativeImage, x0: number, y0: number, width: number, height: number): Uint8Array {
+	const tile = new Uint8Array(TEX_SIZE ** 2 * 4);
+	for (let y = 0; y < TEX_SIZE; y++) {
+		const offset = (y0 + Math.floor((y + 0.5) * height / TEX_SIZE)) * image.width + x0;
+		for (let x = 0; x < TEX_SIZE; x++) {
+			const p = (offset + Math.floor((x + 0.5) * width / TEX_SIZE)) * 4;
+			tile.set(image.pixels.subarray(p, p + 4), (y * TEX_SIZE + x) * 4);
 		}
-		frames.push(tile);
 	}
-	return frames;
+	return tile;
+}
+
+type EffectName = "fire" | "explosion" | "smoke";
+export const effectNames = ["fire", "explosion", "smoke"] as const;
+export const MAX_EFFECT_FRAMES = 64;
+
+export function missingEntityArt(pack: TexturePack): string[] {
+	return [
+		...entityNames.filter(name => !pack.entities.has(name) || (name === "sheep" && !pack.entities.has("sheep/sheared"))),
+		...(!pack.effects.has("fire") ? ["fire"] : []),
+		...(!pack.effects.has("explosion") || !pack.effects.has("smoke") ? ["explosion"] : []),
+	];
+}
+
+function particleArt(document: unknown) {
+	if (!record(document) || !record(document.particle_effect)) return;
+	const { description, components } = document.particle_effect;
+	if (!record(description) || !record(description.basic_render_parameters) || !record(components)) return;
+	const path = texturePath(description.basic_render_parameters.texture);
+	const billboard = components["minecraft:particle_appearance_billboard"];
+	if (!path || !record(billboard) || !record(billboard.uv)) return;
+	const { texture_width: width, texture_height: height, flipbook, uv, uv_size } = billboard.uv;
+	if (typeof width !== "number" || typeof height !== "number" || !imageDimensions(width, height) ||
+		(flipbook !== undefined && !record(flipbook))) return;
+	const base = flipbook ? flipbook.base_UV : uv;
+	const size = flipbook ? flipbook.size_UV : uv_size;
+	const step = flipbook ? flipbook.step_UV : [0, 0];
+	const count = flipbook ? flipbook.max_frame : 1;
+	if (!vector(base, 2) || !vector(size, 2) || !vector(step, 2) ||
+		![...base, ...size, ...step].every(Number.isInteger) || size.some(n => n <= 0) ||
+		typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > MAX_EFFECT_FRAMES) return;
+	const rects = Array.from({ length: count }, (_, i) => [base[0] + step[0] * i, base[1] + step[1] * i] as const);
+	if (rects.some(([x, y]) => x < 0 || y < 0 || x + size[0] > width || y + size[1] > height)) return;
+	return { path, width, height, rects, size };
 }
 
 const unofficialPack = "公式の Bedrock Samples の ZIP ではありません。手順 1 のページから、名前が -full.zip で終わるファイルをダウンロードしてください。";
@@ -247,6 +281,7 @@ export function packMissingNotice(pack: TexturePack, names: readonly string[]): 
 	let count = 0;
 	for (const name of new Set(names)) if (!pack.tiles.has(name)) count++;
 	for (const path of packArtDimensions.keys()) if (!pack.art.has(path)) count++;
+	count += missingEntityArt(pack).length;
 	return count ? `この版のパックに無い画像が ${count} 件あります` : "";
 }
 
@@ -268,7 +303,7 @@ export async function importTexturePack(
 			if (entry.directory || entry.symlink) continue;
 			const parts = entry.filename.split("/");
 			if (parts.includes("__MACOSX") || parts.at(-1)!.startsWith("._")) continue;
-			if (/^(?:[^/]+\/)?resource_pack\/(?:manifest\.json|textures\/(?:terrain_texture\.json|item_texture\.json|.+\.(?:png|tga)))$/.test(entry.filename)) {
+			if (/^(?:[^/]+\/)?resource_pack\/(?:manifest\.json|entity\/[^/]+\.entity\.json|models\/.+\.json|particles\/[^/]+\.json|textures\/(?:terrain_texture\.json|item_texture\.json|.+\.(?:png|tga)))$/.test(entry.filename)) {
 				if (files.has(entry.filename)) throw new Error(unofficialPack);
 				files.set(entry.filename, entry);
 			}
@@ -329,15 +364,28 @@ export async function importTexturePack(
 			return entry ? [{ path, dimensions, entry }] : [];
 		});
 		let done = 0;
-		const total = images.size + artEntries.length;
+		const entityEntries = entityNames.flatMap(name => {
+			const entry = files.get(resource + `entity/${name}.entity.json`);
+			return entry ? [{ name, entry }] : [];
+		});
+		const effectSources = [
+			["fire", "textures/blocks/fire_0"], ["explosion", "particles/large_explosion_level.json"], ["smoke", "particles/basic_smoke.json"],
+		] as const;
+		const effectEntries = effectSources.filter(([name, path]) => name === "fire"
+			? files.has(resource + path + ".png") || files.has(resource + path + ".tga") : files.has(resource + path));
+		const total = images.size + artEntries.length + entityEntries.length + effectEntries.length;
 		onProgress?.(done, total);
 		for (const [entry, aliases] of images) {
 			const bytes = await readEntry(entry, 4 * MiB);
 			const animated = aliases.includes("water") || aliases.includes("water_flow");
 			const maxFrames = animated ? WATER_FRAME_COUNT : 1;
 			let frames: Uint8Array[];
-			if (entry.filename.endsWith(".tga")) frames = tgaFrames(bytes, maxFrames);
-			else {
+			if (entry.filename.endsWith(".tga")) {
+				const image = decodeTga(bytes);
+				const size = image ? Math.min(image.width, image.height) : 0;
+				frames = image ? Array.from({ length: Math.min(maxFrames, Math.floor(image.height / size)) },
+					(_, frame) => sampleTile(image, 0, frame * size, size, size)) : [];
+			} else {
 				const width = pngTileWidth(bytes);
 				frames = [];
 				if (width) {
@@ -364,14 +412,20 @@ export async function importTexturePack(
 				}
 			}
 		}
+		const selectedEntries = new Set(images.keys());
+		const readSelected = async (entry: FileEntry, limit: number) => {
+			if (!selectedEntries.has(entry)) {
+				if (entry.uncompressedSize > limit || selected + entry.uncompressedSize > maxSelected) {
+					throw new Error("パックで使用するファイルの展開サイズが上限を超えています");
+				}
+				selected += entry.uncompressedSize;
+				selectedEntries.add(entry);
+			}
+			return readEntry(entry, limit);
+		};
 		for (const { path, dimensions: [width, height], entry } of artEntries) {
 			try {
-				const extra = images.has(entry) ? 0 : entry.uncompressedSize;
-				if (entry.uncompressedSize > 4 * MiB || selected + extra > maxSelected) {
-					throw new Error("追加画像の展開サイズが上限を超えています");
-				}
-				selected += extra;
-				const bytes = await readEntry(entry, 4 * MiB);
+				const bytes = await readSelected(entry, 4 * MiB);
 				const [w, h] = pngDimensions(bytes);
 				if (w === width && h === height && staticPng(bytes)) {
 					const pixels = await decodeNative(bytes, width, height);
@@ -379,6 +433,90 @@ export async function importTexturePack(
 				}
 			} catch {
 				// Unreadable optional images are treated as missing.
+			}
+			onProgress?.(++done, total);
+		}
+		const readDefinition = async (entry: FileEntry) => parseJson(await readSelected(entry, 2 * MiB));
+		const nativeImages = new Map<string, NativeImage>();
+		const readNative = async (path: string): Promise<NativeImage | undefined> => {
+			const cached = nativeImages.get(path);
+			if (cached) return cached;
+			const entry = files.get(resource + path + ".png") ?? files.get(resource + path + ".tga");
+			if (!entry) return;
+			const bytes = await readSelected(entry, 4 * MiB);
+			let image: NativeImage | undefined;
+			if (entry.filename.endsWith(".tga")) image = decodeTga(bytes);
+			else {
+				const [width, height] = pngDimensions(bytes);
+				if (staticPng(bytes)) {
+					const pixels = await decodeNative(bytes, width, height);
+					if (pixels.length === width * height * 4) image = { width, height, pixels };
+				}
+			}
+			if (image) nativeImages.set(path, image);
+			return image;
+		};
+
+		const requests: { name: EntityAssetKey; id: string; texture: NativeImage }[] = [];
+		for (const { name, entry } of entityEntries) {
+			try {
+				const document = await readDefinition(entry);
+				const client = record(document) && document["minecraft:client_entity"];
+				const description = record(client) && client.description;
+				if (record(description) && record(description.textures) && record(description.geometry)) {
+					const path = texturePath(description.textures.default);
+					const texture = path && await readNative(path);
+					if (texture) {
+						const id = description.geometry.default;
+						if (typeof id === "string") requests.push({ name, id, texture });
+						const sheared = description.geometry.sheared;
+						if (name === "sheep" && typeof sheared === "string") requests.push({ name: "sheep/sheared", id: sheared, texture });
+					}
+				}
+			} catch {
+				// Entity art is optional, so a broken file only affects this entity.
+			}
+		}
+		const entities = new Map<EntityAssetKey, MobAsset>();
+		if (requests.length) {
+			const definitions = new Map<string, GeometryDefinition>();
+			const modelRoot = resource + "models/";
+			for (const [path, entry] of files) {
+				if (!path.startsWith(modelRoot)) continue;
+				try {
+					for (const [id, definition] of geometryDefinitions(await readDefinition(entry))) {
+						// The entity directory takes precedence over the older aggregate models.
+						if (!definitions.has(id) || path.startsWith(modelRoot + "entity/")) definitions.set(id, definition);
+					}
+				} catch {
+					// Unsupported or unreadable definitions are missing if an entity requires them.
+				}
+			}
+			for (const { name, id, texture } of requests) {
+				const asset = resolveGeometry(id, definitions, texture);
+				if (asset) entities.set(name, asset);
+			}
+		}
+		if (entityEntries.length) onProgress?.(done += entityEntries.length, total);
+
+		const effects = new Map<EffectName, Uint8Array[]>();
+		for (const [name, path] of effectEntries) {
+			try {
+				if (name === "fire") {
+					const image = await readNative(path);
+					if (image && image.height % image.width === 0 && image.height / image.width <= MAX_EFFECT_FRAMES) {
+						effects.set(name, Array.from({ length: image.height / image.width }, (_, frame) =>
+							sampleTile(image, 0, frame * image.width, image.width, image.width)));
+					}
+				} else {
+					const animation = particleArt(await readDefinition(files.get(resource + path)!));
+					const image = animation && await readNative(animation.path);
+					if (image && image.width === animation.width && image.height === animation.height) {
+						effects.set(name, animation.rects.map(([x, y]) => sampleTile(image, x, y, animation.size[0], animation.size[1])));
+					}
+				}
+			} catch {
+				// Unreadable effect art is counted as missing.
 			}
 			onProgress?.(++done, total);
 		}
@@ -398,6 +536,6 @@ export async function importTexturePack(
 		if (!tiles.size) {
 			throw new Error("ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。");
 		}
-		return { version, tiles, waterFrames, art };
+		return { version, tiles, waterFrames, art, entities, effects };
 	} finally { await zip.close(); }
 }

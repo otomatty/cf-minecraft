@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
-import { crackPaths, importTexturePack, isPackVersion, moonSheetOrder, packArtDimensions, packMissingNotice, pngTileWidth } from "./texture-pack.ts";
+import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixtureEntityEntries, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
+import { crackPaths, importTexturePack, isPackVersion, missingEntityArt, moonSheetOrder, packArtDimensions, packMissingNotice, pngTileWidth } from "./texture-pack.ts";
 import { installedPack } from "./texture-pack-settings.ts";
 import { ClientCore, gameTextureLayout } from "./client-core.ts";
 import { missingTile, textureIconPixels } from "./textures.ts";
@@ -268,17 +268,21 @@ test("water decodes each square frame up to 32 and uses fixed alpha", async () =
 	assert.equal(pack.tiles.get("stone")![3], 240);
 });
 
-test("stored selection requires a valid version, registry pixels, water frames and optional art map", () => {
+test("stored selection requires a valid version, registry pixels, water frames and validated installed art maps", () => {
 	const tiles = new Map([["stone", tile], ["water", tile]]);
 	const waterFrames = new Map([["water", [tile, tile.slice()]]]);
 	const art = new Map([["environment/sun", new Uint8Array(32 ** 2 * 4)], ["ui/heart_half", new Uint8Array(9 ** 2 * 4)]]);
-	const pack = { version: "1.2.3.4-preview", tiles, waterFrames, art };
+	const pack = { version: "1.2.3.4-preview", tiles, waterFrames, art, entities: new Map(), effects: new Map() };
 	const names = ["stone", "water", "water_flow"];
 	assert.equal(installedPack({ pack: { name: "old.zip", tiles }, active: true }, names), undefined);
 	for (const bad of [
 		undefined, { ...pack, version: "bad" }, { ...pack, version: "1.2.3-preview.4" },
 		{ version: "1.2.3", tiles }, { ...pack, tiles: new Map(), waterFrames: new Map() },
 		{ version: pack.version, tiles, waterFrames }, { ...pack, art: {} },
+		{ version: pack.version, tiles, waterFrames, art },
+		{ ...pack, entities: new Map([["unknown", {}]]) },
+		{ ...pack, effects: new Map([["fire", []]]) },
+		{ ...pack, effects: new Map([["smoke", [new Uint8Array(1)]]]) },
 		{ ...pack, art: new Map([["ui/unknown", new Uint8Array(9 ** 2 * 4)]]) },
 		{ ...pack, art: new Map([["environment/sun", tile]]) },
 		{ ...pack, art: new Map([["ui/heart_half", new Uint16Array(9 ** 2 * 4)]]) },
@@ -347,7 +351,11 @@ test("generated browser fixture covers every registry name through the importer"
 	assert.equal(pack.waterFrames.get("water")?.length, 3);
 	assert.equal(pack.waterFrames.get("water_flow")?.length, 3);
 	assert.equal(pack.art.size, packArtDimensions.size);
+	assert.equal(pack.entities.size, 9);
+	assert.deepEqual([...pack.effects].map(([name, frames]) => [name, frames.length]), [["fire", 3], ["explosion", 3], ["smoke", 3]]);
+	assert.deepEqual(missingEntityArt(pack), []);
 	assert.equal(packMissingNotice(pack, layout.names), "");
+	assert.deepEqual(installedPack(structuredClone({ pack }), layout.names), pack);
 });
 
 test("the layout sends new sprite names and block faces to their respective atlases", async () => {
@@ -401,5 +409,47 @@ test("renderer prepares shared markers and skips unavailable art, including with
 	assert.equal(partial.cracks.filter(Boolean).length, 1);
 	assert.equal(partial.sun, pack.art.get(sunPath));
 	assert.deepEqual([partial.moon, partial.clouds], [undefined, undefined]);
-	assert.equal(packMissingNotice(pack, names), "この版のパックに無い画像が 24 件あります");
+	assert.equal(packMissingNotice(pack, names), "この版のパックに無い画像が 34 件あります");
+});
+
+test("missing or unsupported entity definitions and particle UVs are counted once per target", async () => {
+	const { instance } = await WebAssembly.instantiate(await readFile(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const layout = gameTextureLayout(new ClientCore(instance));
+	const pack = await importTexturePack(new File([await fixturePack({ omit: [
+		"resource_pack/textures/entity/fixture_cow.png",
+		"resource_pack/models/entity/fixture_sheep.geo.json",
+		"resource_pack/particles/basic_smoke.json",
+		"resource_pack/textures/blocks/fire_0.png",
+	] })], "fixture.zip"), layout, undefined, async () => tile, decodeFixtureArt);
+	assert.ok(!pack.entities.has("cow") && !pack.entities.has("sheep"));
+	assert.ok(pack.entities.has("sheep/sheared") && pack.entities.has("player"));
+	assert.ok(pack.effects.has("explosion"));
+	assert.deepEqual(missingEntityArt(pack), ["cow", "sheep", "fire", "explosion"]);
+	assert.equal(packMissingNotice(pack, layout.names), "この版のパックに無い画像が 4 件あります");
+
+	const entries = fixtureEntityEntries().filter(([path]) => /fixture_cow|entity\/cow\.entity/.test(path));
+	const changed = entries.map(([path, data]) => path.endsWith(".geo.json")
+		? [path, String(data).replace('"uv":[0,0]', '"uv":"unsupported"')] : [path, data]);
+	const corrupt = await importTexturePack(await file([...testEntries, ...changed.map(([path, data]) =>
+		["sample/" + path, data])]), blocksOnly(["stone"]), undefined, async () => tile, decodeFixtureArt);
+	assert.equal(corrupt.entities.size, 0);
+	assert.ok(corrupt.tiles.has("stone"));
+
+	const stored = structuredClone(pack);
+	stored.entities.get("pig")!.bones[1].parent = "absent";
+	assert.equal(installedPack({ pack: stored }, layout.names), undefined);
+});
+
+test("particle frames use their declared texture, UV origin, dimensions and negative step", async () => {
+	const { instance } = await WebAssembly.instantiate(await readFile(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const layout = gameTextureLayout(new ClientCore(instance));
+	const pack = await importTexturePack(new File([await fixturePack()], "fixture.zip"), layout,
+		undefined, async () => tile, decodeFixtureArt);
+	const flashes = pack.effects.get("explosion")!, smoke = pack.effects.get("smoke")!;
+	const readPixel = (frame: Uint8Array, x: number, y: number) => Array.from(frame.slice((y * 16 + x) * 4, (y * 16 + x) * 4 + 4));
+	assert.deepEqual(readPixel(flashes[2], 4, 2), [251, 212, 96, 255]);
+	assert.deepEqual(readPixel(smoke[0], 4, 2), [125, 125, 125, 255]);
+	assert.deepEqual(readPixel(smoke[1], 4, 2), [208, 208, 208, 255]);
+	assert.deepEqual(readPixel(smoke[2], 4, 2), [167, 167, 167, 255]);
+	assert.equal(readPixel(smoke[0], 0, 0)[3], 0);
 });

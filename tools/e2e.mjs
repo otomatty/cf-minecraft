@@ -23,7 +23,8 @@ import { testTitleBackground } from "./e2e-title.mjs";
 import { installFixture, testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
-import { fixtureGrassBrightness, fixturePack } from "../apps/web/test/texture-pack-fixture.mjs";
+import { fixtureGrassBrightness, fixtureMobColors, fixturePack, fixtureSmokeShades } from "../apps/web/test/texture-pack-fixture.mjs";
+import { EXPLOSION_SMOKE_SHADE } from "../apps/web/src/client/entities.ts";
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1058,7 +1059,7 @@ async function players() {
 		check(await first.page.$eval(selector, (label, name) => label.textContent.includes(name), player.name),
 			"players: visible name label contains the second player's name");
 		const image = await first.page.screenshot({ path: join(shots, "players.png"), encoding: "base64" });
-		const greenPixels = await first.page.evaluate(async image => {
+		const greenPixels = await first.page.evaluate(async (image, swatch) => {
 			const img = new Image();
 			img.src = `data:image/png;base64,${image}`;
 			await img.decode();
@@ -1069,10 +1070,11 @@ async function players() {
 			let count = 0;
 			for (let i = 0; i < pixels.length; i += 4) {
 				const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
-				if (g > 12 && g > 1.5 * r && g > 1.25 * b) count++;
+				if (g > 12 && Math.abs(r - g * swatch[0] / swatch[1]) < 4 &&
+					Math.abs(b - g * swatch[2] / swatch[1]) < 4) count++;
 			}
 			return count;
-		}, image);
+		}, image, fixtureMobColors.player);
 		check(greenPixels > 20, "players: green jacket pixels are visible at the aim point", `${greenPixels} pixels`);
 
 		await second.page.close();
@@ -2746,7 +2748,7 @@ async function mobs() {
 				captureProblem = `aimed at ${name} ${aim.id} yaw ${aim.yaw} at ${aim.position.join(", ")}, then saw yaw ${current?.yaw ?? "missing"} at ${current?.position.join(", ") ?? "missing"} (blocking mob ${current?.blockedBy ?? "none"})`;
 			}
 			if (captureProblem !== null) throw new Error(`mobs: could not photograph ${name} ${lastMobId}; ${captureProblem ?? "capture timed out"}`);
-			const featurePixels = await page.evaluate(async (data, kind, woolColor) => {
+			const featurePixels = await page.evaluate(async (data, kind, woolColor, muzzleSwatch) => {
 				const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode();
 				const canvas = new OffscreenCanvas(img.width, img.height);
 				const ctx = canvas.getContext("2d");
@@ -2762,7 +2764,7 @@ async function mobs() {
 				// Compare the skin's muzzle/beak swatch after the shader's daylight shading.
 				const swatch = kind === 3
 					? [null, [155, 156, 160], [148, 108, 82], [81, 82, 90]][woolColor]
-					: [[182, 165, 152], [206, 126, 123], [233, 170, 66]][kind];
+					: muzzleSwatch;
 				let matching = 0;
 				for (let i = 0; i < pixels.length; i += 4) {
 					const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
@@ -2779,7 +2781,7 @@ async function mobs() {
 					if (matchesColor) matching++;
 				}
 				return matching;
-			}, readFileSync(file).toString("base64"), kind, photographedColor);
+			}, readFileSync(file).toString("base64"), kind, photographedColor, fixtureMobColors[name]);
 			const [feature, color] = [["muzzle", "beige"], ["snout", "pink"], ["beak", "orange"],
 				["wool", ["white", "gray", "brown", "black"][photographedColor]]][kind];
 			check(featurePixels > 20, `mobs: ${name} ${feature} is visibly rendered`, `${featurePixels} ${color} pixels, ${name} ${photographedId}`);
@@ -3431,7 +3433,7 @@ async function creepers() {
 		}
 
 		// Capture the rendered game canvas in the browser's frame callback while the smoke is visible.
-		const smoke = await page.waitForFunction(before => {
+		const smoke = await page.waitForFunction((before, shades) => {
 			const { camera, explosionsReceived, lastExplosion, explosionParticles } = window.__mc.stats();
 			if (explosionsReceived <= before || !lastExplosion || !explosionParticles) return false;
 			const view = document.getElementById("view");
@@ -3453,7 +3455,6 @@ async function creepers() {
 			const ctx = snapshot.getContext("2d");
 			ctx.drawImage(view, 0, 0);
 			const pixels = ctx.getImageData(left, top, right - left, bottom - top).data;
-			const shades = [0x88, 0xae, 0xc5];
 			const counts = [0, 0, 0];
 			for (let i = 0; i < pixels.length; i += 4) {
 				const gray = pixels[i];
@@ -3463,7 +3464,7 @@ async function creepers() {
 			}
 			if (counts.filter(count => count > 10).length < 2) return false;
 			return { explosionsReceived, explosion: lastExplosion, counts, png: snapshot.toDataURL("image/png").split(",")[1] };
-		}, { timeout: 10000, polling: "raf" }, ground.explosionsReceived);
+		}, { timeout: 10000, polling: "raf" }, ground.explosionsReceived, fixtureSmokeShades.map(shade => Math.round(shade * EXPLOSION_SMOKE_SHADE)));
 		const shot = await smoke.jsonValue();
 		await smoke.dispose();
 		writeFileSync(join(shots, "mobs-creeper-explosion.png"), Buffer.from(shot.png, "base64"));

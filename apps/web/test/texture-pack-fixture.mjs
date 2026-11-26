@@ -174,6 +174,235 @@ function fixtureTga(name, color) {
 	})]);
 }
 
+// Original test models, stored under fixture-only identifiers and filenames.
+const fixtureModels = {
+	cow: [64, 64, [
+		{name: "root", pivot: [0, 0, -1]},
+		{name: "head", parent: "root", pivot: [0, 20, -9], cubes: [
+			{origin: [-4, 16, -15], size: [8, 8, 6], uv: [0, 0]},
+			{origin: [-3, 16, -16], size: [6, 3, 1], uv: [34, 6]},
+			{origin: [-5, 22, -14], size: [1, 3, 1], uv: [30, 0]},
+			{origin: [4, 22, -14], size: [1, 3, 1], uv: [30, 0]},
+		] },
+		{name: "body", parent: "root", pivot: [0, 19, 1], cubes: [
+			{origin: [-6, 12, -9], size: [12, 10, 18], uv: [0, 24]},
+			{origin: [-2, 11, 3], size: [4, 1, 6], uv: [20, 16]},
+		] },
+		{name: "leg0", parent: "root", pivot: [-4, 12, 6], cubes: [{origin: [-6, 0, 4], size: [4, 12, 4], uv: [48, 0], mirror: false}]},
+		{name: "leg1", parent: "root", pivot: [4, 12, 6], cubes: [{origin: [2, 0, 4], size: [4, 12, 4], uv: [48, 0], mirror: true}]},
+		{name: "leg2", parent: "root", pivot: [-4, 12, -7], cubes: [{origin: [-6, 0, -8], size: [4, 12, 4], uv: [48, 0], mirror: false}]},
+		{name: "leg3", parent: "root", pivot: [4, 12, -7], cubes: [{origin: [2, 0, -8], size: [4, 12, 4], uv: [48, 0], mirror: true}]},
+	]],
+	pig: [64, 64, [
+		{name: "root", pivot: [0, 0, 0]},
+		{name: "head", parent: "root", pivot: [0, 12, -7], cubes: [
+			{origin: [-4, 8, -15], size: [8, 8, 8], uv: [0, 0]},
+			{origin: [-2, 9, -16], size: [4, 3, 1], uv: [32, 0]},
+		] },
+		{name: "body", parent: "root", pivot: [0, 10, -1], cubes: [{origin: [-5, 6, -9], size: [10, 8, 16], uv: [0, 18]}]},
+		{name: "leg0", parent: "root", pivot: [-3, 6, 6], cubes: [{origin: [-5, 0, 4], size: [4, 6, 4], uv: [44, 0], mirror: false}]},
+		{name: "leg1", parent: "root", pivot: [3, 6, 6], cubes: [{origin: [1, 0, 4], size: [4, 6, 4], uv: [44, 0], mirror: true}]},
+		{name: "leg2", parent: "root", pivot: [-3, 6, -6], cubes: [{origin: [-5, 0, -8], size: [4, 6, 4], uv: [44, 0], mirror: false}]},
+		{name: "leg3", parent: "root", pivot: [3, 6, -6], cubes: [{origin: [1, 0, -8], size: [4, 6, 4], uv: [44, 0], mirror: true}]},
+	]],
+	chicken: [64, 32, [
+		{name: "body", pivot: [0, 8, 0], cubes: [{origin: [-3, 5, -4], size: [6, 6, 8], uv: [0, 12]}]},
+		{name: "head", pivot: [0, 9, -4], cubes: [{origin: [-2, 9, -6], size: [4, 6, 3], uv: [0, 0]}]},
+		{name: "comb", parent: "head", pivot: [0, 9, -4], cubes: [{origin: [-1, 9, -7], size: [2, 2, 2], uv: [46, 0]}]},
+		{name: "beak", parent: "head", pivot: [0, 9, -4], cubes: [{origin: [-2, 11, -8], size: [4, 2, 2], uv: [32, 0]}]},
+		{name: "leg0", pivot: [-2, 5, 1], cubes: [
+			{origin: [-2, 1, 0], size: [1, 4, 1], uv: [32, 8]},
+			{origin: [-3, 0, -1], size: [3, 1, 2], uv: [40, 8]},
+			{origin: [-3, 0, -2], size: [1, 1, 1], uv: [52, 8]},
+			{origin: [-1, 0, -2], size: [1, 1, 1], uv: [52, 8]},
+		] },
+		{name: "leg1", pivot: [1, 5, 1], cubes: [
+			{origin: [1, 1, 0], size: [1, 4, 1], uv: [32, 8]},
+			{origin: [0, 0, -1], size: [3, 1, 2], uv: [40, 8]},
+			{origin: [0, 0, -2], size: [1, 1, 1], uv: [52, 8]},
+			{origin: [2, 0, -2], size: [1, 1, 1], uv: [52, 8]},
+		] },
+		{name: "wing0", pivot: [-3, 11, 0], cubes: [{origin: [-4, 7, -3], size: [1, 4, 6], uv: [16, 0], mirror: false}]},
+		{name: "wing1", pivot: [3, 11, 0], cubes: [{origin: [3, 7, -3], size: [1, 4, 6], uv: [16, 0], mirror: true}]},
+	]],
+	sheep: [64, 80, [
+		{name: "body", parent: "root", pivot: [0, 12, 0], cubes: [
+			{origin: [-5.76, 6.4, -4.48], size: [11.52, 10.4, 10.88], uv: [0, 0], uvSize: [16, 16, 16]},
+			{origin: [-6.72, 8.32, -2.88], size: [13.44, 9.92, 8], uv: [0, 0], uvSize: [16, 16, 16]},
+		] },
+	]],
+	sheared: [64, 80, [
+		{name: "root", pivot: [0, 0, 0]},
+		{name: "body", parent: "root", pivot: [0, 12, 0], cubes: [{origin: [-4.5, 7.2, -4], size: [9, 7, 10.4], uv: [0, 64], uvSize: [8, 8, 6]}]},
+		{name: "head", parent: "root", pivot: [0, 14, -3.2], cubes: [{origin: [-2.56, 12.48, -7.2], size: [5.12, 6.72, 4], uv: [0, 32], uvSize: [16, 16, 8]}]},
+		{name: "leg0", parent: "root", pivot: [-3.84, 7.68, 3.52], cubes: [{origin: [-5.12, 0, 2.24], size: [2.56, 7.68, 2.56], uv: [48, 32], uvSize: [4, 16, 4]}]},
+		{name: "leg1", parent: "root", pivot: [3.84, 7.68, 3.52], cubes: [{origin: [2.5599999999999996, 0, 2.24], size: [2.56, 7.68, 2.56], uv: [48, 32], uvSize: [4, 16, 4]}]},
+		{name: "leg2", parent: "root", pivot: [-3.84, 7.68, -2.24], cubes: [{origin: [-5.12, 0, -3.5200000000000005], size: [2.56, 7.68, 2.56], uv: [48, 32], uvSize: [4, 16, 4]}]},
+		{name: "leg3", parent: "root", pivot: [3.84, 7.68, -2.24], cubes: [{origin: [2.5599999999999996, 0, -3.5200000000000005], size: [2.56, 7.68, 2.56], uv: [48, 32], uvSize: [4, 16, 4]}]},
+	]],
+	zombie: [64, 32, [
+		{name: "waist", pivot: [0, 12, 0]},
+		{name: "body", parent: "waist", pivot: [0, 24, 0], cubes: [{origin: [-4, 12, -2], size: [8, 12, 4], uv: [16, 16]}]},
+		{name: "head", parent: "body", pivot: [0, 24, 0], cubes: [{origin: [-4, 24, -4], size: [8, 8, 8], uv: [0, 0]}]},
+		{name: "rightArm", parent: "body", pivot: [-5, 22, 0], cubes: [{origin: [-8, 12, -2], size: [4, 12, 4], uv: [40, 16]}]},
+		{name: "leftArm", parent: "body", pivot: [5, 22, 0], cubes: [{origin: [4, 12, -2], size: [4, 12, 4], uv: [40, 16], mirror: true}]},
+		{name: "rightLeg", parent: "body", pivot: [-1.9, 12, 0], cubes: [{origin: [-3.9, 0, -2], size: [4, 12, 4], uv: [0, 16]}]},
+		{name: "leftLeg", parent: "body", pivot: [1.9, 12, 0], cubes: [{origin: [-0.10000000000000009, 0, -2], size: [4, 12, 4], uv: [0, 16], mirror: true}]},
+	]],
+	skeleton: [64, 32, [
+		{name: "waist", pivot: [0, 12, 0]},
+		{name: "body", parent: "waist", pivot: [0, 24, 0], cubes: [{origin: [-4, 12, -2], size: [8, 12, 4], uv: [16, 16]}]},
+		{name: "head", parent: "body", pivot: [0, 24, 0], cubes: [{origin: [-4, 24, -4], size: [8, 8, 8], uv: [0, 0]}]},
+		{name: "rightArm", parent: "body", pivot: [-5, 22, 0], cubes: [{origin: [-6, 12, -1], size: [2, 12, 2], uv: [40, 16]}]},
+		{name: "leftArm", parent: "body", pivot: [5, 22, 0], cubes: [{origin: [4, 12, -1], size: [2, 12, 2], uv: [40, 16], mirror: true}]},
+		{name: "rightLeg", parent: "body", pivot: [-2, 12, 0], cubes: [{origin: [-3, 0, -1], size: [2, 12, 2], uv: [0, 16]}]},
+		{name: "leftLeg", parent: "body", pivot: [2, 12, 0], cubes: [{origin: [1, 0, -1], size: [2, 12, 2], uv: [0, 16], mirror: true}]},
+		{name: "rightItem", parent: "rightArm", pivot: [-6, 15, 1]},
+	]],
+	creeper: [64, 32, [
+		{name: "body", pivot: [0, 6, 0], cubes: [{origin: [-4, 6, -2], size: [8, 12, 4], uv: [16, 16]}]},
+		{name: "head", parent: "body", pivot: [0, 18, 0], cubes: [{origin: [-4, 18, -4], size: [8, 8, 8], uv: [0, 0]}]},
+		{name: "leg0", parent: "body", pivot: [-2, 6, 4], cubes: [{origin: [-4, 0, 2], size: [4, 6, 4], uv: [0, 16]}]},
+		{name: "leg1", parent: "body", pivot: [2, 6, 4], cubes: [{origin: [0, 0, 2], size: [4, 6, 4], uv: [0, 16]}]},
+		{name: "leg2", parent: "body", pivot: [-2, 6, -4], cubes: [{origin: [-4, 0, -6], size: [4, 6, 4], uv: [0, 16]}]},
+		{name: "leg3", parent: "body", pivot: [2, 6, -4], cubes: [{origin: [0, 0, -6], size: [4, 6, 4], uv: [0, 16]}]},
+	]],
+	player: [64, 32, [
+		{name: "waist", pivot: [0, 12, 0]},
+		{name: "body", parent: "waist", pivot: [0, 24, 0], cubes: [{origin: [-4, 12, -2], size: [8, 12, 4], uv: [16, 16]}]},
+		{name: "head", parent: "body", pivot: [0, 24, 0], cubes: [{origin: [-4, 24, -4], size: [8, 8, 8], uv: [0, 0]}]},
+		{name: "rightArm", parent: "body", pivot: [-5, 22, 0], cubes: [{origin: [-8, 12, -2], size: [4, 12, 4], uv: [40, 16]}]},
+		{name: "leftArm", parent: "body", pivot: [5, 22, 0], cubes: [{origin: [4, 12, -2], size: [4, 12, 4], uv: [40, 16], mirror: true}]},
+		{name: "rightLeg", parent: "body", pivot: [-2, 12, 0], cubes: [{origin: [-4, 0, -2], size: [4, 12, 4], uv: [0, 16]}]},
+		{name: "leftLeg", parent: "body", pivot: [2, 12, 0], cubes: [{origin: [0, 0, -2], size: [4, 12, 4], uv: [0, 16], mirror: true}]},
+	]],
+};
+
+const faces = ["west", "north", "east", "south", "up", "down"];
+function faceRects({ uv: [u, v], size, uvSize }) {
+	const [w, h, d] = uvSize ?? size;
+	return [[u, v + d, d, h], [u + d, v + d, w, h], [u + d + w, v + d, d, h],
+		[u + 2 * d + w, v + d, w, h], [u + d, v, w, d], [u + d + w, v, w, d]];
+}
+
+export const fixtureMobColors = {
+	cow: [172, 152, 132], pig: [213, 120, 141], chicken: [245, 170, 59],
+	zombie: [87, 132, 72], skeleton: [192, 189, 185], creeper: [78, 150, 66], player: [50, 143, 100],
+};
+export const fixtureSmokeShades = [125, 167, 208];
+
+function fixtureSkin(name, width, height, bones) {
+	const pixels = new Uint8Array(width * height * 4);
+	const paint = ([u, v, w, h], rgb, alpha = 255) => {
+		for (let y = v; y < v + h; y++) for (let x = u; x < u + w; x++) {
+			pixels.set([...rgb, alpha], (y * width + x) * 4);
+		}
+	};
+	for (const bone of bones) for (const [index, cube] of (bone.cubes ?? []).entries()) {
+		const color = {
+			cow: bone.name === "head" && index === 1 ? fixtureMobColors.cow : [62, 49, 41],
+			pig: bone.name === "head" && index === 1 ? fixtureMobColors.pig : [230, 155, 151],
+			chicken: bone.name === "beak" ? fixtureMobColors.chicken : bone.name === "comb" ? [174, 61, 53] : [240, 234, 221],
+			sheep: bone.name === "body" && cube.uv[1] === 0 ? [248, 248, 248] : [176, 153, 130],
+			zombie: bone.name === "head" || bone.name.endsWith("Arm") ? fixtureMobColors.zombie : [21, 130, 146],
+			skeleton: fixtureMobColors.skeleton,
+			creeper: fixtureMobColors.creeper,
+			player: bone.name === "head" ? [219, 172, 126] : bone.name.endsWith("Leg") ? [55, 60, 83] : fixtureMobColors.player,
+		}[name];
+		for (const [face, rect] of faceRects(cube).entries()) {
+			if (name === "skeleton" && bone.name === "body" && face === 4) continue; // Open rib cage.
+			const alpha = name === "sheep" && color[0] === 176 ? 3 : 255;
+			paint(rect, color, alpha);
+		}
+	}
+	if (["zombie", "skeleton", "player", "creeper"].includes(name)) {
+		for (const x of [9, 13]) paint([x, 12, 2, 1], [25, 24, 29]);
+	}
+	return pixels;
+}
+
+function rleSkin(width, height, pixels) {
+	const header = Buffer.alloc(18);
+	header[2] = 10;
+	header.writeUInt16LE(width, 12);
+	header.writeUInt16LE(height, 14);
+	header[16] = 32;
+	header[17] = 0x28; // Top-left origin, 8 alpha bits.
+	const packets = [];
+	for (let pos = 0; pos < pixels.length;) {
+		const [r, g, b, a] = pixels.subarray(pos, pos + 4);
+		let count = 1;
+		while (count < 128 && pos + count * 4 < pixels.length &&
+			pixels.subarray(pos + count * 4, pos + count * 4 + 4).every((value, i) => value === pixels[pos + i])) count++;
+		packets.push(Buffer.of(0x80 | (count - 1), b, g, r, a));
+		pos += count * 4;
+	}
+	return Buffer.concat([header, ...packets]);
+}
+
+export function fixtureEntityEntries() {
+	const entries = [];
+	for (const [name, [width, height, originalBones]] of Object.entries(fixtureModels)) {
+		const id = "geometry.fixture." + name;
+		const texture = "textures/entity/fixture_" + name;
+		const bones = originalBones.map(bone => bone.cubes ? { ...bone, cubes: bone.cubes.map(cube => {
+			const { uvSize, ...rest } = cube;
+			if (!uvSize) return rest;
+			return { ...rest, uv: Object.fromEntries(faceRects(cube).map(([u, v, w, h], i) =>
+				[faces[i], { uv: [u, v], uv_size: [w, h] }])) };
+		}) } : bone);
+		const legacy = ["sheep", "sheared", "zombie", "skeleton", "creeper"].includes(name);
+		const base = name === "sheep" ? "geometry.fixture.sheared" : undefined;
+		const document = legacy
+			? { format_version: "1.8.0", [base ? id + ":" + base : id]: { texturewidth: width, textureheight: height, bones } }
+			: { format_version: "1.21.0", "minecraft:geometry": [{
+				description: { identifier: id, texture_width: width, texture_height: height }, bones,
+			}] };
+		entries.push(["resource_pack/models/entity/fixture_" + name + ".geo.json", JSON.stringify(document)]);
+		if (name === "sheared") continue;
+		const geometry = base ? { default: id, sheared: base } : { default: id };
+		entries.push(["resource_pack/entity/" + name + ".entity.json", "// Original test entity\n" + JSON.stringify({
+			"minecraft:client_entity": { description: { textures: { default: texture }, geometry } },
+		})]);
+		const skinBones = base ? [...fixtureModels.sheared[2], ...originalBones] : originalBones;
+		const pixels = fixtureSkin(name, width, height, skinBones);
+		entries.push(name === "sheep" ? ["resource_pack/" + texture + ".tga", rleSkin(width, height, pixels)]
+			: ["resource_pack/" + texture + ".png", rgbaPng(width, height, (x, y) =>
+				pixels.subarray((y * width + x) * 4, (y * width + x + 1) * 4))]);
+	}
+	return entries;
+}
+
+function fixtureEffects() {
+	const texture = "textures/particle/fixture_effects";
+	const sheet = rgbaPng(32, 32, (x, y) => {
+		const u = x % 8, v = y % 8;
+		if (u === 0 || v === 0 || u === 7 || v === 7 || (u + v) % 7 === 0) return [0, 0, 0, 0];
+		if (y < 8) return [251, 212, 96, 255];
+		return Array(3).fill(fixtureSmokeShades[(u + v + Math.floor(x / 8)) % 3]).concat(255);
+	});
+	const particle = (base_UV, step_UV) => JSON.stringify({
+		particle_effect: {
+			description: { basic_render_parameters: { texture } },
+			components: { "minecraft:particle_appearance_billboard": {
+				uv: { texture_width: 32, texture_height: 32, flipbook: {
+					base_UV, size_UV: [8, 8], step_UV, max_frame: 3, stretch_to_lifetime: true,
+				} },
+			} },
+		},
+	});
+	return [
+		["resource_pack/textures/blocks/fire_0.png", rgbaPng(16, 48, (x, row) => {
+			const frame = Math.floor(row / 16), y = row % 16;
+			const gap = Math.abs(x - (5 + frame * 2));
+			return gap < 2 + y / 3 && y > 3 + gap ? [252, 126 + 9 * ((x + y) % 7), 45, 255] : [0, 0, 0, 0];
+		})],
+		["resource_pack/" + texture + ".png", sheet],
+		["resource_pack/particles/large_explosion_level.json", particle([8, 0], [8, 0])],
+		["resource_pack/particles/basic_smoke.json", particle([24, 8], [-8, 0])],
+	];
+}
+
 async function fixtureLayout() {
 	const wasm = await readFile(new URL("../src/wasm/client.wasm", import.meta.url));
 	const { instance } = await WebAssembly.instantiate(wasm, {});
@@ -201,7 +430,7 @@ async function fixtureZip({ names, spriteStart }, { colors = {}, artVariant = fa
 		images.push(["resource_pack/" + path + (tga ? ".tga" : ".png"),
 			tga ? fixtureTga(name, colors[name]) : fixturePng(name, item, colors[name])]);
 	}
-	const assets = [...images, ...fixtureArtEntries(artVariant)].filter(([path]) => !omit.includes(path));
+	const assets = [...images, ...fixtureArtEntries(artVariant), ...fixtureEntityEntries(), ...fixtureEffects()].filter(([path]) => !omit.includes(path));
 	return zipBytes([...packEntries({ terrain, items }), ...assets]);
 }
 

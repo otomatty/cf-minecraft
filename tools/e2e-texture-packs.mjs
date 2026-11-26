@@ -147,7 +147,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		const name = `bedrock-samples-v${version}-full.zip`;
 		const versionLabel = "Bedrock Samples v" + version;
 		const partialFilename = "bedrock-samples-v1.26.60.7-full.zip";
-		const partialNotice = "この版のパックに無い画像が 5 件あります";
+		const partialNotice = "この版のパックに無い画像が 7 件あります";
 		const metadataFilename = "sample-min.zip";
 		const missingImages = "ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。";
 		const fringeBrightness = 222;
@@ -165,7 +165,8 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			writeFile(join(dir, partialFilename), await fixturePack({ omit: [
 				"resource_pack/textures/blocks/stone.png", "resource_pack/textures/items/apple.png",
 				"resource_pack/textures/environment/clouds.png", "resource_pack/textures/environment/destroy_stage_4.png",
-				"resource_pack/textures/ui/heart.png",
+				"resource_pack/textures/ui/heart.png", "resource_pack/textures/entity/fixture_cow.png",
+				"resource_pack/textures/blocks/fire_0.png",
 			] })),
 			writeFile(join(dir, name), await fixturePack({ artVariant: true, colors: {
 				stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
