@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
+import { testTitleBackground } from "./e2e-title.mjs";
 import { installFixture, testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
@@ -3530,6 +3531,7 @@ async function creepers() {
 }
 
 try {
+	await testTitleBackground(browser, edge, shots, textureFixture);
 	const title = await browser.newPage();
 	try {
 		await installFixture(title, edge, textureFixture);

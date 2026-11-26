@@ -242,7 +242,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				const assertLocked = async () => {
 					assert.equal(await page.$eval("#panel h2", node => node.textContent), "テクスチャをインストール");
 					assert.doesNotMatch(await page.$eval("#panel", node => node.textContent), /シングルプレイ|マルチプレイ|メニューに戻る/);
-					assert.equal(await page.$eval(".background", node => getComputedStyle(node).backgroundImage), "none");
+					assert.equal(await page.$eval(".shade", node => getComputedStyle(node).display), "none");
 				};
 				await assertLocked();
 				for (const play of [edge + "/play.html", url]) {
@@ -525,7 +525,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			if (target === "https://fonts.googleapis.com/css2?family=DotGothic16&family=M+PLUS+1p:wght@400;500;700&display=swap") continue;
 			if (url.origin === "https://fonts.gstatic.com" && /^\/s\/(?:dotgothic16|mplus1p)\/[\w./-]+\.woff2$/.test(url.pathname) && !url.search) continue;
 			assert.equal(url.origin, new URL(edge).origin);
-			assert(/^\/(?:$|play(?:\.html)?$|api\/me$|@|src\/|node_modules\/|title-bg\.jpg$|favicon\.ico$)/.test(url.pathname), target);
+			assert(/^\/(?:$|play(?:\.html)?$|api\/me$|@|src\/|node_modules\/|favicon\.ico$)/.test(url.pathname), target);
 		}
 		// Packet kinds and lengths in this scenario: hello, position, set block, teleport, creative slot.
 		const lengths = new Map([[0, 3], [1, 33], [2, 14], [3, 25], [5, 5]]);

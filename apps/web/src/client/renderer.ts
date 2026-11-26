@@ -415,6 +415,11 @@ export function filterVisibleSections<T>(sections: ReadonlyMap<string, T>, visib
 
 const key = (cx: number, sy: number, cz: number) => `${cx},${sy},${cz}`;
 
+interface RendererOptions {
+	signal: AbortSignal;
+	onError: (error: Error) => void;
+}
+
 export class Renderer {
 	readonly adapterInfo: string;
 	private readonly device: GPUDevice;
@@ -467,10 +472,11 @@ export class Renderer {
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
+	private disposed = false;
 
 	private readonly heldItemTextures: ReadonlyMap<string, number>;
 
-	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack) {
+	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack, options?: RendererOptions) {
 		const { names: textureNames } = layout;
 		this.playerNames = playerNames;
 		this.heldItemTextures = new Map(textureNames.map((name, index) => [name, index]));
@@ -480,13 +486,17 @@ export class Renderer {
 		this.adapterInfo = adapterInfo;
 		this.context = canvas.getContext("webgpu") as GPUCanvasContext;
 		this.format = navigator.gpu.getPreferredCanvasFormat();
-		this.context.configure({ device, format: this.format, alphaMode: "opaque" });
 		device.lost.then((info) => {
 			this.lost = info.message || "GPU device lost";
+			if (!this.disposed) options?.onError(new Error(this.lost));
 		});
 		// Validation errors are otherwise silent: surface them in the console.
 		device.addEventListener("uncapturederror", (event) => {
-			console.error(`WebGPU: ${event.error.message}`);
+			if (this.disposed) return;
+			if (options) {
+				event.preventDefault();
+				options.onError(new Error(event.error.message));
+			} else console.error(`WebGPU: ${event.error.message}`);
 		});
 
 		this.globals = device.createBuffer({ size: GLOBALS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -722,6 +732,7 @@ export class Renderer {
 			layout: this.outline.getBindGroupLayout(0),
 			entries: [{ binding: 0, resource: { buffer: this.globals } }],
 		});
+		this.context.configure({ device, format: this.format, alphaMode: "opaque" });
 	}
 
 	writeTints(rects: readonly TintRect[]): void {
@@ -730,16 +741,42 @@ export class Renderer {
 			{ bytesPerRow: r.width * 4, rowsPerImage: r.height }, [r.width, r.height, 3]);
 	}
 
-	static async create(canvas: HTMLCanvasElement, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack): Promise<Renderer> {
+	static async create(canvas: HTMLCanvasElement, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack, options?: RendererOptions): Promise<Renderer> {
 		if (!("gpu" in navigator)) {
 			throw new Error("このブラウザはWebGPUに対応していません。最新のChrome、Edge、Safari、Firefoxをお試しください。");
 		}
 		const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+		options?.signal.throwIfAborted();
 		if (!adapter) throw new Error("WebGPUアダプターを取得できませんでした。");
 		const device = await adapter.requestDevice();
 		const info = adapter.info;
 		const label = [info.vendor, info.architecture, info.description].filter(Boolean).join(" ") || "unknown adapter";
-		return new Renderer(canvas, device, label, layout, playerNames, pack);
+		let renderer: Renderer | undefined;
+		try {
+			options?.signal.throwIfAborted();
+			if (options) device.pushErrorScope("validation");
+			renderer = new Renderer(canvas, device, label, layout, playerNames, pack, options);
+			if (options) {
+				const current = renderer;
+				options.signal.addEventListener("abort", () => current.dispose(), { once: true });
+				const error = await device.popErrorScope();
+				options.signal.throwIfAborted();
+				if (error) throw new Error(error.message);
+			}
+			return renderer;
+		} catch (error) {
+			if (renderer) renderer.dispose();
+			else device.destroy();
+			throw error;
+		}
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.context.unconfigure();
+		this.device.destroy();
+		this.sections.clear();
 	}
 
 	/** Replaces (or removes, when empty) the mesh of one section. */

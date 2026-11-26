@@ -1,8 +1,8 @@
-import clientWasmUrl from "../wasm/client.wasm?url";
-import { ClientCore, gameTextureLayout } from "./client-core.ts";
 import { installPack, loadInstalledPack } from "./texture-pack-settings.ts";
 import { packLabel, packMissingNotice, type TexturePack } from "./texture-pack.ts";
-import { gameRedirect, hasPlaySession, safeNext, thumbPosition, titleScreen } from "./title-route.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen } from "./title-route.ts";
+import type { TextureLayout } from "./textures.ts";
+import type { createTitleBackground } from "./title-background.ts";
 
 type Role = "operator" | "player";
 type GameMode = "creative" | "survival";
@@ -162,11 +162,15 @@ function start(): void {
 	const panel = document.getElementById("panel")!;
 	const status = document.getElementById("status")!;
 	const userDisplay = document.getElementById("user")!;
+	const canvas = document.querySelector<HTMLCanvasElement>("#title-background")!;
 	const returnPath = safeNext(new URLSearchParams(location.search).get("next"));
 	let screen: Screen = "loading";
 	let me: Me | undefined;
-	let layout: ReturnType<typeof gameTextureLayout> = { names: [], spriteStart: 0 };
+	let layout: TextureLayout;
+	let layoutLoading: Promise<TextureLayout> | undefined;
 	let pack: TexturePack | undefined;
+	let background: Awaited<ReturnType<typeof createTitleBackground>>;
+	let backgroundLifetime: AbortController;
 	let applied = false;
 	let worlds: World[] | undefined;
 	let selected: string | undefined;
@@ -175,6 +179,62 @@ function start(): void {
 	let packStorageError = "";
 	let generation = 0;
 	let disposeCaptcha: (() => void) | undefined;
+
+	// Give the title UI a paint opportunity before loading rendering code or WASM.
+	const afterPaint = new Promise<void>(resolve => {
+		requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+	});
+
+	function loadLayout(): Promise<TextureLayout> {
+		return layoutLoading ??= afterPaint.then(async () => {
+			const [{ ClientCore, gameTextureLayout }, { default: url }] = await Promise.all([
+				import("./client-core.ts"), import("../wasm/client.wasm?url"),
+			]);
+			return gameTextureLayout(await ClientCore.load(url));
+		}).catch(error => {
+			layoutLoading = undefined;
+			throw error;
+		});
+	}
+
+	function setPack(next: TexturePack | undefined): void {
+		pack = next;
+		if (pack) background?.setPack(pack);
+	}
+
+	async function startBackground(): Promise<void> {
+		const lifetime = new AbortController();
+		backgroundLifetime = lifetime;
+		const { signal } = lifetime;
+		try {
+			await afterPaint;
+			if (signal.aborted) return;
+			const [{ createTitleBackground }, textureLayout] = await Promise.all([
+				import("./title-background.ts"), loadLayout(),
+			]);
+			if (signal.aborted) return;
+			const current = await createTitleBackground(canvas, textureLayout, signal);
+			if (signal.aborted) return;
+			background = current;
+			if (pack) background?.setPack(pack);
+		} catch (error) {
+			if (!signal.aborted) {
+				console.warn("タイトル背景を描画できません", error);
+				lifetime.abort();
+			}
+		}
+	}
+
+	window.addEventListener("pagehide", () => {
+		backgroundLifetime.abort();
+		background = undefined;
+	});
+	window.addEventListener("pageshow", event => {
+		if (!event.persisted) return;
+		pack = undefined;
+		void initialize();
+		void startBackground();
+	});
 
 	function button(text: string, color = "green", action?: () => void): HTMLButtonElement {
 		const node = element("button", text);
@@ -381,11 +441,11 @@ function start(): void {
 			bar.removeAttribute("value");
 			progress.hidden = false;
 			try {
-				pack = await installPack(chosen, layout, (done, total) => {
+				setPack(await installPack(chosen, layout, (done, total) => {
 					if (!total) return;
 					bar.max = total;
 					bar.value = done;
-				});
+				}));
 				applied = true;
 				if (current === generation) openMenu();
 			} catch (error) {
@@ -528,7 +588,7 @@ function start(): void {
 			const card = button("", "world-card", () => selectWorld(world, true));
 			const thumb = element("span");
 			thumb.className = "thumbnail";
-			thumb.style.backgroundPosition = thumbPosition(world.name);
+			thumb.style.backgroundColor = thumbColor(world.name);
 			thumb.setAttribute("aria-hidden", "true");
 			const name = element("span", world.name);
 			name.className = "world-name";
@@ -686,7 +746,6 @@ function start(): void {
 		disposeCaptcha = undefined;
 		panel.replaceChildren();
 		panel.className = screen === "worlds" ? "panel wide" : screen === "textures" ? "panel textures" : "panel";
-		document.body.classList.toggle("pack-installed", Boolean(pack));
 		// Restart only the panel animation; the background element stays mounted.
 		panel.classList.remove("swap");
 		void panel.offsetWidth;
@@ -717,19 +776,25 @@ function start(): void {
 		title.focus({ preventScroll: true });
 	}
 
+	async function readPack() {
+		layout = await loadLayout();
+		packStorageError = "";
+		try { setPack(await loadInstalledPack(layout.names)); }
+		catch (error) {
+			setPack(undefined);
+			packStorageError = message(error);
+		}
+	}
+
 	async function initialize() {
 		go("loading");
+		const selection = readPack().then(() => null, error => ({ error }));
 		try {
 			me = await api<Me>("/api/me");
 			updateUser();
 			if (hasPlaySession(me)) {
-				layout = gameTextureLayout(await ClientCore.load(clientWasmUrl));
-				packStorageError = "";
-				try { pack = await loadInstalledPack(layout.names); }
-				catch (error) {
-					pack = undefined;
-					packStorageError = message(error);
-				}
+				const result = await selection;
+				if (result) throw result.error;
 			}
 			const next = titleScreen(me, Boolean(pack));
 			if (next === "menu") openMenu();
@@ -740,6 +805,7 @@ function start(): void {
 		}
 	}
 	void initialize();
+	void startBackground();
 }
 
 const redirect = gameRedirect(location.search);

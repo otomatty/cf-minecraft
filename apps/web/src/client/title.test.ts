@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { gameRedirect, hasPlaySession, safeNext, thumbPosition, titleScreen } from "./title-route.ts";
+import { titleCameraHeight, titleChunks, titleYaw } from "./title-landscape.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen } from "./title-route.ts";
 
 test("title stays for no query or a login return URL", () => {
 	assert.equal(gameRedirect(""), null);
@@ -33,12 +34,34 @@ test("safeNext rejects external and normalized return paths", () => {
 	}
 });
 
-test("world thumbnails are deterministic and use a known crop", () => {
-	const positions = ["10% 20%", "30% 60%", "50% 35%", "70% 70%", "90% 25%", "60% 90%"];
-	for (const name of ["", "lobby", "world-1", "another_world", "日本語", "a".repeat(32)]) {
-		assert.equal(thumbPosition(name), thumbPosition(name));
-		assert.ok(positions.includes(thumbPosition(name)));
-	}
+test("world names choose deterministic colors from the palette", () => {
+	assert.deepEqual(["", "a", "b", "c", "d", "e"].map(thumbColor),
+		["#829fba", "#769262", "#937d67", "#557e91", "#889184", "#a49b7d"]);
+	assert.equal(thumbColor("日本語"), "#a49b7d");
+});
+
+test("title camera stays eight blocks above the highest non-air cell", () => {
+	assert.equal(titleCameraHeight(-64, 319, y => y === 76 ? 12 : Number(y <= 70)), 84);
+	assert.equal(titleCameraHeight(-64, 319, y => y === 319 ? 1 : 0), 327);
+	assert.equal(titleCameraHeight(-64, 319, () => -1), -56);
+});
+
+test("title yaw rotates at a constant speed and respects reduced motion", () => {
+	assert.equal(titleYaw(0, false), 105);
+	assert.equal(titleYaw(15_000, false), 135);
+	assert.equal(titleYaw(45_000, false), 195);
+	assert.equal(titleYaw(180_000, false), 105);
+	assert.equal(titleYaw(225_000, false), 195);
+	assert.equal(titleYaw(225_000, true), 105);
+});
+
+test("title chunks are unique, inside the radius, and generated nearest first", () => {
+	assert.deepEqual(titleChunks(-2, 3, 1), [[-2, 3], [-2, 2], [-3, 3], [-1, 3], [-2, 4]]);
+	const chunks = titleChunks(-2, 3, 6);
+	const distances = chunks.map(([x, z]) => (x + 2) ** 2 + (z - 3) ** 2);
+	assert.equal(new Set(chunks.map(chunk => chunk.join(","))).size, 113);
+	assert.equal(distances.at(-1), 36);
+	assert.deepEqual(distances, distances.toSorted((a, b) => a - b));
 });
 
 test("title requires a session, then an installed pack", () => {

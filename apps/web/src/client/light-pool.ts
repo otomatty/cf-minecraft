@@ -100,13 +100,17 @@ export class LightPool {
 
 	private fallback(): void {
 		if (this.failed) return;
+		this.dispose();
+		this.core.externalLight(false);
+	}
+
+	dispose(): void {
 		this.failed = true;
 		clearTimeout(this.timer);
 		this.worker?.terminate();
 		this.worker = undefined;
 		this.queued = [];
 		this.core.observeLight = undefined;
-		this.core.externalLight(false);
 	}
 
 	/** Camera traffic is throttled; initial work itself advances independently of frames. */

@@ -136,6 +136,14 @@ export class MeshPool {
 		this.light = undefined;
 	}
 
+	dispose(): void {
+		this.failed = true;
+		clearTimeout(this.timer);
+		for (const { worker } of this.slots) worker.terminate();
+		this.slots = [];
+		this.reset();
+	}
+
 	/** Drain once per animation frame, including reply handling since the last frame. */
 	takeMainThreadMs(): number {
 		const elapsed = this.mainThreadMs;

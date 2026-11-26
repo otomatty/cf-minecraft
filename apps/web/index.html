@@ -9,11 +9,9 @@
 		<style>
 			* { box-sizing: border-box; }
 			body { margin: 0; min-height: 100svh; background: #9cc2ef; color: #f4f7fb; font-family: "M PLUS 1p", "Hiragino Sans", sans-serif; font-size: 14px; }
-			.background { position: fixed; inset: -4%; z-index: -2; background-position: center; background-size: cover; transform: translateX(-2.5%) scale(1.06); animation: panorama 60s ease-in-out alternate infinite; pointer-events: none; }
-			body.pack-installed .background { background-image: url(/title-bg.jpg); }
+			#title-background { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -2; pointer-events: none; }
 			.shade { display: none; position: fixed; inset: 0; z-index: -1; background: linear-gradient(to bottom, rgba(0,0,0,.18), rgba(0,0,0,.05) 40%, rgba(0,0,0,.55)); pointer-events: none; }
-			body.pack-installed .shade { display: block; }
-			@keyframes panorama { to { transform: translateX(2.5%) scale(1.06); } }
+			body.terrain-background .shade { display: block; }
 			main { min-height: 100svh; width: 100%; padding: 100px 24px 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 36px; }
 			.logo { text-align: center; max-width: 100%; }
 			h1, h2, h3, .btn, .subtitle { font-family: "DotGothic16", monospace; font-weight: 400; }
@@ -73,7 +71,7 @@
 			.btn.world-card { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px; padding: 0 0 12px; min-width: 0; background: rgba(10,15,24,.84); border: 3px solid rgba(255,255,255,.14); box-shadow: none; transition: transform .18s; }
 			.world-card[aria-pressed="true"] { border-color: #7cc35a; }
 			.btn.world-card:hover { transform: translateY(-4px); }
-			.thumbnail { display: block; height: 104px; background-image: url(/title-bg.jpg); background-size: 420%; }
+			.thumbnail { display: block; height: 104px; }
 			.world-name { font-size: 18px; padding: 0 8px; overflow-wrap: anywhere; }
 			.btn.create-card { border-style: dashed; justify-content: center; min-height: 174px; padding: 16px; }
 			.world-detail { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
@@ -100,7 +98,7 @@
 				.heading-row { flex-wrap: wrap; }
 			}
 			@media (prefers-reduced-motion: reduce) {
-				.background, .swap { animation: none; }
+				.swap { animation: none; }
 				.btn.world-card { transition: none; }
 				.btn.world-card:hover { transform: none; }
 			}
@@ -108,7 +106,7 @@
 		<script type="module" src="/src/client/title.ts"></script>
 	</head>
 	<body>
-		<div class="background" aria-hidden="true"></div>
+		<canvas id="title-background" aria-hidden="true" hidden></canvas>
 		<div class="shade" aria-hidden="true"></div>
 		<main id="title">
 			<div id="user"></div>
