@@ -34,3 +34,13 @@ export function titleScreen(me: Session, installed: boolean): "login" | "texture
 	if (!hasPlaySession(me)) return "login";
 	return installed ? "menu" : "textures";
 }
+
+type Schedule = (run: () => void) => void;
+
+/** Give the UI a paint opportunity without requiring animation frames in a hidden tab. */
+export function waitForTitlePaint(frame: Schedule, fallback: Schedule): Promise<void> {
+	return new Promise(resolve => {
+		frame(() => frame(resolve));
+		fallback(resolve);
+	});
+}

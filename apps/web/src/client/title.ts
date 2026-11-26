@@ -1,6 +1,6 @@
 import { installPack, loadInstalledPack } from "./texture-pack-settings.ts";
 import { packLabel, packMissingNotice, type TexturePack } from "./texture-pack.ts";
-import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen } from "./title-route.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen, waitForTitlePaint } from "./title-route.ts";
 import type { TextureLayout } from "./textures.ts";
 import type { createTitleBackground } from "./title-background.ts";
 
@@ -180,16 +180,10 @@ function start(): void {
 	let generation = 0;
 	let disposeCaptcha: (() => void) | undefined;
 
-	// Give the title UI a paint opportunity before loading rendering code or WASM.
-	const afterPaint = new Promise<void>(resolve => {
-		requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-	});
-
 	function loadLayout(): Promise<TextureLayout> {
-		return layoutLoading ??= afterPaint.then(async () => {
-			const [{ ClientCore, gameTextureLayout }, { default: url }] = await Promise.all([
-				import("./client-core.ts"), import("../wasm/client.wasm?url"),
-			]);
+		return layoutLoading ??= Promise.all([
+			import("./client-core.ts"), import("../wasm/client.wasm?url"),
+		]).then(async ([{ ClientCore, gameTextureLayout }, { default: url }]) => {
 			return gameTextureLayout(await ClientCore.load(url));
 		}).catch(error => {
 			layoutLoading = undefined;
@@ -207,7 +201,7 @@ function start(): void {
 		backgroundLifetime = lifetime;
 		const { signal } = lifetime;
 		try {
-			await afterPaint;
+			await waitForTitlePaint(run => requestAnimationFrame(run), run => setTimeout(run, 100));
 			if (signal.aborted) return;
 			const [{ createTitleBackground }, textureLayout] = await Promise.all([
 				import("./title-background.ts"), loadLayout(),

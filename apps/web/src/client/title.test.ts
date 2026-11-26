@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { ChunkGenCore } from "../shared/server-core.ts";
 import { ClientCore, MIN_Y, S2C } from "./client-core.ts";
 import { titleCameraHeight, titleChunks, titleLandscape, titleYaw } from "./title-landscape.ts";
-import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen } from "./title-route.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbColor, titleScreen, waitForTitlePaint } from "./title-route.ts";
 
 test("title stays for no query or a login return URL", () => {
 	assert.equal(gameRedirect(""), null);
@@ -168,6 +168,27 @@ test("title requires a session, then an installed pack", () => {
 		assert.equal(titleScreen(me, false), "textures");
 		assert.equal(titleScreen(me, true), "menu");
 	}
+});
+
+test("the title paint wait can finish without an animation frame", async () => {
+	const frames: (() => void)[] = [];
+	const timers: (() => void)[] = [];
+	const ready = waitForTitlePaint(run => frames.push(run), run => timers.push(run));
+	assert.equal(frames.length, 1);
+	assert.equal(timers.length, 1);
+	timers[0]();
+	await ready;
+});
+
+test("the title paint wait gives the browser a frame to paint before continuing", async () => {
+	const frames: (() => void)[] = [];
+	let painted = false;
+	const ready = waitForTitlePaint(run => frames.push(run), () => {}).then(() => { painted = true; });
+	frames.shift()!();
+	await Promise.resolve();
+	assert.equal(painted, false);
+	frames.shift()!();
+	await ready;
 });
 
 test("play admission requires a user or the development override", () => {

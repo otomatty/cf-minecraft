@@ -72,7 +72,10 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		await traffic.send("Emulation.setScrollbarsHidden", { hidden: true });
 		const sockets = [];
 		await traffic.send("Network.enable");
-		traffic.on("Network.webSocketCreated", ({ url }) => sockets.push(url));
+		traffic.on("Network.webSocketCreated", ({ url }) => {
+			// Vite uses the root path for HMR. Game sockets use /ws/<world>.
+			if (new URL(url).pathname !== "/") sockets.push(url);
+		});
 
 		// Use known admission and world list responses so the same flow runs with or without auth.
 		let signedIn = true;
@@ -99,8 +102,15 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		});
 		const reduce = [{ name: "prefers-reduced-motion", value: "reduce" }];
 		await page.emulateMediaFeatures(reduce);
+		const foreground = await context.newPage();
+		await foreground.bringToFront();
 		await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
-		await page.waitForSelector("#texture-drop", { timeout });
+		assert.equal(await page.evaluate(() => document.hidden), true, "title opened in a background tab");
+		await page.waitForFunction(() => document.querySelector("#texture-drop"), { timeout, polling: 100 });
+		assert.equal(await page.evaluate(() => document.hidden), true, "the install screen opens while the title is still hidden");
+		assert.equal(await page.$eval("#title-background", canvas => canvas.hidden), true, "the hidden title has not rendered");
+		await page.bringToFront();
+		await foreground.close();
 		assert.equal(await page.evaluate(() => crossOriginIsolated), false, "title works without COEP");
 		await waitForTitleFrame(page, false);
 		assert.equal(await page.$eval(".shade", node => getComputedStyle(node).display), "none");
@@ -153,7 +163,7 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 			for await (const name of root.keys()) names.push(name);
 			return names;
 		}), [], "the title never creates OPFS world data");
-		assert.deepEqual(sockets, [], "the title never opens a WebSocket");
+		assert.deepEqual(sockets, [], "the title never opens a game or other non-HMR WebSocket");
 		assert.deepEqual(errors, []);
 		console.log("ok  title: sky without a pack, live install and replacement, rotation, reduced motion, login and worlds, no world I/O");
 	} finally {
