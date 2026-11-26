@@ -20,3 +20,17 @@ export function thumbPosition(name: string): string {
 	for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
 	return thumbnailPositions[hash % thumbnailPositions.length];
 }
+
+interface Session {
+	open?: boolean;
+	user?: object | null;
+}
+
+export function hasPlaySession(me: Session): boolean {
+	return me.open === true || Boolean(me.user);
+}
+
+export function titleScreen(me: Session, installed: boolean): "login" | "textures" | "menu" {
+	if (!hasPlaySession(me)) return "login";
+	return installed ? "menu" : "textures";
+}

@@ -19,9 +19,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
-import { testTexturePacks } from "./e2e-texture-packs.mjs";
+import { installFixture, testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
+import { fixturePack } from "../apps/web/test/texture-pack-fixture.mjs";
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,6 +41,8 @@ const check = (ok, label, detail = "") => {
 	console.log(`${ok ? "ok  " : "FAIL"} ${label}${detail ? `  (${detail})` : ""}`);
 	if (!ok) failures.push(label);
 };
+
+const textureFixture = await fixturePack();
 
 const browser = await puppeteer.launch({
 	executablePath: chrome,
@@ -366,7 +369,7 @@ async function transparentMaterials() {
 			if (name === "glass") {
 				const matching = warm.filter((v, i) => Math.abs(v - bare[i]) < 4).length / warm.length;
 				check(matching > 0.35, "glass: clear pixels retain terrain colour", `${(matching * 100).toFixed(1)}%`);
-				// The 16x16 glass has an opaque border and a five-texel diagonal accent
+				// The fixture glass has an opaque border and a diagonal stripe
 				// crossing this central sample area. Their pale blue differs strongly from
 				// the warm planks: require a >=24 change in any RGB channel for only 2%
 				// of pixels, leaving margin for sampling. Undrawn glass changes 0%.
@@ -616,6 +619,7 @@ async function playerPersistence() {
 			domain: origin.hostname, path: "/", secure: origin.protocol === "https:", httpOnly: true,
 		});
 		const page = await context.newPage();
+		await installFixture(page, edge, textureFixture);
 		const world = `e2e-player-${run}`;
 		await page.goto(`${edge}/play.html?server=ws&world=${world}&view=2&autopilot=1`);
 		await page.waitForFunction(() => {
@@ -3512,7 +3516,13 @@ async function creepers() {
 }
 
 try {
-	await testTexturePacks(browser, edge, shots);
+	const title = await browser.newPage();
+	try {
+		await installFixture(title, edge, textureFixture);
+	} finally {
+		await title.close();
+	}
+	await testTexturePacks(browser, edge, shots, textureFixture);
 	await sectionCulling();
 	await biomeTints();
 	await inputs();

@@ -1,9 +1,9 @@
-// Two independent browser profiles share a real Durable Object and no local storage.
+// Two independent browser profiles share a real Durable Object and install packs locally.
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appleRGB, stoneRGB, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
+import { appleRGB, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
 
 const panel = "#textures-tab-panel";
 const input = panel + " input";
@@ -19,7 +19,7 @@ async function openSettings(page) {
 	}
 	await page.click("#settings-open");
 	await page.click("#textures-tab");
-	await page.waitForSelector(input + ":enabled");
+	await page.waitForSelector(panel + " button:enabled", { visible: true });
 }
 
 async function pixels(page) {
@@ -34,16 +34,42 @@ async function pixels(page) {
 	});
 }
 
-export async function testTexturePacks(browser, edge, shots) {
+export async function installFixture(page, edge, bytes) {
+	await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
+	await page.waitForSelector("#texture-drop");
+	await page.$eval("#texture-drop", (target, base64) => {
+		const transfer = new DataTransfer();
+		transfer.items.add(new File([Uint8Array.from(atob(base64), char => char.charCodeAt(0))], "generated-fixture.zip"));
+		target.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+	}, Buffer.from(bytes).toString("base64"));
+	await page.waitForSelector('.pack-summary');
+}
+
+export async function testTexturePacks(browser, edge, shots, initialFixture) {
 	const dir = await mkdtemp(join(tmpdir(), "cf-pack-test-"));
 	const pages = [], contexts = [], traffic = [], errors = [], frames = [];
-	const name = "local-only-pixel-fixture.mcpack";
+	const name = "local-only-pixel-fixture.zip";
 	try {
-		await writeFile(join(dir, name), await zipBytes());
-		await writeFile(join(dir, "broken.zip"), "invalid archive");
+		const version = "1.26.60.6";
+		const versionLabel = "Bedrock Samples v" + version;
+		const officialError = /公式の Bedrock Samples の ZIP ではありません/;
+		const rejected = [
+			["other.zip", await zipBytes(packEntries({ uuid: "other" })), officialError],
+			["versionless.zip", await zipBytes(testEntries.filter(([path]) => !path.endsWith("version.json"))), officialError],
+			["old-format.zip", await zipBytes(testEntries.filter(([path]) => path.includes("/textures/")).map(([path, data]) => [path.replace("sample/resource_pack/", ""), data])), officialError],
+			["broken.zip", "invalid archive", /.+/],
+			["sample-min.zip", await zipBytes(packEntries()), /ブロックとアイテムの画像が入っていません/],
+		];
+		await Promise.all([
+			writeFile(join(dir, "first-fixture.zip"), initialFixture),
+			writeFile(join(dir, name), await fixturePack({ version, colors: {
+				stone: stoneRGB, grass_block_side: stoneRGB, apple: appleRGB,
+			} })),
+			...rejected.map(([filename, data]) => writeFile(join(dir, filename), data)),
+		]);
 		const world = "e2e-pack-" + Date.now().toString(36);
 		const url = `${edge}/play.html?server=ws&view=2&world=${world}`;
-		async function player() {
+		async function player(checkInstall = false) {
 			const context = await browser.createBrowserContext();
 			contexts.push(context);
 			const page = await context.newPage();
@@ -71,11 +97,90 @@ export async function testTexturePacks(browser, edge, shots) {
 					return write.call(this, dst, data, layout, size);
 				};
 			});
+			if (checkInstall) {
+				await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
+				await page.waitForSelector("#texture-drop");
+				const assertLocked = async () => {
+					assert.equal(await page.$eval("#panel h2", node => node.textContent), "テクスチャをインストール");
+					assert.doesNotMatch(await page.$eval("#panel", node => node.textContent), /シングルプレイ|マルチプレイ|メニューに戻る/);
+					assert.equal(await page.$eval(".background", node => getComputedStyle(node).backgroundImage), "none");
+				};
+				await assertLocked();
+				for (const play of [edge + "/play.html", url]) {
+					await page.goto(play, { waitUntil: "domcontentloaded" });
+					await page.waitForSelector("#texture-drop");
+					assert.equal(new URL(page.url()).pathname, "/");
+					await assertLocked();
+				}
+				await page.setViewport({ width: 320, height: 720 });
+				assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "install page fits a narrow viewport");
+				await page.setViewport({ width: 1280, height: 720 });
+
+				// Seed the former IndexedDB shape, then confirm startup deletes it.
+				const oldSelection = async seed => {
+					const request = indexedDB.open("cf-minecraft.texture-pack", 1);
+					const db = await new Promise((resolve, reject) => {
+						request.onsuccess = () => resolve(request.result);
+						request.onerror = () => reject(request.error);
+					});
+					try {
+						const tx = db.transaction("settings", seed ? "readwrite" : "readonly");
+						const store = tx.objectStore("settings");
+						const read = seed ? store.put({
+							pack: { name: "old.zip", tiles: new Map([["stone", new Uint8Array(1024)]]) },
+							active: true,
+						}, "selection") : store.get("selection");
+						return await new Promise((resolve, reject) => {
+							tx.oncomplete = () => resolve(read.result);
+							tx.onabort = () => reject(tx.error);
+						});
+					} finally { db.close(); }
+				};
+				await page.evaluate(oldSelection, true);
+				await page.reload({ waitUntil: "domcontentloaded" });
+				await page.waitForSelector("#texture-drop");
+				await assertLocked();
+				assert.equal(await page.evaluate(oldSelection, false), undefined);
+				for (const [filename, , reason] of rejected) {
+					await (await page.$("#texture-file")).uploadFile(join(dir, filename));
+					await page.waitForSelector("#texture-error:not([hidden])");
+					assert.match(await page.$eval("#texture-error", node => node.textContent), /このファイルは使えません/);
+					assert.equal(await page.$eval("#texture-error .texture-filename", node => node.textContent), filename);
+					assert.match(await page.$eval("#texture-error-reason", node => node.textContent), reason);
+					await assertLocked();
+				}
+				// A failed write must keep the player on the install screen.
+				await page.evaluate(() => {
+					const put = IDBObjectStore.prototype.put;
+					IDBObjectStore.prototype.put = function () {
+						IDBObjectStore.prototype.put = put;
+						this.transaction.abort();
+					};
+				});
+				await (await page.$("#texture-file")).uploadFile(join(dir, "first-fixture.zip"));
+				await page.waitForFunction(() => document.querySelector("#texture-error-reason")?.textContent.includes("保存できません"));
+				await assertLocked();
+				await (await page.$("#texture-file")).uploadFile(join(dir, "first-fixture.zip"));
+				await page.waitForSelector(".pack-summary");
+				assert.equal(await page.$eval("#panel [role=status]", node => node.textContent), "テクスチャを適用しました");
+				assert.match(await page.$eval(".pack-summary", node => node.textContent), /Bedrock Samples v1\.26\.60\.5/);
+				await page.reload({ waitUntil: "domcontentloaded" });
+				await page.waitForSelector(".pack-summary");
+				assert.equal(await page.$("#texture-drop"), null);
+				await page.click(".pack-summary button");
+				await page.waitForSelector("#texture-drop");
+				const back = await page.waitForSelector("#panel > .btn.outline", { visible: true });
+				assert.equal(await back.evaluate(node => node.textContent), "メニューに戻る");
+				await back.click();
+				await page.waitForSelector(".pack-summary");
+			} else {
+				await installFixture(page, edge, initialFixture);
+			}
 			await page.goto(url);
 			await page.waitForFunction(() => window.__mc?.stats().joined && window.__mc.stats().chunks >= 9 && window.testStoneRGB);
 			return page;
 		}
-		const a = await player(), b = await player();
+		const a = await player(true), b = await player();
 		const defaults = await pixels(b);
 		assert.deepEqual(await pixels(a), defaults);
 		await openSettings(a);
@@ -88,10 +193,8 @@ export async function testTexturePacks(browser, edge, shots) {
 		await a.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "grass_block");
 		const frameStart = frames.length;
 		await (await a.$(input)).uploadFile(join(dir, name));
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, notice);
-		assert.deepEqual(await pixels(a), defaults);
-		await a.click("#texture-apply");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, selected);
+		await a.waitForFunction((sel, label) => document.querySelector(sel).textContent === label, {}, selected, versionLabel);
+		assert.equal(await a.$eval(notice, node => node.textContent), "テクスチャを適用しました");
 		const changed = await pixels(a);
 		assert.deepEqual(changed.worldStone, stoneRGB);
 		assert.notEqual(changed.stone, defaults.stone);
@@ -105,7 +208,7 @@ export async function testTexturePacks(browser, edge, shots) {
 			assert.deepEqual(await a.$eval(selector, sidePixel), stoneSide);
 		}
 		assert.deepEqual(await pixels(b), defaults);
-		const sprite = await a.$eval('[data-block="apple"] canvas', c => [...c.getContext("2d").getImageData(0, 0, 1, 1).data]);
+		const sprite = await a.$eval('[data-block="apple"] canvas', c => [...c.getContext("2d").getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data]);
 		assert.deepEqual(sprite, [...appleRGB, 255]);
 		if (shots) {
 			const chart = await a.evaluate(async (before, after, colors) => {
@@ -116,7 +219,7 @@ export async function testTexturePacks(browser, edge, shots) {
 				ctx.fillStyle = "#fff"; ctx.font = "bold 24px sans-serif";
 				ctx.fillText("Local texture pack", 22, 38);
 				ctx.font = "16px sans-serif"; ctx.imageSmoothingEnabled = false;
-				for (const [i, label] of ["B: default", "A: applied", "Input PNG"].entries()) ctx.fillText(label, 172 + i * 179, 81);
+				for (const [i, label] of ["B: original", "A: replaced", "Input PNG"].entries()) ctx.fillText(label, 172 + i * 179, 81);
 				for (const [row, key] of ["stone", "apple"].entries()) {
 					const y = 98 + row * 108;
 					ctx.fillStyle = "#fff"; ctx.fillText(key, 22, y + 48);
@@ -158,19 +261,8 @@ export async function testTexturePacks(browser, edge, shots) {
 			await observer.waitForFunction((pos, state) => window.__mc.getBlock(...pos) === state, { polling: 100 }, target, state);
 		}
 		await a.reload();
-		await a.waitForFunction(() => window.__mc?.stats().joined && document.querySelector("#textures-tab-panel output").textContent.includes("3 枚"));
+		await a.waitForFunction((sel, label) => window.__mc?.stats().joined && document.querySelector(sel).textContent === label, {}, selected, versionLabel);
 		assert.deepEqual(await pixels(a), changed);
-		await openSettings(a);
-		await a.click("#texture-standard");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("保存済み"), {}, selected);
-		assert.deepEqual(await pixels(a), defaults);
-		await a.click("#texture-apply");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent.includes("3 枚"), {}, selected);
-		await a.click("#texture-delete");
-		await a.waitForFunction(sel => document.querySelector(sel).textContent === "使用中：標準素材", {}, selected);
-		await a.reload();
-		await a.waitForFunction(sel => window.__mc?.stats().joined && !document.querySelector(sel).disabled, {}, input);
-		assert.deepEqual(await pixels(a), defaults);
 		assert.deepEqual(await pixels(b), defaults);
 
 		// Only same-origin game/module GETs, never a pack filename, image upload, or pack endpoint.
@@ -179,11 +271,11 @@ export async function testTexturePacks(browser, edge, shots) {
 			const url = new URL(target);
 			assert.equal(method, "GET");
 			assert(!body && !url.href.includes(name) && !/\.(png|mcpack|zip)(?:$|\?)/i.test(url.href), target);
-			// play.html loads a fixed Google Fonts stylesheet and its static font subsets.
+			// Both pages load a fixed Google Fonts stylesheet and its static font subsets.
 			if (target === "https://fonts.googleapis.com/css2?family=DotGothic16&family=M+PLUS+1p:wght@400;500;700&display=swap") continue;
 			if (url.origin === "https://fonts.gstatic.com" && /^\/s\/(?:dotgothic16|mplus1p)\/[\w./-]+\.woff2$/.test(url.pathname) && !url.search) continue;
 			assert.equal(url.origin, new URL(edge).origin);
-			assert(/^\/(?:play(?:\.html)?$|api\/me$|@|src\/|node_modules\/|favicon\.ico$)/.test(url.pathname), target);
+			assert(/^\/(?:$|play(?:\.html)?$|api\/me$|@|src\/|node_modules\/|title-bg\.jpg$|favicon\.ico$)/.test(url.pathname), target);
 		}
 		// Packet kinds and lengths in this scenario: hello, position, set block, teleport, creative slot.
 		const lengths = new Map([[0, 3], [1, 33], [2, 14], [3, 25], [5, 5]]);
@@ -194,7 +286,7 @@ export async function testTexturePacks(browser, edge, shots) {
 			assert.equal(bytes.length, lengths.get(bytes[0]), "unexpected outbound game packet " + bytes[0]);
 		}
 		assert.deepEqual(errors, []);
-		console.log("ok  texture packs: independent multiplayer profiles, GPU and UI pixels, local persistence, shared block edits and outbound traffic");
+		console.log("ok  texture packs: title and play gates, invalid archives, replacement, independent multiplayer profiles, GPU and UI pixels, persistence and outbound traffic");
 	} catch (error) {
 		for (const page of pages) {
 			console.error(await page.evaluate(() => ({

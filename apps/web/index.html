@@ -9,15 +9,32 @@
 		<style>
 			* { box-sizing: border-box; }
 			body { margin: 0; min-height: 100svh; background: #9cc2ef; color: #f4f7fb; font-family: "M PLUS 1p", "Hiragino Sans", sans-serif; font-size: 14px; }
-			.background { position: fixed; inset: -4%; z-index: -2; background: url(/title-bg.jpg) center / cover; transform: translateX(-2.5%) scale(1.06); animation: panorama 60s ease-in-out alternate infinite; pointer-events: none; }
-			.shade { position: fixed; inset: 0; z-index: -1; background: linear-gradient(to bottom, rgba(0,0,0,.18), rgba(0,0,0,.05) 40%, rgba(0,0,0,.55)); pointer-events: none; }
+			.background { position: fixed; inset: -4%; z-index: -2; background-position: center; background-size: cover; transform: translateX(-2.5%) scale(1.06); animation: panorama 60s ease-in-out alternate infinite; pointer-events: none; }
+			body.pack-installed .background { background-image: url(/title-bg.jpg); }
+			.shade { display: none; position: fixed; inset: 0; z-index: -1; background: linear-gradient(to bottom, rgba(0,0,0,.18), rgba(0,0,0,.05) 40%, rgba(0,0,0,.55)); pointer-events: none; }
+			body.pack-installed .shade { display: block; }
 			@keyframes panorama { to { transform: translateX(2.5%) scale(1.06); } }
 			main { min-height: 100svh; width: 100%; padding: 100px 24px 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 36px; }
 			.logo { text-align: center; max-width: 100%; }
 			h1, h2, h3, .btn, .subtitle { font-family: "DotGothic16", monospace; font-weight: 400; }
 			h1 { margin: 0; font-size: clamp(44px, 9vw, 76px); color: white; text-shadow: 4px 4px 0 #2d4a1c, 8px 8px 0 rgba(0,0,0,.35); overflow-wrap: anywhere; }
-			.subtitle { color: #fff3c4; font-size: 16px; letter-spacing: 3px; margin: 16px 0 0; }
+			.subtitle { color: #fff3c4; font-size: 16px; letter-spacing: 3px; margin: 16px 0 0; padding: 4px 12px; background: rgba(12, 18, 28, 0.78); }
 			.panel { width: min(420px, 100%); padding: 28px 32px; background: rgba(12,18,28,.78); border: 2px solid rgba(255,255,255,.2); display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+			.panel.textures { width: min(760px, 100%); }
+			.texture-step { display: grid; gap: 10px; min-width: 0; }
+			.texture-step h3 { display: flex; align-items: center; gap: 10px; font-size: 18px; margin: 0; }
+			.step-number { display: grid; flex: 0 0 30px; height: 30px; place-items: center; border: 1px solid #ffd45c; color: #ffd45c; }
+			.step-number svg { width: 18px; height: 18px; }
+			.texture-step .btn { justify-self: start; }
+			.texture-drop { display: grid; justify-items: center; text-align: center; gap: 8px; min-width: 0; padding: 16px; border: 2px dashed #c3cedd; }
+			.texture-drop.dragging { border-color: #ffd45c; }
+			.texture-drop.invalid { color: #ff9a9a; border-color: #ff9a9a; background: rgba(80, 21, 23, .45); }
+			.texture-drop > div { display: grid; justify-items: center; gap: 8px; width: 100%; }
+			.texture-drop [hidden], .step-number [hidden], .texture-step [hidden] { display: none; }
+			.texture-drop .btn { justify-self: center; }
+			.texture-drop progress { width: 100%; max-width: 360px; accent-color: #83bd5c; }
+			.pack-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+			.pack-summary small { display: block; }
 			.panel.wide { width: min(880px, 100%); }
 			.swap { animation: appear .32s ease-out; }
 			@keyframes appear { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -97,10 +114,49 @@
 			<div id="user"></div>
 			<header class="logo">
 				<h1>cf-minecraft</h1>
-				<p class="subtitle">ブラウザで遊ぶボクセルの世界</p>
+				<p class="subtitle">Cloudflareで動くサンドボックスゲーム</p>
 			</header>
 			<section id="panel" class="panel" aria-label="タイトルメニュー"></section>
 		</main>
+		<template id="texture-install">
+			<p>遊ぶ前に、公式のテクスチャをこのブラウザに入れます。作業は最初の1回だけです。</p>
+			<section class="texture-step" aria-labelledby="texture-download-heading">
+				<h3 id="texture-download-heading">
+					<span class="step-number">
+						<span id="texture-step-one">1</span>
+						<svg id="texture-step-check" hidden role="img" aria-label="完了" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 12 5 5L20 6"/></svg>
+					</span>
+					公式ページから ZIP をダウンロードする
+				</h3>
+				<p data-download-detail>Mojang の Bedrock Samples のリリースページを開き、最新版(Latest)の Assets から、名前が <code>-full.zip</code> で終わるファイル(約 160 MB)を保存します。</p>
+				<a data-download-detail class="btn blue" href="https://github.com/Mojang/bedrock-samples/releases/latest" target="_blank" rel="noreferrer">公式のリリースページを開く</a>
+				<p data-download-detail class="small muted">ダウンロードすると、Minecraft の使用許諾契約(EULA)に同意したことになります。</p>
+			</section>
+			<hr />
+			<section class="texture-step" aria-labelledby="texture-file-heading">
+				<h3 id="texture-file-heading"><span class="step-number">2</span>ダウンロードした ZIP をここで開く</h3>
+				<div id="texture-drop" class="texture-drop">
+					<div id="texture-choice">
+						<p>ZIP をここにドロップ</p>
+						<p>または</p>
+					</div>
+					<div id="texture-progress" role="status" hidden>
+						<p class="texture-filename"></p>
+						<p>テクスチャを取り出しています…</p>
+						<progress aria-label="画像の取り出し"></progress>
+						<p class="small">ブロックとアイテムの画像だけを取り出して、このブラウザに保存しています。終わるとそのままメニューに進みます。このページを閉じないでください。</p>
+					</div>
+					<div id="texture-error" role="alert" hidden>
+						<p><strong>このファイルは使えません</strong></p>
+						<p class="texture-filename"></p>
+						<p id="texture-error-reason"></p>
+					</div>
+					<button id="texture-choose" class="btn green" type="button">ファイルを選ぶ</button>
+				</div>
+				<input id="texture-file" type="file" accept=".zip" hidden />
+				<p class="small muted">ZIP の中身はこのブラウザの中だけに保存します。どこにも送信しません。開くとすぐに適用され、メニューに進みます。</p>
+			</section>
+		</template>
 		<p id="status" class="sr-only" role="status"></p>
 	</body>
 </html>

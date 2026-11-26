@@ -1,4 +1,8 @@
-import { gameRedirect, safeNext, thumbPosition } from "./title-route.ts";
+import clientWasmUrl from "../wasm/client.wasm?url";
+import { ClientCore, gameTextureNames } from "./client-core.ts";
+import { installPack, loadInstalledPack } from "./texture-pack-settings.ts";
+import { packLabel, type TexturePack } from "./texture-pack.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbPosition, titleScreen } from "./title-route.ts";
 
 type Role = "operator" | "player";
 type GameMode = "creative" | "survival";
@@ -152,7 +156,7 @@ function loadTurnstile(): Promise<Turnstile> {
 	}));
 }
 
-type Screen = "loading" | "error" | "login" | "menu" | "worlds" | "members" | "create";
+type Screen = "loading" | "error" | "login" | "textures" | "menu" | "worlds" | "members" | "create";
 
 function start(): void {
 	const panel = document.getElementById("panel")!;
@@ -161,10 +165,14 @@ function start(): void {
 	const returnPath = safeNext(new URLSearchParams(location.search).get("next"));
 	let screen: Screen = "loading";
 	let me: Me | undefined;
+	let textureNames: readonly string[] = [];
+	let pack: TexturePack | undefined;
+	let applied = false;
 	let worlds: World[] | undefined;
 	let selected: string | undefined;
 	let worldError = "";
 	let startupError = "";
+	let packStorageError = "";
 	let generation = 0;
 	let disposeCaptcha: (() => void) | undefined;
 
@@ -283,12 +291,11 @@ function start(): void {
 	}
 
 	async function login(parent: HTMLElement, current: number) {
-		parent.append(element("p", "マルチプレイのワールドに入るには、招待されたメールアドレスの Google アカウントでログインします。"));
+		parent.append(element("p", "遊ぶには Google アカウントでログインしてください。マルチプレイでは、招待されたメールアドレスのアカウントを使います。"));
 		const slot = element("div");
 		const submit = button("Google でログイン");
 		parent.append(slot, submit);
 		const feedback = notice(parent);
-		parent.append(element("hr"), element("p", "ログインなしでも遊べます"), actionLink("シングルプレイ →", "/play.html", "blue"));
 		const widget = await captcha(slot, submit, feedback);
 		if (!widget || current !== generation) return;
 		submit.onclick = async () => {
@@ -326,7 +333,107 @@ function start(): void {
 		badge.textContent = `${worlds.length} ワールド`;
 	}
 
+	function openMenu(): void {
+		go("menu");
+		if (!me!.open && !worlds) {
+			void refreshWorlds().then(() => {
+				if (screen === "menu") updateMultiplayerBadge();
+				else if (screen === "worlds") render();
+			});
+		}
+	}
+
+	function textures(): void {
+		const template = document.querySelector<HTMLTemplateElement>("#texture-install")!;
+		panel.append(template.content.cloneNode(true));
+		const file = panel.querySelector<HTMLInputElement>("#texture-file")!;
+		const choose = panel.querySelector<HTMLButtonElement>("#texture-choose")!;
+		const drop = panel.querySelector<HTMLElement>("#texture-drop")!;
+		const choice = panel.querySelector<HTMLElement>("#texture-choice")!;
+		const progress = panel.querySelector<HTMLElement>("#texture-progress")!;
+		const failure = panel.querySelector<HTMLElement>("#texture-error")!;
+		const bar = progress.querySelector("progress")!;
+		const downloadDetails = panel.querySelectorAll<HTMLElement>("[data-download-detail], #texture-step-one");
+		const check = panel.querySelector<SVGElement>("#texture-step-check")!;
+		const storageWarning = packStorageError ? element("p", packStorageError) : undefined;
+		if (storageWarning) {
+			storageWarning.className = "error";
+			storageWarning.setAttribute("role", "alert");
+			panel.append(storageWarning);
+		}
+		const back = pack ? button("メニューに戻る", "outline", () => go("menu")) : undefined;
+		if (back) panel.append(back);
+		const current = generation;
+		let busy = false;
+		let dragDepth = 0;
+
+		async function install(chosen: File): Promise<void> {
+			if (busy) return;
+			busy = true;
+			storageWarning?.remove();
+			file.value = "";
+			choose.hidden = choice.hidden = failure.hidden = true;
+			if (back) back.disabled = true;
+			drop.classList.remove("invalid", "dragging");
+			downloadDetails.forEach(detail => { detail.hidden = true; });
+			check.removeAttribute("hidden");
+			progress.querySelector(".texture-filename")!.textContent = chosen.name;
+			bar.removeAttribute("value");
+			progress.hidden = false;
+			try {
+				pack = await installPack(chosen, textureNames, (done, total) => {
+					if (!total) return;
+					bar.max = total;
+					bar.value = done;
+				});
+				applied = true;
+				if (current === generation) openMenu();
+			} catch (error) {
+				progress.hidden = true;
+				downloadDetails.forEach(detail => { detail.hidden = false; });
+				check.setAttribute("hidden", "");
+				failure.querySelector(".texture-filename")!.textContent = chosen.name;
+				failure.querySelector("#texture-error-reason")!.textContent = message(error);
+				drop.classList.add("invalid");
+				failure.hidden = choose.hidden = false;
+				choose.textContent = "別のファイルを選ぶ";
+				if (back) back.disabled = false;
+				choose.focus();
+			} finally {
+				busy = false;
+			}
+		}
+
+		choose.onclick = () => file.click();
+		file.onchange = () => { if (file.files?.[0]) void install(file.files[0]); };
+		drop.ondragenter = event => {
+			event.preventDefault();
+			dragDepth++;
+			if (!busy) drop.classList.add("dragging");
+		};
+		drop.ondragleave = () => {
+			if (--dragDepth <= 0) drop.classList.remove("dragging");
+		};
+		drop.ondragover = event => {
+			event.preventDefault();
+			if (event.dataTransfer) event.dataTransfer.dropEffect = busy ? "none" : "copy";
+		};
+		drop.ondrop = event => {
+			event.preventDefault();
+			dragDepth = 0;
+			drop.classList.remove("dragging");
+			const chosen = event.dataTransfer?.files[0];
+			if (chosen) void install(chosen);
+		};
+	}
+
 	function menu() {
+		if (applied) {
+			const confirmation = element("p", "テクスチャを適用しました");
+			confirmation.setAttribute("role", "status");
+			panel.append(confirmation);
+			applied = false;
+		}
 		if (returnPath) panel.append(actionLink("ゲームに戻る", returnPath));
 		panel.append(actionLink("シングルプレイ", "/play.html"));
 		const multiplayer = button("マルチプレイ", "blue", () => go("worlds"));
@@ -353,6 +460,12 @@ function start(): void {
 			note.className = "muted small";
 			panel.append(note);
 		}
+		const summary = element("div");
+		summary.className = "pack-summary";
+		const label = element("div");
+		label.append(element("small", "テクスチャ"), element("p", packLabel(pack!)));
+		summary.append(label, button("入れ直す", "outline", () => go("textures")));
+		panel.append(element("hr"), summary);
 	}
 
 	function worldList() {
@@ -565,14 +678,15 @@ function start(): void {
 		disposeCaptcha?.();
 		disposeCaptcha = undefined;
 		panel.replaceChildren();
-		panel.className = screen === "worlds" ? "panel wide" : "panel";
+		panel.className = screen === "worlds" ? "panel wide" : screen === "textures" ? "panel textures" : "panel";
+		document.body.classList.toggle("pack-installed", Boolean(pack));
 		// Restart only the panel animation; the background element stays mounted.
 		panel.classList.remove("swap");
 		void panel.offsetWidth;
 		panel.classList.add("swap");
 
 		const titles: Record<Screen, string> = {
-			loading: "読み込み中…", error: "読み込みエラー", login: "ログイン", menu: "メニュー",
+			loading: "読み込み中…", error: "読み込みエラー", login: "ログイン", textures: "テクスチャをインストール", menu: "メニュー",
 			worlds: "マルチプレイ", members: `${selected ?? ""} のメンバー`, create: "ワールドを作成",
 		};
 		const title = heading(titles[screen], screen === "worlds" ? "menu" : screen === "members" || screen === "create" ? "worlds" : undefined);
@@ -581,9 +695,9 @@ function start(): void {
 			case "error":
 				notice(panel).textContent = startupError;
 				panel.append(button("再読み込み", "gray", () => { void initialize(); }));
-				panel.append(element("hr"), element("p", "ログインなしでも遊べます"), actionLink("シングルプレイ →", "/play.html", "blue"));
 				break;
 			case "login": void login(panel, generation); break;
+			case "textures": textures(); break;
 			case "menu": menu(); break;
 			case "worlds": worldList(); break;
 			case "members": {
@@ -601,12 +715,18 @@ function start(): void {
 		try {
 			me = await api<Me>("/api/me");
 			updateUser();
-			go(me.open || me.user ? "menu" : "login");
-			if (!me.open && me.user) {
-				await refreshWorlds();
-				if (screen === "menu") updateMultiplayerBadge();
-				else if (screen === "worlds") render();
+			if (hasPlaySession(me)) {
+				textureNames = gameTextureNames(await ClientCore.load(clientWasmUrl));
+				packStorageError = "";
+				try { pack = await loadInstalledPack(textureNames); }
+				catch (error) {
+					pack = undefined;
+					packStorageError = message(error);
+				}
 			}
+			const next = titleScreen(me, Boolean(pack));
+			if (next === "menu") openMenu();
+			else go(next);
 		} catch (error) {
 			startupError = message(error);
 			go("error");

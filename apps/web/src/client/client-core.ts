@@ -584,3 +584,7 @@ export class ClientCore {
 		return this.decoder.decode(this.out(this.x.client_block_names())).split("\n");
 	}
 }
+
+export function gameTextureNames(core: ClientCore): string[] {
+	return [...core.textureNames(), "bow"];
+}

@@ -1,89 +1,88 @@
-import type { TexturePack } from "./texture-pack.ts";
+import { importTexturePack, isPackVersion, packLabel, type PackProgress, type TexturePack } from "./texture-pack.ts";
 import { TEX_SIZE } from "./textures.ts";
 
-interface Selection { pack: TexturePack; active: boolean }
+const storageError = "テクスチャをこのブラウザに保存できません。サイトデータの保存を許可して、もう一度お試しください。";
 
-// One transaction holds both the decoded tiles and whether they are enabled.
-async function selection(next?: Selection | null): Promise<Selection | undefined> {
-	const db = await new Promise<IDBDatabase>((resolve, reject) => {
-		const open = indexedDB.open("cf-minecraft.texture-pack", 1);
-		open.onupgradeneeded = () => open.result.createObjectStore("settings");
-		open.onsuccess = () => resolve(open.result);
-		open.onerror = () => reject(open.error);
-	});
-	try {
-		return await new Promise<Selection | undefined>((resolve, reject) => {
-			const tx = db.transaction("settings", next === undefined ? "readonly" : "readwrite");
-			const store = tx.objectStore("settings");
-			const read = next === undefined ? store.get("selection") : undefined;
-			if (next === null) store.delete("selection");
-			else if (next) store.put(next, "selection");
-			tx.oncomplete = () => resolve(read?.result);
-			tx.onabort = () => reject(tx.error ?? new Error("端末に保存できません"));
-		});
-	} finally { db.close(); }
+export function installedPack(value: unknown, names: readonly string[]): TexturePack | undefined {
+	const pack = (value as { pack?: Partial<TexturePack> } | null)?.pack;
+	if (!isPackVersion(pack?.version) || !(pack.tiles instanceof Map) || !pack.tiles.size) return;
+	const known = new Set(names);
+	for (const [name, pixels] of pack.tiles) {
+		if (!known.has(name) || !(pixels instanceof Uint8Array) || pixels.length !== TEX_SIZE ** 2 * 4) return;
+	}
+	return { version: pack.version, tiles: pack.tiles };
 }
 
-export function setupTexturePack(panel: HTMLElement, names: readonly string[], apply: (tiles: ReadonlyMap<string, Uint8Array>) => void): void {
+async function storedPack(names: readonly string[], next?: TexturePack): Promise<TexturePack | undefined> {
+	try {
+		const db = await new Promise<IDBDatabase>((resolve, reject) => {
+			const open = indexedDB.open("cf-minecraft.texture-pack", 1);
+			open.onupgradeneeded = () => open.result.createObjectStore("settings");
+			open.onsuccess = () => resolve(open.result);
+			open.onerror = () => reject(open.error);
+			open.onblocked = () => {
+				open.onsuccess = () => open.result.close();
+				reject(new Error(storageError));
+			};
+		});
+		try {
+			return await new Promise<TexturePack | undefined>((resolve, reject) => {
+				const tx = db.transaction("settings", "readwrite");
+				const store = tx.objectStore("settings");
+				let pack = next;
+				tx.oncomplete = () => resolve(pack);
+				tx.onabort = () => reject(tx.error);
+				if (next) store.put({ pack: next }, "selection");
+				else {
+					const read = store.get("selection");
+					read.onsuccess = () => {
+						pack = installedPack(read.result, names);
+						if (read.result !== undefined && !pack) store.delete("selection");
+					};
+				}
+			});
+		} finally { db.close(); }
+	} catch {
+		throw new Error(storageError);
+	}
+}
+
+export function loadInstalledPack(names: readonly string[]): Promise<TexturePack | undefined> {
+	return storedPack(names);
+}
+
+export async function installPack(file: File, names: readonly string[], onProgress?: PackProgress): Promise<TexturePack> {
+	const pack = await importTexturePack(file, names, onProgress);
+	await storedPack(names, pack);
+	return pack;
+}
+
+export function setupTexturePack(
+	panel: HTMLElement, names: readonly string[], initial: TexturePack, apply: (tiles: ReadonlyMap<string, Uint8Array>) => void,
+): void {
 	const file = panel.querySelector("input")!;
-	const enable = panel.querySelector<HTMLButtonElement>("#texture-apply")!;
-	const standard = panel.querySelector<HTMLButtonElement>("#texture-standard")!;
-	const remove = panel.querySelector<HTMLButtonElement>("#texture-delete")!;
+	const choose = panel.querySelector("button")!;
 	const current = panel.querySelector("output")!;
 	const message = panel.querySelector('[role="status"]')!;
-	let saved: Selection | undefined, pending: TexturePack | undefined, busy = false;
-
-	function refresh(): void {
-		file.disabled = busy;
-		enable.disabled = busy || (!pending && (!saved || saved.active));
-		standard.disabled = busy || !saved?.active;
-		remove.disabled = busy || (!saved && !pending);
-		current.textContent = saved?.active ? `使用中：${saved.pack.name}（${saved.pack.tiles.size} 枚）` : "使用中：標準素材";
-		if (saved && !saved.active) current.textContent += ` ／ 保存済み：${saved.pack.name}`;
-	}
-
-	async function run(action: () => Promise<void>): Promise<void> {
-		if (busy) return;
-		busy = true;
-		refresh();
-		try { await action(); }
-		catch (error) { message.textContent = `テクスチャ設定を変更できませんでした。${error instanceof Error ? error.message : ""}`; }
-		finally { busy = false; refresh(); }
-	}
-
-	async function commit(next: Selection | null): Promise<void> {
-		await selection(next);
-		saved = next ?? undefined;
-		pending = undefined;
-		file.value = "";
-		apply(saved?.active ? saved.pack.tiles : new Map());
-		message.textContent = "";
-	}
-
-	file.onchange = () => void run(async () => {
+	current.textContent = packLabel(initial);
+	choose.onclick = () => file.click();
+	file.onchange = async () => {
 		const chosen = file.files?.[0];
-		pending = undefined;
-		if (!chosen) { message.textContent = ""; return; }
-		message.textContent = "パックを確認中…";
-		const { importTexturePack } = await import("./texture-pack.ts");
-		pending = await importTexturePack(chosen, names);
-		message.textContent = `${pending.name}（${pending.tiles.size} 枚）を読み込みました。「適用」で切り替えます。`;
-	});
-	enable.onclick = () => void run(async () => {
-		const pack = pending ?? saved?.pack;
-		if (pack) await commit({ pack, active: true });
-	});
-	standard.onclick = () => void run(async () => { if (saved) await commit({ ...saved, active: false }); });
-	remove.onclick = () => void run(() => commit(null));
-	void run(async () => {
-		const stored = await selection();
-		if (!stored) return;
-		if (typeof stored.active !== "boolean" || typeof stored.pack?.name !== "string" || !(stored.pack.tiles instanceof Map) ||
-			![...stored.pack.tiles].every(([name, pixels]) => names.includes(name) && pixels instanceof Uint8Array && pixels.length === TEX_SIZE ** 2 * 4)) {
-			await selection(null);
-			return;
+		if (!chosen || choose.disabled) return;
+		file.value = "";
+		choose.disabled = file.disabled = true;
+		message.textContent = "テクスチャを取り出しています…";
+		try {
+			const pack = await installPack(chosen, names, (done, total) => {
+				if (total) message.textContent = `テクスチャを取り出しています… ${done} / ${total}`;
+			});
+			apply(pack.tiles);
+			current.textContent = packLabel(pack);
+			message.textContent = "テクスチャを適用しました";
+		} catch (error) {
+			message.textContent = `テクスチャを変更できませんでした。${error instanceof Error ? error.message : ""}`;
+		} finally {
+			choose.disabled = file.disabled = false;
 		}
-		saved = stored;
-		if (stored.active) apply(stored.pack.tiles);
-	});
+	};
 }

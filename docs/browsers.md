@@ -9,7 +9,7 @@
 | `/play.html?server=ws&world=…` で Durable Object に接続できる | E2E で検証済み | 未確認（実機での手作業が必要） | 未確認（実機での手作業が必要） | 未確認（実機での手作業が必要） | 未確認（実機での手作業が必要） |
 | サーバーの WASM の決定論（台本・ノイズ・地形） | CI で毎回検証（Playwright の Chromium） | CI で毎回検証（Playwright） | CI で毎回検証（Playwright の WebKit、注） | CI で毎回検証（Playwright の WebKit、注） | 未実施（Chromium と同じ V8） |
 
-Chrome の [E2E](../tools/e2e.mjs) は、`F8` と同じ台本処理を呼び出し、Node のハッシュと比較します。
+Chrome の [E2E](../tools/e2e.mjs) は、開発モードのタイトル画面で仮パックをインストールしてから、`F8` と同じ台本処理を呼び出し、Node のハッシュと比較します。
 
 `/?server=ws` から `/play.html?server=ws` への転送は単体テストで確認しています（E2E はゲームページを直接開きます）。[title.test.ts](../apps/web/src/client/title.test.ts)
 

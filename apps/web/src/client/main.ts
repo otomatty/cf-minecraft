@@ -23,10 +23,11 @@ import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, gameTextureNames, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
-import { setupTexturePack } from "./texture-pack-settings.ts";
+import { loadInstalledPack, setupTexturePack } from "./texture-pack-settings.ts";
+import { hasPlaySession } from "./title-route.ts";
 import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -125,23 +126,23 @@ declare global {
 	}
 }
 
+async function playSession(): Promise<{ open?: boolean; user?: object | null }> {
+	const response = await fetch("/api/me").catch(() => { throw new Error("ログインを確認できません。再度お試しください"); });
+	if (response.status === 503) throw new Error("本番の認証設定が未完了です");
+	if (!response.ok) throw new Error(`ログイン確認に失敗しました (${response.status})`);
+	return response.json();
+}
+
 async function canEnterWorld(): Promise<boolean> {
-	const accountURL = `/?next=${encodeURIComponent(location.pathname + location.search)}`;
 	const stop = (message: string): false => {
 		fail(message);
 		const link = document.createElement("a");
-		link.href = accountURL;
+		link.href = `/?next=${encodeURIComponent(location.pathname + location.search)}`;
 		link.textContent = "タイトル画面でログイン";
 		link.style.color = "#aaccff";
 		$("start-panel").append(link);
 		return false;
 	};
-	const response = await fetch("/api/me");
-	if (response.status === 503) throw new Error("本番の認証設定が未完了です");
-	if (!response.ok) throw new Error(`ログイン確認に失敗しました (${response.status})`);
-	const me = await response.json();
-	if (me.open) return true;
-	if (!me.user) return stop("マルチプレイにはログインが必要です");
 	const world = await fetch(`/api/worlds/${encodeURIComponent(worldName)}`);
 	if (world.status === 404) return stop(`ワールド ${worldName} はありません`);
 	if (world.status === 403) return stop("このワールドに招待されていません");
@@ -157,13 +158,18 @@ async function runScenario(seed: string, ticks: number): Promise<string> {
 }
 
 async function main(): Promise<void> {
-	if (serverKind === "ws" && !await canEnterWorld()) return;
+	const me = await playSession();
+	if (!hasPlaySession(me)) return location.replace("/");
 	const core = await ClientCore.load(clientWasmUrl);
+	const textureNames = gameTextureNames(core);
+	const pack = await loadInstalledPack(textureNames);
+	if (!pack) return location.replace("/");
+	if (serverKind === "ws" && !me.open && !await canEnterWorld()) return;
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
-	const textureNames = [...core.textureNames(), "bow"];
 	const arrowTexture = textureNames.indexOf("arrow");
 	const eggTexture = textureNames.indexOf("egg");
 	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
+	renderer.applyTexturePack(pack.tiles);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
@@ -541,7 +547,7 @@ async function main(): Promise<void> {
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
 	const biomeIcons = new Map<number, ImageData>();
-	let packedGrassSide = false;
+	let packedGrassSide = pack.tiles.has("grass_block_side");
 	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
@@ -1008,7 +1014,7 @@ async function main(): Promise<void> {
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
-	setupTexturePack($("textures-tab-panel"), textureNames, tiles => {
+	setupTexturePack($("textures-tab-panel"), textureNames, pack, tiles => {
 		renderer.applyTexturePack(tiles);
 		packedGrassSide = tiles.has("grass_block_side");
 		icons.clear();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { gameRedirect, safeNext, thumbPosition } from "./title-route.ts";
+import { gameRedirect, hasPlaySession, safeNext, thumbPosition, titleScreen } from "./title-route.ts";
 
 test("title stays for no query or a login return URL", () => {
 	assert.equal(gameRedirect(""), null);
@@ -39,4 +39,22 @@ test("world thumbnails are deterministic and use a known crop", () => {
 		assert.equal(thumbPosition(name), thumbPosition(name));
 		assert.ok(positions.includes(thumbPosition(name)));
 	}
+});
+
+test("title requires a session, then an installed pack", () => {
+	for (const me of [{ open: false, user: null }, {}]) {
+		assert.equal(titleScreen(me, false), "login");
+		assert.equal(titleScreen(me, true), "login");
+	}
+	for (const me of [{ open: true, user: null }, { open: false, user: { id: "player" } }]) {
+		assert.equal(titleScreen(me, false), "textures");
+		assert.equal(titleScreen(me, true), "menu");
+	}
+});
+
+test("play admission requires a user or the development override", () => {
+	assert.equal(hasPlaySession({ open: false, user: null }), false);
+	assert.equal(hasPlaySession({}), false);
+	assert.equal(hasPlaySession({ open: true, user: null }), true);
+	assert.equal(hasPlaySession({ open: false, user: { id: "player" } }), true);
 });
