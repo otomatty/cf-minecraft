@@ -181,6 +181,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			const context = await browser.createBrowserContext();
 			contexts.push(context);
 			const page = await context.newPage();
+			page.setDefaultTimeout(LOAD_TIMEOUT);
 			pages.push(page);
 			page.on("pageerror", e => errors.push(e.message));
 			page.on("request", req => traffic.push([req.method(), req.url(), req.hasPostData()]));
@@ -440,6 +441,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		assert.deepEqual(await pixels(b), defaults);
 
 		const survival = await contexts[1].newPage();
+		survival.setDefaultTimeout(LOAD_TIMEOUT);
 		survival.on("pageerror", error => errors.push(error.message));
 		await survival.evaluateOnNewDocument(() => {
 			window.Worker = class extends Worker {

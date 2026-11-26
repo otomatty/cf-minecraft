@@ -64,6 +64,7 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 			grass_block_top: [241, 155, 44], dirt: [190, 36, 42], water: [130, 95, 200],
 		} }));
 		page = await context.newPage();
+		page.setDefaultTimeout(LOAD_TIMEOUT);
 		await page.setViewport({ width: 960, height: 640 });
 		await page.bringToFront();
 		const errors = [];
@@ -104,6 +105,7 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		const reduce = [{ name: "prefers-reduced-motion", value: "reduce" }];
 		await page.emulateMediaFeatures(reduce);
 		const foreground = await context.newPage();
+		foreground.setDefaultTimeout(LOAD_TIMEOUT);
 		try {
 			await foreground.bringToFront();
 			await page.goto(edge + "/", { waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
