@@ -1,5 +1,7 @@
-import type { MobKind, RayHit, WoolColor } from "./client-core.ts";
+import { blockItemTint, type BlockItemTint } from "./block-tints.ts";
+import type { ItemInfo, MobKind, RayHit, WoolColor } from "./client-core.ts";
 import { boxInFrustum } from "./math.ts";
+import type { BlockStateInfo } from "./placement.ts";
 
 import { chicken, coloredSheepSkins, cow, pig, sheep, shearedSheep } from "./mobs/farm.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
@@ -71,6 +73,8 @@ export function mobBeforeBlock(origin: readonly number[], dir: readonly number[]
 export interface RenderItem {
 	position: [number, number, number];
 	texture: number;
+	blockFaces?: readonly { name: string; texture: number }[];
+	cellTint?: BlockItemTint | null;
 	flat?: boolean;
 	centered?: boolean;
 	velocity?: Vec3;
@@ -85,6 +89,15 @@ export interface RenderSprite {
 }
 
 export const MAX_RENDER_ITEMS = 1024;
+export const ITEM_VERTEX_FLOATS = 10;
+
+/** Biome-tinted block drops use the block's own face materials. */
+export function dropBlockFaces(item: ItemInfo, registry: readonly BlockStateInfo[], textureNames: readonly string[]): RenderItem["blockFaces"] {
+	if (item.texture !== null || item.block === null) return undefined;
+	const faces = registry[item.block]?.faces;
+	if (!faces?.some(name => blockItemTint(name))) return undefined;
+	return faces.map(name => ({ name, texture: textureNames.indexOf(name) }));
+}
 
 /** Keep vertex uploads within the item buffer capacity, preserving input order. */
 export function limitRenderItems(items: readonly RenderItem[]): readonly RenderItem[] {
@@ -95,10 +108,11 @@ const corners = [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], [0, 1, 0], [1, 1, 0
 // Down, up, north, south, west, east; counterclockwise from outside each face.
 const faces = [[0, 1, 2, 3], [7, 6, 5, 4], [1, 0, 4, 5], [3, 2, 6, 7], [0, 3, 7, 4], [2, 1, 5, 6]];
 
-function writeSprite(out: number[], { corners, texture, light }: RenderSprite): void {
+function writeSprite(out: number[], { corners, texture, light }: RenderSprite, drop = false): void {
 	for (const index of [0, 1, 2, 0, 2, 3, 1, 0, 3, 1, 3, 2]) {
 		out.push(...corners[index], [0, 1, 1, 0][index], [1, 1, 0, 0][index], 1, texture,
 			(light[1] + 0.5) / 16, (light[0] + 0.5) / 16);
+		if (drop) out.push(0);
 	}
 }
 
@@ -128,13 +142,17 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 	const angle = timeMs / 2000, c = Math.cos(angle), s = Math.sin(angle);
 	for (const item of items) {
 		if (item.velocity) {
-			writeSprite(out, { ...item, corners: arrowCorners(item.position, item.velocity, camera) });
+			writeSprite(out, { ...item, corners: arrowCorners(item.position, item.velocity, camera) }, true);
 			continue;
 		}
 		const itemCorners = item.flat ? [[0,0,.5],[1,0,.5],[1,1,.5],[0,1,.5]] : corners;
 		const itemFaces = item.flat ? [[0,1,2,3],[1,0,3,2]] : faces;
 		const y = item.position[1] - camera[1];
 		for (const [face, indices] of itemFaces.entries()) {
+			const material = item.blockFaces?.[item.flat ? 1 : face];
+			const rgb = material && blockItemTint(material.name, item.cellTint);
+			// Zero marks untinted vertices. All RGB8 values plus one fit exactly in f32.
+			const tint = rgb ? 1 + (rgb[0] | rgb[1] << 8 | rgb[2] << 16) : 0;
 			for (const i of [0, 1, 2, 0, 2, 3]) {
 				const vertex = itemCorners[indices[i]];
 				const x = (vertex[0] - 0.5) * 0.25, z = (vertex[2] - 0.5) * 0.25;
@@ -142,13 +160,13 @@ export function itemVertices(items: readonly RenderItem[], camera: readonly numb
 					item.position[0] - camera[0] + x * c - z * s,
 					item.centered ? y + (vertex[1] - 0.5) * 0.25 : y + vertex[1] * 0.25 + 0.04 + Math.sin(timeMs / 500) * 0.03,
 					item.position[2] - camera[2] + x * s + z * c,
-					[0, 1, 1, 0][i], [1, 1, 0, 0][i], (item.flat ? 1 : [0.5, 1, 0.8, 0.8, 0.6, 0.6][face]), item.texture,
-					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16,
+					[0, 1, 1, 0][i], [1, 1, 0, 0][i], (item.flat ? 1 : [0.5, 1, 0.8, 0.8, 0.6, 0.6][face]), material?.texture ?? item.texture,
+					(item.light[1] + 0.5) / 16, (item.light[0] + 0.5) / 16, tint,
 				);
 			}
 		}
 	}
-	for (const sprite of sprites.slice(0, MAX_RENDER_ITEMS - items.length)) writeSprite(out, sprite);
+	for (const sprite of sprites.slice(0, MAX_RENDER_ITEMS - items.length)) writeSprite(out, sprite, true);
 	return new Float32Array(out);
 }
 

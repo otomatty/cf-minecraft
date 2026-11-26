@@ -143,13 +143,16 @@ export function grassSideAtlasPixels(): Uint8Array {
 	return pixels;
 }
 
-export function floraTexture(name: string): Uint8Array | undefined {
-	if (name !== "grass_block_side") return tiles.get(name)?.slice();
+export function grassSideIconPixels(tint: readonly number[] = CARRIED_GRASS_SIDE_TINT): Uint8Array {
 	const pixels = grassSideAtlasPixels();
 	for (let i = 0; i < pixels.length; i += 4) {
 		const light = pixels[i + 3] / 255;
-		for (let c = 0; c < 3; c++) pixels[i + c] += Math.round(light * CARRIED_GRASS_SIDE_TINT[c]);
+		for (let c = 0; c < 3; c++) pixels[i + c] += Math.round(light * tint[c]);
 		pixels[i + 3] = 255;
 	}
 	return pixels;
+}
+
+export function floraTexture(name: string): Uint8Array | undefined {
+	return name === "grass_block_side" ? grassSideIconPixels() : tiles.get(name)?.slice();
 }

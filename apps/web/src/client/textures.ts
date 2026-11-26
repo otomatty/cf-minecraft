@@ -1,22 +1,23 @@
-import { CARRIED_GRASS_TOP_TINT, CARRIED_LEAVES_TINT, CARRIED_SHORT_GRASS_TINT, WATER_TINT } from "./block-tints.ts";
+import { blockItemTint, WATER_TINT, type BlockItemTint } from "./block-tints.ts";
 import { buildingTexture } from "./building-textures.ts";
-import { floraTexture } from "./flora-textures.ts";
+import { floraTexture, grassSideIconPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { terrainTexture } from "./terrain-textures.ts";
 
 export { GRASS_TINT, LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
 export const TEX_SIZE = 16;
 
-const iconTints = new Map<string, readonly number[]>([
-	["grass_block_top", CARRIED_GRASS_TOP_TINT], ["short_grass", CARRIED_SHORT_GRASS_TINT],
-	["oak_leaves", CARRIED_LEAVES_TINT], ["oak_leaves_dense", CARRIED_LEAVES_TINT],
-	["water", WATER_TINT], ["water_flow", WATER_TINT],
-]);
-
 /** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
-export function textureIconPixels(name: string, pixels: Uint8Array): Uint8ClampedArray<ArrayBuffer> {
+export function textureIconPixels(name: string, pixels: Uint8Array, cellTint?: BlockItemTint | null): Uint8ClampedArray<ArrayBuffer> {
 	const icon = new Uint8ClampedArray(pixels);
-	const tint = iconTints.get(name);
+	if (name === "grass_block_side") {
+		if (cellTint) {
+			const side = grassSideIconPixels(cellTint.grass);
+			for (let i = 0; i < icon.length; i += 4) icon.set(side.subarray(i, i + 3), i);
+		}
+		return icon;
+	}
+	const tint = name === "water" || name === "water_flow" ? WATER_TINT : blockItemTint(name, cellTint);
 	if (tint) {
 		for (let i = 0; i < icon.length; i += 4) {
 			for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);

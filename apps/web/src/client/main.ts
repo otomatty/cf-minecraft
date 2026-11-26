@@ -23,20 +23,21 @@ import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
-import { durabilityBar, hotbarStates, pickBlockItem } from "./hotbar.ts";
+import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
 import { MeshPool, meshWorkerCount } from "./mesh-pool.ts";
-import { interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
+import { dropBlockFaces, interpolateEntity, MAX_EXPLOSION_PARTICLES, mobBeforeBlock, spawnExplosionParticles, type ExplosionParticle, type RenderMob, type RenderPlayer } from "./entities.ts";
 import { PlayerNames } from "./player-names.ts";
 import { forward, type Vec3 } from "./math.ts";
 import { type Camera, type FrameStats, Renderer } from "./renderer.ts";
 import { parseStartTime, partialDayTicks } from "./sky.ts";
 import { TEX_SIZE, textureIconPixels } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
+import { blockItemTint, type BlockItemTint } from "./block-tints.ts";
 import { LocalTransport, type ServerStats, type Transport, type TransportHandlers, WebSocketTransport } from "./transport.ts";
 import { pageCacheActions, type PageCacheAction } from "./page-cache.ts";
 import { bubbleCount, deathCauses, foodStates, heartStates, MAX_AIR, MAX_FOOD } from "./vitals.ts";
@@ -166,6 +167,7 @@ async function main(): Promise<void> {
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
 	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
+	const dropFaces = new Map(items.map(item => [item.id, dropBlockFaces(item, registry, textureNames)]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
 		() => new Worker(new URL("./mesh.worker.ts", import.meta.url), { type: "module" }),
@@ -537,6 +539,8 @@ async function main(): Promise<void> {
 	let hotbarBlocks: number[] = Array(9).fill(0);
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
+	const biomeIcons = new Map<number, ImageData>();
+	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
 	const arrowItemId = items.find(item => item.name === "arrow")?.id;
@@ -561,15 +565,16 @@ async function main(): Promise<void> {
 	}
 	let dig = newDigState();
 	let heldInventory = "";
-	function paintIcon(c: HTMLCanvasElement, state: number): void {
+	function paintIcon(c: HTMLCanvasElement, state: number, tint?: BlockItemTint | null): void {
 		c.width = c.height = ICON_SIZE;
 		c.title = "";
 		if (!state) return;
 		const info = registry[state];
-		let icon = icons.get(state);
+		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
+		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels), ICON_SIZE, ICON_SIZE);
-			icons.set(state, icon);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint), ICON_SIZE, ICON_SIZE);
+			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
 		c.title = info.name;
@@ -593,13 +598,10 @@ async function main(): Promise<void> {
 		selected = hotbarBlocks[slot];
 		slots.forEach((c, i) => c.classList.toggle("selected", i === slot));
 	}
-	function syncInventory(): void {
-		const inventory = core.inventory;
-		paintInventoryScreen();
-		hotbarBlocks = hotbarStates(inventory, items);
+	function paintHotbar(inventory: readonly (InventorySlot | null)[]): void {
 		for (let i = 0; i < 9; i++) {
 			const c = slots[i];
-			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage);
+			paintItemIcon(c, inventory[i]?.item, inventory[i]?.damage, iconTint);
 			const count = inventory[i]?.count ?? 0;
 			c.dataset.count = String(count);
 			if (count >= 2) {
@@ -620,6 +622,12 @@ async function main(): Promise<void> {
 				ctx.fillText(String(count), 62, 61);
 			}
 		}
+	}
+	function syncInventory(): void {
+		const inventory = core.inventory;
+		paintInventoryScreen();
+		hotbarBlocks = hotbarStates(inventory, items);
+		paintHotbar(inventory);
 		if (pendingSelectedSlot === core.selectedSlot) pendingSelectedSlot = null;
 		selectSlot(pendingSelectedSlot ?? core.selectedSlot, false);
 		if (usingItem) {
@@ -635,9 +643,9 @@ async function main(): Promise<void> {
 			}
 		}
 	}
-	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0): void {
+	function paintItemIcon(c: HTMLCanvasElement, id?: number, damage = 0, tint?: BlockItemTint | null): void {
 		const item = items.find(item => item.id === id);
-		paintIcon(c, item?.block ?? 0);
+		paintIcon(c, item?.block ?? 0, tint);
 		if (item?.texture) {
 			c.width = c.height = TEX_SIZE;
 			const pixels = renderer.texturePixels.get(item.texture);
@@ -936,7 +944,7 @@ async function main(): Promise<void> {
 		const display = inventoryDisplay(core.inventorySlots, active.kind);
 		for (const group of display.groups) for (const {slot,stack} of group) {
 			const view = active.buttons.get(slot)!;
-			paintItemIcon(view.canvas, stack?.item, stack?.damage);
+			paintItemIcon(view.canvas, stack?.item, stack?.damage, iconTint);
 			view.count.textContent = stack && stack.count >= 2 ? String(stack.count) : "";
 			view.canvas.dataset.count = String(stack?.count ?? 0);
 		}
@@ -950,7 +958,7 @@ async function main(): Promise<void> {
 			gauge.setAttribute("aria-valuemax", String(max));
 			gauge.textContent = `${value} / ${max}`;
 		}
-		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage);
+		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage, iconTint);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
 		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
 	}
@@ -1633,6 +1641,13 @@ async function main(): Promise<void> {
 		tintMap.setWorld(seedReady ? core.seed : null, generator);
 		tintMap.update(Math.floor(camera.x / 16), Math.floor(camera.z / 16), viewDistance + 1, tintBudgetMs(frameDtMs));
 		renderer.writeTints(tintMap.takeUploads());
+		const nextIconTint = joined ? tintMap.tint(position[0], position[2]) : null;
+		if (iconTintChanged(iconTint, nextIconTint)) {
+			iconTint = nextIconTint;
+			biomeIcons.clear();
+			paintHotbar(core.inventory);
+			if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) paintInventoryScreen();
+		}
 		const renderArrows = core.arrows.map(arrow => ({
 			position: interpolateEntity(arrow.previous, arrow.position, now - (entityReceivedAt.get(arrow.id) ?? now)),
 			velocity: arrow.velocity,
@@ -1648,9 +1663,13 @@ async function main(): Promise<void> {
 		}));
 		const renderItems = core.entities.map(entity => {
 			const item = items.find(item => item.id === entity.item);
+			const dropPosition = interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now));
+			const blockFaces = dropFaces.get(entity.item);
 			return {
-				position: interpolateEntity(entity.previous, entity.position, now - (entityReceivedAt.get(entity.id) ?? now)),
+				position: dropPosition,
 				texture: itemTextures.get(entity.item) ?? 0,
+				blockFaces,
+				cellTint: blockFaces ? tintMap.tint(dropPosition[0], dropPosition[2]) : null,
 				flat: item?.texture != null || item?.block == null,
 				light: core.entityLight(entity.position),
 			};

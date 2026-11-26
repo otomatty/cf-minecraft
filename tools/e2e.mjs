@@ -1387,7 +1387,7 @@ async function biomeTints() {
 		name: entry.match(/name = "([^"]+)"/)[1],
 		grass: JSON.parse(entry.match(/grass_color = (\[[^\]]+\])/)[1]),
 	}));
-	const { page, errors } = await open(`server=local&world=e2e-tint-${run}&seed=2026&view=3&time=6000`);
+	const { page, errors } = await open(`server=local&world=e2e-tint-${run}&mode=creative&seed=2026&view=3&time=6000`);
 	try {
 		await settle(page, "tint Terrain", chunksInView(3));
 		await page.waitForFunction(() => {
@@ -1464,12 +1464,25 @@ async function biomeTints() {
 			return { logs, crowns };
 		});
 		check(trees.logs > 0 && trees.crowns > 0, "trees: Terrain seed 2026 has logs and leaves within 24 blocks of spawn", JSON.stringify(trees));
+		await resumePointerLock(page, "tint initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="grass_block"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "grass_block");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+		const iconColors = [];
 		for (const [z, name, grass] of [[0, "rain_grove", [72, 170, 74]], [144, "mild_meadow", [124, 184, 84]]]) {
 			await page.evaluate(z => window.__mc.setCamera(0, 140, z, 0, 0), z);
 			await page.waitForFunction(z => window.__mc.tint(0, z) !== null, {}, z);
 			const tint = await page.evaluate(z => window.__mc.tint(0, z), z);
 			check(registry[tint.biome]?.name === name && JSON.stringify(tint.grass) === JSON.stringify(grass), `tint: ${name} sample`, JSON.stringify(tint));
+			const pixel = await page.$eval("#hotbar canvas.selected", canvas =>
+				Array.from(canvas.getContext("2d").getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height * 0.15), 1, 1).data));
+			check(pixel[3] === 255, `tint: ${name} grass hotbar icon has an opaque top pixel`, JSON.stringify(pixel));
+			iconColors.push(pixel.slice(0, 3));
 		}
+		check(JSON.stringify(iconColors[0]) !== JSON.stringify(iconColors[1]), "tint: grass hotbar icon changes between biome cells", JSON.stringify(iconColors));
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "tint-terrain", err);
