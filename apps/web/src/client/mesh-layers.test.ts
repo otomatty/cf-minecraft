@@ -8,7 +8,7 @@ import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { iconTintChanged } from "./hotbar.ts";
 import type { CellTint } from "./tint-map.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels } from "./flora-textures.ts";
+import { grassSideAtlasPixels, grassSideIconPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { ClientCore } from "./client-core.ts";
 import { filterVisibleSections, outlineBox, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
@@ -62,8 +62,8 @@ test("block icon materials use the supplied grass or leaves RGB and preserve alp
 test("grass block side icons recolor the fringe and keep the dirt pixels", () => {
 	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
 	const packed = grassSideAtlasPixels();
-	const original = paintTexture("grass_block_side");
-	const side = textureIconPixels("grass_block_side", original, cell);
+	const original = grassSideIconPixels();
+	const side = textureIconPixels("grass_block_side", paintTexture("grass_block_side"), cell);
 	for (let i = 0; i < side.length; i += 4) {
 		assert.equal(side[i + 3], original[i + 3]);
 		for (let c = 0; c < 3; c++) {
@@ -141,7 +141,7 @@ test("dense and regular leaves share terrain tint and cap rotation", () => {
 
 test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
 	let packed = grassSideAtlasPixels();
-	let icon = paintTexture("grass_block_side");
+	let icon = grassSideIconPixels();
 	const dirt = paintTexture("dirt");
 	for (let i = 0; i < packed.length; i += 4) {
 		if (packed[i + 3] === 0) assert.deepEqual(packed.subarray(i, i + 3), dirt.subarray(i, i + 3));

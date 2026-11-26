@@ -1,16 +1,26 @@
 import { importTexturePack, isPackVersion, packLabel, type PackProgress, type TexturePack } from "./texture-pack.ts";
 import { TEX_SIZE } from "./textures.ts";
+import { WATER_FRAME_COUNT } from "./building-textures.ts";
 
 const storageError = "テクスチャをこのブラウザに保存できません。サイトデータの保存を許可して、もう一度お試しください。";
 
 export function installedPack(value: unknown, names: readonly string[]): TexturePack | undefined {
 	const pack = (value as { pack?: Partial<TexturePack> } | null)?.pack;
-	if (!isPackVersion(pack?.version) || !(pack.tiles instanceof Map) || !pack.tiles.size) return;
+	if (!isPackVersion(pack?.version) || !(pack.tiles instanceof Map) || !pack.tiles.size || !(pack.waterFrames instanceof Map)) return;
 	const known = new Set(names);
+	const validTile = (pixels: unknown): pixels is Uint8Array => pixels instanceof Uint8Array && pixels.length === TEX_SIZE ** 2 * 4;
 	for (const [name, pixels] of pack.tiles) {
-		if (!known.has(name) || !(pixels instanceof Uint8Array) || pixels.length !== TEX_SIZE ** 2 * 4) return;
+		if (!known.has(name) || !validTile(pixels)) return;
 	}
-	return { version: pack.version, tiles: pack.tiles };
+	for (const [name, frames] of pack.waterFrames) {
+		if ((name !== "water" && name !== "water_flow") || !Array.isArray(frames) || !frames.length ||
+			frames.length > WATER_FRAME_COUNT || frames[0] !== pack.tiles.get(name)) return;
+		for (const frame of frames) if (!validTile(frame)) return;
+	}
+	for (const name of ["water", "water_flow"]) {
+		if (pack.tiles.has(name) && !pack.waterFrames.has(name)) return;
+	}
+	return { version: pack.version, tiles: pack.tiles, waterFrames: pack.waterFrames };
 }
 
 async function storedPack(names: readonly string[], next?: TexturePack): Promise<TexturePack | undefined> {
@@ -58,7 +68,7 @@ export async function installPack(file: File, names: readonly string[], onProgre
 }
 
 export function setupTexturePack(
-	panel: HTMLElement, names: readonly string[], initial: TexturePack, apply: (tiles: ReadonlyMap<string, Uint8Array>) => void,
+	panel: HTMLElement, names: readonly string[], initial: TexturePack, apply: (pack: TexturePack) => void,
 ): void {
 	const file = panel.querySelector("input")!;
 	const choose = panel.querySelector("button")!;
@@ -76,7 +86,7 @@ export function setupTexturePack(
 			const pack = await installPack(chosen, names, (done, total) => {
 				if (total) message.textContent = `テクスチャを取り出しています… ${done} / ${total}`;
 			});
-			apply(pack.tiles);
+			apply(pack);
 			current.textContent = packLabel(pack);
 			message.textContent = "テクスチャを適用しました";
 		} catch (error) {

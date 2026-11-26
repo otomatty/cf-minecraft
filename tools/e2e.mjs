@@ -22,7 +22,7 @@ import puppeteer from "puppeteer-core";
 import { installFixture, testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
-import { fixturePack } from "../apps/web/test/texture-pack-fixture.mjs";
+import { fixtureGrassBrightness, fixturePack } from "../apps/web/test/texture-pack-fixture.mjs";
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1476,7 +1476,7 @@ async function biomeTints() {
 		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "grass_block");
 		await page.keyboard.press("KeyE");
 		await page.waitForFunction(() => document.getElementById("block-picker").hidden);
-		const iconColors = [];
+		const iconColors = [], sideColors = [], dirtColors = [];
 		for (const [z, name, grass] of [[0, "rain_grove", [72, 170, 74]], [144, "mild_meadow", [124, 184, 84]]]) {
 			await page.evaluate(z => window.__mc.setCamera(0, 140, z, 0, 0), z);
 			await page.waitForFunction(z => window.__mc.tint(0, z) !== null, {}, z);
@@ -1486,8 +1486,22 @@ async function biomeTints() {
 				Array.from(canvas.getContext("2d").getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height * 0.15), 1, 1).data));
 			check(pixel[3] === 255, `tint: ${name} grass hotbar icon has an opaque top pixel`, JSON.stringify(pixel));
 			iconColors.push(pixel.slice(0, 3));
+			// The fixture's TGA contributes the fringe brightness. This side face has 0.68 shading.
+			const expected = grass.map(channel => Math.round(Math.round(channel * fixtureGrassBrightness / 255) * 0.68)).concat(255);
+			await page.waitForFunction(rgba => {
+				const canvas = document.querySelector("#hotbar canvas.selected");
+				return canvas.getContext("2d").getImageData(20, 19, 1, 1).data.every((value, i) => value === rgba[i]);
+			}, {}, expected);
+			const side = await page.$eval("#hotbar canvas.selected", canvas => {
+				const ctx = canvas.getContext("2d");
+				return [19, 32].map(y => Array.from(ctx.getImageData(20, y, 1, 1).data));
+			});
+			sideColors.push(side[0]);
+			dirtColors.push(side[1]);
 		}
 		check(JSON.stringify(iconColors[0]) !== JSON.stringify(iconColors[1]), "tint: grass hotbar icon changes between biome cells", JSON.stringify(iconColors));
+		check(JSON.stringify(sideColors[0]) !== JSON.stringify(sideColors[1]), "tint: pack grass fringe changes between biome cells", JSON.stringify(sideColors));
+		check(dirtColors[0][3] === 255 && JSON.stringify(dirtColors[0]) === JSON.stringify(dirtColors[1]), "tint: pack soil stays opaque and keeps its colour between biome cells", JSON.stringify(dirtColors));
 		check(errors.length === 0, "tint: no Terrain page errors", errors.slice(0, 3).join(" | "));
 	} catch (err) {
 		await diagnoseFailure(page, "tint-terrain", err);

@@ -10,11 +10,11 @@
 
 ## 対応する ZIP
 
-- ZIP の直下、または直下の1つのフォルダーに `version.json` と `resource_pack/` が必要です。`version.json` の `latest.version` は3〜4個の数字をドットで区切った文字列で、`resource_pack/manifest.json` は Bedrock Samples の UUID を持つ必要があります。
-- `resource_pack/textures/` の `terrain_texture.json` と `item_texture.json` を使い、ゲームに対応するブロック面とアイテムの PNG を取り出します。`-min.zip` には必要な画像がありません。
-- PNG は最近傍で 16 × 16 に変換します。正方形のタイルを縦に並べた画像は先頭の1枚を使います。対応する PNG がない名前には内蔵素材を使います。
+- ZIP の直下、または直下の1つのフォルダーに `resource_pack/` が必要です。`manifest.json` の `header` には Bedrock Samples の UUID と、非負の整数3個の `min_engine_version` が必要です。`bedrock-samples-v…-full.zip` の版の先頭3要素が一致すればファイル名の版を表示し、プレビューの接尾辞も引き継ぎます。それ以外では `min_engine_version` を表示します。
+- `resource_pack/textures/` の `terrain_texture.json` と `item_texture.json` を使い、ゲームに対応するブロック面とアイテムの画像を取り出します。`-min.zip` には必要な画像がありません。
+- PNG を優先し、同じパスに PNG がなければカラーマップなしの32ビット TGA（非圧縮・RLE）を使います。画像の先頭の正方形を最近傍で 16 × 16 に変換します。水の縦並び画像は最大32コマを取り込み、元のコマ数に応じて繰り返します。草の側面はパックの土と草の重ね画像を合成し、バイオームの草色を使います。対応する画像がない名前には内蔵素材を使います。
 
-ZIP は 256 MiB、32,768 項目、宣言された展開サイズの合計は 512 MiB までです。使用する JSON は各 2 MiB、PNG は各 4 MiB・合計 32 MiB までです。画像の幅は 512 ピクセル、高さは 4,096 ピクセル、面積は 1,048,576 ピクセルまでです。読み出すファイルには無圧縮または Deflate 形式を使用します。
+ZIP は 256 MiB、32,768 項目、宣言された展開サイズの合計は 512 MiB までです。使用する JSON は各 2 MiB、画像は各 4 MiB・合計 32 MiB までです。画像の幅は 512 ピクセル、高さは 4,096 ピクセル、面積は 1,048,576 ピクセルまでです。読み出すファイルには無圧縮または Deflate 形式を使用します。
 
 ## 開発と検証
 
@@ -27,3 +27,11 @@ pnpm --filter web dev
 ```
 
 タイトル画面で生成した ZIP を選ぶと、開発モードでプレイできます。E2E もタイトル画面から仮パックをインストールします。
+
+WASM のビルド後、手元の公式 ZIP でゲームが使う全テクスチャ名が解決できるか確認できます。
+
+```sh
+node tools/check-official-pack.mjs /path/to/bedrock-samples-v1.26.60.5-full.zip
+```
+
+版、解決件数、未解決の名前を表示します。未解決の名前がある場合は終了コード 1 を返します。PNG は取り込み時の構造検査まで行い、TGA は実際にデコードします。公式 ZIP はローカルで指定し、この検査は CI では実行しません。

@@ -1,26 +1,24 @@
 import { blockItemTint, WATER_TINT, type BlockItemTint } from "./block-tints.ts";
 import { buildingTexture } from "./building-textures.ts";
-import { floraTexture, grassSideIconPixels } from "./flora-textures.ts";
+import { floraTexture, grassSideAtlasPixels } from "./flora-textures.ts";
 import { itemTexture } from "./item-textures.ts";
 import { terrainTexture } from "./terrain-textures.ts";
 
 export { GRASS_TINT, LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
 export const TEX_SIZE = 16;
 
-/** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
+/** Convert atlas pixels to a tinted UI copy. The grass side mask becomes opaque. */
 export function textureIconPixels(name: string, pixels: Uint8Array, cellTint?: BlockItemTint | null): Uint8ClampedArray<ArrayBuffer> {
 	const icon = new Uint8ClampedArray(pixels);
-	if (name === "grass_block_side") {
-		if (cellTint) {
-			const side = grassSideIconPixels(cellTint.grass);
-			for (let i = 0; i < icon.length; i += 4) icon.set(side.subarray(i, i + 3), i);
-		}
-		return icon;
-	}
 	const tint = name === "water" || name === "water_flow" ? WATER_TINT : blockItemTint(name, cellTint);
 	if (tint) {
 		for (let i = 0; i < icon.length; i += 4) {
-			for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
+			if (name === "grass_block_side") {
+				for (let c = 0; c < 3; c++) icon[i + c] += Math.round(pixels[i + 3] * tint[c] / 255);
+				icon[i + 3] = 255;
+			} else {
+				for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
+			}
 		}
 	}
 	return icon;
@@ -28,6 +26,7 @@ export function textureIconPixels(name: string, pixels: Uint8Array, cellTint?: B
 
 /** Original pixel art in atlas row order, with a checker for missing materials. */
 export function paintTexture(name: string): Uint8Array {
+	if (name === "grass_block_side") return grassSideAtlasPixels();
 	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
 		?? itemTexture(name);
 	if (pixels) return pixels;

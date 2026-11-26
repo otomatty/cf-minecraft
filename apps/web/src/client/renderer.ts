@@ -23,7 +23,7 @@ import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection, type Vec3 } from "./math.ts";
 import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels } from "./flora-textures.ts";
+import type { TexturePack } from "./texture-pack.ts";
 import { hasItemTexture } from "./item-textures.ts";
 import type { PlayerNames } from "./player-names.ts";
 
@@ -436,7 +436,7 @@ export class Renderer {
 	private readonly firstWaterFrame: number;
 	private readonly firstFlameFrame: number;
 	private readonly firstExplosionFrame: number;
-	readonly applyTexturePack: (tiles: ReadonlyMap<string, Uint8Array>) => void;
+	readonly applyTexturePack: (pack?: TexturePack) => void;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
@@ -481,7 +481,7 @@ export class Renderer {
 			const pixels = name.startsWith("crack_") ? paintCracks(Number(name.slice(6))) : paintTexture(name);
 			this.texturePixels.set(name, pixels);
 			if (usesCutoutMips(name)) cutouts.add(layer);
-			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
+			return pixels;
 		});
 		if (textureNames.includes("water") || textureNames.includes("water_flow")) {
 			for (const flowing of [false, true]) {
@@ -505,22 +505,19 @@ export class Renderer {
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
 		const defaults = new Map(this.texturePixels);
-		this.applyTexturePack = overrides => {
+		this.applyTexturePack = pack => {
 			const layers = tiles.slice();
 			for (const [layer, name] of textureNames.entries()) {
-				const pixels = overrides.get(name);
+				const pixels = pack?.tiles.get(name);
 				this.texturePixels.set(name, pixels ?? defaults.get(name)!);
 				if (!pixels) continue;
 				layers[layer] = pixels;
-				if (name === "grass_block_side") {
-					// The grass shader uses alpha as an additive biome tint mask.
-					// A pack's finished RGB face needs a zero mask.
-					layers[layer] = pixels.slice();
-					for (let i = 3; i < pixels.length; i += 4) layers[layer][i] = 0;
-				}
-				if (name === "water" || name === "water_flow") {
+				const frames = pack?.waterFrames.get(name);
+				if (frames) {
 					const first = this.firstWaterFrame + (name === "water_flow" ? WATER_FRAME_COUNT : 0);
-					layers.fill(pixels, first, first + WATER_FRAME_COUNT);
+					for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) {
+						layers[first + frame] = frames[frame % frames.length];
+					}
 				}
 			}
 			// Upload the entire array in five writes, including the animation frames.
@@ -535,7 +532,7 @@ export class Renderer {
 					{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, layers.length]);
 			}
 		};
-		this.applyTexturePack(new Map());
+		this.applyTexturePack();
 		const sampler = device.createSampler({
 			magFilter: "nearest",
 			minFilter: "nearest",

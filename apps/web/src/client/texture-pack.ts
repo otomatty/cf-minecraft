@@ -1,6 +1,7 @@
 import { BlobReader, ZipReader, type FileEntry } from "@zip.js/zip.js/lib/zip-core-custom.js";
 import { hasItemTexture } from "./item-textures.ts";
 import { TEX_SIZE } from "./textures.ts";
+import { WATER_FRAME_COUNT } from "./building-textures.ts";
 
 const MiB = 1024 ** 2;
 const maxArchive = 256 * MiB, maxExpanded = 512 * MiB, maxSelected = 32 * MiB;
@@ -8,9 +9,11 @@ const maxEntries = 32_768;
 export interface TexturePack {
 	version: string;
 	tiles: Map<string, Uint8Array>;
+	/** Each water strip's first frame is also its tile for thumbnails and drops. */
+	waterFrames: Map<string, Uint8Array[]>;
 }
 
-// Internal name -> Bedrock atlas key, conventional PNG basename, variant index.
+// Internal name -> Bedrock atlas key, conventional image basename, variant index.
 type Binding = readonly [key: string, filename: string, variant?: number];
 const bindings = new Map<string, Binding>([
 	["grass_block_side", ["grass_side", "grass_side"]], ["grass_block_top", ["grass_top", "grass_top"]],
@@ -69,7 +72,7 @@ function parseAtlas(bytes: Uint8Array): Record<string, unknown> {
 	return atlas.texture_data;
 }
 
-function pngPath(name: string, atlas: Record<string, unknown>, item: boolean): string | undefined {
+function imagePath(name: string, atlas: Record<string, unknown>, item: boolean): string | undefined {
 	const [key, basename, index = 0] = bindings.get(name) ?? [name, name];
 	const atlasKey = [item ? undefined : currentBlockKeys.get(name), name, key]
 		.find(candidate => candidate !== undefined && Object.hasOwn(atlas, candidate));
@@ -83,7 +86,7 @@ function pngPath(name: string, atlas: Record<string, unknown>, item: boolean): s
 	}
 	if (typeof path !== "string" || !path.startsWith("textures/")) return;
 	if (path.split("/").some(part => !/^[\w.-]+$/.test(part) || part === "." || part === "..")) return;
-	return path.endsWith(".png") ? path : path + ".png";
+	return path.replace(/\.(png|tga)$/, "");
 }
 
 async function readEntry(entry: FileEntry, limit: number): Promise<Uint8Array<ArrayBuffer>> {
@@ -103,13 +106,16 @@ async function readEntry(entry: FileEntry, limit: number): Promise<Uint8Array<Ar
 	return bytes;
 }
 
+function supportedDimensions(width: number, height: number): boolean {
+	return width > 0 && width <= 512 && height > 0 && height <= 4096 && width * height <= 1024 ** 2;
+}
+
 export function pngTileWidth(bytes: Uint8Array): number | undefined {
 	const signature = [137, 80, 78, 71, 13, 10, 26, 10];
 	if (bytes.length < 33 || !signature.every((byte, i) => bytes[i] === byte)) throw new Error("PNG が破損しています");
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const width = view.getUint32(16), height = view.getUint32(20);
-	if (view.getUint32(8) !== 13 || view.getUint32(12) !== 0x49484452 || !width || width > 512 ||
-		!height || height > 4096 || width * height > 1024 ** 2) {
+	if (view.getUint32(8) !== 13 || view.getUint32(12) !== 0x49484452 || !supportedDimensions(width, height)) {
 		throw new Error("PNG の寸法に対応していません");
 	}
 	if (height % width !== 0) return;
@@ -123,8 +129,8 @@ export function pngTileWidth(bytes: Uint8Array): number | undefined {
 	return width;
 }
 
-async function decodeTile(bytes: Uint8Array<ArrayBuffer>, width: number): Promise<Uint8Array> {
-	const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }), 0, 0, width, width);
+async function decodeTile(bytes: Uint8Array<ArrayBuffer>, width: number, frame: number): Promise<Uint8Array> {
+	const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }), 0, frame * width, width, width);
 	try {
 		const canvas = new OffscreenCanvas(TEX_SIZE, TEX_SIZE);
 		const ctx = canvas.getContext("2d")!;
@@ -134,12 +140,65 @@ async function decodeTile(bytes: Uint8Array<ArrayBuffer>, width: number): Promis
 	} finally { bitmap.close(); }
 }
 
+function tgaFrames(bytes: Uint8Array, maxFrames: number): Uint8Array[] {
+	if (bytes.length < 18) return [];
+	const type = bytes[2], descriptor = bytes[17];
+	// Reject right-to-left and interleaved images. Bit 5 marks the vertical origin.
+	if (bytes[1] !== 0 || (type !== 2 && type !== 10) || bytes[16] !== 32 || (descriptor & 0xd0)) return [];
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const width = view.getUint16(12, true), height = view.getUint16(14, true);
+	if (!supportedDimensions(width, height)) return [];
+	const total = width * height;
+	let source = 18 + bytes[0];
+	const pixels = new Uint8Array(total * 4);
+	for (let pixel = 0; pixel < total;) {
+		if (source >= bytes.length) return [];
+		const packet = type === 10 ? bytes[source++] : 0;
+		const repeat = (packet & 0x80) !== 0;
+		const count = type === 2 ? total : (packet & 0x7f) + 1;
+		const end = source + 4 * (repeat ? 1 : count);
+		if (pixel + count > total || end > bytes.length) return [];
+		for (let i = 0; i < count; i++, pixel++) {
+			const dest = pixel * 4, p = source + (repeat ? 0 : i * 4);
+			pixels[dest] = bytes[p + 2];
+			pixels[dest + 1] = bytes[p + 1];
+			pixels[dest + 2] = bytes[p];
+			pixels[dest + 3] = bytes[p + 3];
+		}
+		source = end;
+	}
+	const size = Math.min(width, height);
+	const frames: Uint8Array[] = [];
+	for (let frame = 0; frame < Math.min(maxFrames, Math.floor(height / size)); frame++) {
+		const tile = new Uint8Array(TEX_SIZE ** 2 * 4);
+		for (let y = 0; y < TEX_SIZE; y++) {
+			const row = frame * size + Math.floor((y + 0.5) * size / TEX_SIZE);
+			const offset = (descriptor & 0x20 ? row : height - 1 - row) * width;
+			for (let x = 0; x < TEX_SIZE; x++) {
+				const p = (offset + Math.floor((x + 0.5) * size / TEX_SIZE)) * 4;
+				tile.set(pixels.subarray(p, p + 4), (y * TEX_SIZE + x) * 4);
+			}
+		}
+		frames.push(tile);
+	}
+	return frames;
+}
+
 const unofficialPack = "公式の Bedrock Samples の ZIP ではありません。手順 1 のページから、名前が -full.zip で終わるファイルをダウンロードしてください。";
 const missingImages = "ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。";
 const bedrockUuid = "66c6e9a8-3093-462a-9c36-dbb052165822";
 
+export class MissingPackImages extends Error {
+	readonly version: string;
+
+	constructor(version: string) {
+		super(missingImages);
+		this.version = version;
+	}
+}
+
 export function isPackVersion(value: unknown): value is string {
-	return typeof value === "string" && /^\d+(?:\.\d+){2,3}$/.test(value);
+	return typeof value === "string" && /^\d+(?:\.\d+){2,3}(?:-preview)?$/.test(value);
 }
 
 export function packLabel(pack: TexturePack): string {
@@ -164,30 +223,35 @@ export async function importTexturePack(
 			if (entry.directory || entry.symlink) continue;
 			const parts = entry.filename.split("/");
 			if (parts.includes("__MACOSX") || parts.at(-1)!.startsWith("._")) continue;
-			if (/^(?:[^/]+\/)?(?:version\.json|resource_pack\/(?:manifest\.json|textures\/(?:terrain_texture\.json|item_texture\.json|.+\.png)))$/.test(entry.filename)) {
+			if (/^(?:[^/]+\/)?resource_pack\/(?:manifest\.json|textures\/(?:terrain_texture\.json|item_texture\.json|.+\.(?:png|tga)))$/.test(entry.filename)) {
 				if (files.has(entry.filename)) throw new Error(unofficialPack);
 				files.set(entry.filename, entry);
 			}
 		}
-		const roots = [...files.keys()].filter(path => /^(?:[^/]+\/)?version\.json$/.test(path))
-			.map(path => path.slice(0, -"version.json".length))
-			.filter(root => ["resource_pack/manifest.json", "resource_pack/textures/terrain_texture.json", "resource_pack/textures/item_texture.json"]
+		const roots = [...files.keys()].filter(path => path.endsWith("resource_pack/manifest.json"))
+			.map(path => path.slice(0, -"resource_pack/manifest.json".length))
+			.filter(root => ["resource_pack/textures/terrain_texture.json", "resource_pack/textures/item_texture.json"]
 				.every(path => files.has(root + path)));
 		if (roots.length !== 1) throw new Error(unofficialPack);
 		const [root] = roots;
 		const resource = root + "resource_pack/";
 		const readJson = (path: string) => readEntry(files.get(path)!, 2 * MiB);
-		const versionBytes = await readJson(root + "version.json");
 		const manifestBytes = await readJson(resource + "manifest.json");
 		const terrainBytes = await readJson(resource + "textures/terrain_texture.json");
 		const itemBytes = await readJson(resource + "textures/item_texture.json");
-		let version: unknown, terrain: Record<string, unknown>, items: Record<string, unknown>;
+		let version: string, terrain: Record<string, unknown>, items: Record<string, unknown>;
 		try {
-			const info = parseJson(versionBytes), manifest = parseJson(manifestBytes);
-			version = record(info) && record(info.latest) ? info.latest.version : undefined;
-			if (!isPackVersion(version) || !record(manifest) || !record(manifest.header) || manifest.header.uuid !== bedrockUuid) {
+			const manifest = parseJson(manifestBytes);
+			const header = record(manifest) && record(manifest.header) ? manifest.header : undefined;
+			const engine = header?.min_engine_version;
+			if (header?.uuid !== bedrockUuid || !Array.isArray(engine) || engine.length !== 3 ||
+				!engine.every(part => Number.isInteger(part) && part >= 0)) {
 				throw new Error(unofficialPack);
 			}
+			const engineParts = engine.map(part => String(BigInt(part)));
+			const named = /^bedrock-samples-v(\d+(?:\.\d+){2,3})(-preview)?-full\.zip$/i.exec(file.name);
+			version = named && named[1].split(".").slice(0, 3).every((part, i) => part.replace(/^0+(?=\d)/, "") === engineParts[i])
+				? (named[1] + (named[2] ?? "")).toLowerCase() : engineParts.join(".");
 			terrain = parseAtlas(terrainBytes);
 			items = parseAtlas(itemBytes);
 		} catch {
@@ -195,37 +259,73 @@ export async function importTexturePack(
 		}
 		const wanted = new Set(names);
 		if (wanted.has("torch_item")) wanted.add("torch");
+		if (wanted.has("grass_block_side")) wanted.add("dirt");
 		const images = new Map<FileEntry, string[]>();
 		let selected = 0;
 		for (const name of wanted) {
 			const item = hasItemTexture(name);
-			const path = pngPath(name, item ? items : terrain, item);
-			const entry = path && files.get(resource + path);
+			const path = imagePath(name, item ? items : terrain, item);
+			const entry = path && (files.get(resource + path + ".png") ?? files.get(resource + path + ".tga"));
 			if (!entry) continue;
 			const aliases = images.get(entry);
 			if (aliases) aliases.push(name);
 			else {
 				selected += entry.uncompressedSize;
-				if (selected > maxSelected) throw new Error("使用する PNG の合計が 32 MiB を超えています");
+				if (selected > maxSelected) throw new Error("使用する画像の合計が 32 MiB を超えています");
 				images.set(entry, [name]);
 			}
 		}
 		const tiles = new Map<string, Uint8Array>();
+		const waterFrames = new Map<string, Uint8Array[]>();
 		let done = 0;
 		onProgress?.(done, images.size);
 		for (const [entry, aliases] of images) {
 			const bytes = await readEntry(entry, 4 * MiB);
-			const width = pngTileWidth(bytes);
-			if (width) {
-				const pixels = await decode(bytes, width);
-				for (const name of aliases) tiles.set(name, pixels);
+			const animated = aliases.includes("water") || aliases.includes("water_flow");
+			const maxFrames = animated ? WATER_FRAME_COUNT : 1;
+			let frames: Uint8Array[];
+			if (entry.filename.endsWith(".tga")) frames = tgaFrames(bytes, maxFrames);
+			else {
+				const width = pngTileWidth(bytes);
+				frames = [];
+				if (width) {
+					const height = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(20);
+					for (let frame = 0; frame < Math.min(maxFrames, height / width); frame++) {
+						frames.push(await decode(bytes, width, frame));
+					}
+				}
 			}
 			onProgress?.(++done, images.size);
+			if (!frames.length) continue;
+			for (const name of aliases) {
+				if (name === "water" || name === "water_flow") {
+					const alpha = name === "water" ? 156 : 166;
+					const water = frames.map(frame => {
+						const pixels = frame.slice();
+						for (let i = 3; i < pixels.length; i += 4) pixels[i] = alpha;
+						return pixels;
+					});
+					waterFrames.set(name, water);
+					tiles.set(name, water[0]);
+				} else {
+					tiles.set(name, frames[0]);
+				}
+			}
 		}
 		const torch = tiles.get("torch");
 		if (torch && wanted.has("torch_item") && !tiles.has("torch_item")) tiles.set("torch_item", torch);
+		const fringe = tiles.get("grass_block_side"), dirt = tiles.get("dirt");
+		if (fringe && dirt) {
+			const side = dirt.slice();
+			for (let i = 0; i < side.length; i += 4) {
+				if (fringe[i + 3]) side.fill(0, i, i + 3);
+				side[i + 3] = fringe[i + 3] ? fringe[i] : 0;
+			}
+			tiles.set("grass_block_side", side);
+		} else tiles.delete("grass_block_side");
 		if (!names.includes("torch")) tiles.delete("torch");
-		if (!tiles.size) throw new Error(missingImages);
-		return { version, tiles };
+		if (!names.includes("dirt")) tiles.delete("dirt");
+		if (!tiles.size) throw new MissingPackImages(version);
+		return { version, tiles, waterFrames };
 	} finally { await zip.close(); }
 }

@@ -158,18 +158,19 @@ async function runScenario(seed: string, ticks: number): Promise<string> {
 }
 
 async function main(): Promise<void> {
+	const titleUrl = "/?" + new URLSearchParams({ next: location.pathname + location.search });
 	const me = await playSession();
-	if (!hasPlaySession(me)) return location.replace("/");
+	if (!hasPlaySession(me)) return location.replace(titleUrl);
 	const core = await ClientCore.load(clientWasmUrl);
 	const textureNames = gameTextureNames(core);
 	const pack = await loadInstalledPack(textureNames);
-	if (!pack) return location.replace("/");
+	if (!pack) return location.replace(titleUrl);
 	if (serverKind === "ws" && !me.open && !await canEnterWorld()) return;
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const arrowTexture = textureNames.indexOf("arrow");
 	const eggTexture = textureNames.indexOf("egg");
 	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
-	renderer.applyTexturePack(pack.tiles);
+	renderer.applyTexturePack(pack);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
@@ -547,7 +548,6 @@ async function main(): Promise<void> {
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
 	const biomeIcons = new Map<number, ImageData>();
-	let packedGrassSide = pack.tiles.has("grass_block_side");
 	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
@@ -581,7 +581,7 @@ async function main(): Promise<void> {
 		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
 		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint, packedGrassSide), ICON_SIZE, ICON_SIZE);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint), ICON_SIZE, ICON_SIZE);
 			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
@@ -1014,9 +1014,8 @@ async function main(): Promise<void> {
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
-	setupTexturePack($("textures-tab-panel"), textureNames, pack, tiles => {
-		renderer.applyTexturePack(tiles);
-		packedGrassSide = tiles.has("grass_block_side");
+	setupTexturePack($("textures-tab-panel"), textureNames, pack, next => {
+		renderer.applyTexturePack(next);
 		icons.clear();
 		biomeIcons.clear();
 		paintHotbar(core.inventory);

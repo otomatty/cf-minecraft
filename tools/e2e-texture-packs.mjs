@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appleRGB, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
+import { appleRGB, fixtureFilename, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
 
 const panel = "#textures-tab-panel";
 const input = panel + " input";
@@ -37,33 +37,36 @@ async function pixels(page) {
 export async function installFixture(page, edge, bytes) {
 	await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
 	await page.waitForSelector("#texture-drop");
-	await page.$eval("#texture-drop", (target, base64) => {
+	await page.$eval("#texture-drop", (target, base64, filename) => {
 		const transfer = new DataTransfer();
-		transfer.items.add(new File([Uint8Array.from(atob(base64), char => char.charCodeAt(0))], "generated-fixture.zip"));
+		transfer.items.add(new File([Uint8Array.from(atob(base64), char => char.charCodeAt(0))], filename));
 		target.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
-	}, Buffer.from(bytes).toString("base64"));
+	}, Buffer.from(bytes).toString("base64"), fixtureFilename);
 	await page.waitForSelector('.pack-summary');
 }
 
 export async function testTexturePacks(browser, edge, shots, initialFixture) {
 	const dir = await mkdtemp(join(tmpdir(), "cf-pack-test-"));
 	const pages = [], contexts = [], traffic = [], errors = [], frames = [];
-	const name = "local-only-pixel-fixture.zip";
 	try {
 		const version = "1.26.60.6";
+		const name = `bedrock-samples-v${version}-full.zip`;
 		const versionLabel = "Bedrock Samples v" + version;
+		const fringeBrightness = 222;
 		const officialError = /公式の Bedrock Samples の ZIP ではありません/;
 		const rejected = [
 			["other.zip", await zipBytes(packEntries({ uuid: "other" })), officialError],
-			["versionless.zip", await zipBytes(testEntries.filter(([path]) => !path.endsWith("version.json"))), officialError],
+			["no-engine-version.zip", await zipBytes(testEntries.map(([path, data]) => [path,
+				path.endsWith("manifest.json") ? JSON.stringify({ header: { uuid: JSON.parse(data).header.uuid } }) : data])), officialError],
 			["old-format.zip", await zipBytes(testEntries.filter(([path]) => path.includes("/textures/")).map(([path, data]) => [path.replace("sample/resource_pack/", ""), data])), officialError],
 			["broken.zip", "invalid archive", /.+/],
 			["sample-min.zip", await zipBytes(packEntries()), /ブロックとアイテムの画像が入っていません/],
 		];
 		await Promise.all([
-			writeFile(join(dir, "first-fixture.zip"), initialFixture),
-			writeFile(join(dir, name), await fixturePack({ version, colors: {
-				stone: stoneRGB, grass_block_side: stoneRGB, apple: appleRGB,
+			writeFile(join(dir, fixtureFilename), initialFixture),
+			writeFile(join(dir, name), await fixturePack({ colors: {
+				stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
+				water: [120, 120, 120], water_flow: [130, 130, 130],
 			} })),
 			...rejected.map(([filename, data]) => writeFile(join(dir, filename), data)),
 		]);
@@ -87,17 +90,37 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			client.on("Network.webSocketFrameSent", ({ requestId, response }) => {
 				if (sockets.has(requestId)) frames.push(response);
 			});
-			// Observe the first terrain layer (stone) at the WebGPU boundary, independently of UI canvases.
+			// Observe atlas pixels and the animated layer indices selected by the renderer.
 			await page.evaluateOnNewDocument(() => {
-				const write = GPUQueue.prototype.writeTexture;
+				const write = GPUQueue.prototype.writeTexture, writeBuffer = GPUQueue.prototype.writeBuffer;
+				let atlas;
 				GPUQueue.prototype.writeTexture = function(dst, data, layout, size) {
 					if (dst.mipLevel === 0 && size[0] === 16 && size[2] > 80) {
 						window.testStoneRGB = Array.from(data.subarray(0, 3));
+						atlas = window.testAtlas = Array.from({ length: size[2] }, (_, layer) => Array.from(data.subarray(layer * 1024, layer * 1024 + 4)));
+						window.testWaterSamples = [new Map(), new Map()];
 					}
 					return write.call(this, dst, data, layout, size);
 				};
+				GPUQueue.prototype.writeBuffer = function(buffer, offset, data, ...rest) {
+					if (atlas && (buffer.usage & GPUBufferUsage.UNIFORM) && data instanceof ArrayBuffer && data.byteLength === 272) {
+						const indices = new Uint32Array(data, 128, 2);
+						indices.forEach((layer, i) => window.testWaterSamples[i].set(layer, atlas[layer]));
+					}
+					return writeBuffer.call(this, buffer, offset, data, ...rest);
+				};
 			});
 			if (checkInstall) {
+				const unauthenticated = req => new URL(req.url()).pathname === "/api/me"
+					? req.respond({ contentType: "application/json", body: JSON.stringify({ open: false, user: null }) })
+					: req.continue();
+				await page.setRequestInterception(true);
+				page.on("request", unauthenticated);
+				await page.goto(url, { waitUntil: "domcontentloaded" });
+				await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン");
+				assert.equal(new URL(page.url()).searchParams.get("next"), new URL(url).pathname + new URL(url).search);
+				page.off("request", unauthenticated);
+				await page.setRequestInterception(false);
 				await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
 				await page.waitForSelector("#texture-drop");
 				const assertLocked = async () => {
@@ -110,6 +133,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 					await page.goto(play, { waitUntil: "domcontentloaded" });
 					await page.waitForSelector("#texture-drop");
 					assert.equal(new URL(page.url()).pathname, "/");
+					assert.equal(new URL(page.url()).searchParams.get("next"), new URL(play).pathname + new URL(play).search);
 					await assertLocked();
 				}
 				await page.setViewport({ width: 320, height: 720 });
@@ -157,10 +181,10 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 						this.transaction.abort();
 					};
 				});
-				await (await page.$("#texture-file")).uploadFile(join(dir, "first-fixture.zip"));
+				await (await page.$("#texture-file")).uploadFile(join(dir, fixtureFilename));
 				await page.waitForFunction(() => document.querySelector("#texture-error-reason")?.textContent.includes("保存できません"));
 				await assertLocked();
-				await (await page.$("#texture-file")).uploadFile(join(dir, "first-fixture.zip"));
+				await (await page.$("#texture-file")).uploadFile(join(dir, fixtureFilename));
 				await page.waitForSelector(".pack-summary");
 				assert.equal(await page.$eval("#panel [role=status]", node => node.textContent), "テクスチャを適用しました");
 				assert.match(await page.$eval(".pack-summary", node => node.textContent), /Bedrock Samples v1\.26\.60\.5/);
@@ -173,14 +197,29 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				assert.equal(await back.evaluate(node => node.textContent), "メニューに戻る");
 				await back.click();
 				await page.waitForSelector(".pack-summary");
+				const returnLink = await page.waitForSelector('#panel a[href*="server=ws"]');
+				assert.equal(await returnLink.evaluate(link => link.textContent), "ゲームに戻る");
+				assert.equal(await returnLink.evaluate(link => link.href), url);
+				await Promise.all([page.waitForNavigation(), returnLink.click()]);
 			} else {
 				await installFixture(page, edge, initialFixture);
+				await page.goto(url);
 			}
-			await page.goto(url);
 			await page.waitForFunction(() => window.__mc?.stats().joined && window.__mc.stats().chunks >= 9 && window.testStoneRGB);
 			return page;
 		}
 		const a = await player(true), b = await player();
+		const waterPixels = async page => {
+			await page.waitForFunction(() => window.testWaterSamples?.every(samples =>
+				new Set([...samples.values()].map(pixel => pixel[0])).size === 3));
+			return page.evaluate(() => window.testWaterSamples.map(samples => {
+				let start = samples.keys().next().value;
+				const atlas = window.testAtlas, alpha = atlas[start][3];
+				while (atlas[start - 1]?.[3] === alpha) start--;
+				return atlas.slice(start, start + 32);
+			}));
+		};
+		const originalWater = await waterPixels(a);
 		const defaults = await pixels(b);
 		assert.deepEqual(await pixels(a), defaults);
 		await openSettings(a);
@@ -200,12 +239,25 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		assert.notEqual(changed.stone, defaults.stone);
 		assert.notEqual(changed.apple, defaults.apple);
 		assert.equal(changed.dirt, defaults.dirt);
-		// Both blocks use the same pack PNG on their sides. The cached grass icon must repaint
-		// without replacing that face with the built-in biome-coloured grass fringe.
+		// Both icons use the pack's dirt under the grass mask. The cached fringe must repaint in the same biome.
 		const sidePixel = c => Array.from(c.getContext("2d").getImageData(20, 32, 1, 1).data);
-		const stoneSide = await a.$eval('[data-block="stone"] canvas', sidePixel);
+		const dirtSide = await a.$eval('[data-block="dirt"] canvas', sidePixel);
+		const grassTint = await a.evaluate(() => {
+			const [x, , z] = window.__mc.playerPosition();
+			return window.__mc.tint(x, z).grass;
+		});
 		for (const selector of ["#hotbar canvas.selected", '#inventory-screen [data-slot="0"] canvas']) {
-			assert.deepEqual(await a.$eval(selector, sidePixel), stoneSide);
+			assert.deepEqual(await a.$eval(selector, sidePixel), dirtSide);
+			const fringe = await a.$eval(selector, c => Array.from(c.getContext("2d").getImageData(20, 19, 1, 1).data));
+			assert.deepEqual(fringe, [...grassTint.map(channel => Math.round(Math.round(channel * fringeBrightness / 255) * 0.68)), 255]);
+		}
+		const changedWater = await waterPixels(a);
+		for (const [i, frames] of changedWater.entries()) {
+			assert.equal(frames.length, 32);
+			assert(frames.every(pixel => pixel[3] === (i ? 166 : 156)));
+			assert.equal(new Set(frames.map(pixel => pixel[0])).size, 3);
+			assert(Math.max(...frames.map(pixel => pixel[0])) < Math.max(...originalWater[i].map(pixel => pixel[0])));
+			for (const [frame, pixel] of frames.entries()) assert.deepEqual(pixel, frames[frame % 3]);
 		}
 		assert.deepEqual(await pixels(b), defaults);
 		const sprite = await a.$eval('[data-block="apple"] canvas', c => [...c.getContext("2d").getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data]);
