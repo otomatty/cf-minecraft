@@ -1,6 +1,6 @@
-// Look across the water to the west and north, with wooded hills to the east.
+// Grassy hills with oak groves and a shore opening from north to east.
 export const titleLandscape = {
-	seed: 71n, generator: 2, x: 104.5, z: 88.5, radius: 6, yaw: 105, pitch: 12,
+	seed: 2026n, generator: 2, x: -432.5, z: 1864.5, radius: 6, yaw: 205, pitch: 12,
 	dayTime: 6000, rotationMs: 180_000, clearance: 8,
 } as const;
 

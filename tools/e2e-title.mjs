@@ -16,7 +16,7 @@ async function waitForTitleFrame(page, terrain) {
 
 async function screenshot(page, path) {
 	// Sample the canvas without the UI or the overlay gradient.
-	const hidden = await page.addStyleTag({ content: "main, .shade { visibility: hidden; }" });
+	const hidden = await page.addStyleTag({ content: "main, #user, #status, .shade { visibility: hidden; }" });
 	try {
 		return await page.screenshot({ path, encoding: "base64" });
 	} finally {
@@ -68,6 +68,8 @@ export async function testTitleBackground(browser, edge, shots, initialFixture) 
 		const errors = [];
 		page.on("pageerror", error => errors.push(String(error)));
 		const traffic = await page.createCDPSession();
+		// Keep the long install panel's scrollbar out of every screenshot.
+		await traffic.send("Emulation.setScrollbarsHidden", { hidden: true });
 		const sockets = [];
 		await traffic.send("Network.enable");
 		traffic.on("Network.webSocketCreated", ({ url }) => sockets.push(url));
