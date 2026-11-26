@@ -64,3 +64,50 @@ test("file limit precedes archive reads, and encrypted or oversized images never
 		assert.equal(decoded, false);
 	}
 });
+
+test("current Bedrock face keys take priority over legacy keys and filenames", async () => {
+	const faces = {
+		stone: "flattened_stone", dirt: "flattened_dirt", sand: "flattened_sand",
+		sandstone: "flattened_sandstone", sandstone_top: "flattened_sandstone_top",
+		sandstone_bottom: "flattened_sandstone_bottom", white_wool: "wool_colored_white", furnace_front: "furnace_front_off",
+	};
+	const texture_data = Object.fromEntries(Object.values(faces).map(key => [key, { textures: "textures/blocks/renamed" }]));
+	texture_data.stone = { textures: "textures/blocks/legacy" };
+	const pack = await load(await file([["textures/terrain_texture.json", JSON.stringify({ texture_data })],
+		["textures/blocks/renamed.png", solidPng([1, 2, 3])]]), Object.keys(faces));
+	assert.deepEqual([...pack.tiles.keys()], Object.keys(faces));
+});
+
+test("Finder metadata is ignored while a referenced dotted path stays inside the pack", async () => {
+	const atlas = { texture_data: { stone: { textures: "textures/blocks/pack.v2/stone.v2.png" },
+		dirt: { textures: "textures/blocks/../blocks/pack.v2/stone.v2" } } };
+	const pack = await load(await file([
+		["pack/textures/terrain_texture.json", JSON.stringify(atlas)],
+		["pack/textures/blocks/pack.v2/stone.v2.png", solidPng([1, 2, 3])],
+		["__MACOSX/pack/textures/blocks/._stone.v2.png", "metadata"],
+	]));
+	assert.deepEqual([...pack.tiles.keys()], ["stone"]);
+});
+
+test("torch inventory and drop sprite shares the block tile unless the pack supplies an item sprite", async () => {
+	const entries = [["textures/blocks/torch_on.png", solidPng([1, 2, 3])]];
+	const names = ["torch", "torch_item"];
+	const decode = async () => new Uint8Array(1024);
+	const block = await importTexturePack(await file(entries), names, decode);
+	assert.ok(block.tiles.has("torch"));
+	assert.equal(block.tiles.get("torch_item"), block.tiles.get("torch"));
+	assert.deepEqual([...(await load(await file(entries), ["torch_item"])).tiles.keys()], ["torch_item"]);
+	const both = await importTexturePack(await file([...entries, ["textures/items/torch.png", solidPng([6, 7, 8])]]), names, decode);
+	assert.ok(both.tiles.has("torch_item"));
+	assert.notEqual(both.tiles.get("torch_item"), both.tiles.get("torch"));
+});
+
+test("many references to one unsupported image consume its extraction budget only once", async () => {
+	// A non-square image that is not a vertical strip is skipped before decoding.
+	const wide = solidPng([1, 2, 3], { width: 2, description: "x".repeat(3_800_000) });
+	const names = ["stone", "dirt", "sand", "gravel", "obsidian", "ice", "bedrock", "glass", "coal_ore"];
+	const texture_data = Object.fromEntries(names.map(name => [name, { textures: "textures/blocks/wide" }]));
+	const pack = await load(await file([["textures/terrain_texture.json", JSON.stringify({ texture_data })],
+		["textures/blocks/wide.png", wide], ["textures/items/apple.png", solidPng([4, 5, 6])]]), [...names, "apple"]);
+	assert.deepEqual([...pack.tiles.keys()], ["apple"]);
+});

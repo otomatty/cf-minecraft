@@ -42,6 +42,14 @@ for (const meat of ["beef", "porkchop", "chicken", "mutton"]) {
 	for (const state of ["raw", "cooked"]) bindings.set(`${state}_${meat}`, [`${meat}_${state}`, `${meat}_${state}`]);
 }
 
+// Current Bedrock block-face keys that differ from our names and the older variant arrays.
+const currentBlockKeys = new Map([
+	["stone", "flattened_stone"], ["dirt", "flattened_dirt"], ["sand", "flattened_sand"],
+	["sandstone", "flattened_sandstone"], ["sandstone_top", "flattened_sandstone_top"],
+	["sandstone_bottom", "flattened_sandstone_bottom"], ["white_wool", "wool_colored_white"],
+	["furnace_front", "furnace_front_off"],
+]);
+
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -57,15 +65,18 @@ function parseAtlas(bytes: Uint8Array): Record<string, unknown> {
 
 function pngPath(name: string, atlas: Record<string, unknown>, item: boolean): string | undefined {
 	const [key, basename, index = 0] = bindings.get(name) ?? [name, name];
-	const direct = key !== name && Object.hasOwn(atlas, name);
+	const atlasKey = [item ? undefined : currentBlockKeys.get(name), name, key]
+		.find(candidate => candidate !== undefined && Object.hasOwn(atlas, candidate));
 	let path: unknown = `textures/${item ? "items" : "blocks"}/${basename}`;
-	if (direct || Object.hasOwn(atlas, key)) {
-		const entry = atlas[direct ? name : key];
-		if (!record(entry) || (!direct && index > 0 && !Array.isArray(entry.textures))) return;
-		path = Array.isArray(entry.textures) ? entry.textures[direct ? 0 : index] : entry.textures;
+	if (atlasKey !== undefined) {
+		const entry = atlas[atlasKey];
+		const variant = atlasKey === key ? index : 0;
+		if (!record(entry) || (variant > 0 && !Array.isArray(entry.textures))) return;
+		path = Array.isArray(entry.textures) ? entry.textures[variant] : entry.textures;
 		if (record(path)) path = path.path;
 	}
-	if (typeof path !== "string" || !/^textures\/(?:[\w-]+\/)*[\w-]+(?:\.png)?$/.test(path)) return;
+	if (typeof path !== "string" || !path.startsWith("textures/")) return;
+	if (path.split("/").some(part => !/^[\w.-]+$/.test(part) || part === "." || part === "..")) return;
 	return path.endsWith(".png") ? path : path + ".png";
 }
 
@@ -128,36 +139,41 @@ export async function importTexturePack(file: File, names: readonly string[], de
 			if (++count > maxEntries || expanded > maxExpanded) throw new Error("アーカイブの件数または展開サイズが上限を超えています");
 			if (entry.filename.length > 512 || /[\\:\x00-\x1f]/.test(entry.filename)) throw new Error("パック内のパスが不正です");
 			if (entry.directory || entry.symlink) continue;
+			const parts = entry.filename.split("/");
+			if (parts.includes("__MACOSX") || parts.at(-1)!.startsWith("._")) continue;
 			const match = /^(.*?)(textures\/(?:terrain_texture\.json|item_texture\.json|(?:blocks|items)\/.+\.png))$/.exec(entry.filename);
 			if (match && (!match[1] || match[1].endsWith("/"))) roots.add(match[1]);
 			if (match || entry.filename.endsWith(".png")) files.set(entry.filename, entry);
 		}
 		if (roots.size !== 1) throw new Error("ブロック・アイテム用の textures フォルダーを1つ含むパックを選んでください");
 		const [root] = roots;
-		const tiles = new Map<string, Uint8Array>(), decoded = new Map<string, Uint8Array>();
+		const tiles = new Map<string, Uint8Array>(), decoded = new Map<string, Uint8Array | undefined>();
+		const wanted = new Set(names);
+		if (wanted.has("torch_item")) wanted.add("torch");
 		let selected = 0;
 		for (const item of [false, true]) {
 			const index = files.get(root + `textures/${item ? "item" : "terrain"}_texture.json`);
 			const atlas = index ? parseAtlas(await readEntry(index, 2 * MiB)) : {};
-			for (const name of new Set(names)) {
+			for (const name of wanted) {
 				if (hasItemTexture(name) !== item) continue;
 				const path = pngPath(name, atlas, item);
 				if (!path) continue;
 				const entry = files.get(root + path);
 				if (!entry) continue;
-				let pixels = decoded.get(path);
-				if (!pixels) {
+				if (!decoded.has(path)) {
 					selected += entry.uncompressedSize;
 					if (selected > maxSelected) throw new Error("使用する PNG の合計が 32 MiB を超えています");
 					const bytes = await readEntry(entry, 4 * MiB);
 					const width = pngTileWidth(bytes);
-					if (!width) continue;
-					pixels = await decode(bytes, width);
-					decoded.set(path, pixels);
+					decoded.set(path, width ? await decode(bytes, width) : undefined);
 				}
-				tiles.set(name, pixels);
+				const pixels = decoded.get(path);
+				if (pixels) tiles.set(name, pixels);
 			}
 		}
+		const torch = tiles.get("torch");
+		if (torch && wanted.has("torch_item") && !tiles.has("torch_item")) tiles.set("torch_item", torch);
+		if (!names.includes("torch")) tiles.delete("torch");
 		if (!tiles.size) throw new Error("対応するブロック・アイテムの PNG が見つかりません");
 		return { name: file.name.slice(0, 255), tiles };
 	} finally { await zip.close(); }
