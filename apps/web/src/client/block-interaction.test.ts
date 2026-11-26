@@ -253,12 +253,16 @@ test("biome blocks expose picker entries and pack textures, with translucent ice
 		assert.equal(state, 40 + index);
 		assert.equal(registry[state].model, "cube");
 		assert.equal(registry[state].first, state);
-		const pixels = packTile(name);
-		assert.deepEqual(pixels, packTile(name));
-		assert.equal(pixels.length, 16 * 16 * 4);
-		for (let i = 0; i < pixels.length; i += 4) {
-			assert.ok(pixels[i + 1] > 0, "no missing-texture magenta/black");
-			assert.ok(name === "ice" ? pixels[i+3] > 0 && pixels[i+3] < 255 : pixels[i+3] === 255);
+		const expectedFaces = name === "sandstone" ? ["sandstone_bottom", "sandstone_top", ...Array(4).fill(name)] : Array(6).fill(name);
+		assert.equal(registry[state].faces.length, expectedFaces.length);
+		for (const [face, texture] of registry[state].faces.entries()) {
+			const pixels = packTile(texture);
+			assert.deepEqual(pixels, packTile(expectedFaces[face]), `${name} face ${face}`);
+			assert.equal(pixels.length, 16 * 16 * 4);
+			for (let i = 0; i < pixels.length; i += 4) {
+				assert.ok(pixels[i + 1] > 0, "no missing-texture magenta/black");
+				assert.ok(name === "ice" ? pixels[i + 3] > 0 && pixels[i + 3] < 255 : pixels[i + 3] === 255);
+			}
 		}
 	}
 });

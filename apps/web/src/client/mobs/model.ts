@@ -70,7 +70,7 @@ function validUv(uv: unknown): uv is MobCube["uv"] {
 	if (vec2(uv)) return true;
 	return record(uv) && Object.keys(uv).length > 0 && Object.entries(uv).every(([face, rect]) =>
 		faceNames.some(name => name === face) && record(rect) && vec2(rect.uv) &&
-		(rect.uv_size === undefined || vec2(rect.uv_size)) && rect.uv_rotation === undefined &&
+		(rect.uv_size === undefined || vec2(rect.uv_size)) && (rect.uv_rotation === undefined || rect.uv_rotation === 0) &&
 		rect.material_instance === undefined);
 }
 
@@ -123,7 +123,7 @@ function orderedBones(value: unknown, width: number, height: number): MobBone[] 
 	const pending = new Map(bones.map(bone => [bone.name, bone]));
 	if (pending.size !== value.length) return;
 	const ordered = new Map<string, MobBone>();
-	let cubes = 0, hasVolume = false;
+	let cubes = 0, hasDrawableFace = false;
 	while (pending.size) {
 		const before = pending.size;
 		for (const [name, bone] of pending) {
@@ -132,13 +132,14 @@ function orderedBones(value: unknown, width: number, height: number): MobBone[] 
 				const inflate = cube.inflate ?? bone.inflate ?? 0;
 				const sizes = cube.size.map(size => size + 2 * inflate);
 				if (++cubes > 128 || sizes.some(size => size < 0)) return;
-				hasVolume ||= sizes[1] > 0 || cube.rotation !== undefined ||
-					bone.rotation !== undefined || bone.bind_pose_rotation !== undefined;
-				for (const rect of cubeFaces(cube, bone.mirror)) {
+				const [x, y, z] = sizes;
+				const faceAreas = [z * y, x * y, z * y, x * y, x * z, x * z];
+				for (const [face, rect] of cubeFaces(cube, bone.mirror).entries()) {
 					if (!rect) continue;
 					const [u, v, w, h] = rect;
 					if (u < 0 || v < 0 || u > width || v > height ||
 						u + w < 0 || v + h < 0 || u + w > width || v + h > height) return;
+					hasDrawableFace ||= faceAreas[face] > 0;
 				}
 			}
 			ordered.set(name, bone);
@@ -146,7 +147,7 @@ function orderedBones(value: unknown, width: number, height: number): MobBone[] 
 		}
 		if (pending.size === before) return;
 	}
-	if (hasVolume) return [...ordered.values()];
+	if (hasDrawableFace) return [...ordered.values()];
 }
 
 export function validMobAsset(value: unknown): value is MobAsset {

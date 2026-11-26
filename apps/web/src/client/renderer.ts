@@ -194,7 +194,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 		}
 		if (shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
 	} else if (entityPass == 3u) {
-		if (pixel.a == 0.0) { discard; }
 		color *= shade;
 	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
@@ -562,6 +561,8 @@ export class Renderer {
 				return [start, frames.length];
 			};
 			this.flame = appendFrames("fire");
+			// With no frames, flameVertices samples the first layer directly.
+			if (!this.flame[1]) effects.push(missingTile);
 			this.explosion = appendFrames("explosion");
 			this.smoke = appendFrames("smoke");
 			const nextEffects = device.createTexture({
@@ -686,17 +687,17 @@ export class Renderer {
 			},
 			fragment: {
 				module: terrainModule, entryPoint: "fs",
-				constants: { renderLayer: kind === "cracks" || kind === "flames" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
+				constants: { renderLayer: kind === "cracks" ? 2 : 1, entityPass: kind === "flames" ? 3 : kind === "mobs" ? 2 : 1 },
 				targets: [{
 					format: this.format,
-					...(kind === "cracks" || kind === "flames" ? { blend: {
+					...(kind === "cracks" ? { blend: {
 						color: { srcFactor: "src-alpha" as const, dstFactor: "one-minus-src-alpha" as const },
 						alpha: { srcFactor: "one" as const, dstFactor: "one-minus-src-alpha" as const },
 					} } : {}),
 				}],
 			},
 			primitive: { topology: "triangle-list", cullMode: "back", frontFace: "ccw" },
-			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks" && kind !== "flames", depthCompare: "less" },
+			depthStencil: { format: "depth24plus", depthWriteEnabled: kind !== "cracks", depthCompare: "less" },
 		});
 		this.items = entityPipeline("drops");
 		this.cracks = entityPipeline("cracks");

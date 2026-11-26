@@ -226,6 +226,9 @@ function start(): void {
 	window.addEventListener("pageshow", event => {
 		if (!event.persisted) return;
 		pack = undefined;
+		worlds = undefined;
+		selected = undefined;
+		worldError = "";
 		void initialize();
 		void startBackground();
 	});

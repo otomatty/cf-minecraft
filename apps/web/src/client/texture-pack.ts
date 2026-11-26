@@ -1,7 +1,7 @@
 import { BlobReader, ZipReader, type FileEntry } from "@zip.js/zip.js/lib/zip-core-custom.js";
 import { entityNames, type EntityAssetKey } from "./mobs/catalog.ts";
 import { geometryDefinitions, imageDimensions, record, resolveGeometry, vector, type GeometryDefinition, type MobAsset, type NativeImage } from "./mobs/model.ts";
-import { TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
+import { missingTile, TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
 
 const MiB = 1024 ** 2;
 const maxArchive = 256 * MiB, maxExpanded = 512 * MiB, maxSelected = 32 * MiB;
@@ -191,8 +191,10 @@ function prepareArt(path: string, pixels: Uint8Array): Uint8Array {
 function decodeTga(bytes: Uint8Array): NativeImage | undefined {
 	if (bytes.length < 18) return;
 	const type = bytes[2], descriptor = bytes[17];
+	const alphaBits = descriptor & 0x0f;
 	// Reject right-to-left and interleaved images. Bit 5 marks the vertical origin.
 	if (bytes[1] !== 0 || (type !== 2 && type !== 10) || bytes[16] !== 32 || (descriptor & 0xd0)) return;
+	if (alphaBits !== 0 && alphaBits !== 8) return;
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const width = view.getUint16(12, true), height = view.getUint16(14, true);
 	if (!imageDimensions(width, height)) return;
@@ -213,7 +215,7 @@ function decodeTga(bytes: Uint8Array): NativeImage | undefined {
 			pixels[dest] = bytes[p + 2];
 			pixels[dest + 1] = bytes[p + 1];
 			pixels[dest + 2] = bytes[p];
-			pixels[dest + 3] = bytes[p + 3];
+			pixels[dest + 3] = alphaBits === 8 ? bytes[p + 3] : 255;
 		}
 		source = end;
 	}
@@ -523,14 +525,14 @@ export async function importTexturePack(
 		const torch = tiles.get("torch");
 		if (torch && wanted.has("torch_item") && !tiles.has("torch_item")) tiles.set("torch_item", torch);
 		const fringe = tiles.get("grass_block_side"), dirt = tiles.get("dirt");
-		if (fringe && dirt) {
-			const side = dirt.slice();
+		if (fringe) {
+			const side = (dirt ?? missingTile).slice();
 			for (let i = 0; i < side.length; i += 4) {
 				if (fringe[i + 3]) side.fill(0, i, i + 3);
 				side[i + 3] = fringe[i + 3] ? fringe[i] : 0;
 			}
 			tiles.set("grass_block_side", side);
-		} else tiles.delete("grass_block_side");
+		}
 		if (!names.includes("torch")) tiles.delete("torch");
 		if (!names.includes("dirt")) tiles.delete("dirt");
 		if (!tiles.size) {

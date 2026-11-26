@@ -323,6 +323,8 @@ test("burning mobs draw two hitbox-sized planes with independently staggered cut
 		return [data[6], data[12 * 9 + 6]];
 	});
 	assert.deepEqual(layers, [[100, 101], [101, 102], [102, 100], [100, 101]]);
+	const fallback = flameVertices([zombie, ...burning], camera, 90, 1, 0);
+	assert.deepEqual(fallback, vertices.map((value, index) => index % 9 === 6 ? 1 : value));
 	assert.equal(new Set(frames.map(frame => frame.join(","))).size, 3);
 	for (const frame of frames) {
 		assert.equal(frame.length, 16 * 16 * 4);

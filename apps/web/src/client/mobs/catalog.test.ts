@@ -84,6 +84,34 @@ test("box UV mirror swaps sides and reverses U, with cube mirror taking preceden
 	assert.deepEqual(cubeFaces({ ...cube, mirror: false }, true), cubeFaces(cube));
 });
 
+test("explicit zero UV rotation is equivalent to omission and other rotations stay unsupported", () => {
+	const { texture } = fixture.entities.get("cow")!;
+	const resolve = (uv_rotation?: number) => resolveGeometry("geometry.test", new Map([["geometry.test", {
+		width: 16, height: 16,
+		bones: [{ name: "body", cubes: [{ origin: [0, 0, 0], size: [2, 2, 2], uv: { north: { uv: [0, 0], uv_rotation } } }] }],
+	}]]), texture);
+	const omitted = resolve(), zero = resolve(0);
+	assert.ok(omitted && zero);
+	assert.deepEqual(cubeFaces(zero.bones[0].cubes![0]), cubeFaces(omitted.bones[0].cubes![0]));
+	for (const rotation of [90, 180, 270, 360]) assert.equal(resolve(rotation), undefined);
+});
+
+test("geometry requires a defined face with positive area after inflation", () => {
+	const { texture } = fixture.entities.get("cow")!;
+	const resolve = (size: MobCube["size"], face: string, inflate = 0) =>
+		resolveGeometry("geometry.test", new Map([["geometry.test", {
+			width: 16, height: 16,
+			bones: [{ name: "body", rotation: [90, 0, 0], inflate,
+				cubes: [{ origin: [0, 0, 0], size, uv: { [face]: { uv: [0, 0], uv_size: [2, 2] } } }] }],
+		}]]), texture);
+	assert.equal(resolve([0, 2, 2], "north"), undefined);
+	assert.equal(resolve([2, 2, 4], "north", -1), undefined);
+	assert.ok(resolve([0, 2, 2], "north", 1));
+	assert.ok(resolve([2, 2, 0], "north"));
+	assert.ok(resolve([0, 2, 2], "west"));
+	assert.ok(resolve([2, 0, 2], "up"));
+});
+
 test("legacy inheritance retains base and added cubes and rejects a missing or cyclic base", () => {
 	const { bones: baseBones, texture } = fixture.entities.get("sheep/sheared")!;
 	const { bones } = fixture.entities.get("sheep")!;

@@ -161,20 +161,18 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			["broken.zip", "invalid archive", /.+/],
 			[metadataFilename, await zipBytes(packEntries()), new RegExp(missingImages)],
 		];
-		await Promise.all([
-			writeFile(join(dir, fixtureFilename), initialFixture),
-			writeFile(join(dir, partialFilename), await fixturePack({ omit: [
-				"resource_pack/textures/blocks/stone.png", "resource_pack/textures/items/apple.png",
-				"resource_pack/textures/environment/clouds.png", "resource_pack/textures/environment/destroy_stage_4.png",
-				"resource_pack/textures/ui/heart.png", "resource_pack/textures/entity/fixture_cow.png",
-				"resource_pack/textures/blocks/fire_0.png",
-			] })),
-			writeFile(join(dir, name), await fixturePack({ artVariant: true, colors: {
-				stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
-				water: [120, 120, 120], water_flow: [130, 130, 130],
-			} })),
-			...rejected.map(([filename, data]) => writeFile(join(dir, filename), data)),
-		]);
+		await writeFile(join(dir, fixtureFilename), initialFixture);
+		await writeFile(join(dir, partialFilename), await fixturePack({ omit: [
+			"resource_pack/textures/blocks/stone.png", "resource_pack/textures/items/apple.png",
+			"resource_pack/textures/environment/clouds.png", "resource_pack/textures/environment/destroy_stage_4.png",
+			"resource_pack/textures/ui/heart.png", "resource_pack/textures/entity/fixture_cow.png",
+			"resource_pack/textures/blocks/fire_0.png",
+		] }));
+		await writeFile(join(dir, name), await fixturePack({ artVariant: true, colors: {
+			stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
+			water: [120, 120, 120], water_flow: [130, 130, 130],
+		} }));
+		for (const [filename, data] of rejected) await writeFile(join(dir, filename), data);
 		const world = "e2e-pack-" + Date.now().toString(36);
 		const url = `${edge}/play.html?server=ws&view=2&world=${world}`;
 		async function player(checkInstall = false) {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { ChunkGenCore } from "../shared/server-core.ts";
 import { ClientCore, MIN_Y, S2C } from "./client-core.ts";
 import { titleCameraHeight, titleChunks, titleLandscape, titleYaw } from "./title-landscape.ts";
@@ -168,6 +170,98 @@ test("title requires a session, then an installed pack", () => {
 		assert.equal(titleScreen(me, false), "textures");
 		assert.equal(titleScreen(me, true), "menu");
 	}
+});
+
+test("a BFCache restore reloads the world list, selection and errors for the current user", async (t) => {
+	class Element {
+		children: Element[] = [];
+		textContent = "";
+		dataset: Record<string, string> = {};
+		className = "";
+		classList = { add() {}, remove() {} };
+		style = {};
+		onclick?: () => void;
+		append(...children: Element[]) { this.children.push(...children); }
+		replaceChildren(...children: Element[]) { this.children = children; }
+		setAttribute() {}
+		focus() {}
+		getBoundingClientRect() { return { top: 0, bottom: 0 }; }
+		find(predicate: (element: Element) => boolean): Element | undefined {
+			return this.children.find(predicate) ?? this.children.map(child => child.find(predicate)).find(Boolean);
+		}
+		querySelector(selector: string) {
+			return this.find(child => selector === ".badge" ? child.className === "badge" : child.dataset.role === "multiplayer");
+		}
+	}
+	const panel = new Element(), status = new Element(), user = new Element();
+	const window = Object.assign(new EventTarget(), { innerHeight: 100 });
+	const globals = {
+		window, location: { search: "" }, document: {
+			getElementById: (id: string) => ({ panel, status, user })[id],
+			querySelector: () => new Element(), createElement: () => new Element(),
+		},
+		requestAnimationFrame: queueMicrotask,
+	};
+	Object.assign(globalThis, globals);
+	t.after(() => { for (const name of Object.keys(globals)) Reflect.deleteProperty(globalThis, name); });
+	const pack = `({version: "1.26.60", tiles: new Map(), art: new Map(), entities: new Map(), effects: new Map()})`;
+	const modules = new Map([
+		["./texture-pack-settings.ts", `export const loadInstalledPack = async () => ${pack}; export const installPack = () => {};`],
+		["./client-core.ts", "export const ClientCore = { load() {} }; export const gameTextureLayout = () => ({ names: [] });"],
+		["../wasm/client.wasm?url", "export default '';"],
+		["./title-background.ts", "export const createTitleBackground = async () => undefined;"],
+	]);
+	const title = new URL("./title.ts", import.meta.url);
+	const hooks = registerHooks({ resolve(specifier, context, next) {
+		const source = context.parentURL === title.href && modules.get(specifier);
+		return source ? { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true } : next(specifier, context);
+	} });
+	t.after(() => hooks.deregister());
+	const world = (name: string, role: string) => ({ name, role, owner: false, gameMode: "survival" });
+	let username = "First", requests = 0;
+	let reply: (response: Response) => void;
+	t.mock.method(globalThis, "fetch", (path: string) => {
+		if (path === "/api/me") return Promise.resolve(Response.json({ user: { name: username } }));
+		assert.equal(path, "/api/worlds");
+		requests++;
+		return new Promise<Response>(resolve => { reply = resolve; });
+	});
+	const click = (label: string) => panel.find(node => node.textContent === label)!.onclick!();
+	const restore = async (persisted: boolean) => {
+		window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted }));
+		await setImmediate();
+	};
+	await import(title.href);
+	await setImmediate();
+	reply!(Response.json({ worlds: [world("old-private", "operator"), world("shared", "operator")] }));
+	await setImmediate();
+	click("マルチプレイ");
+	panel.find(node => node.className.includes("world-card") && !!node.find(child => child.textContent === "shared"))!.onclick!();
+	assert.ok(panel.find(node => node.textContent === "メンバー"));
+	await restore(false);
+	assert.equal(requests, 1);
+
+	username = "Second";
+	await restore(true);
+	assert.equal(requests, 2);
+	click("マルチプレイ");
+	assert.equal(panel.find(node => ["old-private", "shared", "メンバー"].includes(node.textContent)), undefined);
+	reply!(Response.json({ worlds: [world("new-private", "player"), world("shared", "player")] }));
+	await setImmediate();
+	assert.equal(panel.find(node => node.className === "world-detail")?.find(node => node.textContent === "new-private")?.textContent, "new-private");
+	assert.equal(panel.find(node => node.textContent === "メンバー"), undefined);
+
+	await restore(true);
+	reply!(Response.json({}, { status: 500 }));
+	await setImmediate();
+	click("マルチプレイ");
+	assert.ok(panel.find(node => node.textContent.includes("(500)")));
+	await restore(true);
+	click("マルチプレイ");
+	assert.equal(panel.find(node => node.textContent.includes("(500)")), undefined);
+	assert.ok(panel.find(node => node.textContent === "読み込み中…"));
+	reply!(Response.json({ worlds: [] }));
+	await setImmediate();
 });
 
 test("the title paint wait can finish without an animation frame", async () => {

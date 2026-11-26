@@ -200,7 +200,6 @@ export function mobInFrustum({ kind, position: [x, y, z] }: RenderMob, eye: read
 
 /** Cross two cutout sprites through the hitbox, leaving the upper body visible between tongues. */
 export function flameVertices(mobs: readonly RenderMob[], camera: readonly number[], timeMs: number, firstFrame: number, frameCount: number): Float32Array {
-	if (!frameCount) return new Float32Array();
 	const out: number[] = [];
 	const frame = Math.floor(timeMs / 90);
 	for (const { burning, kind, position } of mobs) {
@@ -213,7 +212,7 @@ export function flameVertices(mobs: readonly RenderMob[], camera: readonly numbe
 			writeSprite(out, {
 				corners: [[x - half, y, z - dz], [x + half, y, z + dz],
 					[x + half, y + height, z + dz], [x - half, y + height, z - dz]],
-				texture: firstFrame + (frame + (direction === 1 ? 1 : 0)) % frameCount,
+				texture: firstFrame + (frameCount ? (frame + (direction === 1 ? 1 : 0)) % frameCount : 0),
 				light: [0, 0], // The flame pass uses the sprite color directly.
 			});
 		}

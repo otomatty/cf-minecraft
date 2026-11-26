@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { deflateSync } from "node:zlib";
 import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixtureEntityEntries, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
 import { crackPaths, importTexturePack, isPackVersion, missingEntityArt, moonSheetOrder, packArtDimensions, packMissingNotice, pngTileWidth } from "./texture-pack.ts";
 import { installedPack } from "./texture-pack-settings.ts";
 import { ClientCore, gameTextureLayout } from "./client-core.ts";
 import { missingTile, textureIconPixels } from "./textures.ts";
 import { preparePackTextures } from "./renderer.ts";
+import { crc32 } from "./world-archive.ts";
 
 const file = async (entries = testEntries, name = "local.zip") => new File([await zipBytes(entries)], name);
 const versioned = (entries, prefix = "") => [
@@ -21,6 +29,68 @@ const load = (pack: File, names?: string[], spriteStart?: number) => importTextu
 		assert.equal(width, 1);
 		return tile;
 	});
+const runNode = promisify(execFile);
+
+test("official pack checker validates PNG chunk types and full tile payloads", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "cf-check-pack-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const checker = fileURLToPath(new URL("../../../../tools/check-official-pack.mjs", import.meta.url));
+	const path = join(dir, "bedrock-samples-v1.26.60.5-full.zip");
+	const logPath = join(dir, "checker.log");
+	const check = async (entries: typeof testEntries) => {
+		await writeFile(path, await zipBytes(entries));
+		const log = await open(logPath, "w");
+		try {
+			const child = spawn(process.execPath, [checker, path], { stdio: ["ignore", log.fd, log.fd] });
+			const [code] = await once(child, "close");
+			return { code, output: await readFile(logPath, "utf8") };
+		} finally { await log.close(); }
+	};
+	const chunk = (type: string, data: Buffer = Buffer.alloc(0)) => {
+		const result = Buffer.alloc(12 + data.length);
+		result.writeUInt32BE(data.length);
+		result.write(type, 4);
+		data.copy(result, 8);
+		result.writeUInt32BE(crc32(result.subarray(4, -4)), result.length - 4);
+		return result;
+	};
+	const imagePath = "sample/resource_pack/textures/";
+	const png = solidPng([1, 2, 3]);
+	const withChunk = (kind: string) => Buffer.concat([png.subarray(0, 33), chunk(kind), png.subarray(33)]);
+	const ancillary = await check([...testEntries, [imagePath + "blocks/dirt.png", withChunk("vpAg")]]);
+	assert.equal(ancillary.code, 1); // The fixture is a partial pack.
+	assert.match(ancillary.output, /^Resolved: 4\//m);
+	assert.deepEqual(await check([...testEntries, [imagePath + "blocks/dirt.png", withChunk("VpAg")]]), {
+		code: 1, output: "Unknown critical PNG chunk: VpAg\n",
+	});
+	const stripPath = imagePath + "blocks/water_still_grey.png";
+	const strip = solidPng([4, 5, 6], { width: 16, height: 48 });
+	const validStrip = await check([...testEntries, [stripPath, strip]]);
+	assert.equal(validStrip.code, 1);
+	assert.match(validStrip.output, /^Resolved: 4\//m);
+	assert.doesNotMatch(validStrip.output, /^Unresolved:.*\bwater\b/m);
+	const tileWithData = (source: Buffer, data: Buffer) => Buffer.concat([
+		source.subarray(0, 33), chunk("IDAT", data), source.subarray(-12),
+	]);
+	const invalidApple = testEntries.map(([name, data]) => [name, name.endsWith("items/apple.png") ? tileWithData(png, Buffer.of(0)) : data]);
+	const badItem = await check(invalidApple);
+	assert.equal(badItem.code, 1);
+	assert.match(badItem.output, /^unexpected end of file\n$/);
+	const shortStrip = tileWithData(strip, deflateSync(Buffer.alloc(16 * (1 + 16 * 3))));
+	assert.deepEqual(await check([...testEntries, [stripPath, shortStrip]]), { code: 1, output: "Invalid PNG pixel data\n" });
+});
+
+test("texture-pack E2E fixture write failures are handled before the temporary directory is removed", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "cf-pack-write-test-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const e2e = new URL("../../../../tools/e2e-texture-packs.mjs", import.meta.url);
+	await runNode(process.execPath, ["--unhandled-rejections=strict", "--input-type=module", "--eval", `
+		import assert from "node:assert/strict";
+		import { testTexturePacks } from ${JSON.stringify(e2e.href)};
+		await assert.rejects(testTexturePacks(null, "", "", undefined), { code: "ERR_INVALID_ARG_TYPE" });
+	`], { env: { ...process.env, TMPDIR: dir } });
+	assert.deepEqual(await readdir(dir), []);
+});
 
 test("wrapped pack, JSON comments, path objects and partial fallback", async () => {
 	const pack = await load(await file([...testEntries, ["sample/scripts/init.js", "throw 1"]]));
@@ -205,7 +275,7 @@ test("TGA pixels decode in atlas order with both vertical origins and RLE packet
 
 test("unsupported or malformed TGAs are skipped and a matching PNG takes priority", async () => {
 	const image = tga(1, 1, true, [1, 2, 3, 255]);
-	for (const [offset, value] of [[1, 1], [2, 3], [16, 24], [17, 0x38], [13, 3], [2, 10]]) {
+	for (const [offset, value] of [[1, 1], [2, 3], [16, 24], [17, 0x38], [17, 0x21], [17, 0x29], [13, 3], [2, 10]]) {
 		const bad = Buffer.from(image);
 		bad[offset] = value;
 		const pack = await load(await file(versioned([
@@ -221,7 +291,15 @@ test("unsupported or malformed TGAs are skipped and a matching PNG takes priorit
 	assert.equal(pack.tiles.get("oak_leaves"), tile);
 });
 
-test("grass side uses pack soil and a tint mask and requires both images", async () => {
+test("32-bit TGA pixels without alpha attributes are opaque", async () => {
+	for (const image of [tga(1, 1, true, [3, 2, 1, 0]), tga(1, 1, true, [0x80, 3, 2, 1, 0], 10)]) {
+		image[17] = 0x20;
+		const { tiles } = await load(await file(versioned([["textures/blocks/leaves_oak.tga", image]])), ["oak_leaves"]);
+		assert.deepEqual(pixel(tiles.get("oak_leaves")!, 0, 0), [1, 2, 3, 255]);
+	}
+});
+
+test("grass side keeps its tint mask with either pack soil or missing soil", async () => {
 	const entries = [
 		["textures/blocks/grass_side.tga", tga(2, 2, true, [200, 200, 200, 255, 20, 20, 20, 0, 200, 200, 200, 255, 20, 20, 20, 0])],
 		["textures/blocks/dirt.png", solidPng([1, 2, 3])],
@@ -238,10 +316,17 @@ test("grass side uses pack soil and a tint mask and requires both images", async
 	assert.deepEqual(Array.from(icon.subarray(0, 4)), [50, 100, 151, 255]);
 	assert.deepEqual(Array.from(icon.subarray(60, 64)), [1, 2, 3, 255]);
 	assert.deepEqual(pixel(soil, 0, 0), [1, 2, 3, 255]);
-	for (const missing of [0, 1]) {
-		const incomplete = await load(await file(versioned(entries.filter((_, i) => i !== missing))), ["grass_block_side", "apple"], 1);
-		assert.deepEqual([...incomplete.tiles.keys()], ["apple"]);
-	}
+	const withoutGrass = await load(await file(versioned(entries.slice(1))), ["grass_block_side", "apple"], 1);
+	assert.deepEqual([...withoutGrass.tiles.keys()], ["apple"]);
+	const names = ["grass_block_side", "dirt", "apple"];
+	const withoutDirt = await load(await file(versioned([entries[0], entries[2]])), names, 2);
+	const fallback = withoutDirt.tiles.get("grass_block_side")!;
+	assert.deepEqual(pixel(fallback, 0, 0), [0, 0, 0, 200]);
+	assert.deepEqual(pixel(fallback, 8, 0), [248, 0, 248, 0]);
+	assert.deepEqual(pixel(fallback, 8, 8), [0, 0, 0, 0]);
+	assert.equal(withoutDirt.tiles.has("dirt"), false);
+	assert.equal(packMissingNotice(withoutDirt, names), packMissingNotice(withoutDirt, ["dirt", "apple"]));
+	assert.notEqual(packMissingNotice(withoutDirt, names), packMissingNotice(withoutDirt, ["grass_block_side", "apple"]));
 });
 
 test("water decodes each square frame up to 32 and uses fixed alpha", async () => {
@@ -404,12 +489,13 @@ test("renderer prepares shared markers and skips unavailable art, including with
 		.map(([path, png]) => ["sample/" + path, png])].filter(([path]) => !path.endsWith("items/apple.png"));
 	const pack = await importTexturePack(await file(entries), { names, spriteStart: 3 }, undefined, async () => tile, decodeFixtureArt);
 	const partial = preparePackTextures(names, pack);
-	assert.deepEqual(partial.tiles, [tile, missingTile, missingTile, missingTile]);
+	assert.deepEqual(partial.tiles, [tile, pack.tiles.get("grass_block_side"), missingTile, missingTile]);
+	assert.deepEqual(pixel(partial.tiles[1], 8, 0), [248, 0, 248, 0]);
 	assert.equal(partial.cracks[4], pack.art.get(stage));
 	assert.equal(partial.cracks.filter(Boolean).length, 1);
 	assert.equal(partial.sun, pack.art.get(sunPath));
 	assert.deepEqual([partial.moon, partial.clouds], [undefined, undefined]);
-	assert.equal(packMissingNotice(pack, names), "この版のパックに無い画像が 34 件あります");
+	assert.equal(packMissingNotice(pack, names), "この版のパックに無い画像が 33 件あります");
 });
 
 test("missing or unsupported entity definitions and particle UVs are counted once per target", async () => {
@@ -434,6 +520,17 @@ test("missing or unsupported entity definitions and particle UVs are counted onc
 		["sample/" + path, data])]), blocksOnly(["stone"]), undefined, async () => tile, decodeFixtureArt);
 	assert.equal(corrupt.entities.size, 0);
 	assert.ok(corrupt.tiles.has("stone"));
+	for (const [size, missing] of [[[0, 2, 2], true], [[2, 2, 0], false]] as const) {
+		const geometry = entries.map(([path, data]) => {
+			if (!path.endsWith(".geo.json")) return ["sample/" + path, data];
+			const model = JSON.parse(String(data));
+			model["minecraft:geometry"][0].bones = [{ name: "body", cubes: [{ origin: [0, 0, 0], size,
+				uv: { north: { uv: [0, 0], uv_size: [2, 2] } } }] }];
+			return ["sample/" + path, JSON.stringify(model)];
+		});
+		const partial = await importTexturePack(await file([...testEntries, ...geometry]), blocksOnly(["stone"]), undefined, async () => tile, decodeFixtureArt);
+		assert.equal(missingEntityArt(partial).includes("cow"), missing);
+	}
 
 	const stored = structuredClone(pack);
 	stored.entities.get("pig")!.bones[1].parent = "absent";

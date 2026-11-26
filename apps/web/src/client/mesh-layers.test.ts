@@ -8,7 +8,7 @@ import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { iconTintChanged } from "./hotbar.ts";
 import type { CellTint } from "./tint-map.ts";
 import { ClientCore, gameTextureLayout } from "./client-core.ts";
-import { filterVisibleSections, outlineBox, preparePackTextures, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { filterVisibleSections, outlineBox, preparePackTextures, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent, Renderer } from "./renderer.ts";
 import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
 
 const fixture = await decodedFixturePack();
@@ -21,6 +21,55 @@ const packTile = (name: string): Uint8Array => {
 	assert.ok(tile, name);
 	return tile;
 };
+
+test("fire and explosion cutouts write depth before translucent terrain can blend", async (t) => {
+	const pipelines: GPURenderPipelineDescriptor[] = [];
+	const uploads = new Map<object, Map<number, Uint8Array>>();
+	const noop = () => {};
+	const device = {
+		lost: new Promise(() => {}), addEventListener: noop,
+		createBuffer: noop, createSampler: noop, createBindGroupLayout: noop, createPipelineLayout: noop,
+		createShaderModule: ({ code }: GPUShaderModuleDescriptor) => code,
+		createTexture: () => ({ createView: () => ({}), destroy: noop }),
+		createRenderPipeline: (descriptor: GPURenderPipelineDescriptor) => {
+			pipelines.push(descriptor);
+			return { getBindGroupLayout: noop };
+		},
+		createBindGroup: (descriptor: GPUBindGroupDescriptor) => descriptor,
+		queue: { writeBuffer: noop, writeTexture: ({ texture, origin }: GPUTexelCopyTextureInfo, pixels: Uint8Array) => {
+			if (!Array.isArray(origin)) return;
+			if (!uploads.has(texture)) uploads.set(texture, new Map());
+			uploads.get(texture)!.set(origin[2], pixels);
+		} },
+	};
+	const globals = {
+		GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4, VERTEX: 8, INDEX: 16 },
+		GPUTextureUsage: { TEXTURE_BINDING: 1, COPY_DST: 2 },
+		GPUShaderStage: { VERTEX: 1, FRAGMENT: 2 },
+	};
+	Object.assign(globalThis, globals);
+	Object.defineProperty(navigator, "gpu", { configurable: true, value: {
+		getPreferredCanvasFormat: () => "rgba8unorm",
+		requestAdapter: async () => ({ info: {}, requestDevice: async () => device }),
+	} });
+	t.after(() => {
+		for (const name of Object.keys(globals)) Reflect.deleteProperty(globalThis, name);
+		Reflect.deleteProperty(navigator, "gpu");
+	});
+	const renderer = await Renderer.create({ getContext: () => ({ configure: noop }) } as unknown as HTMLCanvasElement,
+		coreLayout, null!);
+	const effects = pipelines.find(pipeline => pipeline.fragment?.constants?.entityPass === 3)!;
+	assert.equal(effects.fragment!.constants!.renderLayer, 1);
+	assert.equal([...effects.fragment!.targets][0]!.blend, undefined);
+	assert.equal(effects.depthStencil?.depthWriteEnabled, true);
+	assert.match(String(effects.fragment!.module), /renderLayer == 1u.*pixel\.a < 0\.5.*discard/);
+	const water = pipelines.find(pipeline => pipeline.fragment?.constants?.renderLayer === 2 && pipeline.vertex.entryPoint === "vs")!;
+	assert.equal(water.depthStencil?.depthCompare, "less");
+	assert.equal([...water.fragment!.targets][0]!.blend?.color.srcFactor, "src-alpha");
+	const effectAtlas = [...uploads.values()].find(layers => layers.get(1) === missingTile);
+	assert.ok(effectAtlas);
+	assert.deepEqual(renderer["flame"], [1, 0]);
+});
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);

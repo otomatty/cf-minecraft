@@ -8,7 +8,7 @@ import { entityNames } from "../apps/web/src/client/mobs/catalog.ts";
 import { TEX_SIZE } from "../apps/web/src/client/textures.ts";
 import { crc32 } from "../apps/web/src/client/world-archive.ts";
 
-// Validate native PNG payloads without the browser's image decoder.
+// Validate PNG payloads without the browser's image decoder.
 function checkPng(bytes, width, height) {
 	const png = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const depth = png[24], color = png[25], interlace = png[28];
@@ -20,11 +20,12 @@ function checkPng(bytes, width, height) {
 	let palette = false, complete = false;
 	for (let at = 8; at < png.length;) {
 		const length = png.readUInt32BE(at), end = at + 8 + length;
-		const kind = png.toString("ascii", at + 4, at + 8);
+		const kind = png.toString("latin1", at + 4, at + 8);
 		if (crc32(png.subarray(at + 4, end)) !== png.readUInt32BE(end)) throw new Error("Invalid PNG CRC");
 		if (kind === "PLTE") palette = length > 0 && length % 3 === 0 && length <= 768;
-		if (kind === "IDAT") data.push(png.subarray(at + 8, end));
-		if (kind === "IEND") complete = length === 0 && end + 4 === png.length;
+		else if (kind === "IDAT") data.push(png.subarray(at + 8, end));
+		else if (kind === "IEND") complete = length === 0 && end + 4 === png.length;
+		else if (kind !== "IHDR" && /^[A-Z]/.test(kind)) throw new Error(`Unknown critical PNG chunk: ${kind}`);
 		at = end + 4;
 	}
 	if (!complete || !data.length || (color === 3 && !palette)) throw new Error("Incomplete PNG");
@@ -43,6 +44,18 @@ function checkPng(bytes, width, height) {
 		offset += row;
 	}
 	if (filtered.length !== size) throw new Error("Invalid PNG pixel data");
+}
+
+async function checkTile(bytes, width, frame) {
+	if (frame === 0) {
+		const height = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(20);
+		checkPng(bytes, width, height);
+	}
+	return new Uint8Array(TEX_SIZE ** 2 * 4);
+}
+
+function checkArt(bytes, width, height) {
+	checkPng(bytes, width, height);
 	return new Uint8Array(width * height * 4);
 }
 
@@ -61,7 +74,7 @@ async function checkPack(path) {
 	const art = [...packArtDimensions.keys()];
 	const required = [...names, ...art, ...entityNames, "fire", "explosion"];
 	const file = new File([await openAsBlob(path)], basename(path));
-	const pack = await importTexturePack(file, layout, undefined, async () => new Uint8Array(TEX_SIZE ** 2 * 4), checkPng);
+	const pack = await importTexturePack(file, layout, undefined, checkTile, checkArt);
 	const missingVisuals = missingEntityArt(pack);
 	report(pack.version, required, [...names.filter(name => !pack.tiles.has(name)),
 		...art.filter(path => !pack.art.has(path)).map(path => path + ".png"), ...missingVisuals]);
