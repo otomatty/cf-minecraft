@@ -11,7 +11,23 @@ export interface TexturePack {
 	tiles: Map<string, Uint8Array>;
 	/** Each water strip's first frame is also its tile for thumbnails and drops. */
 	waterFrames: Map<string, Uint8Array[]>;
+	/** Native-size RGBA pixels, keyed by path within the textures directory. */
+	art: Map<string, Uint8Array>;
 }
+
+export const crackPaths = Array.from({ length: 10 }, (_, stage) => "environment/destroy_stage_" + stage);
+const hudImages = [
+	"heart", "heart_half", "heart_background", "heart_blink",
+	"hunger_full", "hunger_half", "hunger_background", "hunger_blink", "bubble", "bubble_empty",
+] as const;
+export const packArtDimensions: ReadonlyMap<string, readonly [number, number]> = new Map<string, readonly [number, number]>([
+	...crackPaths.map(path => [path, [TEX_SIZE, TEX_SIZE]] as const),
+	["environment/sun", [32, 32]], ["environment/moon_phases", [128, 64]], ["environment/clouds", [256, 256]],
+	...hudImages.map(name => ["ui/" + name, [9, 9]] as const),
+]);
+
+/** The sheet wanes on the left first. In-game phases illuminate the right first. */
+export const moonSheetOrder = [0, 7, 6, 5, 4, 3, 2, 1] as const;
 
 // Internal name -> Bedrock atlas key, conventional image basename, variant index.
 type Binding = readonly [key: string, filename: string, variant?: number];
@@ -110,7 +126,7 @@ function supportedDimensions(width: number, height: number): boolean {
 	return width > 0 && width <= 512 && height > 0 && height <= 4096 && width * height <= 1024 ** 2;
 }
 
-export function pngTileWidth(bytes: Uint8Array): number | undefined {
+function pngDimensions(bytes: Uint8Array): [number, number] {
 	const signature = [137, 80, 78, 71, 13, 10, 26, 10];
 	if (bytes.length < 33 || !signature.every((byte, i) => bytes[i] === byte)) throw new Error("PNG が破損しています");
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -118,15 +134,24 @@ export function pngTileWidth(bytes: Uint8Array): number | undefined {
 	if (view.getUint32(8) !== 13 || view.getUint32(12) !== 0x49484452 || !supportedDimensions(width, height)) {
 		throw new Error("PNG の寸法に対応していません");
 	}
-	if (height % width !== 0) return;
+	return [width, height];
+}
+
+function staticPng(bytes: Uint8Array): boolean {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	for (let at = 8; at < bytes.length;) {
 		if (bytes.length - at < 12) throw new Error("PNG が破損しています");
 		const length = view.getUint32(at);
 		if (length > bytes.length - at - 12) throw new Error("PNG が破損しています");
-		if (view.getUint32(at + 4) === 0x6163544c) return;
+		if (view.getUint32(at + 4) === 0x6163544c) return false;
 		at += length + 12;
 	}
-	return width;
+	return true;
+}
+
+export function pngTileWidth(bytes: Uint8Array): number | undefined {
+	const [width, height] = pngDimensions(bytes);
+	if (height % width === 0 && staticPng(bytes)) return width;
 }
 
 async function decodeTile(bytes: Uint8Array<ArrayBuffer>, width: number, frame: number): Promise<Uint8Array> {
@@ -138,6 +163,31 @@ async function decodeTile(bytes: Uint8Array<ArrayBuffer>, width: number, frame: 
 		ctx.drawImage(bitmap, 0, 0, TEX_SIZE, TEX_SIZE);
 		return new Uint8Array(ctx.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data.buffer);
 	} finally { bitmap.close(); }
+}
+
+async function decodeArt(bytes: Uint8Array<ArrayBuffer>, width: number, height: number): Promise<Uint8Array> {
+	const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+	try {
+		const canvas = new OffscreenCanvas(width, height);
+		const ctx = canvas.getContext("2d")!;
+		ctx.drawImage(bitmap, 0, 0);
+		return new Uint8Array(ctx.getImageData(0, 0, width, height).data.buffer);
+	} finally { bitmap.close(); }
+}
+
+function prepareArt(path: string, pixels: Uint8Array): Uint8Array {
+	const celestial = path === "environment/sun" || path === "environment/moon_phases";
+	if (!celestial && !path.startsWith("environment/destroy_stage_")) return pixels;
+	for (let i = 0; i < pixels.length; i += 4) {
+		if (celestial) {
+			// Black contributes no light. Fade the low-intensity halo into the sky.
+			const brightness = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+			pixels[i + 3] = Math.round(pixels[i + 3] * Math.min(brightness / 56, 1));
+		} else if (pixels[i + 3] <= 1) {
+			pixels.fill(0, i, i + 4);
+		}
+	}
+	return pixels;
 }
 
 function tgaFrames(bytes: Uint8Array, maxFrames: number): Uint8Array[] {
@@ -208,7 +258,7 @@ export function packLabel(pack: TexturePack): string {
 export type PackProgress = (done: number, total: number) => void;
 
 export async function importTexturePack(
-	file: File, names: readonly string[], onProgress?: PackProgress, decode = decodeTile,
+	file: File, names: readonly string[], onProgress?: PackProgress, decode = decodeTile, decodeNative = decodeArt,
 ): Promise<TexturePack> {
 	if (!/\.zip$/i.test(file.name)) throw new Error(unofficialPack);
 	if (file.size > maxArchive) throw new Error("256 MiB 以下の .zip を選んでください");
@@ -277,8 +327,14 @@ export async function importTexturePack(
 		}
 		const tiles = new Map<string, Uint8Array>();
 		const waterFrames = new Map<string, Uint8Array[]>();
+		const art = new Map<string, Uint8Array>();
+		const artEntries = [...packArtDimensions].flatMap(([path, dimensions]) => {
+			const entry = files.get(resource + "textures/" + path + ".png");
+			return entry ? [{ path, dimensions, entry }] : [];
+		});
 		let done = 0;
-		onProgress?.(done, images.size);
+		const total = images.size + artEntries.length;
+		onProgress?.(done, total);
 		for (const [entry, aliases] of images) {
 			const bytes = await readEntry(entry, 4 * MiB);
 			const animated = aliases.includes("water") || aliases.includes("water_flow");
@@ -295,7 +351,7 @@ export async function importTexturePack(
 					}
 				}
 			}
-			onProgress?.(++done, images.size);
+			onProgress?.(++done, total);
 			if (!frames.length) continue;
 			for (const name of aliases) {
 				if (name === "water" || name === "water_flow") {
@@ -312,6 +368,24 @@ export async function importTexturePack(
 				}
 			}
 		}
+		for (const { path, dimensions: [width, height], entry } of artEntries) {
+			try {
+				const extra = images.has(entry) ? 0 : entry.uncompressedSize;
+				if (entry.uncompressedSize > 4 * MiB || selected + extra > maxSelected) {
+					throw new Error("追加画像の展開サイズが上限を超えています");
+				}
+				selected += extra;
+				const bytes = await readEntry(entry, 4 * MiB);
+				const [w, h] = pngDimensions(bytes);
+				if (w === width && h === height && staticPng(bytes)) {
+					const pixels = await decodeNative(bytes, width, height);
+					if (pixels.length === width * height * 4) art.set(path, prepareArt(path, pixels));
+				}
+			} catch {
+				// Optional art falls back independently when a file is unreadable.
+			}
+			onProgress?.(++done, total);
+		}
 		const torch = tiles.get("torch");
 		if (torch && wanted.has("torch_item") && !tiles.has("torch_item")) tiles.set("torch_item", torch);
 		const fringe = tiles.get("grass_block_side"), dirt = tiles.get("dirt");
@@ -326,6 +400,6 @@ export async function importTexturePack(
 		if (!names.includes("torch")) tiles.delete("torch");
 		if (!names.includes("dirt")) tiles.delete("dirt");
 		if (!tiles.size) throw new MissingPackImages(version);
-		return { version, tiles, waterFrames };
+		return { version, tiles, waterFrames, art };
 	} finally { await zip.close(); }
 }

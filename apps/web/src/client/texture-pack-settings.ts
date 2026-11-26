@@ -1,4 +1,4 @@
-import { importTexturePack, isPackVersion, packLabel, type PackProgress, type TexturePack } from "./texture-pack.ts";
+import { importTexturePack, isPackVersion, packArtDimensions, packLabel, type PackProgress, type TexturePack } from "./texture-pack.ts";
 import { TEX_SIZE } from "./textures.ts";
 import { WATER_FRAME_COUNT } from "./building-textures.ts";
 
@@ -6,7 +6,8 @@ const storageError = "テクスチャをこのブラウザに保存できませ�
 
 export function installedPack(value: unknown, names: readonly string[]): TexturePack | undefined {
 	const pack = (value as { pack?: Partial<TexturePack> } | null)?.pack;
-	if (!isPackVersion(pack?.version) || !(pack.tiles instanceof Map) || !pack.tiles.size || !(pack.waterFrames instanceof Map)) return;
+	if (!isPackVersion(pack?.version) || !(pack.tiles instanceof Map) || !pack.tiles.size ||
+		!(pack.waterFrames instanceof Map) || !(pack.art instanceof Map)) return;
 	const known = new Set(names);
 	const validTile = (pixels: unknown): pixels is Uint8Array => pixels instanceof Uint8Array && pixels.length === TEX_SIZE ** 2 * 4;
 	for (const [name, pixels] of pack.tiles) {
@@ -20,7 +21,11 @@ export function installedPack(value: unknown, names: readonly string[]): Texture
 	for (const name of ["water", "water_flow"]) {
 		if (pack.tiles.has(name) && !pack.waterFrames.has(name)) return;
 	}
-	return { version: pack.version, tiles: pack.tiles, waterFrames: pack.waterFrames };
+	for (const [path, pixels] of pack.art) {
+		const size = packArtDimensions.get(path);
+		if (!size || !(pixels instanceof Uint8Array) || pixels.length !== size[0] * size[1] * 4) return;
+	}
+	return { version: pack.version, tiles: pack.tiles, waterFrames: pack.waterFrames, art: pack.art };
 }
 
 async function storedPack(names: readonly string[], next?: TexturePack): Promise<TexturePack | undefined> {

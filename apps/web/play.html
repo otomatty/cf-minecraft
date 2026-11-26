@@ -208,6 +208,17 @@
 				background: radial-gradient(circle at 32% 30%, white 10%, #67ccff 22%, #186aaf 75%);
 				box-shadow: 0 1px 2px #000;
 			}
+			.vital-row [data-pack-icon] {
+				width: 18px;
+				height: 18px;
+				border: 0;
+				box-shadow: none;
+				filter: none;
+				background-size: 100% 100%;
+				background-repeat: no-repeat;
+				image-rendering: pixelated;
+			}
+			.vital-row [data-pack-icon]::before, .vital-row [data-pack-icon]::after { content: none; }
 			#damage-flash {
 				position: fixed;
 				inset: 0;

@@ -4,6 +4,7 @@ import { ClientCore, gameTextureNames } from "../src/client/client-core.ts";
 import { deflateSync } from "node:zlib";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js/lib/zip-core-custom.js";
 import { crc32 } from "../src/client/world-archive.ts";
+import { packArtDimensions } from "../src/client/texture-pack.ts";
 
 function chunk(type, data) {
 	const out = Buffer.alloc(12 + data.length);
@@ -54,35 +55,68 @@ const featuredColors = {
 	lava: [242, 95, 22],
 };
 
+function rgbaPng(width, height, pixel) {
+	const header = Buffer.alloc(13);
+	header.writeUInt32BE(width, 0);
+	header.writeUInt32BE(height, 4);
+	header[8] = 8;
+	header[9] = 6;
+	const stride = width * 4 + 1;
+	const rows = Buffer.alloc(height * stride);
+	for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+		rows.set(pixel(x, y), y * stride + 1 + x * 4);
+	}
+	return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header),
+		chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+
 function fixturePng(name, item, color) {
 	const water = name === "water" || name === "water_flow";
 	const size = name === "water_flow" ? 32 : 16;
 	const frameShades = water ? [0, 36, -20] : [0];
-	const height = size * frameShades.length;
-	const header = Buffer.alloc(13);
-	header.writeUInt32BE(size, 0);
-	header.writeUInt32BE(height, 4);
-	header[8] = 8;
-	header[9] = 6;
-	const rows = Buffer.alloc(height * (size * 4 + 1));
 	const hash = crc32(Buffer.from(name));
 	const rgb = color ?? featuredColors[name] ?? [0, 8, 16].map(shift => 55 + ((hash >>> shift) % 157));
-	for (let row = 0; row < height; row++) for (let x = 0; x < size; x++) {
+	return rgbaPng(size, size * frameShades.length, (x, row) => {
 		const y = row % size;
-		const i = row * (size * 4 + 1) + 1 + x * 4;
 		let opaque = true;
 		if (item) opaque = Math.abs(x - 7) + Math.abs(y - 7) <= 8;
 		else if (name === "glass") opaque = x === 0 || x === 15 || y === 0 || y === 15 || Math.abs(x - y) <= 1;
 		else if (name.endsWith("_flower")) opaque = (y < 8 && Math.abs(x - 7) + Math.abs(y - 4) < 6) || (y >= 7 && x >= 7 && x <= 8);
 		else if (name === "short_grass" || name.startsWith("wheat_")) opaque = y > 3 && (x + (y >> 2)) % 4 < 2;
-		if (!opaque) continue;
+		if (!opaque) return [0, 0, 0, 0];
 		const shade = frameShades[Math.floor(row / size)] + (color ? 0 : ((x * 13 + y * 7 + hash) % 31) - 15);
 		const base = name.endsWith("_flower") && y >= 8 ? [57, 151, 54] : rgb;
 		const alpha = name === "water" ? 240 : 255;
-		rows.set([...base.map(value => Math.min(255, Math.max(0, value + shade))), alpha], i);
-	}
-	return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header),
-		chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+		return [...base.map(value => Math.min(255, Math.max(0, value + shade))), alpha];
+	});
+}
+
+export function fixtureArtRGB(path, variant, index = 0) {
+	return [variant ? 88 : 208, 32 + index * 13, 76 + crc32(Buffer.from(path)) % 150];
+}
+
+export function fixtureArtEntries(variant = false) {
+	return [...packArtDimensions].map(([path, [width, height]]) => {
+		const pixel = (x, y) => {
+			const rgb = index => fixtureArtRGB(path, variant, index);
+			if (path.startsWith("environment/destroy_stage_")) {
+				const stage = Number(path.at(-1));
+				return y >= 3 && y <= 3 + stage && x >= 4 && x <= 11 ? [...rgb(stage), 255] : [255, 255, 255, 1];
+			}
+			if (path === "environment/sun") {
+				return x >= 11 && x <= 20 && y >= 11 && y <= 20 ? [...rgb(0), 255] : [0, 0, 0, 255];
+			}
+			if (path === "environment/moon_phases") {
+				const cell = Math.floor(y / 32) * 4 + Math.floor(x / 32);
+				const u = x % 32, v = y % 32;
+				const lit = cell === 0 || (cell < 4 ? u < 16 : cell > 4 && u >= 16);
+				return lit && u >= 11 && u <= 20 && v >= 11 && v <= 20 ? [...rgb(cell), 255] : [0, 0, 0, 255];
+			}
+			if (path === "environment/clouds") return [...rgb(0), (x + 2 * y) % 31 < 9 ? 255 : 0];
+			return [...rgb(0), y >= 2 && y <= 6 && (path.endsWith("_half") ? x <= 3 : x >= 2 && x <= 6) ? 255 : 0];
+		};
+		return ["resource_pack/textures/" + path + ".png", rgbaPng(width, height, pixel)];
+	});
 }
 
 function fixtureTga(name, color) {
@@ -99,10 +133,17 @@ function fixtureTga(name, color) {
 		const opaque = grass ? y < 4 : (x + 2 * y) % 7 !== 0;
 		bytes.set([level, level, level, opaque ? 255 : 0], 18 + ((size - 1 - y) * size + x) * 4);
 	}
-	return bytes;
+	if (name !== "grass_block_side") return bytes;
+	// Bottom-up: 192 transparent pixels, then 64 opaque pixels.
+	const header = bytes.subarray(0, 18);
+	header[2] = 10;
+	return Buffer.concat([header, ...[[0, 128], [128, 64], [192, 64]].map(([pixel, count]) => {
+		const offset = 18 + pixel * 4;
+		return Buffer.of(0x80 | (count - 1), ...bytes.subarray(offset, offset + 4));
+	})]);
 }
 
-export async function fixturePack({ colors = {} } = {}) {
+export async function fixturePack({ colors = {}, artVariant = false } = {}) {
 	const wasm = await readFile(new URL("../src/wasm/client.wasm", import.meta.url));
 	const { instance } = await WebAssembly.instantiate(wasm, {});
 	const core = new ClientCore(instance);
@@ -123,7 +164,7 @@ export async function fixturePack({ colors = {} } = {}) {
 		images.push(["resource_pack/" + path + (tga ? ".tga" : ".png"),
 			tga ? fixtureTga(name, colors[name]) : fixturePng(name, item, colors[name])]);
 	}
-	return zipBytes([...packEntries({ terrain, items }), ...images]);
+	return zipBytes([...packEntries({ terrain, items }), ...images, ...fixtureArtEntries(artVariant)]);
 }
 
 export async function zipBytes(entries = testEntries) {

@@ -23,7 +23,7 @@ import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection, type Vec3 } from "./math.ts";
 import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
 import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import type { TexturePack } from "./texture-pack.ts";
+import { crackPaths, moonSheetOrder, type TexturePack } from "./texture-pack.ts";
 import { hasItemTexture } from "./item-textures.ts";
 import type { PlayerNames } from "./player-names.ts";
 
@@ -281,6 +281,7 @@ fn fs() -> @location(0) vec4<f32> {
 const SKY_WGSL = TERRAIN_WGSL.slice(0, TERRAIN_WGSL.indexOf("@group(0) @binding(1)")) + /* wgsl */ `
 @group(0) @binding(1) var art: texture_2d_array<f32>;
 @group(0) @binding(2) var artSampler: sampler;
+@group(0) @binding(3) var clouds: texture_2d<f32>;
 struct SkyOut {
 	@builtin(position) pos: vec4<f32>,
 	@location(0) ray: vec3<f32>,
@@ -322,8 +323,8 @@ fn body(ray: vec3<f32>, direction: vec3<f32>, tangent: vec3<f32>, size: f32, lay
 	let offset = vec2<f32>(f32((seed >> 8u) & 255u), f32((seed >> 16u) & 255u)) / 255.0;
 	let point = 1.0 - smoothstep(0.04, 0.18, length(fract(coord) - (0.2 + offset * 0.6)));
 	if ((seed & 127u) == 0u) { color += vec3<f32>(point * g.celestial.y * smoothstep(0.0, 0.12, ray.y)); }
-	let sunPixel = body(ray, sun, tangent, 0.13, 0);
-	let moonPixel = body(ray, -sun, -tangent, 0.10, 1 + i32(g.celestial.z));
+	let sunPixel = body(ray, sun, tangent, g.celestial.w, 0);
+	let moonPixel = body(ray, -sun, -tangent, g.forward.w, 1 + i32(g.celestial.z));
 	let visible = smoothstep(-0.03, 0.03, ray.y);
 	// Emissive bodies add light, like the stars above; they never darken the sky.
 	color += sunPixel.rgb * sunPixel.a * visible;
@@ -343,13 +344,13 @@ struct CloudOut {
 	return out;
 }
 @fragment fn fsCloud(in: CloudOut) -> @location(0) vec4<f32> {
-	let uv = (in.rel.xz + g.cloudOrigin.xy + vec2<f32>(g.skyCamera.w, 0.0)) / 256.0;
-	let pixel = textureSampleLevel(art, artSampler, fract(uv), 9, 0.0);
+	let uv = (in.rel.xz + g.cloudOrigin.xy + vec2<f32>(g.skyCamera.w, 0.0)) / g.right.w;
+	let pixel = textureSampleLevel(clouds, artSampler, fract(uv), 0.0);
 	if (pixel.a < 0.1) { discard; }
 	// Clouds extend beyond terrain: preserve nearby opacity, then fade into the sky.
 	let fog = smoothstep(g.cloudOrigin.z, g.cloudOrigin.w, max(length(in.rel.xz), abs(in.rel.y)));
 	let color = vec3<f32>(0.16 + g.skyColor.a * 0.84);
-	return vec4<f32>(color, pixel.a * (1.0 - fog));
+	return vec4<f32>(color * pixel.rgb, pixel.a * (1.0 - fog));
 }
 `;
 
@@ -436,6 +437,9 @@ export class Renderer {
 	private readonly firstWaterFrame: number;
 	private readonly firstFlameFrame: number;
 	private readonly firstExplosionFrame: number;
+	private sunSize = 0.13;
+	private moonSize = 0.10;
+	private cloudPeriod = 256;
 	readonly applyTexturePack: (pack?: TexturePack) => void;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
@@ -505,10 +509,24 @@ export class Renderer {
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
 		const defaults = new Map(this.texturePixels);
+		const skyArt = device.createTexture({ size: [32, 32, 9], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		const cloudArt = device.createTexture({ size: [256, 256], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		const fallbackSky = Array.from({ length: 10 }, (_, layer) => {
+			const pixels = paintSkyTexture(layer);
+			const size = layer === 9 ? 256 : 32;
+			const scale = size / TEX_SIZE;
+			const enlarged = new Uint8Array(size * size * 4);
+			for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+				const offset = (Math.floor(y / scale) * TEX_SIZE + Math.floor(x / scale)) * 4;
+				enlarged.set(pixels.subarray(offset, offset + 4), (y * size + x) * 4);
+			}
+			return enlarged;
+		});
 		this.applyTexturePack = pack => {
 			const layers = tiles.slice();
 			for (const [layer, name] of textureNames.entries()) {
-				const pixels = pack?.tiles.get(name);
+				const pixels = layer < this.crackTextureBase ? pack?.tiles.get(name)
+					: pack?.art.get(crackPaths[layer - this.crackTextureBase]);
 				this.texturePixels.set(name, pixels ?? defaults.get(name)!);
 				if (!pixels) continue;
 				layers[layer] = pixels;
@@ -531,6 +549,20 @@ export class Renderer {
 				device.queue.writeTexture({ texture, mipLevel: level }, mip,
 					{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, layers.length]);
 			}
+			const sun = pack?.art.get("environment/sun");
+			const moon = pack?.art.get("environment/moon_phases");
+			const clouds = pack?.art.get("environment/clouds");
+			// The luminous core occupies roughly 10 of the 32 source pixels.
+			this.sunSize = sun ? 0.13 * 3 : 0.13;
+			this.moonSize = moon ? 0.10 * 3 : 0.10;
+			this.cloudPeriod = clouds ? 1024 : 256;
+			device.queue.writeTexture({ texture: skyArt }, sun ?? fallbackSky[0], { bytesPerRow: 128 }, [32, 32, 1]);
+			for (const [phase, cell] of moonSheetOrder.entries()) {
+				const offset = (Math.floor(cell / 4) * 32 * 128 + cell % 4 * 32) * 4;
+				device.queue.writeTexture({ texture: skyArt, origin: [0, 0, phase + 1] }, moon ?? fallbackSky[phase + 1],
+					moon ? { offset, bytesPerRow: 512 } : { bytesPerRow: 128 }, [32, 32, 1]);
+			}
+			device.queue.writeTexture({ texture: cloudArt }, clouds ?? fallbackSky[9], { bytesPerRow: 1024 }, [256, 256, 1]);
 		};
 		this.applyTexturePack();
 		const sampler = device.createSampler({
@@ -550,15 +582,12 @@ export class Renderer {
 				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
 		}
 
-		const skyArt = device.createTexture({ size: [TEX_SIZE, TEX_SIZE, 10], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		for (let layer = 0; layer < 10; layer++) {
-			device.queue.writeTexture({ texture: skyArt, origin: [0, 0, layer] }, paintSkyTexture(layer), { bytesPerRow: TEX_SIZE * 4 }, [TEX_SIZE, TEX_SIZE, 1]);
-		}
 		const skyModule = device.createShaderModule({ code: SKY_WGSL });
 		const skyLayout = device.createBindGroupLayout({ entries: [
 			{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
 			{ binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: "2d-array" } },
 			{ binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+			{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
 		] });
 		const skyPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [skyLayout] });
 		this.sky = device.createRenderPipeline({
@@ -581,6 +610,7 @@ export class Renderer {
 			{ binding: 0, resource: { buffer: this.globals } },
 			{ binding: 1, resource: skyArt.createView({ dimension: "2d-array" }) },
 			{ binding: 2, resource: sampler },
+			{ binding: 3, resource: cloudArt.createView() },
 		] });
 
 		const terrainModule = device.createShaderModule({ code: terrainShader(textureNames) });
@@ -814,16 +844,16 @@ export class Renderer {
 		i[33] = this.firstWaterFrame + WATER_FRAME_COUNT + tick % WATER_FRAME_COUNT;
 		f.set([...sky.skyColor, sky.skyBrightness], 36);
 		f.set([...sky.sunsetColor, sky.sunsetStrength], 40);
-		f.set([sky.angle, sky.starBrightness, sky.moonPhase, 0], 44);
+		f.set([sky.angle, sky.starBrightness, sky.moonPhase, this.sunSize], 44);
 		const look = forward(camera.yaw, camera.pitch);
 		const side = right(camera.yaw);
 		const up: Vec3 = [side[1] * look[2] - side[2] * look[1], side[2] * look[0] - side[0] * look[2], side[0] * look[1] - side[1] * look[0]];
-		f.set([...look, 0], 48);
-		f.set([...side, 0], 52);
+		f.set([...look, this.moonSize], 48);
+		f.set([...side, this.cloudPeriod], 52);
 		f.set([...up, 0], 56);
-		f.set([Math.tan(fovY * Math.PI / 360), this.canvas.width / this.canvas.height, camera.y, (dayTime * 0.015) % 256], 60);
+		f.set([Math.tan(fovY * Math.PI / 360), this.canvas.width / this.canvas.height, camera.y, (dayTime * 0.015) % this.cloudPeriod], 60);
 		// xy: repeating cloud texture origin; zw: cloud-only cylindrical fog range.
-		f.set([camera.x % 256, camera.z % 256, cloudFogEnd * 0.65, cloudFogEnd], 64);
+		f.set([camera.x % this.cloudPeriod, camera.z % this.cloudPeriod, cloudFogEnd * 0.65, cloudFogEnd], 64);
 		this.device.queue.writeBuffer(this.globals, 0, this.globalsData);
 
 		if (target) {

@@ -27,6 +27,7 @@ import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, gameTe
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { loadInstalledPack, setupTexturePack } from "./texture-pack-settings.ts";
+import type { TexturePack } from "./texture-pack.ts";
 import { hasPlaySession } from "./title-route.ts";
 import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
@@ -1016,6 +1017,7 @@ async function main(): Promise<void> {
 	});
 	setupTexturePack($("textures-tab-panel"), textureNames, pack, next => {
 		renderer.applyTexturePack(next);
+		applyHudPack(next);
 		icons.clear();
 		biomeIcons.clear();
 		paintHotbar(core.inventory);
@@ -1476,7 +1478,58 @@ async function main(): Promise<void> {
 	const bubbles = Array.from({ length: bubbleCount(MAX_AIR) }, () => document.createElement("span"));
 	for (const bubble of bubbles) bubble.className = "bubble";
 	airMeter.append(...bubbles);
-	let previousHealth: number | null = null;
+	let previousHealth: number | null = null, previousFood: number | null = null;
+	type MeterState = ReturnType<typeof heartStates>[number];
+	let hudArt = new Map<string, string>();
+
+	function meterImage(meter: "heart" | "hunger", state: MeterState, blink = false): string {
+		const base = hudArt.get(meter + (blink ? "_blink" : "_background"));
+		if ((blink && !base) || state === "empty") return base ?? "";
+		const fill = hudArt.get(state === "full" && meter === "heart" ? "heart" : meter + "_" + state);
+		return fill ? (base ? fill + ", " + base : fill) : "";
+	}
+
+	function setHudImage(icon: HTMLElement, image: string): void {
+		icon.toggleAttribute("data-pack-icon", Boolean(image));
+		icon.style.backgroundImage = image;
+	}
+
+	function applyHudPack(next: TexturePack): void {
+		hudArt = new Map();
+		const tile = document.createElement("canvas");
+		tile.width = tile.height = 9;
+		const ctx = tile.getContext("2d")!;
+		for (const [path, pixels] of next.art) {
+			if (!path.startsWith("ui/")) continue;
+			ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), 9, 9), 0, 0);
+			hudArt.set(path.slice(3), `url("${tile.toDataURL()}")`);
+		}
+		for (const [meter, icons] of [["heart", hearts], ["hunger", foodIcons]] as const) {
+			for (const icon of icons) {
+				icon.getAnimations().forEach(animation => animation.cancel());
+				setHudImage(icon, meterImage(meter, (icon.dataset.state ?? "empty") as MeterState));
+			}
+		}
+		for (const bubble of bubbles) setHudImage(bubble, hudArt.get("bubble") ?? "");
+	}
+	applyHudPack(pack);
+
+	function syncMeter(meter: "heart" | "hunger", icons: HTMLElement[], states: MeterState[], decreased: boolean): void {
+		states.forEach((state, i) => {
+			const icon = icons[i];
+			if (icon.dataset.state === state) return;
+			icon.dataset.state = state;
+			icon.getAnimations().forEach(animation => animation.cancel());
+			const image = meterImage(meter, state);
+			setHudImage(icon, image);
+			const blink = decreased && meterImage(meter, state, true);
+			if (image && blink) {
+				icon.animate([blink, image, blink, image].map(backgroundImage => ({
+					backgroundImage, easing: "steps(1, end)",
+				})), 300);
+			}
+		});
+	}
 
 	respawn.addEventListener("click", () => {
 		if (!core.dead || connection !== "open") return;
@@ -1491,9 +1544,9 @@ async function main(): Promise<void> {
 		vitals.hidden = gameMode !== "survival";
 		if (!vitals.hidden) {
 			healthMeter.setAttribute("aria-valuenow", String(health));
-			heartStates(health).forEach((state, i) => { hearts[i].dataset.state = state; });
+			syncMeter("heart", hearts, heartStates(health), previousHealth !== null && health < previousHealth);
 			foodMeter.setAttribute("aria-valuenow", String(food));
-			foodStates(food).forEach((state, i) => { foodIcons[i].dataset.state = state; });
+			syncMeter("hunger", foodIcons, foodStates(food), previousFood !== null && food < previousFood);
 			airMeter.setAttribute("aria-valuenow", String(air));
 			airMeter.hidden = air === MAX_AIR;
 			const count = bubbleCount(air);
@@ -1505,6 +1558,7 @@ async function main(): Promise<void> {
 			}
 		}
 		previousHealth = health;
+		previousFood = food;
 
 		if (failed) return;
 		if (dead && !deathScreen.open) {

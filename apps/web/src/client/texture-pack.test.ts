@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { appleRGB, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
-import { importTexturePack, isPackVersion, pngTileWidth } from "./texture-pack.ts";
+import { inflateSync } from "node:zlib";
+import { appleRGB, fixtureArtEntries, fixtureArtRGB, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
+import { crackPaths, importTexturePack, isPackVersion, moonSheetOrder, packArtDimensions, pngTileWidth } from "./texture-pack.ts";
 import { installedPack } from "./texture-pack-settings.ts";
 import { ClientCore, gameTextureNames } from "./client-core.ts";
 import { textureIconPixels } from "./textures.ts";
@@ -265,15 +266,20 @@ test("water decodes each square frame up to 32 and uses fixed alpha", async () =
 	assert.equal(pack.tiles.get("stone")![3], 240);
 });
 
-test("stored selection requires a valid version, registry pixels and water frames", () => {
+test("stored selection requires a valid version, registry pixels, water frames and optional art map", () => {
 	const tiles = new Map([["stone", tile], ["water", tile]]);
 	const waterFrames = new Map([["water", [tile, tile.slice()]]]);
-	const pack = { version: "1.2.3.4-preview", tiles, waterFrames };
+	const art = new Map([["environment/sun", new Uint8Array(32 ** 2 * 4)], ["ui/heart_half", new Uint8Array(9 ** 2 * 4)]]);
+	const pack = { version: "1.2.3.4-preview", tiles, waterFrames, art };
 	const names = ["stone", "water", "water_flow"];
 	assert.equal(installedPack({ pack: { name: "old.zip", tiles }, active: true }, names), undefined);
 	for (const bad of [
 		undefined, { ...pack, version: "bad" }, { ...pack, version: "1.2.3-preview.4" },
 		{ version: "1.2.3", tiles }, { ...pack, tiles: new Map() },
+		{ version: pack.version, tiles, waterFrames }, { ...pack, art: {} },
+		{ ...pack, art: new Map([["ui/unknown", new Uint8Array(9 ** 2 * 4)]]) },
+		{ ...pack, art: new Map([["environment/sun", tile]]) },
+		{ ...pack, art: new Map([["ui/heart_half", new Uint16Array(9 ** 2 * 4)]]) },
 		{ ...pack, tiles: new Map([["stone", new Uint8Array(1)]]) },
 		...[
 			new Map(), new Map([["water", []]]), new Map([["water", [tile.slice()]]]),
@@ -282,7 +288,59 @@ test("stored selection requires a valid version, registry pixels and water frame
 		].map(waterFrames => ({ ...pack, waterFrames })),
 	]) assert.equal(installedPack({ pack: bad }, names), undefined);
 	assert.equal(installedPack({ pack }, ["apple"]), undefined);
+	assert.ok(installedPack({ pack: { ...pack, art: new Map() } }, names));
 	assert.deepEqual(installedPack(structuredClone({ pack }), names), pack);
+});
+
+// The fixture writes one unfiltered RGBA IDAT chunk immediately after IHDR.
+async function decodeFixtureArt(bytes: Uint8Array, width: number, height: number): Promise<Uint8Array> {
+	const png = Buffer.from(bytes);
+	assert.equal(png.toString("ascii", 37, 41), "IDAT");
+	const rows = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
+	const stride = width * 4 + 1;
+	assert.equal(rows.length, stride * height);
+	return Uint8Array.from(rows.filter((_, i) => i % stride !== 0));
+}
+
+test("native-size environment and HUD art, black celestial backgrounds and crack alpha", async () => {
+	const entries = [...testEntries, ...fixtureArtEntries().map(([path, png]) => ["sample/" + path, png])];
+	const { art } = await importTexturePack(await file(entries), ["stone"], undefined, async () => tile, decodeFixtureArt);
+	assert.deepEqual([...art.keys()], [...packArtDimensions.keys()]);
+	const rgba = (path: string, x: number, y: number) => {
+		const offset = (y * packArtDimensions.get(path)![0] + x) * 4;
+		return Array.from(art.get(path)!.subarray(offset, offset + 4));
+	};
+	const sun = "environment/sun", moon = "environment/moon_phases";
+	assert.deepEqual(rgba(sun, 0, 0), [0, 0, 0, 0]);
+	assert.deepEqual(rgba(sun, 11, 11), [...fixtureArtRGB(sun, false), 255]);
+	for (const [phase, cell] of moonSheetOrder.entries()) {
+		const x = cell % 4 * 32, y = Math.floor(cell / 4) * 32;
+		assert.deepEqual(rgba(moon, x, y), [0, 0, 0, 0]);
+		const lit = [...fixtureArtRGB(moon, false, [0, 7, 6, 5, 4, 3, 2, 1][phase]), 255];
+		assert.deepEqual(rgba(moon, x + 12, y + 16), phase === 0 || phase > 4 ? lit : [0, 0, 0, 0]);
+		assert.deepEqual(rgba(moon, x + 19, y + 16), phase < 4 ? lit : [0, 0, 0, 0]);
+	}
+	for (const [stage, path] of crackPaths.entries()) {
+		assert.deepEqual(rgba(path, 0, 0), [0, 0, 0, 0]);
+		assert.equal(art.get(path)!.filter((value, i) => i % 4 === 3 && value === 255).length,
+			8 * (1 + stage));
+	}
+});
+
+test("missing, malformed, wrong-size and undecodable art fall back independently", async () => {
+	const artEntries = fixtureArtEntries().map(([path, png]) => ["sample/" + path, png]);
+	const moon = "environment/moon_phases", sun = "environment/sun";
+	const entries = [...testEntries, ...artEntries.filter(([path]) => !path.endsWith(moon + ".png")).map(([path, png]) => [
+		path, path.endsWith(sun + ".png") ? "bad PNG" : path.endsWith("ui/heart.png") ? solidPng([0, 0, 0]) : png,
+	])];
+	const { art, tiles } = await importTexturePack(await file(entries), ["stone", "apple"], undefined, async () => tile,
+		async (bytes, width, height) => {
+			if (width === 256) throw new Error("image decoder rejected this file");
+			return decodeFixtureArt(bytes, width, height);
+		});
+	assert.deepEqual([...tiles.keys()], ["stone", "apple"]);
+	assert.deepEqual([...art.keys()], [...packArtDimensions.keys()].filter(path =>
+		![sun, moon, "ui/heart", "environment/clouds"].includes(path)));
 });
 
 test("generated browser fixture covers every registry name through the importer", async () => {
@@ -291,8 +349,9 @@ test("generated browser fixture covers every registry name through the importer"
 	const pack = await importTexturePack(new File([await fixturePack()], "fixture.zip"), [...names], undefined, async (_, width) => {
 		assert.ok(width === 16 || width === 32);
 		return tile;
-	});
+	}, decodeFixtureArt);
 	assert.deepEqual(new Set(pack.tiles.keys()), names);
 	assert.equal(pack.waterFrames.get("water")?.length, 3);
 	assert.equal(pack.waterFrames.get("water_flow")?.length, 3);
+	assert.equal(pack.art.size, packArtDimensions.size);
 });

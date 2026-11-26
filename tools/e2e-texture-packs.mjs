@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appleRGB, fixtureFilename, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
+import { appleRGB, fixtureArtRGB, fixtureFilename, fixturePack, packEntries, stoneRGB, testEntries, zipBytes } from "../apps/web/test/texture-pack-fixture.mjs";
 
 const panel = "#textures-tab-panel";
 const input = panel + " input";
@@ -43,6 +43,91 @@ async function pixels(page) {
 	});
 }
 
+async function assertWorldArt(page, variant) {
+	const { cracks, sky, clouds } = await page.evaluate(() => window.testWorldArt);
+	const stages = Array.from({ length: 10 }, (_, stage) => [
+		[0, 0, 0, 0], [...fixtureArtRGB("environment/destroy_stage_" + stage, variant, stage), 255],
+	]);
+	const start = cracks.findIndex(([, center]) => center.every((value, i) => value === stages[0][1][i]));
+	assert.notEqual(start, -1, "fixture crack overlays in the world atlas");
+	assert.deepEqual(cracks.slice(start, start + 10), stages);
+	const transparent = [0, 0, 0, 0];
+	const sun = [...fixtureArtRGB("environment/sun", variant), 255];
+	assert.deepEqual(sky[0], [transparent, sun, sun]);
+	for (const [phase, cell] of [0, 7, 6, 5, 4, 3, 2, 1].entries()) {
+		const moon = [...fixtureArtRGB("environment/moon_phases", variant, cell), 255];
+		assert.deepEqual(sky[phase + 1], [transparent, phase === 0 || phase > 4 ? moon : transparent,
+			phase < 4 ? moon : transparent], "moon phase " + phase);
+	}
+	assert.deepEqual(clouds, [[...fixtureArtRGB("environment/clouds", variant), 255], transparent]);
+}
+
+async function assertHudArt(page, variant) {
+	const points = await page.evaluate(() => {
+		const sample = (selector, x) => {
+			const rect = document.querySelector(selector).getBoundingClientRect();
+			if (rect.width !== 18 || rect.height !== 18) throw new Error("Unexpected HUD icon size");
+			return [Math.floor(rect.x + x * 2 + 1), Math.floor(rect.y + 7)];
+		};
+		return [
+			sample(".heart[data-state=full]", 3), sample(".heart[data-state=half]", 3),
+			sample(".heart[data-state=half]", 5), sample(".heart[data-state=empty]", 3),
+			sample(".food[data-state=full]", 3), sample(".food[data-state=half]", 3),
+			sample(".food[data-state=half]", 5), sample(".food[data-state=empty]", 3),
+			sample(".bubble:not([hidden])", 3),
+		];
+	});
+	assert.deepEqual(await screenPixels(page, points), ["heart", "heart_half", "heart_background", "heart_background",
+		"hunger_full", "hunger_half", "hunger_background", "hunger_background", "bubble"]
+		.map(name => fixtureArtRGB("ui/" + name, variant)));
+}
+
+async function screenPixels(page, points) {
+	const screenshot = await page.screenshot({ encoding: "base64" });
+	return page.evaluate(async (url, points) => {
+		const image = new Image();
+		image.src = url;
+		await image.decode();
+		const canvas = document.createElement("canvas");
+		canvas.width = image.width;
+		canvas.height = image.height;
+		const ctx = canvas.getContext("2d");
+		ctx.drawImage(image, 0, 0);
+		return points.map(([x, y]) => [...ctx.getImageData(x, y, 1, 1).data.slice(0, 3)]);
+	}, "data:image/png;base64," + screenshot, points);
+}
+
+async function assertWorldFrame(page, variant, spawn) {
+	const { width, height } = page.viewport();
+	const belowCenter = [width / 2 + 24, height / 2 + 24];
+	const aboveCenter = [width / 2 + 24, height / 2 - 24];
+	const show = async (camera, time, dig) => {
+		await page.evaluate(async (camera, time, dig) => {
+			window.testTextureScene = { camera, time, dig };
+			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+		}, camera, time, dig);
+		return screenPixels(page, [belowCenter, aboveCenter]);
+	};
+	const closeTo = (actual, expected, label) => assert.ok(actual.every((value, channel) => Math.abs(value - expected[channel]) <= 2),
+		`${label}: ${actual} vs ${expected}`);
+	const up = { x: 0, y: 200, z: 0, yaw: 0, pitch: -90 };
+	const [sun] = await show(up, 6000);
+	const daylight = [120, 167, 255];
+	closeTo(sun, fixtureArtRGB("environment/sun", variant).map((value, channel) => Math.min(255, value + daylight[channel])), "sun over sky");
+	const [moon, dark] = await show(up, 24000 * 2 + 18000);
+	closeTo(moon, fixtureArtRGB("environment/moon_phases", variant, 6), "first quarter, lit side");
+	assert.ok(dark.every(value => value < 30), "first quarter, dark side");
+	const [cloud] = await show({ ...up, x: -88, y: 191, z: 2 }, 6000);
+	closeTo(cloud, fixtureArtRGB("environment/clouds", variant), "opaque cloud texel");
+	const [gap] = await show({ ...up, x: -28, y: 191, z: 2 }, 6000);
+	closeTo(gap, sun, "clear cloud texel");
+	const [x, y, z] = spawn.map(Math.floor);
+	const [crack] = await show({ x: x + 0.5, y: y + 2, z: z + 0.5, yaw: 0, pitch: 90 }, 6000,
+		{ x, y: y - 1, z, stage: 9, bounds: { min: [0, 0, 0], max: [1, 1, 1] } });
+	closeTo(crack, fixtureArtRGB("environment/destroy_stage_9", variant, 9), "crack overlay on terrain");
+	await page.evaluate(() => { delete window.testTextureScene; });
+}
+
 export async function installFixture(page, edge, bytes) {
 	await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
 	await page.waitForSelector("#texture-drop");
@@ -73,7 +158,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		];
 		await Promise.all([
 			writeFile(join(dir, fixtureFilename), initialFixture),
-			writeFile(join(dir, name), await fixturePack({ colors: {
+			writeFile(join(dir, name), await fixturePack({ artVariant: true, colors: {
 				stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
 				water: [120, 120, 120], water_flow: [130, 130, 130],
 			} })),
@@ -103,11 +188,24 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			await page.evaluateOnNewDocument(() => {
 				const write = GPUQueue.prototype.writeTexture, writeBuffer = GPUQueue.prototype.writeBuffer;
 				let atlas;
+				const art = window.testWorldArt = { sky: [] };
 				GPUQueue.prototype.writeTexture = function(dst, data, layout, size) {
+					const pixel = (x, y, layer = 0) => {
+						const at = (layout.offset ?? 0) + layer * (layout.rowsPerImage ?? size[1]) * layout.bytesPerRow
+							+ y * layout.bytesPerRow + x * 4;
+						return Array.from(data.subarray(at, at + 4));
+					};
 					if (dst.mipLevel === 0 && size[0] === 16 && size[2] > 80) {
 						window.testStoneRGB = Array.from(data.subarray(0, 3));
 						atlas = window.testAtlas = Array.from({ length: size[2] }, (_, layer) => Array.from(data.subarray(layer * 1024, layer * 1024 + 4)));
 						window.testWaterSamples = [new Map(), new Map()];
+						art.cracks = Array.from({ length: size[2] }, (_, layer) => [pixel(0, 0, layer), pixel(4, 3, layer)]);
+					}
+					if (dst.texture.depthOrArrayLayers === 9 && size[0] === 32 && size[1] === 32) {
+						art.sky[dst.origin?.[2] ?? 0] = [pixel(0, 0), pixel(12, 16), pixel(19, 16)];
+					}
+					if (dst.texture.width === 256 && size[0] === 256 && size[1] === 256 && dst.texture.depthOrArrayLayers === 1) {
+						art.clouds = [pixel(0, 0), pixel(15, 0)];
 					}
 					return write.call(this, dst, data, layout, size);
 				};
@@ -231,6 +329,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		const originalWater = await waterPixels(a);
 		const defaults = await pixels(b);
 		assert.deepEqual(await pixels(a), defaults);
+		for (const page of [a, b]) await assertWorldArt(page, false);
 		await openSettings(a);
 		// Populate the biome-specific icon cache before changing the atlas.
 		await a.waitForFunction(() => {
@@ -243,6 +342,8 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		await (await a.$(input)).uploadFile(join(dir, name));
 		await a.waitForFunction((sel, label) => document.querySelector(sel).textContent === label, {}, selected, versionLabel);
 		assert.equal(await a.$eval(notice, node => node.textContent), "テクスチャを適用しました");
+		await assertWorldArt(a, true);
+		await assertWorldArt(b, false);
 		const changed = await pixels(a);
 		assert.deepEqual(changed.worldStone, stoneRGB);
 		assert.notEqual(changed.stone, defaults.stone);
@@ -325,6 +426,53 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		await a.waitForFunction((sel, label) => window.__mc?.stats().joined && document.querySelector(sel).textContent === label, {}, selected, versionLabel);
 		assert.deepEqual(await pixels(a), changed);
 		assert.deepEqual(await pixels(b), defaults);
+
+		const survival = await contexts[1].newPage();
+		survival.on("pageerror", error => errors.push(error.message));
+		await survival.evaluateOnNewDocument(() => {
+			window.Worker = class extends Worker {
+				constructor(url, options) {
+					super(url, options);
+					if (!String(url).includes("/sim.worker.ts")) return;
+					// Exercise the normal status handler with stable half, empty and underwater states.
+					window.testVitals = () => this.dispatchEvent(new MessageEvent("message", {
+						data: { type: "packets", list: [Uint8Array.of(12, 13, 0, 180, 0, 0, 13).buffer] },
+					}));
+				}
+			};
+		});
+		await survival.goto(`${edge}/play.html?server=local&mode=survival&gen=flat&view=2&time=6000&world=${world}-hud`);
+		await survival.bringToFront();
+		await survival.waitForFunction(() => window.__mc?.stats().joined && window.__mc.stats().chunks >= 9
+			&& !window.__mc.stats().meshQueue && document.querySelector('.heart[data-state="full"]'));
+		const spawn = await survival.evaluate(async () => {
+			const { Renderer } = await import("/src/client/renderer.ts");
+			const render = Renderer.prototype.render;
+			Renderer.prototype.render = function(camera, view, target, fov, time, items, now, digs, ...entities) {
+				const scene = window.testTextureScene;
+				return render.call(this, scene?.camera ?? camera, view, target, fov, scene?.time ?? time, items, now,
+					scene?.dig ? [scene.dig] : digs, ...entities);
+			};
+			window.testVitals();
+			document.querySelector("#overlay").hidden = true;
+			return window.__mc.stats().spawn;
+		});
+		await survival.waitForFunction(() => document.querySelector('.heart[data-state="half"]') &&
+			!document.querySelector(".bubble").hidden && document.querySelector("#damage-flash").hidden);
+		await assertHudArt(survival, false);
+		await assertWorldFrame(survival, false, spawn);
+		await survival.$eval("#overlay", overlay => { overlay.hidden = false; });
+		await openSettings(survival);
+		await (await survival.$(input)).uploadFile(join(dir, name));
+		await survival.waitForFunction((sel, label) => document.querySelector(sel).textContent === label, {}, selected, versionLabel);
+		await survival.evaluate(() => {
+			window.testVitals();
+			document.querySelector("#overlay").hidden = true;
+		});
+		await survival.waitForFunction(() => document.querySelector("#damage-flash").hidden);
+		await assertHudArt(survival, true);
+		await assertWorldFrame(survival, true, spawn);
+		await survival.close();
 
 		// Only same-origin game/module GETs, never a pack filename, image upload, or pack endpoint.
 		for (const [method, target, body] of traffic) {
