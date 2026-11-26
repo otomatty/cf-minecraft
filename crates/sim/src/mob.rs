@@ -5905,6 +5905,47 @@ mod tests {
     }
 
     #[test]
+    fn dark_hostiles_cannot_spawn_on_in_or_next_to_lava() {
+        let mut server = joined(GameMode::Creative);
+        let floor = -41;
+        server.clients.get_mut(&1).unwrap().pos[1] = f64::from(floor - 10);
+        let pos = server.clients[&1].pos;
+        let (time, x, z) = (200..40_000)
+            .step_by(200)
+            .find_map(|time| {
+                let roll = sample(2026, 1, time, HOSTILE_DARK_COLUMN_SALT);
+                let (x, z) = ring_column(roll, pos);
+                (dark_start_y(roll, pos) == floor && column_in_ring(pos, x, z))
+                    .then_some((time, x, z))
+            })
+            .expect("dark spawn attempt at the lava level");
+        seal_dark_room(&mut server.world, x, floor, z);
+        for y in MIN_Y + 4..floor {
+            server.world.set_block(x, y, z, blocks::STONE);
+        }
+        let feet = [x, floor + 1, z];
+        assert_eq!(server.world.local_sky_light(feet), 0);
+        assert_eq!(server.world.local_block_light(feet), 0);
+        tick_spawn(&mut server, time, 6000);
+        assert_eq!(hostiles(&server).len(), 1);
+
+        server.world.set_block(x + 1, floor, z, blocks::LAVA);
+        assert!(hostile_dark_feet(&server.world, x, z, floor).is_some());
+        assert_eq!(server.world.local_block_light(feet), 13);
+        tick_spawn(&mut server, time, 6000);
+        assert!(hostiles(&server).is_empty());
+        server.world.set_block(x + 1, floor, z, blocks::STONE);
+
+        for y in [floor, floor + 1] {
+            let old = server.world.set_block(x, y, z, blocks::LAVA).unwrap();
+            assert_eq!(hostile_dark_feet(&server.world, x, z, floor), None);
+            tick_spawn(&mut server, time, 6000);
+            assert!(hostiles(&server).is_empty());
+            server.world.set_block(x, y, z, old);
+        }
+    }
+
+    #[test]
     fn dark_hostiles_spawn_by_day_only_under_unlit_cover() {
         let mut server = joined(GameMode::Creative);
         assert!(!server.world.lighting_enabled());

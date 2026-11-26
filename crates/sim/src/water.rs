@@ -816,6 +816,70 @@ mod tests {
     }
 
     #[test]
+    fn generated_and_reloaded_lava_is_idle_until_adjacent_stone_is_broken() {
+        let mut server = Server::new(2026, Generator::Terrain);
+        server.set_game_mode(GameMode::Creative);
+        let source = [-127, -41, -127];
+        let below = offset(source, BELOW);
+        let coords = (source[0] >> 4, source[2] >> 4);
+        server.generate_now(coords.0, coords.1);
+        server.connect(1);
+        let client = server.clients.get_mut(&1).unwrap();
+        client.joined = true;
+        client.pos = [
+            f64::from(source[0]) + 0.5,
+            f64::from(source[1] + 1),
+            f64::from(source[2]) + 0.5,
+        ];
+        client.sent.insert(coords);
+
+        for reload in [false, true] {
+            if reload {
+                server.world.chunks.get_mut(&coords).unwrap().dirty = true;
+                let (cx, cz, bytes) = server.take_dirty().unwrap();
+                assert_eq!((cx, cz), coords);
+                server.world.chunks.remove(&coords);
+                assert!(server.load_chunk(cx, cz, &bytes));
+            }
+            assert_eq!(at(&server, source), blocks::LAVA);
+            assert_eq!(at(&server, offset(source, ABOVE)), blocks::AIR);
+            assert_eq!(at(&server, below), blocks::STONE);
+            assert!(server.scheduled_blocks.is_empty());
+            advance(&mut server, 2 * LAVA_FLOW_DELAY);
+            assert_eq!(server.stats.blocks_changed, 0);
+            assert!(server.scheduled_blocks.is_empty());
+            assert_eq!(at(&server, source), blocks::LAVA);
+        }
+
+        let [x, y, z] = below;
+        server.apply(
+            1,
+            C2S::SetBlock {
+                x,
+                y,
+                z,
+                state: blocks::AIR,
+            },
+        );
+        assert!(server
+            .scheduled_blocks
+            .contains(&(server.game_time + LAVA_FLOW_DELAY, source)));
+        advance(&mut server, LAVA_FLOW_DELAY - 1);
+        assert_eq!(at(&server, below), blocks::AIR);
+        advance(&mut server, 1);
+        assert_eq!(at(&server, below), blocks::FALLING_LAVA);
+
+        server.set_game_mode(GameMode::Survival);
+        hold(&mut server, "bucket", 1);
+        use_at(&mut server, source);
+        assert_eq!(at(&server, source), blocks::AIR);
+        assert_eq!(
+            server.clients[&1].inventory.selected_stack(),
+            Some(stack("lava_bucket", 1))
+        );
+    }
+
+    #[test]
     fn lava_spreads_one_level_per_delay_and_drains_after_removing_its_source() {
         let mut server = setup(GameMode::Creative);
         let [x, y, z] = SOURCE;

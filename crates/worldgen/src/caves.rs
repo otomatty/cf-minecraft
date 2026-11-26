@@ -9,6 +9,8 @@ const STEP: i32 = 4;
 const FLOOR: i32 = MIN_Y + 6;
 const TUNNEL_RADIUS: f64 = 0.036;
 pub(crate) const ENTRANCE_THRESHOLD: f64 = 0.22;
+const LAVA_REGION_SCALE: f64 = 224.0;
+const LAVA_REGION_THRESHOLD: f64 = 0.16;
 const SALTS: [u64; 3] = [
     0x51ec_7a92_d304_b86f,
     0xb682_09fd_43ae_715c,
@@ -18,6 +20,7 @@ const SALTS: [u64; 3] = [
 pub(crate) struct Caves {
     fields: [Fbm; 3],
     entrances: Fbm,
+    lava_regions: Fbm,
 }
 
 fn lerp(t: f64, a: f64, b: f64) -> f64 {
@@ -52,6 +55,12 @@ impl Caves {
             ),
             fields: SALTS
                 .map(|salt| Fbm::new(mix_stafford13(seed as u64 ^ salt) as i64, 1, 2.0, 0.5)),
+            lava_regions: Fbm::new(
+                mix_stafford13(seed as u64 ^ 0x9f51_27e6_a38d_4bc1) as i64,
+                1,
+                2.0,
+                0.5,
+            ),
         }
     }
 
@@ -66,7 +75,14 @@ impl Caves {
         self.entrances.sample2(x as f64 / 193.0, z as f64 / 193.0)
     }
 
-    // Reference pure coordinate query: no chunk-local state or noise evaluated at blocks.
+    pub(crate) fn is_lava_region(&self, x: i32, z: i32) -> bool {
+        self.lava_regions
+            .sample2(x as f64 / LAVA_REGION_SCALE, z as f64 / LAVA_REGION_SCALE)
+            > LAVA_REGION_THRESHOLD
+    }
+
+    // Reference cave shape before choosing the underground fill. Like the
+    // carver, sample the cave noise only at world-aligned lattice points.
     pub(crate) fn is_cave(
         &self,
         x: i32,
@@ -133,9 +149,31 @@ impl Caves {
                 })
             })
             .collect();
+        // A halo gives both sides of each chunk edge the same region boundary.
+        let lava_regions: [[bool; 18]; 18] = std::array::from_fn(|z| {
+            std::array::from_fn(|x| {
+                self.is_lava_region(cx * 16 + x as i32 - 1, cz * 16 + z as i32 - 1)
+            })
+        });
         for z in 0..16 {
             for x in 0..16 {
                 let top = heights[z + 1][x + 1];
+                let in_lava_region = lava_regions[z + 1][x + 1];
+                let underground = if [
+                    lava_regions[z + 1][x],
+                    lava_regions[z + 1][x + 2],
+                    lava_regions[z][x + 1],
+                    lava_regions[z + 2][x + 1],
+                ]
+                .into_iter()
+                .any(|neighbor| neighbor != in_lava_region)
+                {
+                    blocks::OBSIDIAN
+                } else if in_lava_region {
+                    blocks::LAVA
+                } else {
+                    blocks::WATER
+                };
                 let lowest_neighbor = [
                     heights[z + 1][x],
                     heights[z + 1][x + 2],
@@ -168,7 +206,16 @@ impl Caves {
                     if let Some(state) = replacement(values, y, top, lowest_neighbor) {
                         let old = chunk.get(x, y, z);
                         if old != blocks::AIR && old != blocks::WATER {
-                            chunk.set(x, y, z, state);
+                            chunk.set(
+                                x,
+                                y,
+                                z,
+                                if state == blocks::WATER {
+                                    underground
+                                } else {
+                                    state
+                                },
+                            );
                         }
                     }
                 }
@@ -180,6 +227,33 @@ impl Caves {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lava_replaces_new_groundwater_and_preserves_existing_water() {
+        let caves = Caves::new(2026);
+        let mut chunk = Chunk::empty(-8, -8);
+        chunk.sections[..9].fill(world::Section::uniform(blocks::STONE));
+        chunk.set(1, MIN_Y, 1, blocks::BEDROCK);
+        let mut with_water = chunk.clone();
+        with_water.set(1, CAVE_WATER_LEVEL, 1, blocks::WATER);
+
+        let heights = [[80; 18]; 18];
+        caves.carve(&mut chunk, -8, -8, &heights);
+        caves.carve(&mut with_water, -8, -8, &heights);
+        assert_eq!(chunk.get(1, CAVE_WATER_LEVEL, 1), blocks::LAVA);
+        assert_eq!(chunk.get(1, CAVE_WATER_LEVEL + 1, 1), blocks::AIR);
+        assert_eq!(chunk.get(1, CAVE_WATER_LEVEL - 1, 1), blocks::STONE);
+        assert_eq!(chunk.get(1, MIN_Y, 1), blocks::BEDROCK);
+        assert_eq!(with_water.get(1, CAVE_WATER_LEVEL, 1), blocks::WATER);
+        chunk.set(1, CAVE_WATER_LEVEL, 1, blocks::WATER);
+        for y in MIN_Y..MIN_Y + world::HEIGHT {
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(chunk.get(x, y, z), with_water.get(x, y, z), "{x},{y},{z}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn tunnels_and_chambers_preserve_the_roof_and_water_neighbors() {
