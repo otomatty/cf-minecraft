@@ -23,7 +23,7 @@ import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, gameTextureNames, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, gameTextureLayout, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
 import { loadInstalledPack, setupTexturePack } from "./texture-pack-settings.ts";
@@ -163,19 +163,19 @@ async function main(): Promise<void> {
 	const me = await playSession();
 	if (!hasPlaySession(me)) return location.replace(titleUrl);
 	const core = await ClientCore.load(clientWasmUrl);
-	const textureNames = gameTextureNames(core);
+	const layout = gameTextureLayout(core);
+	const textureNames = layout.names;
 	const pack = await loadInstalledPack(textureNames);
 	if (!pack) return location.replace(titleUrl);
 	if (serverKind === "ws" && !me.open && !await canEnterWorld()) return;
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
 	const arrowTexture = textureNames.indexOf("arrow");
 	const eggTexture = textureNames.indexOf("egg");
-	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
-	renderer.applyTexturePack(pack);
+	const renderer = await Renderer.create(canvas, layout, new PlayerNames($("player-names")), pack);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
-	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
+	const dropLayers = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
 	const dropFaces = new Map(items.map(item => [item.id, dropBlockFaces(item, registry, textureNames)]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
@@ -1015,7 +1015,7 @@ async function main(): Promise<void> {
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
-	setupTexturePack($("textures-tab-panel"), textureNames, pack, next => {
+	setupTexturePack($("textures-tab-panel"), layout, pack, next => {
 		renderer.applyTexturePack(next);
 		applyHudPack(next);
 		icons.clear();
@@ -1738,7 +1738,7 @@ async function main(): Promise<void> {
 			const blockFaces = dropFaces.get(entity.item);
 			return {
 				position: dropPosition,
-				texture: itemTextures.get(entity.item) ?? 0,
+				texture: dropLayers.get(entity.item) ?? 0,
 				blockFaces,
 				cellTint: blockFaces ? tintMap.tint(dropPosition[0], dropPosition[2]) : null,
 				flat: item?.texture != null || item?.block == null,

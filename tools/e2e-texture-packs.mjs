@@ -146,6 +146,10 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		const version = "1.26.60.6";
 		const name = `bedrock-samples-v${version}-full.zip`;
 		const versionLabel = "Bedrock Samples v" + version;
+		const partialFilename = "bedrock-samples-v1.26.60.7-full.zip";
+		const partialNotice = "この版のパックに無い画像が 5 件あります";
+		const metadataFilename = "sample-min.zip";
+		const missingImages = "ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。";
 		const fringeBrightness = 222;
 		const officialError = /公式の Bedrock Samples の ZIP ではありません/;
 		const rejected = [
@@ -154,10 +158,15 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				path.endsWith("manifest.json") ? JSON.stringify({ header: { uuid: JSON.parse(data).header.uuid } }) : data])), officialError],
 			["old-format.zip", await zipBytes(testEntries.filter(([path]) => path.includes("/textures/")).map(([path, data]) => [path.replace("sample/resource_pack/", ""), data])), officialError],
 			["broken.zip", "invalid archive", /.+/],
-			["sample-min.zip", await zipBytes(packEntries()), /ブロックとアイテムの画像が入っていません/],
+			[metadataFilename, await zipBytes(packEntries()), new RegExp(missingImages)],
 		];
 		await Promise.all([
 			writeFile(join(dir, fixtureFilename), initialFixture),
+			writeFile(join(dir, partialFilename), await fixturePack({ omit: [
+				"resource_pack/textures/blocks/stone.png", "resource_pack/textures/items/apple.png",
+				"resource_pack/textures/environment/clouds.png", "resource_pack/textures/environment/destroy_stage_4.png",
+				"resource_pack/textures/ui/heart.png",
+			] })),
 			writeFile(join(dir, name), await fixturePack({ artVariant: true, colors: {
 				stone: stoneRGB, grass_block_side: [fringeBrightness, fringeBrightness, fringeBrightness], apple: appleRGB,
 				water: [120, 120, 120], water_flow: [130, 130, 130],
@@ -474,6 +483,38 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 		await assertWorldFrame(survival, true, spawn);
 		await survival.close();
 
+		// Install a partial pack from the title, reload, then enter the world using it.
+		await a.goto(edge + "/?" + new URLSearchParams({ next: new URL(url).pathname + new URL(url).search }));
+		await a.waitForSelector(".pack-summary button");
+		await a.click(".pack-summary button");
+		await a.waitForSelector("#texture-file");
+		await (await a.$("#texture-file")).uploadFile(join(dir, partialFilename));
+		const missing = ".pack-summary [data-pack-missing]";
+		await a.waitForSelector(missing);
+		assert.equal(await a.$eval(missing, node => node.textContent), partialNotice);
+		await a.reload();
+		await a.waitForSelector(missing);
+		assert.equal(await a.$eval(missing, node => node.textContent), partialNotice);
+		await a.click('#panel a[href*="server=ws"]');
+		await a.waitForFunction(() => window.__mc?.stats().joined && window.__mc.stats().chunks >= 9);
+		await openSettings(a);
+		assert.equal(await a.$eval(panel + " [data-pack-missing]", node => node.textContent), partialNotice);
+		assert.deepEqual(await a.evaluate(() => window.testStoneRGB), [0, 0, 0]);
+		assert.deepEqual(await a.$eval('[data-block="apple"] canvas', canvas => {
+			const context = canvas.getContext("2d");
+			return [0, 8].map(x => [...context.getImageData(x, 0, 1, 1).data]);
+		}), [[0, 0, 0, 255], [248, 0, 248, 255]]);
+
+		assert.equal(await a.evaluate(() => window.testWorldArt.clouds), undefined);
+		const beforeRejectedReplacement = await pixels(a);
+		await (await a.$(input)).uploadFile(join(dir, metadataFilename));
+		await a.waitForFunction((sel, reason) => document.querySelector(sel).textContent === reason,
+			{}, notice, "テクスチャを変更できませんでした。" + missingImages);
+		assert.equal(await a.$eval(selected, node => node.textContent), "Bedrock Samples v1.26.60.7");
+		assert.equal(await a.$eval(panel + " [data-pack-missing]", node => node.textContent), partialNotice);
+		assert.deepEqual(await pixels(a), beforeRejectedReplacement);
+		assert.equal(await a.evaluate(() => window.__mc.stats().joined), true);
+
 		// Only same-origin game/module GETs, never a pack filename, image upload, or pack endpoint.
 		for (const [method, target, body] of traffic) {
 			if (!/^https?:/.test(target)) continue;
@@ -495,7 +536,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 			assert.equal(bytes.length, lengths.get(bytes[0]), "unexpected outbound game packet " + bytes[0]);
 		}
 		assert.deepEqual(errors, []);
-		console.log("ok  texture packs: title and play gates, invalid archives, replacement, independent multiplayer profiles, GPU and UI pixels, persistence and outbound traffic");
+		console.log("ok  texture packs: title and play gates, invalid archives, missing images, replacement, independent multiplayer profiles, GPU and UI pixels, persistence and outbound traffic");
 	} catch (error) {
 		for (const page of pages) {
 			console.error(await page.evaluate(() => ({

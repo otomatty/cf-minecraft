@@ -2,8 +2,8 @@ import { openAsBlob } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { inflateSync } from "node:zlib";
-import { ClientCore, gameTextureNames } from "../apps/web/src/client/client-core.ts";
-import { importTexturePack, MissingPackImages, packArtDimensions } from "../apps/web/src/client/texture-pack.ts";
+import { ClientCore, gameTextureLayout } from "../apps/web/src/client/client-core.ts";
+import { importTexturePack, packArtDimensions } from "../apps/web/src/client/texture-pack.ts";
 import { TEX_SIZE } from "../apps/web/src/client/textures.ts";
 import { crc32 } from "../apps/web/src/client/world-archive.ts";
 
@@ -55,19 +55,15 @@ function report(version, names, missing) {
 async function checkPack(path) {
 	const wasm = await readFile(new URL("../apps/web/src/wasm/client.wasm", import.meta.url));
 	const { instance } = await WebAssembly.instantiate(wasm, {});
-	const names = [...new Set(gameTextureNames(new ClientCore(instance)))];
+	const layout = gameTextureLayout(new ClientCore(instance));
+	const names = [...new Set(layout.names)];
 	const art = [...packArtDimensions.keys()];
 	const required = [...names, ...art];
 	const file = new File([await openAsBlob(path)], basename(path));
-	try {
-		const pack = await importTexturePack(file, names, undefined, async () => new Uint8Array(TEX_SIZE ** 2 * 4), checkPng);
-		report(pack.version, required, [...names.filter(name => !pack.tiles.has(name)),
-			...art.filter(path => !pack.art.has(path)).map(path => path + ".png")]);
-		console.log(`Cracks, sky and HUD: ${pack.art.size}/${art.length}`);
-	} catch (error) {
-		if (!(error instanceof MissingPackImages)) throw error;
-		report(error.version, required, [...names, ...art.map(path => path + ".png")]);
-	}
+	const pack = await importTexturePack(file, layout, undefined, async () => new Uint8Array(TEX_SIZE ** 2 * 4), checkPng);
+	report(pack.version, required, [...names.filter(name => !pack.tiles.has(name)),
+		...art.filter(path => !pack.art.has(path)).map(path => path + ".png")]);
+	console.log(`Cracks, sky and HUD: ${pack.art.size}/${art.length}`);
 }
 
 const [path] = process.argv.slice(2);

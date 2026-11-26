@@ -1,7 +1,5 @@
 import { BlobReader, ZipReader, type FileEntry } from "@zip.js/zip.js/lib/zip-core-custom.js";
-import { hasItemTexture } from "./item-textures.ts";
-import { TEX_SIZE } from "./textures.ts";
-import { WATER_FRAME_COUNT } from "./building-textures.ts";
+import { TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
 
 const MiB = 1024 ** 2;
 const maxArchive = 256 * MiB, maxExpanded = 512 * MiB, maxSelected = 32 * MiB;
@@ -235,17 +233,7 @@ function tgaFrames(bytes: Uint8Array, maxFrames: number): Uint8Array[] {
 }
 
 const unofficialPack = "公式の Bedrock Samples の ZIP ではありません。手順 1 のページから、名前が -full.zip で終わるファイルをダウンロードしてください。";
-const missingImages = "ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。";
 const bedrockUuid = "66c6e9a8-3093-462a-9c36-dbb052165822";
-
-export class MissingPackImages extends Error {
-	readonly version: string;
-
-	constructor(version: string) {
-		super(missingImages);
-		this.version = version;
-	}
-}
 
 export function isPackVersion(value: unknown): value is string {
 	return typeof value === "string" && /^\d+(?:\.\d+){2,3}(?:-preview)?$/.test(value);
@@ -255,10 +243,17 @@ export function packLabel(pack: TexturePack): string {
 	return `Bedrock Samples v${pack.version}`;
 }
 
+export function packMissingNotice(pack: TexturePack, names: readonly string[]): string {
+	let count = 0;
+	for (const name of new Set(names)) if (!pack.tiles.has(name)) count++;
+	for (const path of packArtDimensions.keys()) if (!pack.art.has(path)) count++;
+	return count ? `この版のパックに無い画像が ${count} 件あります` : "";
+}
+
 export type PackProgress = (done: number, total: number) => void;
 
 export async function importTexturePack(
-	file: File, names: readonly string[], onProgress?: PackProgress, decode = decodeTile, decodeNative = decodeArt,
+	file: File, { names, spriteStart }: TextureLayout, onProgress?: PackProgress, decode = decodeTile, decodeNative = decodeArt,
 ): Promise<TexturePack> {
 	if (!/\.zip$/i.test(file.name)) throw new Error(unofficialPack);
 	if (file.size > maxArchive) throw new Error("256 MiB 以下の .zip を選んでください");
@@ -308,12 +303,13 @@ export async function importTexturePack(
 			throw new Error(unofficialPack);
 		}
 		const wanted = new Set(names);
+		const sprites = new Set(names.slice(spriteStart));
 		if (wanted.has("torch_item")) wanted.add("torch");
 		if (wanted.has("grass_block_side")) wanted.add("dirt");
 		const images = new Map<FileEntry, string[]>();
 		let selected = 0;
 		for (const name of wanted) {
-			const item = hasItemTexture(name);
+			const item = sprites.has(name);
 			const path = imagePath(name, item ? items : terrain, item);
 			const entry = path && (files.get(resource + path + ".png") ?? files.get(resource + path + ".tga"));
 			if (!entry) continue;
@@ -382,7 +378,7 @@ export async function importTexturePack(
 					if (pixels.length === width * height * 4) art.set(path, prepareArt(path, pixels));
 				}
 			} catch {
-				// Optional art falls back independently when a file is unreadable.
+				// Unreadable optional images are treated as missing.
 			}
 			onProgress?.(++done, total);
 		}
@@ -399,7 +395,9 @@ export async function importTexturePack(
 		} else tiles.delete("grass_block_side");
 		if (!names.includes("torch")) tiles.delete("torch");
 		if (!names.includes("dirt")) tiles.delete("dirt");
-		if (!tiles.size) throw new MissingPackImages(version);
+		if (!tiles.size) {
+			throw new Error("ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。");
+		}
 		return { version, tiles, waterFrames, art };
 	} finally { await zip.close(); }
 }

@@ -1,10 +1,10 @@
 // Original, deterministic tile patterns for host and browser tests.
 import { readFile } from "node:fs/promises";
-import { ClientCore, gameTextureNames } from "../src/client/client-core.ts";
-import { deflateSync } from "node:zlib";
+import { ClientCore, gameTextureLayout } from "../src/client/client-core.ts";
+import { deflateSync, inflateSync } from "node:zlib";
 import { Uint8ArrayReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js/lib/zip-core-custom.js";
 import { crc32 } from "../src/client/world-archive.ts";
-import { packArtDimensions } from "../src/client/texture-pack.ts";
+import { importTexturePack, packArtDimensions } from "../src/client/texture-pack.ts";
 
 function chunk(type, data) {
 	const out = Buffer.alloc(12 + data.length);
@@ -48,10 +48,12 @@ export const testEntries = [
 
 const featuredColors = {
 	grass_block_top: [185, 185, 185],
+	white_wool: [233, 233, 233], gray_wool: [110, 110, 110], brown_wool: [123, 76, 60], black_wool: [40, 40, 40],
+	farmland_dry: [130, 105, 83], farmland_moist: [74, 54, 40], wheat_ripe: [220, 177, 60],
 	oak_planks: [182, 119, 64], cobblestone: [112, 112, 112],
 	glass: [192, 233, 250], water: [170, 170, 170], water_flow: [178, 178, 178],
 	red_flower: [242, 29, 36], yellow_flower: [238, 206, 35], short_grass: [168, 184, 84],
-	oak_leaves_dense: [61, 110, 39], torch: [245, 171, 65],
+	torch: [245, 171, 65],
 	lava: [242, 95, 22],
 };
 
@@ -70,23 +72,52 @@ function rgbaPng(width, height, pixel) {
 		chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
 
+function leafShade(x, y) {
+	return 145 + (x * 13 + y * 7) % 31;
+}
+
+function leafOpaque(x, y) {
+	return (x + 2 * y) % 7 !== 0;
+}
+
 function fixturePng(name, item, color) {
 	const water = name === "water" || name === "water_flow";
 	const size = name === "water_flow" ? 32 : 16;
+	const stage = ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"].indexOf(name);
 	const frameShades = water ? [0, 36, -20] : [0];
-	const hash = crc32(Buffer.from(name));
+	const ore = name.endsWith("_ore");
+	const tool = /_(pickaxe|axe|shovel|hoe)$/.exec(name)?.[1];
+	const pattern = name.endsWith("_wool") ? "white_wool" : ore ? "stone" : name;
+	const hash = crc32(Buffer.from(pattern));
+	const colorHash = ore ? crc32(Buffer.from(name)) : hash;
 	const rgb = color ?? featuredColors[name] ?? [0, 8, 16].map(shift => 55 + ((hash >>> shift) % 157));
 	return rgbaPng(size, size * frameShades.length, (x, row) => {
 		const y = row % size;
 		let opaque = true;
-		if (item) opaque = Math.abs(x - 7) + Math.abs(y - 7) <= 8;
+		if (item) {
+			opaque = Math.abs(x - 7) + Math.abs(y - 7) <= 8;
+			if (tool && y === 12 && x === (tool === "hoe" ? 8 : 2)) opaque = true;
+		}
 		else if (name === "glass") opaque = x === 0 || x === 15 || y === 0 || y === 15 || Math.abs(x - y) <= 1;
 		else if (name.endsWith("_flower")) opaque = (y < 8 && Math.abs(x - 7) + Math.abs(y - 4) < 6) || (y >= 7 && x >= 7 && x <= 8);
-		else if (name === "short_grass" || name.startsWith("wheat_")) opaque = y > 3 && (x + (y >> 2)) % 4 < 2;
+		else if (name === "short_grass") opaque = y > 3 && (x + (y >> 2)) % 4 < 2;
+		else if (stage >= 0) opaque = y > 11 - stage * 3 && x % 4 < 2;
 		if (!opaque) return [0, 0, 0, 0];
 		const shade = frameShades[Math.floor(row / size)] + (color ? 0 : ((x * 13 + y * 7 + hash) % 31) - 15);
-		const base = name.endsWith("_flower") && y >= 8 ? [57, 151, 54] : rgb;
-		const alpha = name === "water" ? 240 : 255;
+		if (name === "oak_leaves_dense" && !color) {
+			const level = leafOpaque(x, y) ? leafShade(x, y) : 100;
+			return [level, level, level, 255];
+		}
+		if (name === "furnace_front" && y >= 6 && y < 13 && x >= 4 && x <= 11 && !color) {
+			return y === 12 ? [200, 130, 35, 255] : [25, 25, 25, 255];
+		}
+		let base = rgb;
+		if (name.endsWith("_flower") && y >= 8) base = [57, 151, 54];
+		if (name.startsWith("crafting_table_") && y < 2 && !color) base = [120, 120, 120];
+		if (ore && (x + 2 * y) % 11 === 0 && !color) {
+			base = [0, 8, 16].map(shift => 55 + ((colorHash >>> shift) % 157));
+		}
+		const alpha = name === "water" || name === "ice" ? 240 : 255;
 		return [...base.map(value => Math.min(255, Math.max(0, value + shade))), alpha];
 	});
 }
@@ -129,8 +160,8 @@ function fixtureTga(name, color) {
 	bytes[17] = 8; // Bottom-left origin, eight alpha bits.
 	for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
 		const grass = name === "grass_block_side";
-		const level = color?.[0] ?? (grass ? fixtureGrassBrightness : 145 + (x * 13 + y * 7) % 31);
-		const opaque = grass ? y < 4 : (x + 2 * y) % 7 !== 0;
+		const level = color?.[0] ?? (grass ? fixtureGrassBrightness : leafShade(x, y));
+		const opaque = grass ? y < 4 : leafOpaque(x, y);
 		bytes.set([level, level, level, opaque ? 255 : 0], 18 + ((size - 1 - y) * size + x) * 4);
 	}
 	if (name !== "grass_block_side") return bytes;
@@ -143,12 +174,18 @@ function fixtureTga(name, color) {
 	})]);
 }
 
-export async function fixturePack({ colors = {}, artVariant = false } = {}) {
+async function fixtureLayout() {
 	const wasm = await readFile(new URL("../src/wasm/client.wasm", import.meta.url));
 	const { instance } = await WebAssembly.instantiate(wasm, {});
-	const core = new ClientCore(instance);
-	const names = new Set(gameTextureNames(core));
-	const itemNames = new Set([...core.itemRegistry().map(item => item.texture), "bow"]);
+	return gameTextureLayout(new ClientCore(instance));
+}
+
+export async function fixturePack(options) {
+	return fixtureZip(await fixtureLayout(), options);
+}
+
+async function fixtureZip({ names, spriteStart }, { colors = {}, artVariant = false, omit = [] } = {}) {
+	const itemNames = new Set(names.slice(spriteStart));
 	const terrain = {}, items = {}, images = [];
 	for (const name of names) {
 		const item = itemNames.has(name);
@@ -164,7 +201,33 @@ export async function fixturePack({ colors = {}, artVariant = false } = {}) {
 		images.push(["resource_pack/" + path + (tga ? ".tga" : ".png"),
 			tga ? fixtureTga(name, colors[name]) : fixturePng(name, item, colors[name])]);
 	}
-	return zipBytes([...packEntries({ terrain, items }), ...images, ...fixtureArtEntries(artVariant)]);
+	const assets = [...images, ...fixtureArtEntries(artVariant)].filter(([path]) => !omit.includes(path));
+	return zipBytes([...packEntries({ terrain, items }), ...assets]);
+}
+
+// Test PNGs contain one unfiltered RGBA IDAT immediately after the header.
+export async function decodeFixtureArt(bytes, width, height) {
+	const png = Buffer.from(bytes);
+	const stride = width * 4 + 1;
+	if (png.toString("ascii", 37, 41) !== "IDAT") throw new Error("Expected fixture PNG");
+	const rows = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
+	if (rows.length !== stride * height) throw new Error("Unexpected fixture PNG size");
+	return Uint8Array.from(rows.filter((_, i) => i % stride !== 0));
+}
+
+export async function decodedFixturePack() {
+	const layout = await fixtureLayout();
+	const file = new File([await fixtureZip(layout)], fixtureFilename);
+	return importTexturePack(file, layout, undefined, async (bytes, size, frame) => {
+		const height = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(20);
+		const image = await decodeFixtureArt(bytes, size, height);
+		const tile = new Uint8Array(16 * 16 * 4);
+		for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+			const source = (size * (frame * size + Math.floor((y + 0.5) * size / 16)) + Math.floor((x + 0.5) * size / 16)) * 4;
+			tile.set(image.subarray(source, source + 4), (y * 16 + x) * 4);
+		}
+		return tile;
+	}, decodeFixtureArt);
 }
 
 export async function zipBytes(entries = testEntries) {

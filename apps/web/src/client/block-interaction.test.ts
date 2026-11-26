@@ -3,10 +3,18 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ClientCore, type RayHit } from "./client-core.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
-import { paintTexture } from "./textures.ts";
+import { missingTile } from "./textures.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { hotbarStates, pickBlockItem } from "./hotbar.ts";
+import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
+
+const fixture = await decodedFixturePack();
+const packTile = (name: string): Uint8Array => {
+	const tile = fixture.tiles.get(name);
+	assert.ok(tile, name);
+	return tile;
+};
 
 const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 const registry = core.blockRegistry();
@@ -28,7 +36,7 @@ test("pick block finds the same item for both leaves and places persistent leave
 	assert.equal(pickBlockItem(registry[air], items), undefined);
 });
 
-test("white wool is an opaque hand-mined block with a fluffy white texture", () => {
+test("white wool is an opaque hand-mined block with a white pack texture", () => {
 	const block = registry.find(entry => entry.name === "white_wool");
 	assert.ok(block);
 	assert.equal(block.texture, "white_wool");
@@ -39,8 +47,8 @@ test("white wool is an opaque hand-mined block with a fluffy white texture", () 
 	const item = core.itemRegistry().find(entry => entry.name === "white_wool");
 	assert.equal(item?.block, block.first);
 	assert.equal(item?.texture, null);
-	const pixels = paintTexture("white_wool");
-	assert.notDeepEqual(pixels, paintTexture("missing_wool"));
+	const pixels = packTile("white_wool");
+	assert.notDeepEqual(pixels, missingTile);
 	assert.equal(pixels.length, 16 * 16 * 4);
 	let white = 0;
 	for (let i = 0; i < pixels.length; i += 4) {
@@ -53,15 +61,15 @@ test("white wool is an opaque hand-mined block with a fluffy white texture", () 
 		const food = core.itemRegistry().find(entry => entry.name === name);
 		assert.equal(food?.texture, name);
 		assert.equal(food?.block, null);
-		const icon = paintTexture(name);
+		const icon = packTile(name);
 		assert.ok(icon.some((value, i) => i % 4 === 3 && value === 0), name);
 		assert.ok(icon.some((value, i) => i % 4 === 3 && value === 255), name);
 	}
 });
 
 test("inventory icons use registered faces and distinguish blocks built from the same material", () => {
-	const atlas = new Map(core.textureNames().map(name => [name, paintTexture(name)]));
-	const missing = paintTexture("missing");
+	const atlas = fixture.tiles;
+	const missing = missingTile;
 	for (const [name, pixels] of atlas) assert.notDeepEqual(pixels, missing, name);
 	const icon = name => blockIconPixels(registry[id(name)], atlas);
 	const coverage = name => icon(name).filter((value, i) => i % 4 === 3 && value !== 0).length;
@@ -239,14 +247,14 @@ test("empty, unknown and non-block items have empty hotbar icons", () => {
 });
 
 
-test("biome blocks expose picker entries and original art, with translucent ice", () => {
+test("biome blocks expose picker entries and pack textures, with translucent ice", () => {
 	for (const [index, name] of ["snow_block", "sandstone", "gravel", "ice", "coarse_dirt"].entries()) {
 		const state = id(name);
 		assert.equal(state, 40 + index);
 		assert.equal(registry[state].model, "cube");
 		assert.equal(registry[state].first, state);
-		const pixels = paintTexture(name);
-		assert.deepEqual(pixels, paintTexture(name));
+		const pixels = packTile(name);
+		assert.deepEqual(pixels, packTile(name));
 		assert.equal(pixels.length, 16 * 16 * 4);
 		for (let i = 0; i < pixels.length; i += 4) {
 			assert.ok(pixels[i + 1] > 0, "no missing-texture magenta/black");
@@ -321,17 +329,17 @@ test("right-click tills uncovered grass or dirt with any hoe", () => {
 	}
 });
 
-test("crop states and farming items use distinct painted textures", () => {
+test("crop states and farming items use distinct pack textures", () => {
 	const crops = registry.filter(block => block.name === "wheat");
 	assert.deepEqual(crops.map(block => block.stateName), Array.from({ length: 8 }, (_, age) => `wheat[age=${age}]`));
 	assert.deepEqual(crops.map(block => block.texture), [
 		"wheat_sprout", "wheat_sprout", "wheat_shoot", "wheat_shoot",
 		"wheat_green", "wheat_green", "wheat_green", "wheat_ripe",
 	]);
-	assert.notDeepEqual(paintTexture("farmland_dry"), paintTexture("farmland_moist"));
+	assert.notDeepEqual(packTile("farmland_dry"), packTile("farmland_moist"));
 	for (const name of ["wooden_hoe", "stone_hoe", "copper_hoe", "iron_hoe", "wheat_seeds", "wheat", "bread"]) {
 		assert.equal(core.itemRegistry().find(item => item.name === name)?.texture, name);
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 0), name);
 		assert.ok(pixels.some((value, i) => i % 4 === 3 && value === 255), name);
 	}
@@ -368,7 +376,7 @@ test("filled bucket targets the adjacent air, flow, or short grass and respects 
 	assert.equal(pickBlockItem(flow, core.itemRegistry()), undefined);
 	assert.deepEqual(placementState(registry, id("stone"), target, 0, x => x === 0 ? id("stone") : flow.first),
 		{ x: 1, y: -2, z: 0, state: id("stone") });
-	assert.notDeepEqual(paintTexture("bucket"), paintTexture("water_bucket"));
+	assert.notDeepEqual(packTile("bucket"), packTile("water_bucket"));
 });
 
 test("bucket ray passes through flow to water and lava sources", () => {
@@ -402,9 +410,9 @@ test("lava buckets place into air, flowing lava, or flowers", () => {
 		assert.deepEqual(bucketTarget("lava_bucket", target, blockName, false), allowed ? [1, -2, 0] : null);
 	}
 	assert.equal(bucketTarget("water_bucket", target, x => blockInfo(x === 0 ? "stone" : "flowing_lava"), false), null);
-	const pixels = paintTexture("lava_bucket");
-	assert.notDeepEqual(pixels, paintTexture("water_bucket"));
-	assert.notDeepEqual(pixels, paintTexture("missing"));
+	const pixels = packTile("lava_bucket");
+	assert.notDeepEqual(pixels, packTile("water_bucket"));
+	assert.notDeepEqual(pixels, missingTile);
 });
 
 test("filled buckets can target a washable block directly or next to the hit face", () => {

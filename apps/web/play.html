@@ -166,59 +166,16 @@
 			#air { width: 216px; margin: 0 auto 4px; }
 			#vital-meters { display: flex; gap: 12px; }
 			#food { flex-direction: row-reverse; }
-			.food {
-				position: relative;
+			.vital-row span {
 				width: 18px;
 				height: 18px;
-				filter: drop-shadow(0 1px 1px #000);
-			}
-			.food::before, .food::after {
-				content: "";
-				position: absolute;
-			}
-			.food::before {
-				inset: 8px 1px 1px 7px;
-				background: #f6dcaa;
-				clip-path: polygon(0 0, 70% 44%, 92% 32%, 100% 51%, 90% 70%, 93% 88%, 74% 100%, 48% 78%, 0 40%);
-			}
-			.food::after {
-				inset: 1px 4px 4px 0;
-				background: #353042;
-				clip-path: polygon(18% 5%, 59% 0, 83% 18%, 100% 48%, 86% 83%, 53% 100%, 20% 83%, 0 53%, 0 27%);
-			}
-			.food[data-state="full"]::after { background: #db783d; }
-			.food[data-state="half"]::after { background: linear-gradient(270deg, #db783d 50%, #353042 50%); }
-			.heart { filter: drop-shadow(0 1px 1px #000); }
-			.heart::before {
-				content: "";
-				display: block;
-				width: 18px;
-				height: 18px;
-				background: #353042;
-				clip-path: polygon(0 18%, 12% 6%, 36% 6%, 50% 20%, 64% 6%, 88% 6%, 100% 18%, 100% 47%, 50% 98%, 0 47%);
-			}
-			.heart[data-state="full"]::before { background: #ff4f59; }
-			.heart[data-state="half"]::before { background: linear-gradient(90deg, #ff4f59 50%, #353042 50%); }
-			.bubble {
-				box-sizing: border-box;
-				width: 18px;
-				height: 18px;
-				border: 2px solid #c5f2ff;
-				border-radius: 50%;
-				background: radial-gradient(circle at 32% 30%, white 10%, #67ccff 22%, #186aaf 75%);
-				box-shadow: 0 1px 2px #000;
-			}
-			.vital-row [data-pack-icon] {
-				width: 18px;
-				height: 18px;
-				border: 0;
-				box-shadow: none;
-				filter: none;
 				background-size: 100% 100%;
 				background-repeat: no-repeat;
 				image-rendering: pixelated;
 			}
-			.vital-row [data-pack-icon]::before, .vital-row [data-pack-icon]::after { content: none; }
+			.vital-row span:not([data-pack-icon]) { background-color: #eee; }
+			.vital-row span:not([data-pack-icon])[data-state="half"] { opacity: .6; }
+			.vital-row span:not([data-pack-icon])[data-state="empty"] { opacity: .25; }
 			#damage-flash {
 				position: fixed;
 				inset: 0;
@@ -265,6 +222,7 @@
 			#settings-warning { color: #ffcf80; min-height: 1.7em; }
 			#textures-tab-panel { overflow-wrap: anywhere; }
 			#textures-tab-panel a { color: #aaccff; }
+			#textures-tab-panel small:not([hidden]) { display: block; }
 			.pack-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 			[role="tablist"] { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 2px solid rgba(255,255,255,.2); }
 			[role="tab"] { background: transparent; border: 0; box-shadow: none; color: #c3cedd; font-family: "DotGothic16", monospace; font-size: 16px; padding: 8px 18px; border-bottom: 3px solid transparent; margin-bottom: -2px; cursor: pointer; }
@@ -385,7 +343,7 @@
 					<label>音楽 <span><input id="volume-music" type="range" min="0" max="100" step="1" /><output id="volume-music-value"></output></span></label>
 				</div>
 				<div id="textures-tab-panel" role="tabpanel" aria-labelledby="textures-tab" hidden>
-					<p>使用中 <output></output></p>
+					<p>使用中 <output></output><small data-pack-missing hidden></small></p>
 					<p>新しい版が出たときは、公式のリリースページから ZIP をダウンロードして入れ替えます。開くとすぐに適用されます。</p>
 					<input type="file" accept=".zip" hidden />
 					<div class="pack-actions">

@@ -1,6 +1,5 @@
-import { importTexturePack, isPackVersion, packArtDimensions, packLabel, type PackProgress, type TexturePack } from "./texture-pack.ts";
-import { TEX_SIZE } from "./textures.ts";
-import { WATER_FRAME_COUNT } from "./building-textures.ts";
+import { importTexturePack, isPackVersion, packArtDimensions, packLabel, packMissingNotice, type PackProgress, type TexturePack } from "./texture-pack.ts";
+import { TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
 
 const storageError = "テクスチャをこのブラウザに保存できません。サイトデータの保存を許可して、もう一度お試しください。";
 
@@ -66,20 +65,26 @@ export function loadInstalledPack(names: readonly string[]): Promise<TexturePack
 	return storedPack(names);
 }
 
-export async function installPack(file: File, names: readonly string[], onProgress?: PackProgress): Promise<TexturePack> {
-	const pack = await importTexturePack(file, names, onProgress);
-	await storedPack(names, pack);
+export async function installPack(file: File, layout: TextureLayout, onProgress?: PackProgress): Promise<TexturePack> {
+	const pack = await importTexturePack(file, layout, onProgress);
+	await storedPack(layout.names, pack);
 	return pack;
 }
 
 export function setupTexturePack(
-	panel: HTMLElement, names: readonly string[], initial: TexturePack, apply: (pack: TexturePack) => void,
+	panel: HTMLElement, layout: TextureLayout, initial: TexturePack, apply: (pack: TexturePack) => void,
 ): void {
 	const file = panel.querySelector("input")!;
 	const choose = panel.querySelector("button")!;
 	const current = panel.querySelector("output")!;
 	const message = panel.querySelector('[role="status"]')!;
-	current.textContent = packLabel(initial);
+	const missing = panel.querySelector<HTMLElement>("[data-pack-missing]")!;
+	const showPack = (pack: TexturePack) => {
+		current.textContent = packLabel(pack);
+		missing.textContent = packMissingNotice(pack, layout.names);
+		missing.hidden = !missing.textContent;
+	};
+	showPack(initial);
 	choose.onclick = () => file.click();
 	file.onchange = async () => {
 		const chosen = file.files?.[0];
@@ -88,11 +93,11 @@ export function setupTexturePack(
 		choose.disabled = file.disabled = true;
 		message.textContent = "テクスチャを取り出しています…";
 		try {
-			const pack = await installPack(chosen, names, (done, total) => {
+			const pack = await installPack(chosen, layout, (done, total) => {
 				if (total) message.textContent = `テクスチャを取り出しています… ${done} / ${total}`;
 			});
 			apply(pack);
-			current.textContent = packLabel(pack);
+			showPack(pack);
 			message.textContent = "テクスチャを適用しました";
 		} catch (error) {
 			message.textContent = `テクスチャを変更できませんでした。${error instanceof Error ? error.message : ""}`;

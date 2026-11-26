@@ -1494,6 +1494,12 @@ pub extern "C" fn client_texture_names() -> usize {
     emit(state(), names.join("\n").into_bytes())
 }
 
+/// First item sprite layer in client_texture_names.
+#[no_mangle]
+pub extern "C" fn client_sprite_start() -> usize {
+    blocks::TEXTURES.len()
+}
+
 /// Output: newline-separated block names, line number = block id.
 #[no_mangle]
 pub extern "C" fn client_block_names() -> usize {

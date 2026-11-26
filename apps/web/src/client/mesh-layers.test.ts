@@ -2,16 +2,25 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { quadCenters, sortedQuadIndices, sortSections, splitMeshLayers, updateTranslucentSort } from "./mesh-layers.ts";
-import { paintTexture, downsample, textureIconPixels } from "./textures.ts";
+import { missingTile, WATER_FRAME_COUNT, downsample, textureIconPixels } from "./textures.ts";
 import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_SHORT_GRASS_TINT, CARRIED_LEAVES_TINT, WATER_TINT, type BlockItemTint } from "./block-tints.ts";
 import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 import { iconTintChanged } from "./hotbar.ts";
 import type { CellTint } from "./tint-map.ts";
-import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels, grassSideIconPixels } from "./flora-textures.ts";
-import { itemTexture } from "./item-textures.ts";
-import { ClientCore } from "./client-core.ts";
-import { filterVisibleSections, outlineBox, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { ClientCore, gameTextureLayout } from "./client-core.ts";
+import { filterVisibleSections, outlineBox, preparePackTextures, terrainShader, usesCutoutMips, CLOUD_HEIGHT, cloudsBeforeTranslucent } from "./renderer.ts";
+import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
+
+const fixture = await decodedFixturePack();
+const coreLayout = gameTextureLayout(new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(
+	readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {})));
+const atlas = preparePackTextures(coreLayout.names, fixture);
+const rendererTile = (name: string) => atlas.tiles[coreLayout.names.indexOf(name)];
+const packTile = (name: string): Uint8Array => {
+	const tile = fixture.tiles.get(name);
+	assert.ok(tile, name);
+	return tile;
+};
 
 test("clouds draw before translucent terrain only below the cloud plane", () => {
 	assert.equal(CLOUD_HEIGHT, 192);
@@ -25,7 +34,7 @@ test("clouds draw before translucent terrain only below the cloud plane", () => 
 test("icons use carried colours without changing alpha or shared terrain pixels", () => {
 	for (const [name, tint] of [["oak_leaves", CARRIED_LEAVES_TINT], ["grass_block_top", CARRIED_GRASS_TOP_TINT],
 		["short_grass", CARRIED_SHORT_GRASS_TINT], ["water", WATER_TINT], ["water_flow", WATER_TINT]]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		const original = pixels.slice();
 		const icon = textureIconPixels(name, pixels);
 		assert.notDeepEqual([...icon], [...pixels]);
@@ -36,7 +45,7 @@ test("icons use carried colours without changing alpha or shared terrain pixels"
 		}
 		if (name === "oak_leaves") assert.ok(icon.some((v, i) => i % 4 === 3 && v === 0));
 	}
-	const stone = paintTexture("stone");
+	const stone = packTile("stone");
 	assert.deepEqual([...textureIconPixels("stone", stone)], [...stone]);
 });
 
@@ -44,7 +53,7 @@ test("block icon materials use the supplied grass or leaves RGB and preserve alp
 	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
 	for (const [name, tint] of [["grass_block_top", cell.grass], ["short_grass", cell.grass],
 		["oak_leaves", cell.leaves], ["oak_leaves_dense", cell.leaves]] as const) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		const original = pixels.slice();
 		const icon = textureIconPixels(name, pixels, cell);
 		for (let i = 0; i < pixels.length; i += 4) {
@@ -54,26 +63,26 @@ test("block icon materials use the supplied grass or leaves RGB and preserve alp
 		assert.deepEqual(pixels, original);
 	}
 	for (const name of ["stone", "water", "water_flow", "water_bucket"]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		assert.deepEqual(textureIconPixels(name, pixels, cell), textureIconPixels(name, pixels));
 	}
 });
 
 test("grass block side icons recolor the fringe and keep the dirt pixels", () => {
 	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
-	const packed = grassSideAtlasPixels();
-	const original = grassSideIconPixels();
-	const side = textureIconPixels("grass_block_side", paintTexture("grass_block_side"), cell);
+	const packed = packTile("grass_block_side");
+	const dirt = packTile("dirt");
+	const side = textureIconPixels("grass_block_side", packTile("grass_block_side"), cell);
 	for (let i = 0; i < side.length; i += 4) {
-		assert.equal(side[i + 3], original[i + 3]);
+		assert.equal(side[i + 3], 255);
 		for (let c = 0; c < 3; c++) {
 			assert.equal(side[i + c], packed[i + c] + Math.round(packed[i + 3] * cell.grass[c] / 255));
-			if (packed[i + 3] === 0) assert.equal(side[i + c], original[i + c]);
+			if (packed[i + 3] === 0) assert.equal(side[i + c], dirt[i + c]);
 		}
 	}
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 	const block = core.blockRegistry().find(block => block.name === "grass_block")!;
-	const atlas = new Map(block.faces.map(name => [name, paintTexture(name)]));
+	const atlas = new Map(block.faces.map(name => [name, packTile(name)]));
 	const carried = blockIconPixels(block, atlas);
 	const tinted = blockIconPixels(block, atlas, cell);
 	const pixel = (image: Uint8ClampedArray, y: number) => image.subarray((y * ICON_SIZE + 20) * 4, (y * ICON_SIZE + 21) * 4);
@@ -95,9 +104,9 @@ test("icons repaint for RGB changes and transitions to or from the fallback", ()
 
 test("drop shader decodes marked colors and keeps the grass side opaque", () => {
 	for (const names of [["water_bucket", "grass_block_side", "oak_leaves"], ["grass_block_side", "water_bucket"], ["stone"]]) {
-		const shader = terrainShader(names);
+		const shader = terrainShader({ names, spriteStart: names.length });
 		assert.match(shader, /fn vsDrop\(.*@location\(5\) tint: f32\)/);
-		assert.match(shader, /if \(tint > 0\.0\) \{\s+out\.tintColor = unpack4x8unorm\(u32\(tint\) - 1u\)\.rgb;/);
+		assert.match(shader, /if \(tint > 0\.0 && out\.layer == u32\(layer\)\) \{\s+out\.tintColor = unpack4x8unorm\(u32\(tint\) - 1u\)\.rgb;/);
 		assert.match(shader, new RegExp(`in.layer == ${names.indexOf("grass_block_side") >>> 0}u`));
 		assert.ok(shader.includes("color += pixel.a * in.tintColor"));
 		assert.ok(shader.includes("!(entityPass == 1u && grassSide)"));
@@ -107,13 +116,13 @@ test("drop shader decodes marked colors and keeps the grass side opaque", () => 
 
 test("terrain tint layers follow texture names when the texture array is reordered", () => {
 	for (const names of [["water", "grass_block_side", "oak_leaves", "water_flow"], ["water_flow", "oak_leaves", "water", "grass_block_side"]]) {
-		const shader = terrainShader(names);
+		const shader = terrainShader({ names, spriteStart: names.length });
 		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("oak_leaves")}u) { tintLayer =`));
 		assert.ok(shader.includes(`if (out.layer == ${names.indexOf("water")}u || out.layer == ${names.indexOf("water_flow")}u)`));
 		assert.ok(shader.includes(`if (in.layer == ${names.indexOf("grass_block_side")}u)`));
 		assert.ok(!shader.includes("__LEAVES_LAYER__") && !shader.includes("__WATER_LAYER__"));
 	}
-	const shader = terrainShader(["water", "oak_leaves"]);
+	const shader = terrainShader({ names: ["water", "oak_leaves"], spriteStart: 2 });
 	const vertex = shader.slice(shader.indexOf("@vertex"), shader.indexOf("override renderLayer"));
 	assert.equal(vertex.match(/textureSampleLevel\(tintTex/g)?.length, 4);
 	assert.ok(vertex.includes("origins[section].xz & vec2<i32>(1023)"));
@@ -121,7 +130,7 @@ test("terrain tint layers follow texture names when the texture array is reorder
 	assert.ok(shader.includes("@location(4) @interpolate(perspective, center) tintColor: vec3<f32>"));
 	assert.ok(shader.includes("color = color * in.tintColor"));
 	assert.ok(!shader.includes("g.grassTint"));
-	const absent = terrainShader(["stone"]);
+	const absent = terrainShader({ names: ["stone"], spriteStart: 1 });
 	assert.ok(absent.includes("if (out.layer == 4294967295u || out.layer == 4294967295u)"));
 	assert.ok(absent.includes("if (false) { tintLayer = 1; }"));
 	assert.doesNotMatch(absent, /__[A-Z_]+__/);
@@ -132,7 +141,7 @@ test("dense and regular leaves share terrain tint and cap rotation", () => {
 		[["oak_leaves", "water", "oak_leaves_dense"], "out.layer == 0u || out.layer == 2u"],
 		[["water", "oak_leaves_dense", "stone", "oak_leaves"], "out.layer == 1u || out.layer == 3u"],
 	]) {
-		const shader = terrainShader(names);
+		const shader = terrainShader({ names, spriteStart: names.length });
 		assert.ok(shader.includes(`if (${predicate}) { tintLayer = 1; }`));
 		assert.ok(shader.includes(`face <= 1u && (${predicate})`));
 		assert.doesNotMatch(shader, /__LEAVES_LAYERS__/);
@@ -140,9 +149,9 @@ test("dense and regular leaves share terrain tint and cap rotation", () => {
 });
 
 test("grass side keeps soil colour and reproduces the tinted fringe through all mip levels", () => {
-	let packed = grassSideAtlasPixels();
-	let icon = grassSideIconPixels();
-	const dirt = paintTexture("dirt");
+	let packed = packTile("grass_block_side");
+	let icon = textureIconPixels("grass_block_side", packed);
+	const dirt = packTile("dirt");
 	for (let i = 0; i < packed.length; i += 4) {
 		if (packed[i + 3] === 0) assert.deepEqual(packed.subarray(i, i + 3), dirt.subarray(i, i + 3));
 		else assert.deepEqual([...packed.subarray(i, i + 3)], [0, 0, 0]);
@@ -160,22 +169,24 @@ test("grass side keeps soil colour and reproduces the tinted fringe through all 
 	}
 });
 
-test("water has separate, looping animation frames for its surface and sides", () => {
+test("water repeats each pack animation independently for its surface and sides", () => {
 	assert.equal(WATER_FRAME_COUNT, 32);
-	for (const [name, flowing] of [["water", false], ["water_flow", true]]) {
-		const first = paintTexture(name);
-		assert.deepEqual(first, waterTextureFrame(0, flowing));
-		assert.deepEqual(first, waterTextureFrame(WATER_FRAME_COUNT, flowing));
-		const frames = new Set();
+	const names = ["water", "water_flow"];
+	const { water } = preparePackTextures(names, fixture);
+	assert.equal(water.length, 2 * WATER_FRAME_COUNT);
+	for (const [i, name] of names.entries()) {
+		const frames = fixture.waterFrames.get(name)!;
+		assert.equal(frames.length, 3);
+		assert.equal(water[i * WATER_FRAME_COUNT], packTile(name));
+		assert.equal(new Set(frames.map(pixels => Buffer.from(pixels).toString("base64"))).size, 3);
 		for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) {
-			const pixels = waterTextureFrame(frame, flowing);
+			const pixels = water[i * WATER_FRAME_COUNT + frame];
+			assert.equal(pixels, frames[frame % 3]);
 			assert.equal(pixels.length, 16 * 16 * 4);
-			assert.ok(pixels[3] > 0 && pixels[3] < 255);
-			frames.add(Buffer.from(pixels).toString("base64"));
+			assert.equal(pixels[3], i ? 166 : 156);
 		}
-		assert.equal(frames.size, WATER_FRAME_COUNT);
 	}
-	assert.notDeepEqual(paintTexture("water"), paintTexture("water_flow"));
+	assert.notDeepEqual(water[0], water[WATER_FRAME_COUNT]);
 });
 
 function quad(x, y, z, rotated = false) {
@@ -222,8 +233,8 @@ test("outlines use the selected shape bounds relative to the camera", () => {
 
 test("plant textures are deterministic cutouts with visible colored pixels", () => {
 	for (const name of ["red_flower", "yellow_flower", "short_grass"]) {
-		const pixels = paintTexture(name);
-		assert.deepEqual(pixels, paintTexture(name));
+		const pixels = packTile(name);
+		assert.equal(rendererTile(name), pixels, name);
 		const alpha = [...pixels].filter((_, i) => i % 4 === 3);
 		assert.ok(alpha.includes(0) && alpha.includes(255));
 	}
@@ -323,15 +334,15 @@ test("WASM water height seam emits one narrow quad with a displaced sorting cent
 	} finally { x.mc_free(ptr, padded.byteLength); }
 });
 
-test("original glass and leaf textures contain holes; water stays grayscale and translucent", () => {
+test("pack glass and leaf textures contain holes; water stays grayscale and translucent", () => {
 	for (const name of ["glass", "oak_leaves"]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		const alpha = [...pixels].filter((_, i) => i % 4 === 3);
 		assert.ok(alpha.includes(0) && alpha.includes(255));
-		assert.deepEqual(pixels, paintTexture(name));
+		assert.equal(rendererTile(name), pixels, name);
 	}
 	for (const name of ["oak_leaves", "water"]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		for (let i = 0; i < pixels.length; i += 4) {
 			assert.equal(pixels[i], pixels[i + 1]);
 			assert.equal(pixels[i], pixels[i + 2]);
@@ -343,7 +354,7 @@ test("original glass and leaf textures contain holes; water stays grayscale and 
 test("cutout mipmaps preserve threshold coverage to the nearest representable texel", () => {
 	const coverage = pixels => [...pixels].filter((v, i) => i % 4 === 3 && v >= 128).length / (pixels.length / 4);
 	for (const name of ["glass", "oak_leaves", "red_flower", "yellow_flower", "short_grass"]) {
-		let pixels = paintTexture(name);
+		let pixels = packTile(name);
 		for (let size = 16; size > 1; size >>= 1) {
 			const expected = coverage(pixels);
 			pixels = downsample(pixels, size, true);
@@ -355,8 +366,8 @@ test("cutout mipmaps preserve threshold coverage to the nearest representable te
 });
 
 test("dense leaves fill only the original holes with a darker opaque gray", () => {
-	const regular = paintTexture("oak_leaves");
-	let dense = paintTexture("oak_leaves_dense");
+	const regular = packTile("oak_leaves");
+	let dense = packTile("oak_leaves_dense");
 	assert.equal(dense.length, 16 * 16 * 4);
 	const darkest = Math.min(...regular.filter((_, i) => i % 4 === 0 && regular[i + 3] === 255));
 	for (let i = 0; i < dense.length; i += 4) {
@@ -369,7 +380,7 @@ test("dense leaves fill only the original holes with a darker opaque gray", () =
 			assert.ok(dense[i] < darkest);
 		}
 	}
-	assert.ok(usesCutoutMips("oak_leaves_dense"));
+	assert.ok(usesCutoutMips({ names: ["oak_leaves_dense"], spriteStart: 1 }, 0));
 	for (let size = 16; size > 1; size >>= 1) {
 		dense = downsample(dense, size, true);
 		assert.ok(dense.every((v, i) => i % 4 !== 3 || v === 255));
@@ -385,14 +396,14 @@ test("section visibility filters every layer before frustum tests and translucen
     assert.deepEqual(filterVisibleSections(meshes, null), [...meshes.values()]);
 });
 
-test("four original ore textures are opaque stone with distinct mineral grains", () => {
+test("four pack ore textures are opaque stone with distinct mineral grains", () => {
 	const names = ["coal_ore", "copper_ore", "iron_ore", "gold_ore"];
-	const textures = names.map(paintTexture);
-	const plainStone = paintTexture("stone");
-	const unknown = paintTexture("unknown_ore");
+	const textures = names.map(packTile);
+	const plainStone = packTile("stone");
+	const unknown = missingTile;
 	for (const [i, pixels] of textures.entries()) {
 		assert.equal(pixels.length, 16 * 16 * 4);
-		assert.deepEqual(pixels, paintTexture(names[i]));
+		assert.equal(rendererTile(names[i]), pixels);
 		assert.notDeepEqual(pixels, unknown);
 		let stone = 0, mineral = 0;
 		for (let p = 0; p < pixels.length; p += 4) {
@@ -413,17 +424,17 @@ function luminance([r, g, b]: Uint8Array): number {
 	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () => {
+test("opaque pack tiles retain their colour variation", () => {
 	const names = [
 		"crafting_table_top", "crafting_table_side", "crafting_table_bottom",
 		"furnace_front", "furnace_side", "furnace_top",
 		"farmland_dry", "farmland_moist", "oak_log_top", "white_wool",
 	];
-	const missing = paintTexture("missing_texture");
+	const missing = missingTile;
 	for (const name of names) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		assert.equal(pixels.length, 16 * 16 * 4, name);
-		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.equal(rendererTile(name), pixels, name);
 		assert.notDeepEqual(pixels, missing, name);
 		const colors = texels(pixels);
 		assert.ok(colors.every(([, , , a]) => a === 255), name);
@@ -432,19 +443,19 @@ test("redrawn opaque tiles resolve to deterministic multi-colour artwork", () =>
 });
 
 test("colored wool tiles share the white wool tuft pattern and shears have a hand-drawn icon", () => {
-	const white = texels(paintTexture("white_wool")).map(luminance);
+	const white = texels(packTile("white_wool")).map(luminance);
 	const ranks = (values: number[]) => {
 		const shades = [...new Set(values)].sort((a, b) => a - b);
 		return values.map(value => shades.indexOf(value));
 	};
 	for (const name of ["gray_wool", "brown_wool", "black_wool"]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		const colors = texels(pixels);
 		assert.ok(colors.every(([, , , alpha]) => alpha === 255), name);
-		assert.notDeepEqual(pixels, paintTexture("white_wool"), name);
+		assert.notDeepEqual(pixels, packTile("white_wool"), name);
 		assert.deepEqual(ranks(colors.map(luminance)), ranks(white), name);
 	}
-	const shears = itemTexture("shears");
+	const shears = packTile("shears");
 	assert.ok(shears);
 	const colors = texels(shears);
 	assert.equal(colors.length, 256);
@@ -457,16 +468,16 @@ test("table and furnace faces are distinct and show their tools and firebox", ()
 		["crafting_table_top", "crafting_table_side", "crafting_table_bottom"],
 		["furnace_front", "furnace_side", "furnace_top"],
 	]) {
-		const faces = names.map(paintTexture);
+		const faces = names.map(packTile);
 		for (const [i, pixels] of faces.entries()) {
 			for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, faces[j], `${names[i]} vs ${names[j]}`);
 		}
 	}
 	for (const name of ["crafting_table_top", "crafting_table_side"]) {
-		const gray = texels(paintTexture(name)).filter(([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b) <= 10);
+		const gray = texels(packTile(name)).filter(([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b) <= 10);
 		assert.ok(gray.length >= 8, name);
 	}
-	const front = texels(paintTexture("furnace_front"));
+	const front = texels(packTile("furnace_front"));
 	const firebox = front.filter((_, i) => i % 16 >= 4 && i % 16 <= 11 && i >= 6 * 16 && i < 13 * 16);
 	assert.ok(firebox.filter(pixel => luminance(pixel) < 45).length >= 12);
 	assert.ok(firebox.some(([r, g, b]) => r >= 170 && r - g >= 40 && g - b >= 30));
@@ -474,19 +485,19 @@ test("table and furnace faces are distinct and show their tools and firebox", ()
 
 test("moist furrows are darker than dry furrows", () => {
 	const averageLuminance = (name: string) => {
-		const pixels = texels(paintTexture(name));
+		const pixels = texels(packTile(name));
 		return pixels.reduce((sum, pixel) => sum + luminance(pixel), 0) / pixels.length;
 	};
 	assert.ok(averageLuminance("farmland_moist") < averageLuminance("farmland_dry"));
 });
 
 test("wheat cutouts grow denser, keep four grounded stems and ripen gold", () => {
-	const missing = paintTexture("missing_texture");
+	const missing = missingTile;
 	let previousCoverage = 0;
 	for (const name of ["wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe"]) {
-		const pixels = paintTexture(name);
+		const pixels = packTile(name);
 		assert.equal(pixels.length, 16 * 16 * 4, name);
-		assert.deepEqual(pixels, paintTexture(name), name);
+		assert.equal(rendererTile(name), pixels, name);
 		assert.notDeepEqual(pixels, missing, name);
 		const colors = texels(pixels);
 		assert.deepEqual(new Set(colors.map(([, , , a]) => a)), new Set([0, 255]), name);
@@ -514,44 +525,56 @@ test("tool sprites preserve their grip shapes and distinct colors for each mater
 			assert.equal(item.texture, name);
 			assert.equal(item.maxStack, 1);
 			assert.ok(core.textureNames().includes(name));
-			const pixels = paintTexture(name);
+			const pixels = packTile(name);
 			assert.equal(pixels.length, 16 * 16 * 4);
 			const gripX = kind === "hoe" ? 8 : 2;
 			assert.equal(pixels[(12 * 16 + gripX) * 4 + 3], 255, name);
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 0));
 			assert.ok(pixels.some((v, i) => i % 4 === 3 && v === 255));
-			assert.deepEqual(paintTexture(name), pixels);
+			assert.equal(rendererTile(name), pixels, name);
 			return pixels;
 		});
 		for (let a = 0; a < images.length; a++) for (let b = a + 1; b < images.length; b++) assert.notDeepEqual(images[a], images[b]);
 	}
 });
 
-test("registered item sprites and prepared mob drops resolve through the atlas painter", () => {
+test("registry sprite layers resolve pack art for inventory, drops and held items", () => {
 	const core = new ClientCore(new WebAssembly.Instance(new WebAssembly.Module(readFileSync(new URL("../wasm/client.wasm", import.meta.url))), {}));
 	const keys = core.itemRegistry().flatMap(item => item.texture ? [item.texture] : []);
-	const futureDrops = ["arrow", "bone", "gunpowder", "leather", "rotten_flesh"];
+	const layout = gameTextureLayout(core);
+	assert.deepEqual(layout.names.slice(layout.spriteStart), [...new Set([...keys, "bow"])]);
+	const blockLayers = new Set(layout.names.slice(0, layout.spriteStart));
+	for (const block of core.blockRegistry().filter(block => block.name !== "air")) {
+		for (const name of block.faces) assert.ok(blockLayers.has(name), name);
+	}
+	const prepared = preparePackTextures(layout.names, fixture);
+	const futureDrops = ["arrow", "bone", "gunpowder", "rotten_flesh"];
 	for (const name of [...keys, ...futureDrops, "bow"]) {
-		const pixels = itemTexture(name);
+		const pixels = packTile(name);
 		assert.ok(pixels, name);
 		assert.equal(pixels.length, 16 * 16 * 4);
 		const alpha = pixels.filter((_, i) => i % 4 === 3);
 		assert.deepEqual(new Set(alpha), new Set([0, 255]), name);
-		assert.deepEqual(paintTexture(name), pixels, name);
+		const layer = layout.names.indexOf(name);
+		assert.ok(layer >= layout.spriteStart, name);
+		assert.ok(usesCutoutMips(layout, layer), name);
+		assert.equal(prepared.tiles[layer], pixels, name);
 	}
-	assert.equal(itemTexture("unknown_item"), undefined);
+	assert.equal(fixture.tiles.get("unknown_item"), undefined);
 });
 
 test("dropped sprites keep cutout coverage while block drops retain their alpha test", async () => {
-	const { dropAlphaTest, usesCutoutMips } = await import("./renderer.ts");
-	const names = ["water", "stick", "apple", "grass_block_side", "iron_shovel", "crack_0"];
-	assert.equal(dropAlphaTest(names), "(pixel.a <= 0.0 || (pixel.a < 0.5 && ((in.layer >= 1u && in.layer <= 2u) || (in.layer >= 4u && in.layer <= 4u))))");
-	assert.equal(dropAlphaTest(["water", "crack_0"]), "pixel.a <= 0.0");
-	assert.deepEqual(names.map(usesCutoutMips), [false, true, true, false, true, false]);
-	let mip = paintTexture("stick");
+	const { dropAlphaTest } = await import("./renderer.ts");
+	const names = ["water", "grass_block_side", "stick", "apple", "iron_shovel", "bow", "future_sprite"];
+	const layout = { names, spriteStart: 2 };
+	assert.equal(dropAlphaTest(layout), "(pixel.a <= 0.0 || (pixel.a < 0.5 && in.layer >= 2u && in.layer < 7u))");
+	assert.equal(dropAlphaTest({ names: ["water"], spriteStart: 1 }), "pixel.a <= 0.0");
+	assert.deepEqual(names.map((_, layer) => usesCutoutMips(layout, layer)), [false, false, true, true, true, true, true]);
+	assert.equal(usesCutoutMips(layout, names.length), false, "the crack layers follow the sprites");
+	let mip = packTile("stick");
 	for (let size = 16; size > 2; size >>= 1) {
 		const visible = mip.filter((v, i) => i % 4 === 3 && v >= 128).length;
-		mip = downsample(mip, size, usesCutoutMips("stick"));
+		mip = downsample(mip, size, usesCutoutMips(layout, names.indexOf("stick")));
 		assert.equal(mip.filter((v, i) => i % 4 === 3 && v >= 128).length, Math.round(visible / 4));
 	}
 	assert.ok(mip.some((v, i) => i % 4 === 3 && v < 128));

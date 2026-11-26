@@ -1,7 +1,7 @@
 import clientWasmUrl from "../wasm/client.wasm?url";
-import { ClientCore, gameTextureNames } from "./client-core.ts";
+import { ClientCore, gameTextureLayout } from "./client-core.ts";
 import { installPack, loadInstalledPack } from "./texture-pack-settings.ts";
-import { packLabel, type TexturePack } from "./texture-pack.ts";
+import { packLabel, packMissingNotice, type TexturePack } from "./texture-pack.ts";
 import { gameRedirect, hasPlaySession, safeNext, thumbPosition, titleScreen } from "./title-route.ts";
 
 type Role = "operator" | "player";
@@ -165,7 +165,7 @@ function start(): void {
 	const returnPath = safeNext(new URLSearchParams(location.search).get("next"));
 	let screen: Screen = "loading";
 	let me: Me | undefined;
-	let textureNames: readonly string[] = [];
+	let layout: ReturnType<typeof gameTextureLayout> = { names: [], spriteStart: 0 };
 	let pack: TexturePack | undefined;
 	let applied = false;
 	let worlds: World[] | undefined;
@@ -381,7 +381,7 @@ function start(): void {
 			bar.removeAttribute("value");
 			progress.hidden = false;
 			try {
-				pack = await installPack(chosen, textureNames, (done, total) => {
+				pack = await installPack(chosen, layout, (done, total) => {
 					if (!total) return;
 					bar.max = total;
 					bar.value = done;
@@ -464,6 +464,13 @@ function start(): void {
 		summary.className = "pack-summary";
 		const label = element("div");
 		label.append(element("small", "テクスチャ"), element("p", packLabel(pack!)));
+		const missing = packMissingNotice(pack!, layout.names);
+		if (missing) {
+			const notice = element("small", missing);
+			notice.dataset.packMissing = "";
+			notice.className = "muted";
+			label.append(notice);
+		}
 		summary.append(label, button("入れ直す", "outline", () => go("textures")));
 		panel.append(element("hr"), summary);
 	}
@@ -716,9 +723,9 @@ function start(): void {
 			me = await api<Me>("/api/me");
 			updateUser();
 			if (hasPlaySession(me)) {
-				textureNames = gameTextureNames(await ClientCore.load(clientWasmUrl));
+				layout = gameTextureLayout(await ClientCore.load(clientWasmUrl));
 				packStorageError = "";
-				try { pack = await loadInstalledPack(textureNames); }
+				try { pack = await loadInstalledPack(layout.names); }
 				catch (error) {
 					pack = undefined;
 					packStorageError = message(error);

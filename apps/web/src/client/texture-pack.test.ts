@@ -1,23 +1,26 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { inflateSync } from "node:zlib";
-import { appleRGB, fixtureArtEntries, fixtureArtRGB, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
-import { crackPaths, importTexturePack, isPackVersion, moonSheetOrder, packArtDimensions, pngTileWidth } from "./texture-pack.ts";
+import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
+import { crackPaths, importTexturePack, isPackVersion, moonSheetOrder, packArtDimensions, packMissingNotice, pngTileWidth } from "./texture-pack.ts";
 import { installedPack } from "./texture-pack-settings.ts";
-import { ClientCore, gameTextureNames } from "./client-core.ts";
-import { textureIconPixels } from "./textures.ts";
+import { ClientCore, gameTextureLayout } from "./client-core.ts";
+import { missingTile, textureIconPixels } from "./textures.ts";
+import { preparePackTextures } from "./renderer.ts";
 
 const file = async (entries = testEntries, name = "local.zip") => new File([await zipBytes(entries)], name);
 const versioned = (entries, prefix = "") => [
 	...packEntries({ prefix }).filter(([path]) => !entries.some(([entry]) => path === prefix + "resource_pack/" + entry)),
 	...entries.map(([path, data]) => [prefix + "resource_pack/" + path, data]),
 ];
+const blocksOnly = (names: string[]) => ({ names, spriteStart: names.length });
 const tile = new Uint8Array(1024);
-const load = (pack: File, names = ["stone", "apple", "dirt"]) => importTexturePack(pack, names, undefined, async (_, width) => {
-	assert.equal(width, 1);
-	return tile;
-});
+const load = (pack: File, names?: string[], spriteStart?: number) => importTexturePack(pack,
+	names ? { names, spriteStart: spriteStart ?? names.length } : { names: ["stone", "dirt", "apple"], spriteStart: 2 },
+	undefined, async (_, width) => {
+		assert.equal(width, 1);
+		return tile;
+	});
 
 test("wrapped pack, JSON comments, path objects and partial fallback", async () => {
 	const pack = await load(await file([...testEntries, ["sample/scripts/init.js", "throw 1"]]));
@@ -30,7 +33,7 @@ test("item variants, including material-specific indices and safe local referenc
 		apple: { textures: "https://example.invalid/image" }, stick: { textures: "textures/items/../payload" } } };
 	const pack = await load(await file(versioned([["textures/item_texture.json", JSON.stringify(json)],
 		["textures/items/test.png", solidPng([5, 10, 15])], ["textures/items/apple.png", solidPng([0, 1, 2])]])),
-		["stone_pickaxe", "iron_pickaxe", "apple", "stick"]);
+		["stone_pickaxe", "iron_pickaxe", "apple", "stick"], 0);
 	assert.deepEqual([...pack.tiles.keys()], ["iron_pickaxe"]);
 });
 test("invalid JSON, PNG, ambiguous roots and unsupported packs fail atomically", async () => {
@@ -67,7 +70,7 @@ test("file limit precedes archive reads, and encrypted or oversized images never
 			bad.writeUInt32LE(5 * 1024 ** 2, central + 24);
 		}
 		let decoded = false;
-		await assert.rejects(importTexturePack(new File([bad], "invalid.zip"), ["apple"], undefined, async () => {
+		await assert.rejects(importTexturePack(new File([bad], "invalid.zip"), { names: ["apple"], spriteStart: 0 }, undefined, async () => {
 			decoded = true;
 			return tile;
 		}));
@@ -102,11 +105,11 @@ test("torch inventory and drop sprite shares the block tile unless the pack supp
 	const entries = [["textures/blocks/torch_on.png", solidPng([1, 2, 3])]];
 	const names = ["torch", "torch_item"];
 	const decode = async () => new Uint8Array(1024);
-	const block = await importTexturePack(await file(versioned(entries)), names, undefined, decode);
+	const block = await importTexturePack(await file(versioned(entries)), { names, spriteStart: 1 }, undefined, decode);
 	assert.ok(block.tiles.has("torch"));
 	assert.equal(block.tiles.get("torch_item"), block.tiles.get("torch"));
-	assert.deepEqual([...(await load(await file(versioned(entries)), ["torch_item"])).tiles.keys()], ["torch_item"]);
-	const both = await importTexturePack(await file(versioned([...entries, ["textures/items/torch.png", solidPng([6, 7, 8])]])), names, undefined, decode);
+	assert.deepEqual([...(await load(await file(versioned(entries)), ["torch_item"], 0)).tiles.keys()], ["torch_item"]);
+	const both = await importTexturePack(await file(versioned([...entries, ["textures/items/torch.png", solidPng([6, 7, 8])]])), { names, spriteStart: 1 }, undefined, decode);
 	assert.ok(both.tiles.has("torch_item"));
 	assert.notEqual(both.tiles.get("torch_item"), both.tiles.get("torch"));
 });
@@ -117,7 +120,7 @@ test("many references to one unsupported image consume its extraction budget onl
 	const names = ["stone", "dirt", "sand", "gravel", "obsidian", "ice", "bedrock", "glass", "coal_ore"];
 	const texture_data = Object.fromEntries(names.map(name => [name, { textures: "textures/blocks/wide" }]));
 	const pack = await load(await file(versioned([["textures/terrain_texture.json", JSON.stringify({ texture_data })],
-		["textures/blocks/wide.png", wide], ["textures/items/apple.png", solidPng([4, 5, 6])]])), [...names, "apple"]);
+		["textures/blocks/wide.png", wide], ["textures/items/apple.png", solidPng([4, 5, 6])]])), [...names, "apple"], names.length);
 	assert.deepEqual([...pack.tiles.keys()], ["apple"]);
 });
 
@@ -132,7 +135,6 @@ test("official manifest, engine version, extension and common prefix are require
 		packEntries().map(([path, data]) => [path.endsWith("manifest.json") ? "different/" + path : path, data]),
 	]) await assert.rejects(load(await file(entries)), /公式の Bedrock Samples の ZIP ではありません/);
 	await assert.rejects(load(await file(testEntries, "local.mcpack")), /公式の Bedrock Samples/);
-	await assert.rejects(load(await file(packEntries())), /ブロックとアイテムの画像が入っていません/);
 });
 
 test("a matching release filename supplies the version and preserves preview", async () => {
@@ -166,7 +168,7 @@ test("wool bindings use the current Bedrock filenames", async () => {
 
 test("progress counts unique selected PNG files", async () => {
 	const progress: number[][] = [];
-	await importTexturePack(await file(), ["stone", "grass_block_side", "apple"], (done, total) => progress.push([done, total]), async () => tile);
+	await importTexturePack(await file(), { names: ["stone", "grass_block_side", "apple"], spriteStart: 2 }, (done, total) => progress.push([done, total]), async () => tile);
 	assert.deepEqual(progress, [[0, 2], [1, 2], [2, 2]]);
 });
 
@@ -197,7 +199,7 @@ test("TGA pixels decode in atlas order with both vertical origins and RLE packet
 		assert.deepEqual(pixel(leaves, 8, 15), [4, 5, 6, 255]);
 	}
 	const strip = tga(1, 2, true, [3, 2, 1, 255, 6, 5, 4, 255]);
-	const { tiles } = await load(await file(versioned([["textures/items/apple.tga", strip]])), ["apple"]);
+	const { tiles } = await load(await file(versioned([["textures/items/apple.tga", strip]])), ["apple"], 0);
 	assert.deepEqual(pixel(tiles.get("apple")!, 15, 15), [1, 2, 3, 255]);
 });
 
@@ -208,7 +210,7 @@ test("unsupported or malformed TGAs are skipped and a matching PNG takes priorit
 		bad[offset] = value;
 		const pack = await load(await file(versioned([
 			["textures/blocks/leaves_oak.tga", bad], ["textures/items/apple.png", solidPng(appleRGB)],
-		])), ["oak_leaves", "apple"]);
+		])), ["oak_leaves", "apple"], 1);
 		assert.deepEqual([...pack.tiles.keys()], ["apple"]);
 	}
 	const terrain = { texture_data: { oak_leaves: { textures: "textures/blocks/leaves_oak.tga" } } };
@@ -227,7 +229,7 @@ test("grass side uses pack soil and a tint mask and requires both images", async
 	];
 	const soil = new Uint8Array(1024);
 	for (let i = 0; i < soil.length; i += 4) soil.set([1, 2, 3, 255], i);
-	const pack = await importTexturePack(await file(versioned(entries)), ["grass_block_side"], undefined, async () => soil);
+	const pack = await importTexturePack(await file(versioned(entries)), blocksOnly(["grass_block_side"]), undefined, async () => soil);
 	assert.deepEqual([...pack.tiles.keys()], ["grass_block_side"]);
 	const side = pack.tiles.get("grass_block_side")!;
 	assert.deepEqual(pixel(side, 0, 0), [0, 0, 0, 200]);
@@ -237,7 +239,7 @@ test("grass side uses pack soil and a tint mask and requires both images", async
 	assert.deepEqual(Array.from(icon.subarray(60, 64)), [1, 2, 3, 255]);
 	assert.deepEqual(pixel(soil, 0, 0), [1, 2, 3, 255]);
 	for (const missing of [0, 1]) {
-		const incomplete = await load(await file(versioned(entries.filter((_, i) => i !== missing))), ["grass_block_side", "apple"]);
+		const incomplete = await load(await file(versioned(entries.filter((_, i) => i !== missing))), ["grass_block_side", "apple"], 1);
 		assert.deepEqual([...incomplete.tiles.keys()], ["apple"]);
 	}
 });
@@ -249,7 +251,7 @@ test("water decodes each square frame up to 32 and uses fixed alpha", async () =
 		["textures/blocks/water_still_grey.png", solidPng([1, 2, 3], { width: 16, height: 48 })],
 		["textures/blocks/water_flow_grey.png", solidPng([1, 2, 3], { width: 32, height: 32 * 33 })],
 		["textures/blocks/stone.png", solidPng([1, 2, 3], { width: 2, height: 4 })],
-	])), names, undefined, async (_, width, frame) => {
+	])), blocksOnly(names), undefined, async (_, width, frame) => {
 		reads.push([width, frame]);
 		return Uint8Array.from({ length: 1024 }, (_, i) => i % 4 === 3 ? 240 : 100 + frame);
 	});
@@ -275,7 +277,7 @@ test("stored selection requires a valid version, registry pixels, water frames a
 	assert.equal(installedPack({ pack: { name: "old.zip", tiles }, active: true }, names), undefined);
 	for (const bad of [
 		undefined, { ...pack, version: "bad" }, { ...pack, version: "1.2.3-preview.4" },
-		{ version: "1.2.3", tiles }, { ...pack, tiles: new Map() },
+		{ version: "1.2.3", tiles }, { ...pack, tiles: new Map(), waterFrames: new Map() },
 		{ version: pack.version, tiles, waterFrames }, { ...pack, art: {} },
 		{ ...pack, art: new Map([["ui/unknown", new Uint8Array(9 ** 2 * 4)]]) },
 		{ ...pack, art: new Map([["environment/sun", tile]]) },
@@ -292,19 +294,9 @@ test("stored selection requires a valid version, registry pixels, water frames a
 	assert.deepEqual(installedPack(structuredClone({ pack }), names), pack);
 });
 
-// The fixture writes one unfiltered RGBA IDAT chunk immediately after IHDR.
-async function decodeFixtureArt(bytes: Uint8Array, width: number, height: number): Promise<Uint8Array> {
-	const png = Buffer.from(bytes);
-	assert.equal(png.toString("ascii", 37, 41), "IDAT");
-	const rows = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
-	const stride = width * 4 + 1;
-	assert.equal(rows.length, stride * height);
-	return Uint8Array.from(rows.filter((_, i) => i % stride !== 0));
-}
-
 test("native-size environment and HUD art, black celestial backgrounds and crack alpha", async () => {
 	const entries = [...testEntries, ...fixtureArtEntries().map(([path, png]) => ["sample/" + path, png])];
-	const { art } = await importTexturePack(await file(entries), ["stone"], undefined, async () => tile, decodeFixtureArt);
+	const { art } = await importTexturePack(await file(entries), blocksOnly(["stone"]), undefined, async () => tile, decodeFixtureArt);
 	assert.deepEqual([...art.keys()], [...packArtDimensions.keys()]);
 	const rgba = (path: string, x: number, y: number) => {
 		const offset = (y * packArtDimensions.get(path)![0] + x) * 4;
@@ -333,7 +325,7 @@ test("missing, malformed, wrong-size and undecodable art fall back independently
 	const entries = [...testEntries, ...artEntries.filter(([path]) => !path.endsWith(moon + ".png")).map(([path, png]) => [
 		path, path.endsWith(sun + ".png") ? "bad PNG" : path.endsWith("ui/heart.png") ? solidPng([0, 0, 0]) : png,
 	])];
-	const { art, tiles } = await importTexturePack(await file(entries), ["stone", "apple"], undefined, async () => tile,
+	const { art, tiles } = await importTexturePack(await file(entries), { names: ["stone", "apple"], spriteStart: 1 }, undefined, async () => tile,
 		async (bytes, width, height) => {
 			if (width === 256) throw new Error("image decoder rejected this file");
 			return decodeFixtureArt(bytes, width, height);
@@ -345,8 +337,9 @@ test("missing, malformed, wrong-size and undecodable art fall back independently
 
 test("generated browser fixture covers every registry name through the importer", async () => {
 	const { instance } = await WebAssembly.instantiate(await readFile(new URL("../wasm/client.wasm", import.meta.url)), {});
-	const names = new Set(gameTextureNames(new ClientCore(instance)));
-	const pack = await importTexturePack(new File([await fixturePack()], "fixture.zip"), [...names], undefined, async (_, width) => {
+	const layout = gameTextureLayout(new ClientCore(instance));
+	const names = new Set(layout.names);
+	const pack = await importTexturePack(new File([await fixturePack()], "fixture.zip"), layout, undefined, async (_, width) => {
 		assert.ok(width === 16 || width === 32);
 		return tile;
 	}, decodeFixtureArt);
@@ -354,4 +347,59 @@ test("generated browser fixture covers every registry name through the importer"
 	assert.equal(pack.waterFrames.get("water")?.length, 3);
 	assert.equal(pack.waterFrames.get("water_flow")?.length, 3);
 	assert.equal(pack.art.size, packArtDimensions.size);
+	assert.equal(packMissingNotice(pack, layout.names), "");
+});
+
+test("the layout sends new sprite names and block faces to their respective atlases", async () => {
+	const terrain = { future_face: { textures: "textures/blocks/face" }, future_sprite: { textures: "textures/blocks/wrong" } };
+	const items = { future_face: { textures: "textures/items/wrong" }, future_sprite: { textures: "textures/items/sprite" } };
+	const fileEntries = [...packEntries({ terrain, items }),
+		["resource_pack/textures/blocks/face.png", solidPng([0, 0, 0], { width: 2, height: 2 })],
+		["resource_pack/textures/items/sprite.png", solidPng([0, 0, 0], { width: 3, height: 3 })],
+	];
+	const layout = { names: ["future_face", "future_sprite"], spriteStart: 1 };
+	const pack = await importTexturePack(await file(fileEntries), layout, undefined, async (_, width) =>
+		new Uint8Array(1024).fill(width));
+	assert.deepEqual([...pack.tiles.keys()], layout.names);
+	assert.equal(pack.tiles.get("future_face")?.[0], 2);
+	assert.equal(pack.tiles.get("future_sprite")?.[0], 3);
+});
+
+test("an archive needs at least one resolved block or item image", async () => {
+	const layout = { names: ["stone", "grass_block_side", "apple"], spriteStart: 2 };
+	const message = "ブロックとアイテムの画像が入っていません。手順 1 のページで、名前が -full.zip で終わるファイルをダウンロードして、もう一度開いてください。";
+	const renamed = packEntries({
+		terrain: { stone: { textures: "textures/blocks/renamed_stone" } },
+		items: { apple: { textures: "textures/items/renamed_apple" } },
+	});
+	await assert.rejects(importTexturePack(await file(packEntries(), "sample-min.zip"), layout), { message });
+	const artOnly = await file([...renamed, fixtureArtEntries()[0]], "bedrock-samples-v1.26.60.5-full.zip");
+	await assert.rejects(importTexturePack(artOnly, layout, undefined, async () => tile, decodeFixtureArt), { message });
+});
+
+test("renderer prepares shared markers and skips unavailable art, including with no installed pack", async () => {
+	const names = ["stone", "grass_block_side", "water", "apple"];
+	const { tiles, water, cracks, sun, moon, clouds } = preparePackTextures(names);
+	assert.equal(tiles.length, names.length);
+	assert.ok(tiles.every(pixels => pixels === missingTile));
+	assert.ok(water.length === 64 && water.every(pixels => pixels === missingTile));
+	assert.deepEqual(pixel(missingTile, 0, 0), [0, 0, 0, 255]);
+	assert.deepEqual(pixel(missingTile, 8, 0), [248, 0, 248, 255]);
+	assert.deepEqual(pixel(missingTile, 0, 8), [248, 0, 248, 255]);
+	assert.deepEqual(pixel(missingTile, 8, 8), [0, 0, 0, 255]);
+	for (const name of names) assert.deepEqual([...textureIconPixels(name, missingTile)], [...missingTile]);
+	assert.deepEqual(cracks, Array(10).fill(undefined));
+	assert.deepEqual([sun, moon, clouds], [undefined, undefined, undefined]);
+
+	const stage = crackPaths[4], sunPath = "environment/sun";
+	const entries = [...testEntries, ...fixtureArtEntries().filter(([path]) => [stage, sunPath].some(name => path.endsWith(name + ".png")))
+		.map(([path, png]) => ["sample/" + path, png])].filter(([path]) => !path.endsWith("items/apple.png"));
+	const pack = await importTexturePack(await file(entries), { names, spriteStart: 3 }, undefined, async () => tile, decodeFixtureArt);
+	const partial = preparePackTextures(names, pack);
+	assert.deepEqual(partial.tiles, [tile, missingTile, missingTile, missingTile]);
+	assert.equal(partial.cracks[4], pack.art.get(stage));
+	assert.equal(partial.cracks.filter(Boolean).length, 1);
+	assert.equal(partial.sun, pack.art.get(sunPath));
+	assert.deepEqual([partial.moon, partial.clouds], [undefined, undefined]);
+	assert.equal(packMissingNotice(pack, names), "この版のパックに無い画像が 24 件あります");
 });

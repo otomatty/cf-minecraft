@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mobAssets } from "./catalog.ts";
-import { itemTexture } from "../item-textures.ts";
+import { decodedFixturePack } from "../../../test/texture-pack-fixture.mjs";
+
+const fixture = await decodedFixturePack();
+const packTile = (name: string): Uint8Array => {
+	const tile = fixture.tiles.get(name);
+	assert.ok(tile, name);
+	return tile;
+};
 
 test("adult mob visuals can be looked up by Bedrock identifier", () => {
 	for (const name of ["pig", "cow", "chicken", "sheep", "zombie", "skeleton", "creeper"]) {
@@ -76,7 +83,7 @@ test("adult zombie extends both arms and the idle skeleton grips a bow in its ri
 	const held = skeleton.bones.find(b => b.parent === socket?.name)?.itemSprite;
 	assert.ok(held);
 	assert.equal(held.texture, "bow");
-	const pixels = itemTexture(held.texture)!;
+	const pixels = packTile(held.texture)!;
 	const [u, v] = held.grip.map(Math.floor);
 	assert.equal(pixels[4 * (v * 16 + u) + 3], 255, "the grip must lie on the bow");
 });
