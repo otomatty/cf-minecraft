@@ -13,7 +13,7 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { entitySkins, explosionVertices, flameVertices, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobInFrustum, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { entitySkins, explosionVertices, flameVertices, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobInFrustum, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import type { TintRect } from "./tint-map.ts";
@@ -150,8 +150,7 @@ override renderLayer: u32 = 0u;
 // 0 = terrain, 1 = drops and crack overlays, 2 = mob skins, 3 = flames and explosion particles.
 override entityPass: u32 = 0u;
 
-@vertex
-fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>) -> VOut {
+fn entityVertex(pos: vec3<f32>, uv: vec2<f32>, shade: f32, layer: f32, light: vec2<f32>) -> VOut {
 	var out: VOut;
 	out.pos = g.viewProj * vec4<f32>(pos, 1.0);
 	out.rel = pos;
@@ -163,11 +162,26 @@ fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2
 	return out;
 }
 
+@vertex
+fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>) -> VOut {
+	return entityVertex(pos, uv, shade, layer, light);
+}
+
+@vertex
+fn vsDrop(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>, @location(5) tint: f32) -> VOut {
+	var out = entityVertex(pos, uv, shade, layer, light);
+	if (tint > 0.0) {
+		out.tintColor = unpack4x8unorm(u32(tint) - 1u).rgb;
+	}
+	return out;
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
 	let pixel = textureSample(tex, samp, in.uv, in.layer);
 	var color = pixel.rgb;
 	var shade = in.shade;
+	var grassSide = false;
 	if (entityPass == 2u) {
 		// |shade| above 1.5 is the creeper's white flash, stacked on the red hurt tint.
 		if (abs(shade) > 1.5) {
@@ -178,13 +192,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
 		color += pixel.a * in.tintColor;
+		grassSide = true;
 	} else {
 		color = color * in.tintColor;
 	}
 	if (entityPass != 3u) {
 		color = color * abs(shade) * textureSample(lightTex, lightSampler, in.light).rgb;
 	}
-	if (renderLayer == 1u && select(pixel.a < 0.5, __DROP_ALPHA_TEST__, entityPass == 1u)) { discard; }
+	if (renderLayer == 1u && !(entityPass == 1u && grassSide) && select(pixel.a < 0.5, __DROP_ALPHA_TEST__, entityPass == 1u)) { discard; }
 	let dist = max(length(in.rel.xz), abs(in.rel.y));
 	let fog = smoothstep(g.fogRange.x, g.fogRange.y, dist);
 	return vec4<f32>(mix(color, g.fogColor.rgb, fog), select(1.0, pixel.a, renderLayer == 2u));
@@ -581,13 +596,14 @@ export class Renderer {
 		const entityPipeline = (kind: "drops" | "cracks" | "mobs" | "flames"): GPURenderPipeline => device.createRenderPipeline({
 			layout: pipelineLayout,
 			vertex: {
-				module: terrainModule, entryPoint: "vsEntity",
-				buffers: [{ arrayStride: 36, attributes: [
+				module: terrainModule, entryPoint: kind === "drops" ? "vsDrop" : "vsEntity",
+				buffers: [{ arrayStride: kind === "drops" ? ITEM_VERTEX_FLOATS * 4 : 36, attributes: [
 					{ shaderLocation: 0, offset: 0, format: "float32x3" },
 					{ shaderLocation: 1, offset: 12, format: "float32x2" },
 					{ shaderLocation: 2, offset: 20, format: "float32" },
 					{ shaderLocation: 3, offset: 24, format: "float32" },
 					{ shaderLocation: 4, offset: 28, format: "float32x2" },
+					...(kind === "drops" ? [{ shaderLocation: 5, offset: 36, format: "float32" as const }] : []),
 				] }],
 			},
 			fragment: {
@@ -610,8 +626,9 @@ export class Renderer {
 		this.flames = entityPipeline("flames");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		// Each drop uses up to 36 vertices, each burning mob two double-sided quads, and each particle one.
-		const itemVerticesCapacity = MAX_RENDER_ITEMS * (36 + 24) + MAX_EXPLOSION_PARTICLES * 12;
-		this.itemBuffer = device.createBuffer({ size: itemVerticesCapacity * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		const itemBytes = MAX_RENDER_ITEMS * 36 * ITEM_VERTEX_FLOATS * 4;
+		const effectBytes = (MAX_RENDER_ITEMS * 24 + MAX_EXPLOSION_PARTICLES * 12) * 36;
+		this.itemBuffer = device.createBuffer({ size: itemBytes + effectBytes, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
 		this.cutout = terrainPipeline(1);
 		this.translucent = terrainPipeline(2);
@@ -863,7 +880,7 @@ export class Renderer {
 					pass.setPipeline(this.items);
 					pass.setBindGroup(0, this.terrainBind);
 					pass.setVertexBuffer(0, this.itemBuffer);
-					pass.draw(itemData.length / 9);
+					pass.draw(itemData.length / ITEM_VERTEX_FLOATS);
 				}
 				if (this.mobBuffer && mobData.length) {
 					pass.setPipeline(this.mobs);
@@ -875,8 +892,8 @@ export class Renderer {
 				if (effectVertices) {
 					pass.setPipeline(this.flames);
 					pass.setBindGroup(0, this.terrainBind);
-					pass.setVertexBuffer(0, this.itemBuffer);
-					pass.draw(effectVertices, 1, itemData.length / 9);
+					pass.setVertexBuffer(0, this.itemBuffer, itemData.byteLength);
+					pass.draw(effectVertices);
 				}
 				if (cloudsFirst) drawClouds();
 			}

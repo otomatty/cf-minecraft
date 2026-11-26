@@ -319,6 +319,15 @@ impl Server {
         if client.health.eating.is_some() || client.health.bow.is_some() {
             return;
         }
+        if client.joined
+            && client
+                .inventory
+                .selected_stack()
+                .is_some_and(|stack| Some(stack.item) == items::by_name("egg"))
+        {
+            self.throw_egg(id);
+            return;
+        }
         if client.joined && client.bow_selected() {
             let arrow = items::by_name("arrow").unwrap();
             if self.game_mode == GameMode::Creative

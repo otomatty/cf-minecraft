@@ -367,6 +367,36 @@ test("debug gamemode updates only the DO when the D1 lookup fails", async t => {
 	assert.deepEqual(f.modeChanges, [["disposable", "survival", undefined]]);
 });
 
+test("debug gamemode updates D1 and the DO after a failed lookup on the same world", async t => {
+	const f = await setup(t);
+	f.deps.env.DEBUG = "1";
+	const world = f.deps.worlds.getByName("lobby");
+	const initial = await f.db.world("lobby");
+	assert.ok(initial);
+	await world.setGameMode(initial.gameMode, initial.gameModeRevision);
+	const lookup = t.mock.method(f.db, "world", async () => {
+		throw new Error("D1_ERROR: no such table: world: SQLITE_ERROR");
+	}, { times: 1 });
+
+	const path = "/api/debug/gamemode?world=lobby";
+	const first = await f.request(`${path}&mode=survival`, "POST");
+	assert.equal(first.status, 200);
+	assert.equal(await world.getGameMode(), "survival");
+	const firstRevision = await world.getGameModeRevision();
+	assert.ok(firstRevision > initial.gameModeRevision);
+	assert.equal(lookup.mock.callCount(), 1);
+	assert.deepEqual(await f.db.world("lobby"), initial);
+
+	const second = await f.request(`${path}&mode=creative`, "POST");
+	assert.equal(second.status, 200);
+	const row = await f.db.world("lobby");
+	assert.ok(row);
+	assert.equal(row.gameMode, "creative");
+	assert.equal(await world.getGameMode(), "creative");
+	assert.ok(row.gameModeRevision > firstRevision);
+	assert.equal(await world.getGameModeRevision(), row.gameModeRevision);
+});
+
 test("debug gamemode returns an error when the D1 update fails for an existing world", async t => {
 	const f = await setup(t);
 	f.deps.env.DEBUG = "1";

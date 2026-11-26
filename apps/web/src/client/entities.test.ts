@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aimedMob, entitySkins, flameVertices, mobInFrustum, mobVertices, interpolateEntity, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_LEAVES_TINT, CARRIED_SHORT_GRASS_TINT, type BlockItemTint } from "./block-tints.ts";
+import { aimedMob, dropBlockFaces, entitySkins, flameVertices, mobInFrustum, mobVertices, interpolateEntity, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { coloredSheepSkins, shearedSheep } from "./mobs/farm.ts";
 import { flameFrames } from "./mobs/flame.ts";
 import { player } from "./mobs/player.ts";
 import { projectPlayerName } from "./player-names.ts";
@@ -35,7 +37,7 @@ test("player skin paints every humanoid face and keeps the existing mob layers",
 	const { texture } = player;
 	assert.equal(texture.width, 64);
 	assert.equal(texture.height, 32);
-	assert.deepEqual(entitySkins, [...mobAssetsByKind.map(asset => asset.texture), texture]);
+	assert.deepEqual(entitySkins, [...mobAssetsByKind.map(asset => asset.texture), texture, ...coloredSheepSkins, shearedSheep.texture]);
 	const pixels = texture.pixels();
 	assert.deepEqual(pixels, texture.pixels());
 	for (const bone of player.bones) {
@@ -156,10 +158,53 @@ test("chicken targeting uses a 0.4 by 0.7 foot-centered hitbox", () => {
 
 test("cube vertices remain camera relative, bounded, and use lightmap coordinates", () => {
 	const vertices=itemVertices([{position:[29999998,1,-29999998],texture:7,light:[15,3]}],[29999998,1,-29999998],0);
-	assert.equal(vertices.length,36*9);
-	for(let i=0;i<vertices.length;i+=9) {
+	assert.equal(vertices.length,36*ITEM_VERTEX_FLOATS);
+	for(let i=0;i<vertices.length;i+=ITEM_VERTEX_FLOATS) {
 		assert.ok(Math.abs(vertices[i])<=0.125); assert.ok(Math.abs(vertices[i+2])<=0.125);
 		assert.equal(vertices[i+6],7); assert.equal(vertices[i+7],3.5/16); assert.equal(vertices[i+8],15.5/16);
+	}
+});
+
+test("only biome-tinted block faces carry a tint on drop vertices", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { ClientCore } = await import("./client-core.ts");
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const registry = core.blockRegistry();
+	const textures = core.textureNames();
+	const items = core.itemRegistry();
+	const cell: BlockItemTint = { grass: [72, 170, 74], leaves: [53, 145, 71] };
+	for (const [name, faceColors] of [
+		["grass_block", [undefined, cell.grass, cell.grass, cell.grass, cell.grass, cell.grass]],
+		["oak_leaves", Array(6).fill(cell.leaves)],
+		["short_grass", Array(6).fill(cell.grass)],
+		["stone", Array(6).fill(undefined)],
+		["water_bucket", Array(2).fill(undefined)],
+	] as const) {
+		const item = items.find(item => item.name === name)!;
+		const blockFaces = dropBlockFaces(item, registry, textures);
+		const layer = textures.indexOf(item.texture ?? registry[item.block!].texture);
+		const vertices = itemVertices([{
+			position: [0, 0, 0], texture: layer, light: [15, 0], flat: item.texture !== null, blockFaces, cellTint: cell,
+		}], [0, 0, 0], 0);
+		assert.equal(vertices.length, faceColors.length * 6 * ITEM_VERTEX_FLOATS, name);
+		for (let i = 0; i < vertices.length; i += ITEM_VERTEX_FLOATS) {
+			const face = Math.floor(i / (6 * ITEM_VERTEX_FLOATS));
+			const rgb = faceColors[face];
+			const tint = vertices[i + 9];
+			assert.equal(vertices[i + 6], name === "grass_block" ? textures.indexOf(registry[item.block!].faces[face]) : layer);
+			if (rgb) assert.deepEqual([0, 8, 16].map(shift => ((tint - 1) >>> shift) & 255), rgb);
+			else assert.equal(tint, 0);
+		}
+		if (!blockFaces) continue;
+		const fallback = itemVertices([{ position: [0, 0, 0], texture: layer, light: [15, 0], blockFaces }], [0, 0, 0], 0);
+		const colors = name === "grass_block" ? [undefined, CARRIED_GRASS_TOP_TINT, ...Array(4).fill(CARRIED_GRASS_SIDE_TINT)]
+			: Array(6).fill(name === "oak_leaves" ? CARRIED_LEAVES_TINT : CARRIED_SHORT_GRASS_TINT);
+		for (const [face, rgb] of colors.entries()) {
+			const tint = fallback[face * 6 * ITEM_VERTEX_FLOATS + 9];
+			if (rgb) assert.deepEqual([0, 8, 16].map(shift => ((tint - 1) >>> shift) & 255), [...rgb]);
+			else assert.equal(tint, 0);
+		}
 	}
 });
 
@@ -196,7 +241,7 @@ test("render items are capped before vertex generation and preserve input order"
 	assert.equal(limited[0], items[0]);
 	assert.equal(limited[MAX_RENDER_ITEMS - 1], items[MAX_RENDER_ITEMS - 1]);
 	assert.equal(items.length, 1100);
-	assert.equal(itemVertices(limited, [0, 0, 0], 0).byteLength, MAX_RENDER_ITEMS * 36 * 36);
+	assert.equal(itemVertices(limited, [0, 0, 0], 0).byteLength, MAX_RENDER_ITEMS * 36 * ITEM_VERTEX_FLOATS * 4);
 	assert.deepEqual(limitRenderItems([]), []);
 	assert.deepEqual(limitRenderItems(items.slice(0, 3)), items.slice(0, 3));
 	assert.equal(limitRenderItems(items.slice(0, MAX_RENDER_ITEMS)).length, MAX_RENDER_ITEMS);
@@ -206,15 +251,15 @@ test("render items are capped before vertex generation and preserve input order"
 test("non-block drops are rotating double-sided planes with full sprite UVs", () => {
 	const item: RenderItem = { position: [3, 4, 5], texture: 28, light: [15, 0], flat: true };
 	const vertices = itemVertices([item], [0, 0, 0], 0);
-	assert.equal(vertices.length, 12 * 9);
-	for (let i = 0; i < vertices.length; i += 9) {
+	assert.equal(vertices.length, 12 * ITEM_VERTEX_FLOATS);
+	for (let i = 0; i < vertices.length; i += ITEM_VERTEX_FLOATS) {
 		assert.equal(vertices[i + 2], 5);
 		assert.equal(vertices[i + 6], 28);
 	}
 	for (let side = 0; side < 2; side++) {
-		const start = side * 6 * 9;
-		assert.deepEqual(new Set(Array.from({ length: 6 }, (_, i) => `${vertices[start + i * 9 + 3]}:${vertices[start + i * 9 + 4]}`)), new Set(["0:0", "0:1", "1:0", "1:1"]));
-		const a = start, b = start + 9, c = start + 18;
+		const start = side * 6 * ITEM_VERTEX_FLOATS;
+		assert.deepEqual(new Set(Array.from({ length: 6 }, (_, i) => `${vertices[start + i * ITEM_VERTEX_FLOATS + 3]}:${vertices[start + i * ITEM_VERTEX_FLOATS + 4]}`)), new Set(["0:0", "0:1", "1:0", "1:1"]));
+		const a = start, b = start + ITEM_VERTEX_FLOATS, c = start + 2 * ITEM_VERTEX_FLOATS;
 		const normalZ = (vertices[b] - vertices[a]) * (vertices[c+1] - vertices[a+1]) - (vertices[b+1] - vertices[a+1]) * (vertices[c] - vertices[a]);
 		assert.ok(side === 0 ? normalZ > 0 : normalZ < 0);
 	}
@@ -226,8 +271,8 @@ const boxFloats = 36 * 9;
 const quarterStride = Math.PI * 50;
 const renderedHeights = [1.3, 0.9, 0.7, 1.2, 1.95, 1.99, 1.625] as const;
 
-function component(vertices: Float32Array, index: number) {
-	return vertices.filter((_, i) => i % 9 === index);
+function component(vertices: Float32Array, index: number, stride = 9) {
+	return vertices.filter((_, i) => i % stride === index);
 }
 
 test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
@@ -387,6 +432,32 @@ test("sheep mesh keeps two fleece boxes, a forward face and four hooves at the w
 	}
 });
 
+test("colored fleece swaps only body pixels and a sheared sheep has one skin-colored torso", () => {
+	const sheep: RenderMob = { kind: 3, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
+	const white = mobVertices([sheep], sheep.position, 0);
+	const base = entitySkins[white[6]].pixels();
+	const layers = new Set([white[6]]);
+	for (const woolColor of [1, 2, 3] as const) {
+		const colored = mobVertices([{ ...sheep, woolColor }], sheep.position, 0);
+		assert.equal(colored.length, white.length);
+		layers.add(colored[6]);
+		const pixels = entitySkins[colored[6]].pixels();
+		assert.notDeepEqual(pixels.subarray(0, 32 * 64 * 4), base.subarray(0, 32 * 64 * 4));
+		assert.deepEqual(pixels.subarray(32 * 64 * 4), base.subarray(32 * 64 * 4));
+	}
+	const sheared = mobVertices([{ ...sheep, woolColor: 2, sheared: true }], sheep.position, 0);
+	const box = 36 * 9;
+	assert.equal(sheared.length, white.length - box);
+	layers.add(sheared[6]);
+	assert.equal(layers.size, 5);
+	const skin = entitySkins[sheared[6]].pixels();
+	assert.deepEqual(skin.subarray(32 * 64 * 4), base.subarray(32 * 64 * 4));
+	// The head and leg geometry stays in place when the fleece is removed.
+	for (let i = box; i < sheared.length; i += 9) {
+		assert.deepEqual(sheared.subarray(i, i + 3), white.subarray(i + box, i + box + 3));
+	}
+});
+
 test("WASM mob records track hurt, yaw and previous position and clear on removal and reset", async () => {
 	const { readFileSync } = await import("node:fs");
 	const { ClientCore, S2C } = await import("./client-core.ts");
@@ -406,26 +477,26 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	const position = [29999998.25, 1, -3.5], moved = [29999998.5, 1, -3.5];
 	const spawn = packet(S2C.MobSpawn, position, 0, 0);
 	assert.equal(core.packet(spawn), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0, fuse: 0, burning: false }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position, previous: position, yaw: 0, hurt: 0, fuse: 0, burning: false, woolColor: 0, sheared: false }]);
 	const entityPacket = new Uint8Array(5);
 	new DataView(entityPacket.buffer).setUint32(1, id);
 	entityPacket[0] = S2C.MobHurt;
 	assert.equal(core.packet(entityPacket), S2C.MobHurt);
 	assert.equal(core.packet(packet(S2C.MobMove, moved, 270)), S2C.MobMove);
-	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1, fuse: 0, burning: false }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 0, position: moved, previous: position, yaw: 270, hurt: 1, fuse: 0, burning: false, woolColor: 0, sheared: false }]);
 	assert.deepEqual([...core.encodeAttack(id)], [0x10, 0x80, 0, 0, 2]);
 	entityPacket[0] = S2C.EntityRemove;
 	core.packet(entityPacket);
 	assert.deepEqual(core.mobs, []);
 	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 1)), S2C.MobSpawn);
-	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0, fuse: 0, burning: false }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 1, position, previous: position, yaw: 90, hurt: 0, fuse: 0, burning: false, woolColor: 0, sheared: false }]);
 	core.resetWorld();
 	assert.deepEqual(core.mobs, []);
 
 	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 6)), S2C.MobSpawn);
 	const fusePacket = Uint8Array.of(S2C.MobFuse, ...entityPacket.subarray(1), 12);
 	assert.equal(core.packet(fusePacket), S2C.MobFuse);
-	assert.deepEqual(core.mobs, [{ id, kind: 6, position, previous: position, yaw: 90, hurt: 0, fuse: 12, burning: false }]);
+	assert.deepEqual(core.mobs, [{ id, kind: 6, position, previous: position, yaw: 90, hurt: 0, fuse: 12, burning: false, woolColor: 0, sheared: false }]);
 	fusePacket[5] = 0;
 	assert.equal(core.packet(fusePacket), S2C.MobFuse);
 	assert.equal(core.mobs[0].fuse, 0);
@@ -437,6 +508,16 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 	assert.equal(core.mobs[0].burning, false);
 	burning[5] = 2;
 	assert.equal(core.packet(burning), -1);
+
+	assert.equal(core.packet(packet(S2C.MobSpawn, position, 90, 3)), S2C.MobSpawn);
+	const appearance = Uint8Array.of(S2C.SheepAppearance, ...entityPacket.subarray(1), 2, 1);
+	assert.equal(core.packet(appearance), S2C.SheepAppearance);
+	assert.equal(core.mobs[0].woolColor, 2);
+	assert.equal(core.mobs[0].sheared, true);
+	appearance[6] = 0;
+	assert.equal(core.packet(appearance), S2C.SheepAppearance);
+	assert.equal(core.mobs[0].sheared, false);
+	assert.deepEqual([...core.encodeUseEntity(id)], [0x13, 0x80, 0, 0, 2]);
 });
 
 test("zombie head uses the front of the 64×32 skin and the legs swing in opposite directions", () => {
@@ -506,20 +587,21 @@ test("skeleton uses the 64×32 skin, taller hitbox, and a bow parented to its mo
 	assert.ok(output.every(sprite => sprite.texture === 123));
 	assert.notDeepEqual(output[0].corners, output[1].corners);
 	const vertices = itemVertices([], [0, 0, 0], 0, output);
-	assert.equal(vertices.length, 2 * 12 * 9);
-	assert.ok(component(vertices, 6).every(layer => layer === 123));
+	assert.equal(vertices.length, 2 * 12 * ITEM_VERTEX_FLOATS);
+	assert.ok(component(vertices, 6, ITEM_VERTEX_FLOATS).every(layer => layer === 123));
+	assert.ok(component(vertices, 9, ITEM_VERTEX_FLOATS).every(tint => tint === 0));
 });
 
 test("arrow sprite aligns its diagonal with velocity and stays camera relative", () => {
 	const item: RenderItem = { position: [29999998.25, 1, -29999998], velocity: [0, -1, 0], texture: 7, light: [15, 3] };
 	const vertices = itemVertices([item], [29999998, 1, -29999998], 0);
-	assert.equal(vertices.length, 12 * 9);
-	const tail = vertices.subarray(0, 3), tip = vertices.subarray(18, 21);
+	assert.equal(vertices.length, 12 * ITEM_VERTEX_FLOATS);
+	const tail = vertices.subarray(0, 3), tip = vertices.subarray(2 * ITEM_VERTEX_FLOATS, 2 * ITEM_VERTEX_FLOATS + 3);
 	assert.equal(tail[0], 0.25);
 	assert.equal(tip[0], 0.25);
 	assert.equal(tail[2], tip[2]);
 	assert.ok(tip[1] < tail[1]);
-	assert.ok(component(vertices, 6).every(layer => layer === 7));
+	assert.ok(component(vertices, 6, ITEM_VERTEX_FLOATS).every(layer => layer === 7));
 });
 
 test("WASM arrow records carry freshness and velocity and interpolate from the last received position", async () => {
@@ -550,4 +632,38 @@ test("WASM arrow records carry freshness and velocity and interpolate from the l
 	assert.deepEqual(core.arrows, [{ id, position, previous: position, velocity, fresh: false }]);
 	core.resetWorld();
 	assert.deepEqual(core.arrows, []);
+});
+
+test("WASM egg positions interpolate and render as a centered flat item", async () => {
+	const { readFileSync } = await import("node:fs");
+	const { ClientCore, S2C } = await import("./client-core.ts");
+	const { instance } = await WebAssembly.instantiate(readFileSync(new URL("../wasm/client.wasm", import.meta.url)), {});
+	const core = new ClientCore(instance);
+	const id = 42;
+	const packet = (tag: number, position: number[]) => {
+		const view = new DataView(new ArrayBuffer(29));
+		view.setUint8(0, tag);
+		view.setUint32(1, id);
+		position.forEach((value, i) => view.setFloat64(5 + i * 8, value));
+		return new Uint8Array(view.buffer);
+	};
+	const previous = [4.5, 8, 8.5], current = [5.5, 8.25, 8.5];
+	assert.equal(core.packet(packet(S2C.EggSpawn, previous)), S2C.EggSpawn);
+	assert.deepEqual(core.eggs, [{ id, position: previous, previous }]);
+	assert.equal(core.packet(packet(S2C.EntityMove, current)), S2C.EntityMove);
+	assert.deepEqual(core.eggs, [{ id, position: current, previous }]);
+	const [egg] = core.eggs;
+	const vertices = itemVertices([{
+		position: interpolateEntity(egg.previous, egg.position, 25),
+		texture: 7, flat: true, centered: true, light: [15, 3],
+	}], [5, 8.125, 8.5], 0);
+	assert.equal(vertices.length, 12 * ITEM_VERTEX_FLOATS);
+	assert.deepEqual([...vertices.subarray(0, 3)], [-0.125, -0.125, 0]);
+	assert.deepEqual([...vertices.subarray(2 * ITEM_VERTEX_FLOATS, 2 * ITEM_VERTEX_FLOATS + 3)], [0.125, 0.125, 0]);
+	assert.ok(component(vertices, 6, ITEM_VERTEX_FLOATS).every(layer => layer === 7));
+	assert.equal(core.packet(Uint8Array.of(S2C.EntityRemove, 0, 0, 0, id)), S2C.EntityRemove);
+	assert.deepEqual(core.eggs, []);
+	assert.equal(core.packet(packet(S2C.EggSpawn, previous)), S2C.EggSpawn);
+	core.resetWorld();
+	assert.deepEqual(core.eggs, []);
 });

@@ -17,6 +17,7 @@
 //! the same state. `state_hash` makes that checkable.
 
 mod arrow;
+mod egg;
 pub mod entity;
 mod entity_storage;
 mod falling_blocks;
@@ -178,6 +179,8 @@ struct Client {
     dig: Option<Dig>,
     visible_entities: BTreeMap<u32, ([f64; 3], u8)>,
     visible_mobs: BTreeMap<u32, ([f64; 3], f32)>,
+    visible_eggs: BTreeMap<u32, [f64; 3]>,
+    egg_cooldown: u8,
     visible_arrows: BTreeMap<u32, arrow::ArrowMotion>,
     /// Connection ids this client has been told about, with the last sent feet and look.
     visible_players: BTreeMap<u32, ([f64; 3], f32, f32)>,
@@ -301,6 +304,7 @@ pub struct Server {
     entities: BTreeMap<u32, entity::Entity>,
     mobs: BTreeMap<u32, mob::Mob>,
     arrows: BTreeMap<u32, arrow::Arrow>,
+    eggs: BTreeMap<u32, egg::Egg>,
     next_entity_id: u32,
     entity_persistence: bool,
     entity_changes: BTreeSet<ChunkPos>,
@@ -342,6 +346,7 @@ impl Server {
             entities: BTreeMap::new(),
             mobs: BTreeMap::new(),
             arrows: BTreeMap::new(),
+            eggs: BTreeMap::new(),
             next_entity_id: 1,
             entity_persistence: true,
             entity_changes: BTreeSet::new(),
@@ -783,6 +788,8 @@ impl Server {
                 visible_entities: BTreeMap::new(),
                 visible_mobs: BTreeMap::new(),
                 visible_arrows: BTreeMap::new(),
+                visible_eggs: BTreeMap::new(),
+                egg_cooldown: 0,
                 visible_players: BTreeMap::new(),
                 inventory,
                 health: health::Health::new(vitals, pos[1]),
@@ -1184,6 +1191,7 @@ impl Server {
         self.day_time += 1;
         self.tick_arrows();
         self.tick_mobs();
+        self.tick_eggs();
         self.tick_health();
         self.tick_screens();
         self.flush_digs();
@@ -1219,6 +1227,7 @@ impl Server {
         self.sync_mobs();
         self.sync_players();
         self.sync_arrows();
+        self.sync_eggs();
         let changed: Vec<_> = self
             .clients
             .iter()
@@ -1242,7 +1251,11 @@ impl Server {
         if self.clients[&id].health.vitals.dead
             && !matches!(
                 packet,
-                C2S::Hello { .. } | C2S::Respawn | C2S::UseBucket { .. } | C2S::Attack { .. }
+                C2S::Hello { .. }
+                    | C2S::Respawn
+                    | C2S::UseBucket { .. }
+                    | C2S::Attack { .. }
+                    | C2S::UseEntity { .. }
             )
         {
             self.stats.packets_rejected += 1;
@@ -1285,6 +1298,7 @@ impl Server {
                 .health
                 .cancel_using_item(),
             C2S::Attack { id: target } => self.attack(id, target),
+            C2S::UseEntity { id: target } => self.use_entity(id, target),
             C2S::DigAbort => {
                 if self.game_mode != GameMode::Survival || !self.clients[&id].joined {
                     self.stats.packets_rejected += 1;
@@ -1627,16 +1641,26 @@ impl Server {
     }
 
     fn spawn_mining_drops(&mut self, pos: [i32; 3], state: u16, exploded: bool) {
+        self.spawn_mining_drops_at_height(pos, state, exploded, 0.25);
+    }
+
+    fn spawn_mining_drops_at_height(
+        &mut self,
+        pos: [i32; 3],
+        state: u16,
+        exploded: bool,
+        height: f64,
+    ) {
         let mut blast_random = exploded.then(|| self.block_drop_random(pos));
         if state == blocks::SHORT_GRASS {
             if self.block_drop_random(pos).next_int_bound(8) == 0 {
                 let seeds = items::by_name("wheat_seeds").unwrap();
-                self.spawn_block_drop_with_random(seeds, 1, pos, 0.25, blast_random.as_mut());
+                self.spawn_block_drop_with_random(seeds, 1, pos, height, blast_random.as_mut());
             }
         } else if let Some(mut item) = items::mining_drop(state) {
             let count = if state == blocks::RIPE_WHEAT {
                 let wheat = items::by_name("wheat").unwrap();
-                self.spawn_block_drop_with_random(wheat, 1, pos, 0.25, blast_random.as_mut());
+                self.spawn_block_drop_with_random(wheat, 1, pos, height, blast_random.as_mut());
                 1 + self.block_drop_random(pos).next_int_bound(2) as u8
             } else {
                 if state == blocks::OAK_LEAVES
@@ -1649,7 +1673,7 @@ impl Server {
                 }
                 1
             };
-            self.spawn_block_drop_with_random(item, count, pos, 0.25, blast_random.as_mut());
+            self.spawn_block_drop_with_random(item, count, pos, height, blast_random.as_mut());
         }
     }
 
@@ -1727,17 +1751,25 @@ impl Server {
         }
     }
 
+    fn mob_in_reach(&self, player: u32, id: u32) -> Option<&mob::Mob> {
+        let client = &self.clients[&player];
+        let mob = self.mobs.get(&id)?;
+        (client.joined
+            && !client.health.vitals.dead
+            && self.world.chunks.contains_key(&mob.chunk())
+            && mob.within_attack_reach(client.pos))
+        .then_some(mob)
+    }
+
     fn attack(&mut self, attacker: u32, id: u32) {
+        if self
+            .mob_in_reach(attacker, id)
+            .is_none_or(|mob| mob.hurt_ticks != 0)
+        {
+            return;
+        }
         let client = self.clients.get_mut(&attacker).unwrap();
-        if !client.joined || client.health.vitals.dead {
-            return;
-        }
-        let Some(mob) = self.mobs.get_mut(&id) else {
-            return;
-        };
-        if mob.hurt_ticks != 0 || !mob.within_attack_reach(client.pos) {
-            return;
-        }
+        let mob = self.mobs.get_mut(&id).unwrap();
 
         let tool = client
             .inventory
@@ -2225,6 +2257,8 @@ impl Server {
             });
             self.arrows
                 .retain(|_, arrow| waiting_for_save.binary_search(&arrow.chunk()).is_err());
+            self.eggs
+                .retain(|_, egg| waiting_for_save.binary_search(&egg.chunk()).is_err());
         }
         self.unload_chunks(&removed);
     }
@@ -2242,6 +2276,7 @@ impl Server {
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
             self.mobs.retain(|_, mob| mob.chunk() != (cx, cz));
             self.arrows.retain(|_, arrow| arrow.chunk() != (cx, cz));
+            self.eggs.retain(|_, egg| egg.chunk() != (cx, cz));
         }
     }
 
@@ -2506,6 +2541,10 @@ impl Server {
                 h.bytes(&client.yaw.to_bits().to_be_bytes());
                 h.bytes(&client.pitch.to_bits().to_be_bytes());
             }
+            if client.egg_cooldown != 0 {
+                h.bytes(b"egg");
+                h.u8(client.egg_cooldown);
+            }
             client.survival_movement.hash_into(&mut h);
             h.u8(client.dig.is_some() as u8);
             if let Some(dig) = client.dig {
@@ -2552,6 +2591,7 @@ impl Server {
         }
         self.hash_mobs(&mut h);
         self.hash_arrows(&mut h);
+        self.hash_eggs(&mut h);
         self.world.hash_into(&mut h);
         h.finish()
     }

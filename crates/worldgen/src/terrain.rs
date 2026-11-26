@@ -563,7 +563,23 @@ pub fn terrain_fingerprint(seed: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{generate, spawn_point, surface_y, Generator};
+    use crate::{
+        caves::{Caves, CAVE_WATER_LEVEL},
+        generate, spawn_point, surface_y, Generator,
+    };
+
+    fn underground_at(caves: &Caves, x: i32, z: i32) -> world::BlockState {
+        let wet = !caves.is_lava_region(x, z);
+        let neighboring_water = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)]
+            .into_iter()
+            .filter(|&(nx, nz)| !caves.is_lava_region(nx, nz))
+            .count();
+        match (wet, neighboring_water) {
+            (true, 4) => blocks::WATER,
+            (false, 0) => blocks::LAVA,
+            _ => blocks::OBSIDIAN,
+        }
+    }
 
     fn terrain_column(t: &TerrainGenerator, x: i32, z: i32) -> [f64; Y_POINTS] {
         let (gx, gz) = (x.div_euclid(4) * 4, z.div_euclid(4) * 4);
@@ -636,11 +652,17 @@ mod tests {
                             .iter()
                             .any(|&(nx, nz)| (terrain.surface_y(nx, nz) - shape_top).abs() >= 3);
                         assert_eq!(chunk.get(x, MIN_Y, z), blocks::BEDROCK);
+                        let underground = underground_at(&terrain.caves, wx, wz);
                         for y in (MIN_Y + 1)..=SEA_LEVEL {
                             if let Some(state) =
                                 terrain.caves.is_cave(wx, y, wz, shape_top, neighbors)
                             {
-                                assert_eq!(chunk.get(x, y, z), state);
+                                let expected = if state == blocks::WATER {
+                                    underground
+                                } else {
+                                    state
+                                };
+                                assert_eq!(chunk.get(x, y, z), expected);
                             } else {
                                 assert_ne!(chunk.get(x, y, z), blocks::AIR);
                             }
@@ -1094,6 +1116,141 @@ mod tests {
     }
 
     #[test]
+    fn lava_matches_world_coordinates_across_chunk_borders_in_both_orders() {
+        for (seed, cx, cz) in [(2026, -10, -10), (0, -9, -12), (-71, 11, -8)] {
+            let t = TerrainGenerator::new(seed);
+            let before = [
+                t.generate_features(cx, cz, false, false, false),
+                t.generate_features(cx + 1, cz, false, false, false),
+            ];
+            let west = t.generate(cx, cz);
+            let east = t.generate(cx + 1, cz);
+            assert_eq!(east, t.generate(cx + 1, cz));
+            assert_eq!(west, t.generate(cx, cz));
+
+            let mut shared_lava = 0;
+            let border_x = (cx + 1) * 16;
+            for z in 0..16 {
+                let wz = cz * 16 + z as i32;
+                for (i, (chunk, x, wx)) in [(&west, 15, border_x - 1), (&east, 0, border_x)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let top = t.surface_y(wx, wz);
+                    let neighbors = [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
+                        .map(|(x, z)| t.surface_y(x, z));
+                    let underground = underground_at(&t.caves, wx, wz);
+                    for y in MIN_Y..=CAVE_WATER_LEVEL {
+                        let old = before[i].get(x, y, z);
+                        let actual = chunk.get(x, y, z);
+                        if old != blocks::WATER
+                            && t.caves.is_cave(wx, y, wz, top, neighbors) == Some(blocks::WATER)
+                        {
+                            assert_eq!(actual, underground, "seed={seed} at {wx},{y},{wz}");
+                        } else {
+                            assert!(!matches!(actual, blocks::LAVA | blocks::OBSIDIAN));
+                        }
+                    }
+                }
+                shared_lava += (MIN_Y..=CAVE_WATER_LEVEL)
+                    .filter(|&y| {
+                        west.get(15, y, z) == blocks::LAVA && east.get(0, y, z) == blocks::LAVA
+                    })
+                    .count();
+            }
+            assert!(shared_lava > 0, "seed={seed}: no lava across the border");
+        }
+    }
+
+    #[test]
+    fn lava_regions_cover_about_one_fifth_of_the_map() {
+        for seed in [2026, 0, -71] {
+            let caves = Caves::new(seed);
+            let mut count = 0;
+            for z in (-4096..4096).step_by(8) {
+                for x in (-4096..4096).step_by(8) {
+                    count += usize::from(caves.is_lava_region(x, z));
+                }
+            }
+            let share = count as f64 / (1024 * 1024) as f64;
+            eprintln!(
+                "lava region seed={seed}: {count}/1048576 ({:.2}%)",
+                share * 100.0
+            );
+            assert!((0.15..=0.25).contains(&share));
+        }
+    }
+
+    #[test]
+    fn deep_caves_have_exposed_lava_without_water_contact_or_other_block_changes() {
+        const RADIUS: i32 = 12;
+        let range = -RADIUS..=RADIUS;
+        // Full block fingerprints from 2ce7fc7 in chunk z/x, block y/z/x order.
+        for (seed, baseline) in [
+            (2026, 0x6737d4e6c943a955),
+            (0, 0x056d7b9b0dc279d2),
+            (-71, 0xbc852a208de5d9ae),
+        ] {
+            let terrain = TerrainGenerator::new(seed);
+            let rows: Vec<Vec<_>> = range
+                .clone()
+                .map(|cz| range.clone().map(|cx| terrain.generate(cx, cz)).collect())
+                .collect();
+            let mut normalized = Fnv64::new();
+            let (mut sources, mut exposed, mut walls, mut lava_chunks) = (0, 0, 0, 0);
+            for row in &rows {
+                for chunk in row {
+                    let mut has_lava = false;
+                    for y in MIN_Y..MIN_Y + world::HEIGHT {
+                        for z in 0..16 {
+                            for x in 0..16 {
+                                let state = chunk.get(x, y, z);
+                                normalized.u16(match state {
+                                    blocks::LAVA | blocks::OBSIDIAN => blocks::WATER,
+                                    _ => state,
+                                });
+                                if state == blocks::OBSIDIAN {
+                                    assert!(y <= CAVE_WATER_LEVEL);
+                                    walls += 1;
+                                }
+                                if state != blocks::LAVA {
+                                    continue;
+                                }
+                                assert!(y <= CAVE_WATER_LEVEL);
+                                sources += 1;
+                                exposed += usize::from(chunk.get(x, y + 1, z) == blocks::AIR);
+                                has_lava = true;
+                                let (wx, wz) = (chunk.cx * 16 + x as i32, chunk.cz * 16 + z as i32);
+                                for (nx, nz) in
+                                    [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
+                                {
+                                    let (cx, cz) = (nx.div_euclid(16), nz.div_euclid(16));
+                                    if range.contains(&cx) && range.contains(&cz) {
+                                        let neighbor =
+                                            &rows[(cz + RADIUS) as usize][(cx + RADIUS) as usize];
+                                        let adjacent = neighbor.get(
+                                            nx.rem_euclid(16) as usize,
+                                            y,
+                                            nz.rem_euclid(16) as usize,
+                                        );
+                                        assert!(!blocks::is_water(adjacent), "seed={seed}: lava at {wx},{y},{wz} touches water at {nx},{y},{nz}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    lava_chunks += usize::from(has_lava);
+                }
+            }
+            assert_eq!(normalized.finish(), baseline, "seed={seed}");
+            assert!(exposed > 0 && walls > 0, "seed={seed}");
+            eprintln!(
+                "deep caves seed={seed}: {sources} lava sources, {exposed} exposed, {walls} obsidian, {lava_chunks} chunks with lava"
+            );
+        }
+    }
+
+    #[test]
     fn heights_match_pre_biome_baseline() {
         // Captured by running the HEAD (pre-biome) generator on these probes.
         let mut hash = Fnv64::new();
@@ -1110,10 +1267,13 @@ mod tests {
 
     #[test]
     fn caves_match_coordinate_query_and_preserve_surface() {
-        use crate::caves::CAVE_WATER_LEVEL;
-        for seed in [2026, 0, -71] {
+        for (seed, lava_chunk, wall_chunk) in [
+            (2026, (-8, -8), (-10, 2)),
+            (0, (-10, -12), (-11, -12)),
+            (-71, (12, -8), (-3, 3)),
+        ] {
             let t = TerrainGenerator::new(seed);
-            let (mut air, mut water) = (0, 0);
+            let (mut air, mut water, mut lava, mut walls) = (0, 0, 0, 0);
             let chunks = (-1..=1).flat_map(|z| (-1..=1).map(move |x| (x, z))).chain([
                 (-13, 9),
                 (-12, 9),
@@ -1121,6 +1281,8 @@ mod tests {
                 (-12, 10),
                 (-20, -20),
                 (20, 20),
+                lava_chunk,
+                wall_chunk,
             ]);
             for (cx, cz) in chunks {
                 let before = t.generate_features(cx, cz, false, false, false);
@@ -1132,6 +1294,7 @@ mod tests {
                         let top = t.surface_y(wx, wz);
                         let neighbors = [(wx - 1, wz), (wx + 1, wz), (wx, wz - 1), (wx, wz + 1)]
                             .map(|(x, z)| t.surface_y(x, z));
+                        let underground = underground_at(&t.caves, wx, wz);
                         for y in MIN_Y..320 {
                             let old = before.get(x, y, z);
                             let cave = t.caves.is_cave(wx, y, wz, top, neighbors);
@@ -1144,7 +1307,11 @@ mod tests {
                             let expected = if passage {
                                 blocks::AIR
                             } else if old != blocks::AIR && old != blocks::WATER {
-                                cave.unwrap_or(old)
+                                match cave {
+                                    Some(blocks::WATER) => underground,
+                                    Some(state) => state,
+                                    None => old,
+                                }
                             } else {
                                 old
                             };
@@ -1173,18 +1340,17 @@ mod tests {
                                     }
                                 );
                                 if old != blocks::AIR && old != blocks::WATER {
-                                    if state == blocks::WATER {
-                                        water += 1;
-                                    } else {
-                                        air += 1;
-                                    }
+                                    water += usize::from(expected == blocks::WATER);
+                                    air += usize::from(expected == blocks::AIR);
+                                    lava += usize::from(expected == blocks::LAVA);
+                                    walls += usize::from(expected == blocks::OBSIDIAN);
                                 }
                             }
                         }
                     }
                 }
             }
-            assert!(air > 0 && water > 0);
+            assert!(air > 0 && water > 0 && lava > 0 && walls > 0, "seed={seed}");
         }
     }
 
@@ -1414,6 +1580,6 @@ mod tests {
 
     #[test]
     fn terrain_reference_fingerprint() {
-        assert_eq!(terrain_fingerprint(2026), 0x7ec6cedb74055722);
+        assert_eq!(terrain_fingerprint(2026), 0x8a5f7c2e7b0aa3dc);
     }
 }

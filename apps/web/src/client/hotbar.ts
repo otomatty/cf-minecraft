@@ -1,3 +1,11 @@
+import type { BlockItemTint } from "./block-tints.ts";
+
+export function iconTintChanged(previous: BlockItemTint | null, next: BlockItemTint | null): boolean {
+	if (!previous || !next) return previous !== next;
+	return previous.grass.some((channel, i) => channel !== next.grass[i])
+		|| previous.leaves.some((channel, i) => channel !== next.leaves[i]);
+}
+
 /** Empty and non-placeable item slots have no block icon or placement state. */
 export function hotbarStates(slots: readonly ({ item: number } | null)[], items: readonly { id: number; block: number | null }[]): number[] {
 	return slots.slice(0, 9).map(slot => slot ? items.find(item => item.id === slot.item)?.block ?? 0 : 0);

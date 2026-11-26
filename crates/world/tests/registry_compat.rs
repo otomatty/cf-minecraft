@@ -54,12 +54,15 @@ fn registry_matches_pre_generation_snapshot() {
             WHITE_WOOL,
             TORCH,
             WALL_TORCH,
+            GRAY_WOOL,
+            BROWN_WOOL,
+            BLACK_WOOL,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 14
+            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 83, 84, 85, 14
         ]
     );
     for state in 0..COUNT {
@@ -277,4 +280,59 @@ fn original_ore_ids_textures_and_stone_properties() {
         assert_eq!(ore.emission, 0);
         assert_eq!(ore.tex, [texture; 6]);
     }
+}
+
+#[test]
+fn new_wool_and_shears_are_appended_to_the_registries() {
+    use world::items;
+
+    assert_eq!(
+        &TEXTURES[44..],
+        [
+            "white_wool",
+            "torch",
+            "oak_leaves_dense",
+            "gray_wool",
+            "brown_wool",
+            "black_wool"
+        ]
+    );
+    let white = info(WHITE_WOOL);
+    for (name, state, item, texture) in [
+        ("gray_wool", 82, 79, 47),
+        ("brown_wool", 83, 80, 48),
+        ("black_wool", 84, 81, 49),
+    ] {
+        assert_eq!(parse_state(name), Some(state));
+        assert_eq!(info(state).tex, [texture; 6]);
+        assert!(is_full_opaque_cube(state));
+        assert_eq!(info(state).dig_ticks, white.dig_ticks);
+        assert_eq!(info(state).tool, white.tool);
+        assert_eq!(info(state).min_tier, white.min_tier);
+        assert_eq!(items::by_name(name), Some(item));
+        assert_eq!(items::mining_drop(state), Some(item));
+        assert_eq!(items::info(item).unwrap().block, Some(state));
+        assert_eq!(items::info(item).unwrap().max_stack, 64);
+    }
+    assert_eq!(items::by_name("torch"), Some(78));
+    let shears = items::ITEMS.last().unwrap();
+    assert_eq!(
+        (shears.name, shears.id, shears.max_stack, shears.durability),
+        ("shears", 82, 1, Some(120))
+    );
+    assert_eq!((shears.texture, shears.tool), (Some("shears"), None));
+    let recipe = world::recipes::RECIPES.last().unwrap();
+    let iron = items::by_name("iron_ingot").unwrap();
+    let stick = items::by_name("stick").unwrap();
+    assert_eq!(
+        (
+            recipe.width,
+            recipe.height,
+            recipe.table_only,
+            recipe.item,
+            recipe.count
+        ),
+        (3, 2, true, 82, 1)
+    );
+    assert_eq!(recipe.ingredients, [iron, 0, iron, 0, stick, 0]);
 }

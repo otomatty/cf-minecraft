@@ -57,6 +57,7 @@ pub struct BlockInfo {
     /// Collides with players.
     pub solid: bool,
     pub falls: bool,
+    pub washes_away: bool,
     /// Suppress internal faces against the same block state.
     pub cull_same: bool,
     /// Light absorption and emission, each in 0..=15.
@@ -517,7 +518,7 @@ mod tests {
 
     #[test]
     fn torch_states_emit_light_and_have_only_selection_bounds() {
-        assert_eq!((TORCH, WALL_TORCH, COUNT), (77, 78, 82));
+        assert_eq!((TORCH, WALL_TORCH, COUNT), (77, 78, 85));
         assert_eq!(block(TORCH).unwrap().count, 1);
         assert_eq!(block(WALL_TORCH).unwrap().count, 4);
         assert_eq!(torch_for_face(0), None);
