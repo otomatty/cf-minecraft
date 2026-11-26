@@ -23,10 +23,12 @@ import { TintMap, tintBudgetMs, type CellTint } from "./tint-map.ts";
 import { Generator, ServerCore } from "../shared/server-core.ts";
 import clientWasmUrl from "../wasm/client.wasm?url";
 import serverWasmUrl from "../wasm/server.wasm?url";
-import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
+import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, gameTextureLayout, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
-import { setupTexturePack } from "./texture-pack-settings.ts";
+import { loadInstalledPack, setupTexturePack } from "./texture-pack-settings.ts";
+import type { TexturePack } from "./texture-pack.ts";
+import { hasPlaySession } from "./title-route.ts";
 import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -125,23 +127,23 @@ declare global {
 	}
 }
 
+async function playSession(): Promise<{ open?: boolean; user?: object | null }> {
+	const response = await fetch("/api/me").catch(() => { throw new Error("ログインを確認できません。再度お試しください"); });
+	if (response.status === 503) throw new Error("本番の認証設定が未完了です");
+	if (!response.ok) throw new Error(`ログイン確認に失敗しました (${response.status})`);
+	return response.json();
+}
+
 async function canEnterWorld(): Promise<boolean> {
-	const accountURL = `/?next=${encodeURIComponent(location.pathname + location.search)}`;
 	const stop = (message: string): false => {
 		fail(message);
 		const link = document.createElement("a");
-		link.href = accountURL;
+		link.href = `/?next=${encodeURIComponent(location.pathname + location.search)}`;
 		link.textContent = "タイトル画面でログイン";
 		link.style.color = "#aaccff";
 		$("start-panel").append(link);
 		return false;
 	};
-	const response = await fetch("/api/me");
-	if (response.status === 503) throw new Error("本番の認証設定が未完了です");
-	if (!response.ok) throw new Error(`ログイン確認に失敗しました (${response.status})`);
-	const me = await response.json();
-	if (me.open) return true;
-	if (!me.user) return stop("マルチプレイにはログインが必要です");
 	const world = await fetch(`/api/worlds/${encodeURIComponent(worldName)}`);
 	if (world.status === 404) return stop(`ワールド ${worldName} はありません`);
 	if (world.status === 403) return stop("このワールドに招待されていません");
@@ -157,17 +159,23 @@ async function runScenario(seed: string, ticks: number): Promise<string> {
 }
 
 async function main(): Promise<void> {
-	if (serverKind === "ws" && !await canEnterWorld()) return;
+	const titleUrl = "/?" + new URLSearchParams({ next: location.pathname + location.search });
+	const me = await playSession();
+	if (!hasPlaySession(me)) return location.replace(titleUrl);
 	const core = await ClientCore.load(clientWasmUrl);
+	const layout = gameTextureLayout(core);
+	const textureNames = layout.names;
+	const pack = await loadInstalledPack(textureNames);
+	if (!pack) return location.replace(titleUrl);
+	if (serverKind === "ws" && !me.open && !await canEnterWorld()) return;
 	const lightPool = new LightPool(core, () => new Worker(new URL("./light.worker.ts", import.meta.url), { type: "module" }));
-	const textureNames = [...core.textureNames(), "bow"];
 	const arrowTexture = textureNames.indexOf("arrow");
 	const eggTexture = textureNames.indexOf("egg");
-	const renderer = await Renderer.create(canvas, textureNames, new PlayerNames($("player-names")));
+	const renderer = await Renderer.create(canvas, layout, new PlayerNames($("player-names")), pack);
 	const tintMap = new TintMap(core.biomeColors(), (cx, cz) => core.tintCells(core.seed, generator!, cx, cz));
 	const registry = core.blockRegistry();
 	const items = core.itemRegistry();
-	const itemTextures = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
+	const dropLayers = new Map(items.map(item => [item.id, Math.max(0, textureNames.indexOf(item.texture ?? registry[item.block ?? 0]?.texture))]));
 	const dropFaces = new Map(items.map(item => [item.id, dropBlockFaces(item, registry, textureNames)]));
 	let mainThreadMeshMs = 0;
 	const meshPool = new MeshPool(meshWorkerCount(navigator.hardwareConcurrency),
@@ -541,7 +549,6 @@ async function main(): Promise<void> {
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
 	const biomeIcons = new Map<number, ImageData>();
-	let packedGrassSide = false;
 	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
@@ -575,7 +582,7 @@ async function main(): Promise<void> {
 		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
 		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint, packedGrassSide), ICON_SIZE, ICON_SIZE);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint), ICON_SIZE, ICON_SIZE);
 			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
@@ -1008,9 +1015,9 @@ async function main(): Promise<void> {
 		$("block-grid").append(button);
 		pickerButtons.push(button);
 	});
-	setupTexturePack($("textures-tab-panel"), textureNames, tiles => {
-		renderer.applyTexturePack(tiles);
-		packedGrassSide = tiles.has("grass_block_side");
+	setupTexturePack($("textures-tab-panel"), layout, pack, next => {
+		renderer.applyTexturePack(next);
+		applyHudPack(next);
 		icons.clear();
 		biomeIcons.clear();
 		paintHotbar(core.inventory);
@@ -1471,7 +1478,58 @@ async function main(): Promise<void> {
 	const bubbles = Array.from({ length: bubbleCount(MAX_AIR) }, () => document.createElement("span"));
 	for (const bubble of bubbles) bubble.className = "bubble";
 	airMeter.append(...bubbles);
-	let previousHealth: number | null = null;
+	let previousHealth: number | null = null, previousFood: number | null = null;
+	type MeterState = ReturnType<typeof heartStates>[number];
+	let hudArt = new Map<string, string>();
+
+	function meterImage(meter: "heart" | "hunger", state: MeterState, blink = false): string {
+		const base = hudArt.get(meter + (blink ? "_blink" : "_background"));
+		if ((blink && !base) || state === "empty") return base ?? "";
+		const fill = hudArt.get(state === "full" && meter === "heart" ? "heart" : meter + "_" + state);
+		return fill ? (base ? fill + ", " + base : fill) : "";
+	}
+
+	function setHudImage(icon: HTMLElement, image: string): void {
+		icon.toggleAttribute("data-pack-icon", Boolean(image));
+		icon.style.backgroundImage = image;
+	}
+
+	function applyHudPack(next: TexturePack): void {
+		hudArt = new Map();
+		const tile = document.createElement("canvas");
+		tile.width = tile.height = 9;
+		const ctx = tile.getContext("2d")!;
+		for (const [path, pixels] of next.art) {
+			if (!path.startsWith("ui/")) continue;
+			ctx.putImageData(new ImageData(new Uint8ClampedArray(pixels), 9, 9), 0, 0);
+			hudArt.set(path.slice(3), `url("${tile.toDataURL()}")`);
+		}
+		for (const [meter, icons] of [["heart", hearts], ["hunger", foodIcons]] as const) {
+			for (const icon of icons) {
+				icon.getAnimations().forEach(animation => animation.cancel());
+				setHudImage(icon, meterImage(meter, (icon.dataset.state ?? "empty") as MeterState));
+			}
+		}
+		for (const bubble of bubbles) setHudImage(bubble, hudArt.get("bubble") ?? "");
+	}
+	applyHudPack(pack);
+
+	function syncMeter(meter: "heart" | "hunger", icons: HTMLElement[], states: MeterState[], decreased: boolean): void {
+		states.forEach((state, i) => {
+			const icon = icons[i];
+			if (icon.dataset.state === state) return;
+			icon.dataset.state = state;
+			icon.getAnimations().forEach(animation => animation.cancel());
+			const image = meterImage(meter, state);
+			setHudImage(icon, image);
+			const blink = decreased && meterImage(meter, state, true);
+			if (image && blink) {
+				icon.animate([blink, image, blink, image].map(backgroundImage => ({
+					backgroundImage, easing: "steps(1, end)",
+				})), 300);
+			}
+		});
+	}
 
 	respawn.addEventListener("click", () => {
 		if (!core.dead || connection !== "open") return;
@@ -1486,9 +1544,9 @@ async function main(): Promise<void> {
 		vitals.hidden = gameMode !== "survival";
 		if (!vitals.hidden) {
 			healthMeter.setAttribute("aria-valuenow", String(health));
-			heartStates(health).forEach((state, i) => { hearts[i].dataset.state = state; });
+			syncMeter("heart", hearts, heartStates(health), previousHealth !== null && health < previousHealth);
 			foodMeter.setAttribute("aria-valuenow", String(food));
-			foodStates(food).forEach((state, i) => { foodIcons[i].dataset.state = state; });
+			syncMeter("hunger", foodIcons, foodStates(food), previousFood !== null && food < previousFood);
 			airMeter.setAttribute("aria-valuenow", String(air));
 			airMeter.hidden = air === MAX_AIR;
 			const count = bubbleCount(air);
@@ -1500,6 +1558,7 @@ async function main(): Promise<void> {
 			}
 		}
 		previousHealth = health;
+		previousFood = food;
 
 		if (failed) return;
 		if (dead && !deathScreen.open) {
@@ -1679,7 +1738,7 @@ async function main(): Promise<void> {
 			const blockFaces = dropFaces.get(entity.item);
 			return {
 				position: dropPosition,
-				texture: itemTextures.get(entity.item) ?? 0,
+				texture: dropLayers.get(entity.item) ?? 0,
 				blockFaces,
 				cellTint: blockFaces ? tintMap.tint(dropPosition[0], dropPosition[2]) : null,
 				flat: item?.texture != null || item?.block == null,

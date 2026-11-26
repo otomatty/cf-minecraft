@@ -107,6 +107,8 @@ export class TintMap {
 		}
 	}
 
+	get updating(): boolean { return this.cursor < this.pending.length; }
+
 	private has(cx: number, cz: number): boolean {
 		const owner = this.owners[(cz & 63) * 64 + (cx & 63)];
 		return owner?.[0] === cx && owner[1] === cz;

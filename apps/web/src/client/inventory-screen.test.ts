@@ -2,7 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { bindInventorySlot, containerScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
 import { durabilityBar } from "./hotbar.ts";
-import { paintTexture } from "./textures.ts";
+import { missingTile, textureIconPixels } from "./textures.ts";
+import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
+
+const fixture = await decodedFixturePack();
+const packTile = (name: string): Uint8Array => {
+	const tile = fixture.tiles.get(name);
+	assert.ok(tile, name);
+	return tile;
+};
 
 test("inventory display maps all wire slots without mutating server state", () => {
     const slots = Array.from({length:42},(_,item) => ({item:item+1,count:item+1,damage:0}));
@@ -20,13 +28,13 @@ test("inventory display maps all wire slots without mutating server state", () =
     assert.ok(inventoryDisplay([]).groups.flat().every(s=>s.stack===null));
 });
 
-test("original stick and table pixels are deterministic and distinct", () => {
+test("pack stick and table pixels are deterministic and distinct", () => {
     const names = ["stick","crafting_table_top","crafting_table_side","crafting_table_bottom"];
-    const images = names.map(name=>paintTexture(name));
+    const images = names.map(name=>packTile(name));
     for (let i=0;i<names.length;i++) {
         assert.equal(images[i].length,16*16*4);
-        assert.deepEqual(images[i],paintTexture(names[i]));
-        assert.notDeepEqual(images[i],paintTexture("unknown_texture"));
+        assert.deepEqual(textureIconPixels(names[i], images[i]), new Uint8ClampedArray(images[i]));
+        assert.notDeepEqual(images[i],missingTile);
         for (let j=0;j<i;j++) assert.notDeepEqual(images[i],images[j]);
     }
     assert.equal(images[0][3],0);
@@ -173,11 +181,11 @@ test("furnace display uses wire 51–53 directly and keeps cursor separate", () 
 
 test("furnace item and block textures are deterministic and distinct", () => {
     const names = ["coal", "copper_ingot", "iron_ingot", "furnace_front", "furnace_side", "furnace_top"];
-    const images = names.map(name => paintTexture(name));
+    const images = names.map(name => packTile(name));
     for (const [i, pixels] of images.entries()) {
         assert.equal(pixels.length, 16 * 16 * 4);
-        assert.deepEqual(pixels, paintTexture(names[i]));
-        assert.notDeepEqual(pixels, paintTexture("unknown_texture"));
+        assert.deepEqual(textureIconPixels(names[i], pixels), new Uint8ClampedArray(pixels));
+        assert.notDeepEqual(pixels, missingTile);
         for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, images[j]);
     }
 });

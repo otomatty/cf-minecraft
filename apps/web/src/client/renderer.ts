@@ -13,18 +13,14 @@ import { digVertices, type RenderDig } from "./dig.ts";
 // arithmetic before anything becomes a float. Rendering stays exact at the
 // world border.
 
-import { entitySkins, explosionVertices, flameVertices, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, MOB_SKIN_SIZE, mobInFrustum, mobVertices, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
-import { blastFrames, smokeFrames } from "./mobs/explosion.ts";
-import { flameFrames } from "./mobs/flame.ts";
+import { explosionVertices, flameVertices, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_EXPLOSION_PARTICLES, MAX_RENDER_ITEMS, mobInFrustum, mobVertices, prepareEntityModels, type ExplosionParticle, type RenderItem, type RenderMob, type RenderPlayer, type RenderSprite } from "./entities.ts";
 import type { TintRect } from "./tint-map.ts";
 import { quadCenters, sortSections, sortedQuadIndices, splitMeshLayers, updateTranslucentSort, type LayerCounts, type Point } from "./mesh-layers.ts";
 import { skyState, lightmap } from "./sky.ts";
 import { type RayHit, MIN_Y, WORDS_PER_QUAD } from "./client-core.ts";
 import { boxInFrustum, forward, right, frustumPlanes, viewProjection, type Vec3 } from "./math.ts";
-import { paintCracks, downsample, paintTexture, paintSkyTexture, TEX_SIZE } from "./textures.ts";
-import { waterTextureFrame, WATER_FRAME_COUNT } from "./building-textures.ts";
-import { grassSideAtlasPixels } from "./flora-textures.ts";
-import { hasItemTexture } from "./item-textures.ts";
+import { downsample, missingTile, TEX_SIZE, WATER_FRAME_COUNT, type TextureLayout } from "./textures.ts";
+import { crackPaths, moonSheetOrder, type TexturePack } from "./texture-pack.ts";
 import type { PlayerNames } from "./player-names.ts";
 
 const MAX_SECTIONS = 16384;
@@ -68,6 +64,12 @@ struct Globals {
 @group(0) @binding(5) var lightSampler: sampler;
 @group(0) @binding(6) var tintTex: texture_2d_array<f32>;
 @group(0) @binding(7) var tintSampler: sampler;
+@group(0) @binding(8) var<storage, read> materialLayers: array<u32>;
+
+fn materialLayer(layer: u32) -> u32 {
+	if (layer < arrayLength(&materialLayers)) { return materialLayers[layer]; }
+	return layer;
+}
 
 struct VOut {
 	@builtin(position) pos: vec4<f32>,
@@ -120,12 +122,13 @@ fn vs(@location(0) a: vec2<u32>, @builtin(instance_index) section: u32) -> VOut 
 	if (face >= 2u) { out.uv.y += f32(a.y >> 31u) / 9.0; }
 	out.shade = faceShade[face] * aoShade[ao];
 	out.rel = rel;
-	out.layer = a.y & 4095u;
+	let layer = a.y & 4095u;
+	out.layer = materialLayer(layer);
 	if (__ISOTROPIC_FACE__) {
 		out.uv = rotatedBlockUV(origins[section].xyz + vec3<i32>(local), face, out.uv);
 	}
 	out.tintColor = vec3<f32>(1.0);
-	if (((a.y >> 12u) & 1u) == 1u) {
+	if (((a.y >> 12u) & 1u) == 1u && out.layer == layer) {
 		var tintLayer = 0;
 		if (__LEAVES_LAYERS__) { tintLayer = 1; }
 		if (out.layer == __WATER_LAYER__u || out.layer == __FLOW_LAYER__u) {
@@ -170,7 +173,8 @@ fn vsEntity(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2
 @vertex
 fn vsDrop(@location(0) pos: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) shade: f32, @location(3) layer: f32, @location(4) light: vec2<f32>, @location(5) tint: f32) -> VOut {
 	var out = entityVertex(pos, uv, shade, layer, light);
-	if (tint > 0.0) {
+	out.layer = materialLayer(out.layer);
+	if (tint > 0.0 && out.layer == u32(layer)) {
 		out.tintColor = unpack4x8unorm(u32(tint) - 1u).rgb;
 	}
 	return out;
@@ -189,6 +193,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 			shade = shade - sign(shade) * 2.0;
 		}
 		if (shade < 0.0) { color = mix(color, vec3<f32>(1.0, 0.12, 0.12), 0.5); }
+	} else if (entityPass == 3u) {
+		color *= shade;
 	} else if (in.layer == __GRASS_SIDE_LAYER__u) {
 		// RGB carries bare soil; alpha carries the turf's grayscale intensity.
 		color += pixel.a * in.tintColor;
@@ -207,7 +213,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 `;
 
 /** Resolve tint layers from the same ordered names used to upload the texture array. */
-export function terrainShader(textureNames: readonly string[]): string {
+export function terrainShader({ names: textureNames, spriteStart }: TextureLayout): string {
 	const matches = (names: string[]) => textureNames.flatMap((name, layer) =>
 		names.includes(name) ? [`out.layer == ${layer}u`] : []).join(" || ") || "false";
 	// Bedrock's blocks.json marks these cube faces as isotropic.
@@ -218,7 +224,7 @@ export function terrainShader(textureNames: readonly string[]): string {
 	return TERRAIN_WGSL
 		.replace("__ISOTROPIC_FACE__", `${allFaces} || (face <= 1u && (${caps}))`)
 		.replace("__GRASS_SIDE_LAYER__", String(textureNames.indexOf("grass_block_side") >>> 0))
-		.replace("__DROP_ALPHA_TEST__", dropAlphaTest(textureNames))
+		.replace("__DROP_ALPHA_TEST__", dropAlphaTest({ names: textureNames, spriteStart }))
 		.replace("__LEAVES_LAYERS__", matches(leaves))
 		.replaceAll("__FLOW_LAYER__", String(textureNames.indexOf("water_flow") >>> 0))
 		.replace("__WATER_LAYER__", String(textureNames.indexOf("water") >>> 0));
@@ -229,22 +235,33 @@ const cutoutBlockTextures = new Set([
 	"wheat_sprout", "wheat_shoot", "wheat_green", "wheat_ripe",
 ]);
 
-export function usesCutoutMips(name: string): boolean {
-	return hasItemTexture(name) || cutoutBlockTextures.has(name);
+export function usesCutoutMips(layout: TextureLayout, layer: number): boolean {
+	return (layer >= layout.spriteStart && layer < layout.names.length) || cutoutBlockTextures.has(layout.names[layer]);
 }
 
-/** Group adjacent sprite layers into a single shader comparison per range. */
-export function dropAlphaTest(textureNames: readonly string[]): string {
-	const ranges: string[] = [];
-	for (let layer = 0; layer < textureNames.length; layer++) {
-		if (!hasItemTexture(textureNames[layer])) continue;
-		const first = layer;
-		while (layer + 1 < textureNames.length && hasItemTexture(textureNames[layer + 1])) layer++;
-		ranges.push(`(in.layer >= ${first}u && in.layer <= ${layer}u)`);
-	}
-	return ranges.length
-		? `(pixel.a <= 0.0 || (pixel.a < 0.5 && (${ranges.join(" || ")})))`
+export function dropAlphaTest({ names, spriteStart }: TextureLayout): string {
+	return spriteStart < names.length
+		? `(pixel.a <= 0.0 || (pixel.a < 0.5 && in.layer >= ${spriteStart}u && in.layer < ${names.length}u))`
 		: "pixel.a <= 0.0";
+}
+
+const waterNames = ["water", "water_flow"];
+
+/** Resolve all pack-dependent renderer input before it is uploaded to WebGPU. */
+export function preparePackTextures(names: readonly string[], pack?: TexturePack) {
+	const tiles = names.map(name => pack?.tiles.get(name) ?? missingTile);
+	const cracks = crackPaths.map(path => pack?.art.get(path));
+	const water = waterNames.some(name => names.includes(name)) ? waterNames.flatMap(name => {
+		const frames = pack?.waterFrames.get(name);
+		return Array.from({ length: WATER_FRAME_COUNT }, (_, frame) =>
+			frames?.length ? frames[frame % frames.length] : missingTile);
+	}) : [];
+	return {
+		tiles, cracks, water,
+		sun: pack?.art.get("environment/sun"),
+		moon: pack?.art.get("environment/moon_phases"),
+		clouds: pack?.art.get("environment/clouds"),
+	};
 }
 
 const OUTLINE_WGSL = /* wgsl */ `
@@ -281,6 +298,7 @@ fn fs() -> @location(0) vec4<f32> {
 const SKY_WGSL = TERRAIN_WGSL.slice(0, TERRAIN_WGSL.indexOf("@group(0) @binding(1)")) + /* wgsl */ `
 @group(0) @binding(1) var art: texture_2d_array<f32>;
 @group(0) @binding(2) var artSampler: sampler;
+@group(0) @binding(3) var clouds: texture_2d<f32>;
 struct SkyOut {
 	@builtin(position) pos: vec4<f32>,
 	@location(0) ray: vec3<f32>,
@@ -322,12 +340,16 @@ fn body(ray: vec3<f32>, direction: vec3<f32>, tangent: vec3<f32>, size: f32, lay
 	let offset = vec2<f32>(f32((seed >> 8u) & 255u), f32((seed >> 16u) & 255u)) / 255.0;
 	let point = 1.0 - smoothstep(0.04, 0.18, length(fract(coord) - (0.2 + offset * 0.6)));
 	if ((seed & 127u) == 0u) { color += vec3<f32>(point * g.celestial.y * smoothstep(0.0, 0.12, ray.y)); }
-	let sunPixel = body(ray, sun, tangent, 0.13, 0);
-	let moonPixel = body(ray, -sun, -tangent, 0.10, 1 + i32(g.celestial.z));
 	let visible = smoothstep(-0.03, 0.03, ray.y);
 	// Emissive bodies add light, like the stars above; they never darken the sky.
-	color += sunPixel.rgb * sunPixel.a * visible;
-	color += moonPixel.rgb * moonPixel.a * visible;
+	if (g.celestial.w > 0.0) {
+		let pixel = body(ray, sun, tangent, g.celestial.w, 0);
+		color += pixel.rgb * pixel.a * visible;
+	}
+	if (g.forward.w > 0.0) {
+		let pixel = body(ray, -sun, -tangent, g.forward.w, 1 + i32(g.celestial.z));
+		color += pixel.rgb * pixel.a * visible;
+	}
 	return vec4<f32>(color, 1.0);
 }
 struct CloudOut {
@@ -343,13 +365,13 @@ struct CloudOut {
 	return out;
 }
 @fragment fn fsCloud(in: CloudOut) -> @location(0) vec4<f32> {
-	let uv = (in.rel.xz + g.cloudOrigin.xy + vec2<f32>(g.skyCamera.w, 0.0)) / 256.0;
-	let pixel = textureSampleLevel(art, artSampler, fract(uv), 9, 0.0);
+	let uv = (in.rel.xz + g.cloudOrigin.xy + vec2<f32>(g.skyCamera.w, 0.0)) / g.right.w;
+	let pixel = textureSampleLevel(clouds, artSampler, fract(uv), 0.0);
 	if (pixel.a < 0.1) { discard; }
 	// Clouds extend beyond terrain: preserve nearby opacity, then fade into the sky.
 	let fog = smoothstep(g.cloudOrigin.z, g.cloudOrigin.w, max(length(in.rel.xz), abs(in.rel.y)));
 	let color = vec3<f32>(0.16 + g.skyColor.a * 0.84);
-	return vec4<f32>(color, pixel.a * (1.0 - fog));
+	return vec4<f32>(color * pixel.rgb, pixel.a * (1.0 - fog));
 }
 `;
 
@@ -393,6 +415,11 @@ export function filterVisibleSections<T>(sections: ReadonlyMap<string, T>, visib
 
 const key = (cx: number, sy: number, cz: number) => `${cx},${sy},${cz}`;
 
+interface RendererOptions {
+	signal: AbortSignal;
+	onError: (error: Error) => void;
+}
+
 export class Renderer {
 	readonly adapterInfo: string;
 	private readonly device: GPUDevice;
@@ -411,7 +438,9 @@ export class Renderer {
 	private readonly crackTextureBase: number;
 	private readonly itemBuffer: GPUBuffer;
 	private mobBuffer: GPUBuffer | null = null;
-	private readonly mobBind: GPUBindGroup;
+	private mobBind?: GPUBindGroup;
+	private effectBind?: GPUBindGroup;
+	private entityModels!: ReturnType<typeof prepareEntityModels>;
 	private readonly playerNames: PlayerNames;
 	private readonly cutout: GPURenderPipeline;
 	private readonly translucent: GPURenderPipeline;
@@ -434,32 +463,43 @@ export class Renderer {
 	private readonly globalsF32 = new Float32Array(this.globalsData);
 	private readonly globalsI32 = new Int32Array(this.globalsData);
 	private readonly firstWaterFrame: number;
-	private readonly firstFlameFrame: number;
-	private readonly firstExplosionFrame: number;
-	readonly applyTexturePack: (tiles: ReadonlyMap<string, Uint8Array>) => void;
+	private flame: readonly [number, number] = [0, 0];
+	private explosion: readonly [number, number] = [0, 0];
+	private smoke: readonly [number, number] = [0, 0];
+	private sunSize = 0;
+	private moonSize = 0;
+	private hasClouds = false;
+	private crackStages: readonly (Uint8Array | undefined)[] = [];
+	private readonly cloudPeriod = 1024;
+	readonly applyTexturePack: (pack?: TexturePack) => void;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
+	private disposed = false;
 
 	private readonly heldItemTextures: ReadonlyMap<string, number>;
 
-	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, textureNames: string[], playerNames: PlayerNames) {
+	private constructor(canvas: HTMLCanvasElement, device: GPUDevice, adapterInfo: string, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack, options?: RendererOptions) {
+		const { names: textureNames } = layout;
 		this.playerNames = playerNames;
 		this.heldItemTextures = new Map(textureNames.map((name, index) => [name, index]));
 		this.crackTextureBase = textureNames.length;
-		textureNames = [...textureNames, ...Array.from({ length: 10 }, (_, i) => "crack_" + i)];
 		this.canvas = canvas;
 		this.device = device;
 		this.adapterInfo = adapterInfo;
 		this.context = canvas.getContext("webgpu") as GPUCanvasContext;
 		this.format = navigator.gpu.getPreferredCanvasFormat();
-		this.context.configure({ device, format: this.format, alphaMode: "opaque" });
 		device.lost.then((info) => {
 			this.lost = info.message || "GPU device lost";
+			if (!this.disposed) options?.onError(new Error(this.lost));
 		});
 		// Validation errors are otherwise silent: surface them in the console.
 		device.addEventListener("uncapturederror", (event) => {
-			console.error(`WebGPU: ${event.error.message}`);
+			if (this.disposed) return;
+			if (options) {
+				event.preventDefault();
+				options.onError(new Error(event.error.message));
+			} else console.error(`WebGPU: ${event.error.message}`);
 		});
 
 		this.globals = device.createBuffer({ size: GLOBALS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -475,67 +515,95 @@ export class Renderer {
 		this.quadIndices = device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
 		device.queue.writeBuffer(this.quadIndices, 0, indices);
 
-		this.firstWaterFrame = textureNames.length;
-		const cutouts = new Set<number>();
-		const tiles = textureNames.map((name, layer) => {
-			const pixels = name.startsWith("crack_") ? paintCracks(Number(name.slice(6))) : paintTexture(name);
-			this.texturePixels.set(name, pixels);
-			if (usesCutoutMips(name)) cutouts.add(layer);
-			return name === "grass_block_side" ? grassSideAtlasPixels() : pixels;
+		this.firstWaterFrame = this.crackTextureBase + crackPaths.length;
+		const waterLayers = waterNames.some(name => textureNames.includes(name)) ? waterNames.length * WATER_FRAME_COUNT : 0;
+		const missingLayer = this.firstWaterFrame + waterLayers;
+		const materialLayers = device.createBuffer({
+			size: Math.max(1, textureNames.length) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
 		});
-		if (textureNames.includes("water") || textureNames.includes("water_flow")) {
-			for (const flowing of [false, true]) {
-				for (let frame = 0; frame < WATER_FRAME_COUNT; frame++) tiles.push(waterTextureFrame(frame, flowing));
-			}
-		}
-		this.firstFlameFrame = tiles.length;
-		for (const pixels of flameFrames) {
-			cutouts.add(tiles.length);
-			tiles.push(pixels);
-		}
-		this.firstExplosionFrame = tiles.length;
-		for (const pixels of [...blastFrames, ...smokeFrames]) {
-			cutouts.add(tiles.length);
-			tiles.push(pixels);
-		}
 		const texture = device.createTexture({
-			size: [TEX_SIZE, TEX_SIZE, Math.max(2, tiles.length)],
+			size: [TEX_SIZE, TEX_SIZE, missingLayer + 1],
 			format: "rgba8unorm",
 			mipLevelCount: MIP_LEVELS,
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
-		const defaults = new Map(this.texturePixels);
-		this.applyTexturePack = overrides => {
-			const layers = tiles.slice();
-			for (const [layer, name] of textureNames.entries()) {
-				const pixels = overrides.get(name);
-				this.texturePixels.set(name, pixels ?? defaults.get(name)!);
-				if (!pixels) continue;
-				layers[layer] = pixels;
-				if (name === "grass_block_side") {
-					// The grass shader uses alpha as an additive biome tint mask.
-					// A pack's finished RGB face needs a zero mask.
-					layers[layer] = pixels.slice();
-					for (let i = 3; i < pixels.length; i += 4) layers[layer][i] = 0;
-				}
-				if (name === "water" || name === "water_flow") {
-					const first = this.firstWaterFrame + (name === "water_flow" ? WATER_FRAME_COUNT : 0);
-					layers.fill(pixels, first, first + WATER_FRAME_COUNT);
-				}
+		const skyArt = device.createTexture({ size: [32, 32, 9], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		const cloudArt = device.createTexture({ size: [256, 256], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		const transparent = new Uint8Array(TEX_SIZE ** 2 * 4);
+		const solidEffect = new Uint8Array(TEX_SIZE ** 2 * 4);
+		for (let i = 0; i < solidEffect.length; i += 4) solidEffect.set([150, 150, 150, 255], i);
+		let mobSkins: GPUTexture | undefined, effectArt: GPUTexture | undefined;
+		this.applyTexturePack = pack => {
+			this.entityModels = prepareEntityModels(pack?.entities);
+			const { width, height, skins } = this.entityModels;
+			const nextSkins = device.createTexture({
+				size: [width, height, Math.max(2, skins.length)], format: "rgba8unorm",
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			for (const [layer, skin] of skins.entries()) {
+				device.queue.writeTexture({ texture: nextSkins, origin: [0, 0, layer] }, skin.pixels,
+					{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
 			}
+			this.mobBind = bindAtlas(nextSkins);
+			mobSkins?.destroy();
+			mobSkins = nextSkins;
+			const { tiles, cracks, water, sun, moon, clouds } = preparePackTextures(textureNames, pack);
+			this.crackStages = cracks;
+			for (const [layer, name] of textureNames.entries()) this.texturePixels.set(name, tiles[layer]);
+			// Remap missing surfaces to a shared layer so grass masks and biome tint skip the marker.
+			if (tiles.length) device.queue.writeBuffer(materialLayers, 0,
+				Uint32Array.from(tiles, (pixels, layer) => pixels === missingTile ? missingLayer : layer));
+			const effects: Uint8Array[] = [solidEffect];
+			const appendFrames = (name: "fire" | "explosion" | "smoke"): readonly [number, number] => {
+				const start = effects.length;
+				const frames = pack?.effects.get(name) ?? [];
+				effects.push(...frames);
+				return [start, frames.length];
+			};
+			this.flame = appendFrames("fire");
+			// With no frames, flameVertices samples the first layer directly.
+			if (!this.flame[1]) effects.push(missingTile);
+			this.explosion = appendFrames("explosion");
+			this.smoke = appendFrames("smoke");
+			const nextEffects = device.createTexture({
+				size: [TEX_SIZE, TEX_SIZE, Math.max(2, effects.length)], format: "rgba8unorm",
+				usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+			});
+			for (const [layer, pixels] of effects.entries()) {
+				device.queue.writeTexture({ texture: nextEffects, origin: [0, 0, layer] }, pixels,
+					{ bytesPerRow: TEX_SIZE * 4 }, [TEX_SIZE, TEX_SIZE, 1]);
+			}
+			this.effectBind = bindAtlas(nextEffects);
+			effectArt?.destroy();
+			effectArt = nextEffects;
+
+			const layers = [...tiles, ...cracks.map(pixels => pixels ?? transparent), ...water, missingTile];
+			const cutouts = layers.map((_, layer) => usesCutoutMips(layout, layer));
 			// Upload the entire array in five writes, including the animation frames.
-			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS && layers.length; level++, size >>= 1) {
+			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS; level++, size >>= 1) {
 				const tileBytes = size * size * 4;
 				const mip = new Uint8Array(layers.length * tileBytes);
 				layers.forEach((pixels, layer) => {
 					mip.set(pixels, layer * tileBytes);
-					if (size > 1) layers[layer] = downsample(pixels, size, cutouts.has(layer));
+					if (size > 1) layers[layer] = downsample(pixels, size, cutouts[layer]);
 				});
 				device.queue.writeTexture({ texture, mipLevel: level }, mip,
 					{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, layers.length]);
 			}
+			// The luminous core occupies roughly 10 of the 32 source pixels.
+			this.sunSize = sun ? 0.13 * 3 : 0;
+			this.moonSize = moon ? 0.10 * 3 : 0;
+			this.hasClouds = Boolean(clouds);
+			if (sun) device.queue.writeTexture({ texture: skyArt }, sun, { bytesPerRow: 128 }, [32, 32, 1]);
+			if (moon) {
+				for (const [phase, cell] of moonSheetOrder.entries()) {
+					const offset = (Math.floor(cell / 4) * 32 * 128 + cell % 4 * 32) * 4;
+					device.queue.writeTexture({ texture: skyArt, origin: [0, 0, phase + 1] }, moon,
+						{ offset, bytesPerRow: 512 }, [32, 32, 1]);
+				}
+			}
+			if (clouds) device.queue.writeTexture({ texture: cloudArt }, clouds, { bytesPerRow: 1024 }, [256, 256, 1]);
 		};
-		this.applyTexturePack(new Map());
 		const sampler = device.createSampler({
 			magFilter: "nearest",
 			minFilter: "nearest",
@@ -543,25 +611,12 @@ export class Renderer {
 			addressModeU: "clamp-to-edge",
 			addressModeV: "clamp-to-edge",
 		});
-		// Keep each UV island at native resolution, including the chicken's half-height skin.
-		const mobSkins = device.createTexture({
-			size: [MOB_SKIN_SIZE, MOB_SKIN_SIZE, entitySkins.length], format: "rgba8unorm",
-			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-		});
-		for (const [layer, skin] of entitySkins.entries()) {
-			device.queue.writeTexture({ texture: mobSkins, origin: [0, 0, layer] }, skin.pixels(),
-				{ bytesPerRow: skin.width * 4, rowsPerImage: skin.height }, [skin.width, skin.height, 1]);
-		}
-
-		const skyArt = device.createTexture({ size: [TEX_SIZE, TEX_SIZE, 10], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		for (let layer = 0; layer < 10; layer++) {
-			device.queue.writeTexture({ texture: skyArt, origin: [0, 0, layer] }, paintSkyTexture(layer), { bytesPerRow: TEX_SIZE * 4 }, [TEX_SIZE, TEX_SIZE, 1]);
-		}
 		const skyModule = device.createShaderModule({ code: SKY_WGSL });
 		const skyLayout = device.createBindGroupLayout({ entries: [
 			{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
 			{ binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: "2d-array" } },
 			{ binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+			{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {} },
 		] });
 		const skyPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [skyLayout] });
 		this.sky = device.createRenderPipeline({
@@ -584,9 +639,10 @@ export class Renderer {
 			{ binding: 0, resource: { buffer: this.globals } },
 			{ binding: 1, resource: skyArt.createView({ dimension: "2d-array" }) },
 			{ binding: 2, resource: sampler },
+			{ binding: 3, resource: cloudArt.createView() },
 		] });
 
-		const terrainModule = device.createShaderModule({ code: terrainShader(textureNames) });
+		const terrainModule = device.createShaderModule({ code: terrainShader(layout) });
 		// Explicit shared layout permits the same bind group in all three pipelines.
 		const terrainLayout = device.createBindGroupLayout({ entries: [
 			{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
@@ -597,6 +653,7 @@ export class Renderer {
 			{ binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
 			{ binding: 6, visibility: GPUShaderStage.VERTEX, texture: { viewDimension: "2d-array" } },
 			{ binding: 7, visibility: GPUShaderStage.VERTEX, sampler: {} },
+			{ binding: 8, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
 		] });
 		const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [terrainLayout] });
 		const terrainPipeline = (layer: number) => device.createRenderPipeline({
@@ -647,8 +704,9 @@ export class Renderer {
 		this.mobs = entityPipeline("mobs");
 		this.flames = entityPipeline("flames");
 		this.crackBuffer = device.createBuffer({ size: MAX_RENDER_ITEMS * 36 * 36, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-		// Each drop uses up to 36 vertices, each burning mob two double-sided quads, and each particle one.
-		const itemBytes = MAX_RENDER_ITEMS * 36 * ITEM_VERTEX_FLOATS * 4;
+		// Each drop uses up to 36 vertices and each held item uses up to 12.
+		const itemBytes = MAX_RENDER_ITEMS * (36 + 12) * ITEM_VERTEX_FLOATS * 4;
+		// Each burning mob uses two double-sided quads and each particle uses one.
 		const effectBytes = (MAX_RENDER_ITEMS * 24 + MAX_EXPLOSION_PARTICLES * 12) * 36;
 		this.itemBuffer = device.createBuffer({ size: itemBytes + effectBytes, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
 		this.terrain = terrainPipeline(0);
@@ -669,10 +727,11 @@ export class Renderer {
 				{ binding: 5, resource: lightSampler },
 				{ binding: 6, resource: this.tintTexture.createView({ dimension: "2d-array" }) },
 				{ binding: 7, resource: tintSampler },
+				{ binding: 8, resource: { buffer: materialLayers } },
 			],
 		});
 		this.terrainBind = bindAtlas(texture);
-		this.mobBind = bindAtlas(mobSkins);
+		this.applyTexturePack(pack);
 
 		const outlineModule = device.createShaderModule({ code: OUTLINE_WGSL });
 		this.outline = device.createRenderPipeline({
@@ -702,6 +761,7 @@ export class Renderer {
 			layout: this.outline.getBindGroupLayout(0),
 			entries: [{ binding: 0, resource: { buffer: this.globals } }],
 		});
+		this.context.configure({ device, format: this.format, alphaMode: "opaque" });
 	}
 
 	writeTints(rects: readonly TintRect[]): void {
@@ -710,16 +770,42 @@ export class Renderer {
 			{ bytesPerRow: r.width * 4, rowsPerImage: r.height }, [r.width, r.height, 3]);
 	}
 
-	static async create(canvas: HTMLCanvasElement, textureNames: string[], playerNames: PlayerNames): Promise<Renderer> {
+	static async create(canvas: HTMLCanvasElement, layout: TextureLayout, playerNames: PlayerNames, pack?: TexturePack, options?: RendererOptions): Promise<Renderer> {
 		if (!("gpu" in navigator)) {
 			throw new Error("このブラウザはWebGPUに対応していません。最新のChrome、Edge、Safari、Firefoxをお試しください。");
 		}
 		const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+		options?.signal.throwIfAborted();
 		if (!adapter) throw new Error("WebGPUアダプターを取得できませんでした。");
 		const device = await adapter.requestDevice();
 		const info = adapter.info;
 		const label = [info.vendor, info.architecture, info.description].filter(Boolean).join(" ") || "unknown adapter";
-		return new Renderer(canvas, device, label, textureNames, playerNames);
+		let renderer: Renderer | undefined;
+		try {
+			options?.signal.throwIfAborted();
+			if (options) device.pushErrorScope("validation");
+			renderer = new Renderer(canvas, device, label, layout, playerNames, pack, options);
+			if (options) {
+				const current = renderer;
+				options.signal.addEventListener("abort", () => current.dispose(), { once: true });
+				const error = await device.popErrorScope();
+				options.signal.throwIfAborted();
+				if (error) throw new Error(error.message);
+			}
+			return renderer;
+		} catch (error) {
+			if (renderer) renderer.dispose();
+			else device.destroy();
+			throw error;
+		}
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.context.unconfigure();
+		this.device.destroy();
+		this.sections.clear();
 	}
 
 	/** Replaces (or removes, when empty) the mesh of one section. */
@@ -817,23 +903,23 @@ export class Renderer {
 		i[33] = this.firstWaterFrame + WATER_FRAME_COUNT + tick % WATER_FRAME_COUNT;
 		f.set([...sky.skyColor, sky.skyBrightness], 36);
 		f.set([...sky.sunsetColor, sky.sunsetStrength], 40);
-		f.set([sky.angle, sky.starBrightness, sky.moonPhase, 0], 44);
+		f.set([sky.angle, sky.starBrightness, sky.moonPhase, this.sunSize], 44);
 		const look = forward(camera.yaw, camera.pitch);
 		const side = right(camera.yaw);
 		const up: Vec3 = [side[1] * look[2] - side[2] * look[1], side[2] * look[0] - side[0] * look[2], side[0] * look[1] - side[1] * look[0]];
-		f.set([...look, 0], 48);
-		f.set([...side, 0], 52);
+		f.set([...look, this.moonSize], 48);
+		f.set([...side, this.cloudPeriod], 52);
 		f.set([...up, 0], 56);
-		f.set([Math.tan(fovY * Math.PI / 360), this.canvas.width / this.canvas.height, camera.y, (dayTime * 0.015) % 256], 60);
+		f.set([Math.tan(fovY * Math.PI / 360), this.canvas.width / this.canvas.height, camera.y, (dayTime * 0.015) % this.cloudPeriod], 60);
 		// xy: repeating cloud texture origin; zw: cloud-only cylindrical fog range.
-		f.set([camera.x % 256, camera.z % 256, cloudFogEnd * 0.65, cloudFogEnd], 64);
+		f.set([camera.x % this.cloudPeriod, camera.z % this.cloudPeriod, cloudFogEnd * 0.65, cloudFogEnd], 64);
 		this.device.queue.writeBuffer(this.globals, 0, this.globalsData);
 
 		if (target) {
 			this.device.queue.writeBuffer(this.outlineVertices, 0, outlineBox(target, block, frac));
 		}
 
-		const crackData = digVertices(digs.slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], this.crackTextureBase);
+		const crackData = digVertices(digs.filter(dig => this.crackStages[dig.stage]).slice(0, MAX_RENDER_ITEMS), [camera.x, camera.y, camera.z], this.crackTextureBase);
 		if (crackData.length) this.device.queue.writeBuffer(this.crackBuffer, 0, crackData);
 		const heldItems: RenderSprite[] = [];
 		const eye: Vec3 = [camera.x, camera.y, camera.z];
@@ -842,10 +928,10 @@ export class Renderer {
 			x - eye[0] - 0.75, y - eye[1] - 0.1, z - eye[2] - 0.75, 1.5, 2.4, 1.5))
 			.slice(0, MAX_RENDER_ITEMS - visibleMobs.length);
 		this.playerNames.update(players, visiblePlayers, eye, viewProj);
-		const mobData = mobVertices([...visibleMobs, ...visiblePlayers], eye, now, { output: heldItems, textures: this.heldItemTextures });
+		const mobData = mobVertices(this.entityModels, [...visibleMobs, ...visiblePlayers], eye, now, { output: heldItems, textures: this.heldItemTextures });
 		const itemData = itemVertices(limitRenderItems(items), eye, now, heldItems);
-		const flameData = flameVertices(visibleMobs, eye, now, this.firstFlameFrame);
-		const explosionData = explosionVertices(particles, eye, side, up, now, this.firstExplosionFrame);
+		const flameData = flameVertices(visibleMobs, eye, now, ...this.flame);
+		const explosionData = explosionVertices(particles, eye, side, up, now, this.explosion, this.smoke, 0);
 		if (itemData.length) this.device.queue.writeBuffer(this.itemBuffer, 0, itemData);
 		if (flameData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength, flameData);
 		if (explosionData.length) this.device.queue.writeBuffer(this.itemBuffer, itemData.byteLength + flameData.byteLength, explosionData);
@@ -892,6 +978,7 @@ export class Renderer {
 		const cloudsFirst = cloudsBeforeTranslucent(camera.y);
 		// Clouds test opaque/cutout depth without writing it, on either side of the plane.
 		const drawClouds = () => {
+			if (!this.hasClouds) return;
 			pass.setPipeline(this.clouds);
 			pass.setBindGroup(0, this.skyBind);
 			pass.draw(6);
@@ -904,16 +991,16 @@ export class Renderer {
 					pass.setVertexBuffer(0, this.itemBuffer);
 					pass.draw(itemData.length / ITEM_VERTEX_FLOATS);
 				}
-				if (this.mobBuffer && mobData.length) {
+				if (this.mobBind && this.mobBuffer && mobData.length) {
 					pass.setPipeline(this.mobs);
 					pass.setBindGroup(0, this.mobBind);
 					pass.setVertexBuffer(0, this.mobBuffer);
 					pass.draw(mobData.length / 9);
 				}
 				const effectVertices = (flameData.length + explosionData.length) / 9;
-				if (effectVertices) {
+				if (effectVertices && this.effectBind) {
 					pass.setPipeline(this.flames);
-					pass.setBindGroup(0, this.terrainBind);
+					pass.setBindGroup(0, this.effectBind);
 					pass.setVertexBuffer(0, this.itemBuffer, itemData.byteLength);
 					pass.draw(effectVertices);
 				}

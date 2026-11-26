@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CARRIED_GRASS_TOP_TINT, CARRIED_GRASS_SIDE_TINT, CARRIED_LEAVES_TINT, CARRIED_SHORT_GRASS_TINT, type BlockItemTint } from "./block-tints.ts";
-import { aimedMob, dropBlockFaces, entitySkins, flameVertices, mobInFrustum, mobVertices, interpolateEntity, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, mobAssetsByKind, MOB_SKIN_SIZE, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
-import { coloredSheepSkins, shearedSheep } from "./mobs/farm.ts";
-import { flameFrames } from "./mobs/flame.ts";
-import { player } from "./mobs/player.ts";
+import { aimedMob, dropBlockFaces, EXPLOSION_SMOKE_SHADE, explosionVertices, flameVertices, mobInFrustum, mobVertices as renderMobVertices, prepareEntityModels, interpolateEntity, ITEM_VERTEX_FLOATS, itemVertices, limitRenderItems, MAX_RENDER_ITEMS, mobBeforeBlock, type RenderMob, type RenderItem, type RenderPlayer, type RenderSprite } from "./entities.ts";
+import { entityPoses, mobNames } from "./mobs/catalog.ts";
+import { resolveGeometry } from "./mobs/model.ts";
+import { missingTile } from "./textures.ts";
+import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
 import { projectPlayerName } from "./player-names.ts";
 import { frustumPlanes, viewProjection } from "./math.ts";
 import { ACTIONS, defaultSettings, loadSettings, SETTINGS_KEY } from "./input-settings.ts";
+
+const fixture = await decodedFixturePack();
+const models = prepareEntityModels(fixture.entities);
+const fixtureMobs = mobNames.map(name => fixture.entities.get(name)!);
+const mobVertices = (...args: Parameters<typeof renderMobVertices> extends [unknown, ...infer Rest] ? Rest : never) =>
+	renderMobVertices(models, ...args);
 
 test("drop defaults to Q and old preferences migrate without losing assigned Q", () => {
 	assert.ok(ACTIONS.includes("drop")); assert.equal(defaultSettings().keys.drop,"KeyQ");
@@ -33,15 +40,17 @@ test("mob frustum culling keeps partial models at the edge in camera-relative co
 	assert.equal(mobInFrustum({ ...mob, position: [eye[0], eye[1], eye[2] - 2] }, eye, planes), false);
 });
 
-test("player skin paints every humanoid face and keeps the existing mob layers", () => {
+test("player skin keeps native dimensions and paints every fixture humanoid face", () => {
+	const player = fixture.entities.get("player")!;
 	const { texture } = player;
 	assert.equal(texture.width, 64);
 	assert.equal(texture.height, 32);
-	assert.deepEqual(entitySkins, [...mobAssetsByKind.map(asset => asset.texture), texture, ...coloredSheepSkins, shearedSheep.texture]);
-	const pixels = texture.pixels();
-	assert.deepEqual(pixels, texture.pixels());
+	assert.equal(models.skins[models.player.layer], texture);
+	const { pixels } = texture;
 	for (const bone of player.bones) {
-		for (const { uv: [u, v], size: [w, h, d] } of bone.cubes ?? []) {
+		for (const { uv, size: [w, h, d] } of bone.cubes ?? []) {
+			assert.ok(Array.isArray(uv));
+			const [u, v] = uv;
 			for (const [x, y, width, height] of [[u + d, v, 2 * w, d], [u, v + d, 2 * (w + d), h]]) {
 				for (let row = y; row < y + height; row++) {
 					for (let col = x; col < x + width; col++) {
@@ -65,7 +74,8 @@ test("player head pitches independently and arms swing opposite their legs", () 
 	const walking = mobVertices([{ ...pose, moving: true }], [0, 0, 0], strideTime);
 	const cube = 36 * 9;
 	assert.equal(rest.length, 6 * cube);
-	assert.equal(rest[6], mobAssetsByKind.length);
+	assert.equal(rest[6], models.player.layer);
+	assert.equal(Math.max(...component(rest, 1)), Math.fround(1.8));
 	assert.equal(rest[7], 4.5 / 16);
 	assert.equal(rest[8], 15.5 / 16);
 	assert.deepEqual(rest.slice(0, cube), pitched.slice(0, cube));
@@ -275,11 +285,11 @@ function component(vertices: Float32Array, index: number, stride = 9) {
 	return vertices.filter((_, i) => i % stride === index);
 }
 
-test("mobs stand on the ground at gameplay height and use their protocol skin layer", () => {
-	assert.deepEqual(mobAssetsByKind.map(asset => asset.id), ["minecraft:cow", "minecraft:pig", "minecraft:chicken", "minecraft:sheep", "minecraft:zombie", "minecraft:skeleton", "minecraft:creeper"]);
+test("mobs stand on the ground at gameplay height and use the skin for their protocol kind", () => {
+	assert.deepEqual(mobNames, ["cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper"]);
 	for (const kind of [0, 1, 2, 3, 4, 5, 6] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
-		const asset = mobAssetsByKind[kind];
+		const asset = fixtureMobs[kind];
 		const still = mobVertices([mob], [0, 0, 0], 0);
 		const hurt = mobVertices([{ ...mob, hurt: true }], [0, 0, 0], 0);
 		const cubes = asset.bones.flatMap(bone => bone.cubes ?? []);
@@ -287,12 +297,12 @@ test("mobs stand on the ground at gameplay height and use their protocol skin la
 		assert.equal(Math.min(...component(still, 1)), 0);
 		assert.equal(Math.max(...component(still, 1)), Math.fround(renderedHeights[kind]));
 		for (let i = 0; i < still.length; i += 9) {
-			assert.equal(still[i + 6], kind);
+			assert.equal(still[i + 6], models.mobs[kind].layer);
 			assert.equal(still[i + 7], 3.5 / 16);
 			assert.equal(still[i + 8], 15.5 / 16);
 			assert.equal(still[i + 5], -hurt[i + 5]);
-			assert.ok(still[i + 3] >= 0 && still[i + 3] <= asset.texture.width / MOB_SKIN_SIZE);
-			assert.ok(still[i + 4] >= 0 && still[i + 4] <= asset.texture.height / MOB_SKIN_SIZE);
+			assert.ok(still[i + 3] >= 0 && still[i + 3] <= asset.texture.width / models.width);
+			assert.ok(still[i + 4] >= 0 && still[i + 4] <= Math.fround(asset.texture.height / models.height));
 		}
 	}
 });
@@ -300,20 +310,23 @@ test("mobs stand on the ground at gameplay height and use their protocol skin la
 test("burning mobs draw two hitbox-sized planes with independently staggered cutout frames", () => {
 	const camera = [29999998, 1, -29999998];
 	const zombie: RenderMob = { kind: 4, position: [29999998.5, 2, -29999997.5], yaw: 0, moving: false, hurt: false, light: [0, 0] };
-	assert.equal(flameVertices([zombie], camera, 0, 100).length, 0);
+	const frames = fixture.effects.get("fire")!;
+	assert.equal(flameVertices([zombie], camera, 0, 100, frames.length).length, 0);
 	const burning = [{ ...zombie, burning: true }];
-	const vertices = flameVertices(burning, camera, 0, 100);
+	const vertices = flameVertices(burning, camera, 0, 100, frames.length);
 	assert.equal(vertices.length, 24 * 9);
 	assert.equal(vertices[1], 1);
 	assert.equal(vertices[2 * 9 + 1], Math.fround(1 + 1.95));
 	assert.ok(vertices[2] > 0.5 && vertices[12 * 9 + 2] < 0.5);
 	const layers = [0, 90, 180, 270].map(now => {
-		const data = flameVertices(burning, camera, now, 100);
+		const data = flameVertices(burning, camera, now, 100, frames.length);
 		return [data[6], data[12 * 9 + 6]];
 	});
 	assert.deepEqual(layers, [[100, 101], [101, 102], [102, 100], [100, 101]]);
-	assert.equal(new Set(flameFrames.map(frame => frame.join(","))).size, 3);
-	for (const frame of flameFrames) {
+	const fallback = flameVertices([zombie, ...burning], camera, 90, 1, 0);
+	assert.deepEqual(fallback, vertices.map((value, index) => index % 9 === 6 ? 1 : value));
+	assert.equal(new Set(frames.map(frame => frame.join(","))).size, 3);
+	for (const frame of frames) {
 		assert.equal(frame.length, 16 * 16 * 4);
 		const alpha = frame.filter((_, i) => i % 4 === 3);
 		assert.ok(alpha.includes(0) && alpha.includes(255));
@@ -351,8 +364,8 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 	assert.deepEqual([...new Set(component(snoutFront, 2))], [Math.fround(12 * scale)]);
 	// In the catalog, the snout's front stretches from u=33..37 and v=1..4.
 	for (let i = 0; i < snoutFront.length; i += 9) {
-		assert.equal(snoutFront[i + 3] * MOB_SKIN_SIZE, snoutFront[i] < 0.25 ? 33 : 37);
-		assert.equal(snoutFront[i + 4] * MOB_SKIN_SIZE, snoutFront[i + 1] === Math.fround(12 * scale) ? 1 : 4);
+		assert.equal(snoutFront[i + 3] * models.width, snoutFront[i] < 0.25 ? 33 : 37);
+		assert.equal(Math.round(snoutFront[i + 4] * models.height), snoutFront[i + 1] === Math.fround(12 * scale) ? 1 : 4);
 	}
 
 	// A reflected model has to reverse triangle winding to survive back-face culling.
@@ -367,8 +380,8 @@ test("pig faces south at yaw zero: snout points outwards and box UVs stay uprigh
 		assert.ok(nx * (ax - centre[0]) + ny * (ay - centre[1]) + nz * (az - centre[2]) > 0);
 	}
 	// Opposite legs mirror their side rectangles as well as the horizontal UV.
-	assert.equal(still[3 * boxFloats + 3] * MOB_SKIN_SIZE, 44);
-	assert.equal(still[4 * boxFloats + 3] * MOB_SKIN_SIZE, 56);
+	assert.equal(still[3 * boxFloats + 3] * models.width, 44);
+	assert.equal(still[4 * boxFloats + 3] * models.width, 56);
 });
 
 test("walking swings the catalog leg bones around their pivots while the body and wings keep their pose", () => {
@@ -377,14 +390,14 @@ test("walking swings the catalog leg bones around their pivots while the body an
 		const still = mobVertices([mob], [0, 0, 0], quarterStride);
 		const moving = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
 		assert.deepEqual(mobVertices([{ ...mob, moving: true }], [0, 0, 0], 0), still);
-		const asset = mobAssetsByKind[kind];
+		const asset = fixtureMobs[kind];
 		const modelHeight = Math.max(...asset.bones.flatMap(b => (b.cubes ?? []).map(c => c.origin[1] + c.size[1])));
 		const scale = renderedHeights[kind] / modelHeight;
 		let offset = 0;
 		for (const bone of asset.bones) {
 			const end = offset + (bone.cubes?.length ?? 0) * boxFloats;
 			const atRest = still.subarray(offset, end), posed = moving.subarray(offset, end);
-			const pitch = asset.walkPitch[bone.name];
+			const pitch = entityPoses[mobNames[kind]].walkPitch[bone.name];
 			if (pitch) {
 				const first = bone.cubes![0];
 				const centreY = first.origin[1] + first.size[1] / 2;
@@ -404,10 +417,10 @@ test("walking swings the catalog leg bones around their pivots while the body an
 	}
 });
 
-test("sheep mesh keeps two fleece boxes, a forward face and four hooves at the world border", () => {
+test("inherited sheep mesh keeps the fleece, forward face and four hooves at the world border", () => {
 	const sheep: RenderMob = { kind: 3, position: [29999998.25, 1, -29999998.5], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 	const still = mobVertices([sheep], sheep.position, 0);
-	assert.equal(still.length, 7 * boxFloats);
+	assert.equal(still.length, 8 * boxFloats);
 	for (const [axis, min, max] of [[0, -0.42, 0.42], [1, 0, 1.2], [2, -0.4, 0.45]]) {
 		const coordinates = still.filter((_, i) => i % 9 === axis);
 		assert.equal(Math.min(...coordinates), Math.fround(min));
@@ -415,46 +428,55 @@ test("sheep mesh keeps two fleece boxes, a forward face and four hooves at the w
 	}
 	const frontFace = (box: number) => still.subarray(box * boxFloats + 6 * 9, box * boxFloats + 12 * 9);
 	for (const [box, left, top, width, height] of [
-		[0, 16, 16, 16, 16], [1, 16, 16, 16, 16], [2, 8, 40, 16, 16], [3, 52, 36, 4, 16],
+		[0, 6, 70, 8, 8], [1, 16, 16, 16, 16], [3, 8, 40, 16, 16], [4, 52, 36, 4, 16],
 	]) {
 		const face = frontFace(box);
 		const u = component(face, 3), v = component(face, 4);
-		assert.equal(Math.min(...u) * MOB_SKIN_SIZE, left);
-		assert.equal(Math.max(...u) * MOB_SKIN_SIZE, left + width);
-		assert.equal(Math.min(...v) * MOB_SKIN_SIZE, top);
-		assert.equal(Math.max(...v) * MOB_SKIN_SIZE, top + height);
+		assert.equal(Math.min(...u) * models.width, left);
+		assert.equal(Math.max(...u) * models.width, left + width);
+		assert.equal(Math.round(Math.min(...v) * models.height), top);
+		assert.equal(Math.round(Math.max(...v) * models.height), top + height);
 	}
-	assert.ok(component(frontFace(2), 2).every(z => z === Math.fround(0.45)));
+	assert.ok(component(frontFace(3), 2).every(z => z === Math.fround(0.45)));
 	const moving = mobVertices([{ ...sheep, moving: true }], sheep.position, quarterStride);
-	for (const [leg, direction] of [[3, -1], [4, 1], [5, 1], [6, -1]]) {
+	for (const [leg, direction] of [[4, -1], [5, 1], [6, 1], [7, -1]]) {
 		const foot = leg * boxFloats + 9; // second vertex is at floor height
 		assert.equal(Math.sign(moving[foot + 2] - still[foot + 2]), direction);
 	}
 });
 
-test("colored fleece swaps only body pixels and a sheared sheep has one skin-colored torso", () => {
+test("colored fleece uses the TGA dye mask and a sheared sheep keeps only the base torso", () => {
 	const sheep: RenderMob = { kind: 3, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 	const white = mobVertices([sheep], sheep.position, 0);
-	const base = entitySkins[white[6]].pixels();
+	const base = models.skins[white[6]].pixels;
+	const at = (x: number, y: number) => (y * 64 + x) * 4;
+	const face = at(14, 42), fleece = at(21, 24);
+	const raw = fixture.entities.get("sheep")!.texture.pixels;
+	assert.equal(raw[face + 3], 3);
+	assert.equal(raw[fleece + 3], 255);
+	assert.equal(base[face + 3], 255);
 	const layers = new Set([white[6]]);
 	for (const woolColor of [1, 2, 3] as const) {
 		const colored = mobVertices([{ ...sheep, woolColor }], sheep.position, 0);
 		assert.equal(colored.length, white.length);
 		layers.add(colored[6]);
-		const pixels = entitySkins[colored[6]].pixels();
-		assert.notDeepEqual(pixels.subarray(0, 32 * 64 * 4), base.subarray(0, 32 * 64 * 4));
-		assert.deepEqual(pixels.subarray(32 * 64 * 4), base.subarray(32 * 64 * 4));
+		const pixels = models.skins[colored[6]].pixels;
+		assert.notDeepEqual(pixels.subarray(fleece, fleece + 3), base.subarray(fleece, fleece + 3));
+		assert.ok([0, 1, 2].every(channel => Math.abs(pixels[face + channel] - base[face + channel]) <= 2));
+		assert.equal(pixels[face + 3], 255);
+		assert.equal(pixels[at(63, 79) + 3], 0);
 	}
 	const sheared = mobVertices([{ ...sheep, woolColor: 2, sheared: true }], sheep.position, 0);
 	const box = 36 * 9;
-	assert.equal(sheared.length, white.length - box);
+	assert.equal(sheared.length, white.length - 2 * box);
 	layers.add(sheared[6]);
 	assert.equal(layers.size, 5);
-	const skin = entitySkins[sheared[6]].pixels();
-	assert.deepEqual(skin.subarray(32 * 64 * 4), base.subarray(32 * 64 * 4));
+	const skin = models.skins[sheared[6]].pixels;
+	assert.deepEqual(skin.subarray(face, face + 4), base.subarray(face, face + 4));
+	assert.deepEqual(mobVertices([{ ...sheep, woolColor: 0, sheared: true }], sheep.position, 0), sheared);
 	// The head and leg geometry stays in place when the fleece is removed.
 	for (let i = box; i < sheared.length; i += 9) {
-		assert.deepEqual(sheared.subarray(i, i + 3), white.subarray(i + box, i + box + 3));
+		assert.deepEqual(sheared.subarray(i, i + 3), white.subarray(i + 2 * box, i + 2 * box + 3));
 	}
 });
 
@@ -522,7 +544,7 @@ test("WASM mob records track hurt, yaw and previous position and clear on remova
 
 test("zombie head uses the front of the 64×32 skin and the legs swing in opposite directions", () => {
 	const mob: RenderMob = { kind: 4, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [10, 0] };
-	const asset = mobAssetsByKind[4];
+	const asset = fixtureMobs[4];
 	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
 	const still = mobVertices([mob], [0, 0, 0], 0);
 	const stride = mobVertices([{ ...mob, moving: true }], [0, 0, 0], quarterStride);
@@ -536,8 +558,8 @@ test("zombie head uses the front of the 64×32 skin and the legs swing in opposi
 	const front = still.subarray(boxFloats + 6 * 9, boxFloats + 12 * 9);
 	assert.equal(new Set(component(front, 2)).size, 1);
 	for (let i = 0; i < front.length; i += 9) {
-		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
-		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.95) ? 8 : 16);
+		assert.equal(front[i + 3] * models.width, front[i] < 0 ? 8 : 16);
+		assert.equal(Math.round(front[i + 4] * models.height), front[i + 1] === Math.fround(1.95) ? 8 : 16);
 	}
 });
 
@@ -545,7 +567,7 @@ test("creeper uses the 64×32 skin, swells with its fuse, and flashes white on o
 	const creeper: RenderMob & { id: number } = {
 		id: 9, kind: 6, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, fuse: 0, light: [15, 3],
 	};
-	const asset = mobAssetsByKind[6];
+	const asset = fixtureMobs[6];
 	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
 	assert.equal(aimedMob([0, 1.69, 3], [0, 0, -1], [creeper], 5)?.id, 9);
 	assert.equal(aimedMob([0, 1.71, 3], [0, 0, -1], [creeper], 5), null);
@@ -566,8 +588,8 @@ test("creeper uses the 64×32 skin, swells with its fuse, and flashes white on o
 	const front = still.subarray(boxFloats + 6 * 9, boxFloats + 12 * 9);
 	assert.equal(new Set(component(front, 2)).size, 1);
 	for (let i = 0; i < front.length; i += 9) {
-		assert.equal(front[i + 3] * MOB_SKIN_SIZE, front[i] < 0 ? 8 : 16);
-		assert.equal(front[i + 4] * MOB_SKIN_SIZE, front[i + 1] === Math.fround(1.625) ? 8 : 16);
+		assert.equal(front[i + 3] * models.width, front[i] < 0 ? 8 : 16);
+		assert.equal(Math.round(front[i + 4] * models.height), front[i + 1] === Math.fround(1.625) ? 8 : 16);
 	}
 });
 
@@ -575,7 +597,7 @@ test("skeleton uses the 64×32 skin, taller hitbox, and a bow parented to its mo
 	const skeleton: RenderMob & { id: number } = {
 		id: 7, kind: 5, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3],
 	};
-	const asset = mobAssetsByKind[5];
+	const asset = fixtureMobs[5];
 	assert.deepEqual([asset.texture.width, asset.texture.height], [64, 32]);
 	assert.equal(aimedMob([0, 1.98, 3], [0, 0, -1], [skeleton], 5)?.id, 7);
 	assert.equal(aimedMob([0, 2, 3], [0, 0, -1], [skeleton], 5), null);
@@ -666,4 +688,85 @@ test("WASM egg positions interpolate and render as a centered flat item", async 
 	assert.equal(core.packet(packet(S2C.EggSpawn, previous)), S2C.EggSpawn);
 	core.resetWorld();
 	assert.deepEqual(core.eggs, []);
+});
+
+test("missing entity variants draw the shared checker at their hitbox dimensions", () => {
+	const incomplete = new Map(fixture.entities);
+	incomplete.delete("sheep/sheared");
+	incomplete.delete("player");
+	const prepared = prepareEntityModels(incomplete);
+	assert.equal(prepared.skins[0].pixels, missingTile);
+	const common = { position: [0, 0, 0] as const, yaw: 45, moving: false, light: [15, 0] as const };
+	for (const [entity, width, height] of [
+		[{ ...common, kind: 3, sheared: true, woolColor: 2, hurt: false }, 0.9, 1.3],
+		[{ ...common, id: 1, name: "Test", pitch: 10 }, 0.6, 1.8],
+	] as const) {
+		const data = renderMobVertices(prepared, [entity], [0, 0, 0], 0);
+		assert.equal(data.length, boxFloats);
+		assert.ok(component(data, 6).every(layer => layer === 0));
+		assert.deepEqual([Math.min(...component(data, 1)), Math.max(...component(data, 1))], [0, Math.fround(height)]);
+		for (const axis of [0, 2]) assert.deepEqual([Math.min(...component(data, axis)), Math.max(...component(data, axis))],
+			[Math.fround(-width / 2), Math.fround(width / 2)]);
+		assert.equal(Math.round(Math.max(...component(data, 3)) * prepared.width), 16);
+		assert.equal(Math.round(Math.max(...component(data, 4)) * prepared.height), 16);
+	}
+});
+
+test("per-face UVs can omit faces and flip a rectangle while cube and bone rotate around their pivots", () => {
+	const texture = { width: 16, height: 32, pixels: new Uint8Array(16 * 32 * 4) };
+	const asset = resolveGeometry("geometry.test", new Map([["geometry.test", {
+		width: 16, height: 16,
+		bones: [{
+			name: "body", pivot: [4, 8, 0], rotation: [0, 0, 90],
+			cubes: [{ origin: [4, 8, 0], size: [2, 4, 6], pivot: [4, 8, 0], rotation: [90, 0, 0],
+				inflate: 1, uv: { north: { uv: [12, 2], uv_size: [-6, 8] } } }],
+		}],
+	}]]), texture)!;
+	assert.ok(asset);
+	const prepared = prepareEntityModels(new Map([["chicken", asset]]));
+	const entity: RenderMob = { kind: 2, position: [0, 0, 0], yaw: 0, moving: true, hurt: false, light: [15, 0] };
+	const data = renderMobVertices(prepared, [entity], [0, 0, 0], quarterStride);
+	assert.equal(data.length, 6 * 9);
+	assert.ok(component(data, 0).every(x => x === 5 / 16));
+	assert.deepEqual([Math.min(...component(data, 1)), Math.max(...component(data, 1))], [0, 4 / 16]);
+	assert.deepEqual([Math.min(...component(data, 2)), Math.max(...component(data, 2))], [-3 / 16, 3 / 16]);
+	assert.deepEqual([...new Set(component(data, 3))], [12 / 16, 6 / 16]);
+	assert.deepEqual([...new Set(component(data, 4))], [2 / 16, 10 / 16]);
+	assert.deepEqual(data, renderMobVertices(prepared, [{ ...entity, moving: false }], [0, 0, 0], 0));
+});
+
+test("explosion particles choose the matching animation or draw an expanding solid quad", () => {
+	const particle = { position: [0, 0, 0] as const, velocity: [0, 0, 0] as const,
+		startedAt: 10, lifetime: 100, size: 2, smoke: false };
+	const render = (time: number, flash: readonly [number, number], cloud: readonly [number, number]) =>
+		explosionVertices([particle, { ...particle, smoke: true }], [0, 0, 0], [1, 0, 0], [0, 1, 0], time, flash, cloud, 0);
+	assert.deepEqual([...new Set(component(render(60, [1, 3], [4, 3]), 6))], [2, 5]);
+	assert.deepEqual([...new Set(component(render(60, [1, 3], [4, 3]), 5))], [1, Math.fround(EXPLOSION_SMOKE_SHADE)]);
+	assert.equal(render(9, [1, 3], [4, 3]).length, 0);
+	assert.equal(render(110, [1, 3], [4, 3]).length, 0);
+	assert.ok(component(render(60, [0, 0], [0, 0]), 6).every(layer => layer === 0));
+	assert.ok(Math.max(...component(render(60, [0, 0], [0, 0]), 0)) > Math.max(...component(render(10, [0, 0], [0, 0]), 0)));
+});
+
+test("legacy bind rotation lays the torso down while child legs retain their model-space pivots", () => {
+	const texture = { width: 32, height: 32, pixels: new Uint8Array(32 * 32 * 4) };
+	const asset = resolveGeometry("geometry.test", new Map([["geometry.test", {
+		width: 32, height: 32,
+		bones: [
+			{ name: "leg0", parent: "body", pivot: [0, 4, 0],
+				cubes: [{ origin: [0, 0, 0], size: [2, 4, 2], uv: [0, 0] }] },
+			{ name: "body", pivot: [0, 4, 0], bind_pose_rotation: [90, 0, 0],
+				cubes: [{ origin: [0, 0, 0], size: [4, 8, 2], uv: [0, 10] }] },
+		],
+	}]]), texture)!;
+	assert.ok(asset);
+	const prepared = prepareEntityModels(new Map([["sheep", asset]]));
+	const entity: RenderMob = { kind: 3, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 0] };
+	const data = renderMobVertices(prepared, [entity], [0, 0, 0], 0);
+	assert.equal(data.length, 2 * boxFloats);
+	const torso = data.subarray(0, boxFloats), leg = data.subarray(boxFloats);
+	assert.equal(Math.max(...component(torso, 1)), 6 / 16);
+	assert.equal(Math.min(...component(torso, 1)), 4 / 16);
+	assert.equal(Math.max(...component(leg, 1)), 4 / 16);
+	assert.equal(Math.min(...component(leg, 1)), 0);
 });

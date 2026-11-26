@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { lightmap, celestialAngle, parseStartTime, partialDayTicks, skyState } from "./sky.ts";
-import { paintSkyTexture } from "./textures.ts";
+import { moonSheetOrder } from "./texture-pack.ts";
+import { preparePackTextures } from "./renderer.ts";
+import { decodedFixturePack, fixtureArtRGB } from "../../test/texture-pack-fixture.mjs";
 
 test("celestial angle follows the published cosine correction and repeats daily", () => {
 	assert.equal(celestialAngle(6000), 0);
@@ -65,16 +67,21 @@ test("URL start times reject malformed, negative, fractional and unsafe integers
 	assert.equal(parseStartTime("18000"), 18000);
 });
 
-test("original sky art is deterministic and all lunar phases have distinct pixels", () => {
-	const phases = new Set<string>();
-	for (let layer = 0; layer < 10; layer++) {
-		const art = paintSkyTexture(layer);
-		assert.deepEqual(art, paintSkyTexture(layer));
-		if (layer >= 1 && layer <= 8) phases.add(Buffer.from(art).toString("base64"));
+test("pack sky art keeps native dimensions and orders all eight lunar phases", async () => {
+	const { sun, moon, clouds } = preparePackTextures([], await decodedFixturePack());
+	assert.equal(sun?.length, 32 ** 2 * 4);
+	assert.equal(moon?.length, 128 * 64 * 4);
+	assert.equal(clouds?.length, 256 ** 2 * 4);
+	assert.deepEqual([...sun!.subarray(0, 4)], [0, 0, 0, 0]);
+	assert.equal(new Set(moonSheetOrder).size, 8);
+	for (const cell of moonSheetOrder) {
+		const x = (cell < 4 ? 12 : 19) + cell % 4 * 32;
+		const y = 16 + Math.floor(cell / 4) * 32;
+		const offset = 4 * (y * 128 + x);
+		const expected = cell === 4 ? [0, 0, 0, 0] : [...fixtureArtRGB("environment/moon_phases", false, cell), 255];
+		assert.deepEqual([...moon!.subarray(offset, offset + 4)], expected);
 	}
-	assert.equal(phases.size, 8);
 });
-
 
 test("lightmap separates daylight, cave darkness and warm block light", () => {
 	const day = lightmap(skyState(6000).skylight);

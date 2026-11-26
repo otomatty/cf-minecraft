@@ -1,3 +1,4 @@
+import type { TextureLayout } from "./textures.ts";
 import type { BlockStateInfo } from "./placement.ts";
 import type { LayerCounts } from "./mesh-layers.ts";
 import type { LightMutation } from "./light-pool.ts";
@@ -112,6 +113,7 @@ export interface ClientExports {
 	tint_biome_cells(seed: bigint, generator: number, cx: number, cz: number): number;
 	tint_out_ptr(): number;
 	client_texture_names(): number;
+	client_sprite_start(): number;
 	client_block_names(): number;
 	client_block_registry(): number;
 }
@@ -540,6 +542,10 @@ export class ClientCore {
 		return new Uint8Array(this.x.memory.buffer, this.x.tint_out_ptr(), len).slice();
 	}
 
+	spriteStart(): number {
+		return this.x.client_sprite_start();
+	}
+
 	textureNames(): string[] {
 		return this.decoder.decode(this.out(this.x.client_texture_names())).split("\n");
 	}
@@ -583,4 +589,10 @@ export class ClientCore {
 	blockNames(): string[] {
 		return this.decoder.decode(this.out(this.x.client_block_names())).split("\n");
 	}
+}
+
+export function gameTextureLayout(core: ClientCore): TextureLayout {
+	const names = core.textureNames();
+	if (!names.includes("bow")) names.push("bow");
+	return { names, spriteStart: core.spriteStart() };
 }

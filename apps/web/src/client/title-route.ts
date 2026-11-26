@@ -13,10 +13,34 @@ export function safeNext(value: string | null): string | null {
 	return value;
 }
 
-const thumbnailPositions = ["10% 20%", "30% 60%", "50% 35%", "70% 70%", "90% 25%", "60% 90%"];
+const thumbnailColors = ["#829fba", "#769262", "#937d67", "#557e91", "#889184", "#a49b7d"];
 
-export function thumbPosition(name: string): string {
+export function thumbColor(name: string): string {
 	let hash = 0;
 	for (const character of name) hash = (Math.imul(hash, 31) + character.codePointAt(0)!) >>> 0;
-	return thumbnailPositions[hash % thumbnailPositions.length];
+	return thumbnailColors[hash % thumbnailColors.length];
+}
+
+interface Session {
+	open?: boolean;
+	user?: object | null;
+}
+
+export function hasPlaySession(me: Session): boolean {
+	return me.open === true || Boolean(me.user);
+}
+
+export function titleScreen(me: Session, installed: boolean): "login" | "textures" | "menu" {
+	if (!hasPlaySession(me)) return "login";
+	return installed ? "menu" : "textures";
+}
+
+type Schedule = (run: () => void) => void;
+
+/** Give the UI a paint opportunity without requiring animation frames in a hidden tab. */
+export function waitForTitlePaint(frame: Schedule, fallback: Schedule): Promise<void> {
+	return new Promise(resolve => {
+		frame(() => frame(resolve));
+		fallback(resolve);
+	});
 }

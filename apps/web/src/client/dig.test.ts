@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { advanceDig, digSelection, updateDigSelection, invalidateDigSelection, newDigState, observeDigBlockUpdate, digVertices } from "./dig.ts";
-import { paintCracks, TEX_SIZE } from "./textures.ts";
+import { TEX_SIZE } from "./textures.ts";
+import { crackPaths } from "./texture-pack.ts";
+import { preparePackTextures } from "./renderer.ts";
+import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
 const target = { x: 1, y: 2, z: 3, state: 1, ticks: 12 };
 
 test("press, integer tick stages, completion waits for server and release aborts", () => {
@@ -39,11 +42,14 @@ test("aim switches, lost targets, changed blocks, zero duration and cooldown", (
 	assert.deepEqual(r.commands, [{ type: "abort" }, { type: "start", target: changed }]);
 });
 
-test("cracks have ten deterministic, strictly growing masks", () => {
+test("crack layers preserve ten ordered masks from the fixture pack", async () => {
+	const pack = await decodedFixturePack();
+	const { cracks } = preparePackTextures([], pack);
+	assert.equal(cracks.length, 10);
 	let previous = new Uint8Array(TEX_SIZE * TEX_SIZE * 4), count = 0;
 	for (let stage = 0; stage < 10; stage++) {
-		const pixels = paintCracks(stage);
-		assert.deepEqual(pixels, paintCracks(stage));
+		const pixels = cracks[stage]!;
+		assert.equal(pixels, pack.art.get(crackPaths[stage]));
 		assert.equal(pixels.length, TEX_SIZE * TEX_SIZE * 4);
 		let current = 0;
 		for (let i = 3; i < pixels.length; i += 4) {
@@ -53,8 +59,8 @@ test("cracks have ten deterministic, strictly growing masks", () => {
 		assert.ok(current > count);
 		previous = pixels; count = current;
 	}
-	assert.throws(() => paintCracks(10), RangeError);
-	assert.throws(() => paintCracks(-1), RangeError);
+	assert.equal(cracks[10], undefined);
+	assert.equal(cracks[-1], undefined);
 });
 
 test("overlay cube uses camera-relative vertices and the requested stage layer", () => {

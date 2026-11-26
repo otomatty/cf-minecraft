@@ -1,36 +1,32 @@
 import { blockItemTint, WATER_TINT, type BlockItemTint } from "./block-tints.ts";
-import { buildingTexture } from "./building-textures.ts";
-import { floraTexture, grassSideIconPixels } from "./flora-textures.ts";
-import { itemTexture } from "./item-textures.ts";
-import { terrainTexture } from "./terrain-textures.ts";
-
 export { GRASS_TINT, LEAVES_TINT, WATER_TINT } from "./block-tints.ts";
 export const TEX_SIZE = 16;
+export const WATER_FRAME_COUNT = 32;
 
-/** Tinted UI copy; keep shared terrain pixels and every alpha value intact. */
+export interface TextureLayout {
+	readonly names: readonly string[];
+	readonly spriteStart: number;
+}
+
+/** Convert atlas pixels to a tinted UI copy. The grass side mask becomes opaque. */
 export function textureIconPixels(name: string, pixels: Uint8Array, cellTint?: BlockItemTint | null): Uint8ClampedArray<ArrayBuffer> {
 	const icon = new Uint8ClampedArray(pixels);
-	if (name === "grass_block_side") {
-		if (cellTint) {
-			const side = grassSideIconPixels(cellTint.grass);
-			for (let i = 0; i < icon.length; i += 4) icon.set(side.subarray(i, i + 3), i);
-		}
-		return icon;
-	}
 	const tint = name === "water" || name === "water_flow" ? WATER_TINT : blockItemTint(name, cellTint);
-	if (tint) {
+	if (tint && pixels !== missingTile) {
 		for (let i = 0; i < icon.length; i += 4) {
-			for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
+			if (name === "grass_block_side") {
+				for (let c = 0; c < 3; c++) icon[i + c] += Math.round(pixels[i + 3] * tint[c] / 255);
+				icon[i + 3] = 255;
+			} else {
+				for (let c = 0; c < 3; c++) icon[i + c] = Math.round(pixels[i + c] * tint[c] / 255);
+			}
 		}
 	}
 	return icon;
 }
 
-/** Original pixel art in atlas row order, with a checker for missing materials. */
-export function paintTexture(name: string): Uint8Array {
-	const pixels = terrainTexture(name) ?? buildingTexture(name) ?? floraTexture(name)
-		?? itemTexture(name);
-	if (pixels) return pixels;
+/** Shared marker for an unresolved block face or item sprite. */
+export const missingTile = (() => {
 	const missing = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
 	for (let y = 0; y < TEX_SIZE; y++) {
 		for (let x = 0; x < TEX_SIZE; x++) {
@@ -39,7 +35,7 @@ export function paintTexture(name: string): Uint8Array {
 		}
 	}
 	return missing;
-}
+})();
 
 /** Halves an RGBA image by averaging 2x2 blocks. */
 export function downsample(src: Uint8Array, size: number, cutout = false): Uint8Array {
@@ -73,49 +69,4 @@ export function downsample(src: Uint8Array, size: number, cutout = false): Uint8
 		});
 	}
 	return out;
-}
-
-/** Original pixel art: layer 0 sun, layers 1..8 lunar phases, layer 9 repeating clouds. */
-export function paintSkyTexture(layer: number): Uint8Array<ArrayBuffer> {
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let y = 0; y < TEX_SIZE; y++) {
-		for (let x = 0; x < TEX_SIZE; x++) {
-			const i = (y * TEX_SIZE + x) * 4;
-			const u = (x + 0.5) / TEX_SIZE * 2 - 1;
-			const v = (y + 0.5) / TEX_SIZE * 2 - 1;
-			if (layer === 9) {
-				// Periodic low-frequency waves, quantised into blocky islands.
-				const wave = Math.sin(x / TEX_SIZE * Math.PI * 4) + Math.cos(y / TEX_SIZE * Math.PI * 6)
-					+ Math.sin((x + y) / TEX_SIZE * Math.PI * 2);
-				pixels.set([255, 255, 255, wave > 0.15 ? 210 : 0], i);
-			} else if (layer === 0) {
-				const edge = Math.max(Math.abs(u), Math.abs(v));
-				pixels.set([255, edge < 0.65 ? 247 : 204, edge < 0.65 ? 205 : 103, edge < 0.92 ? 255 : 0], i);
-			} else {
-				const phase = layer - 1;
-				const radius = u * u + v * v;
-				const depth = Math.sqrt(Math.max(0, 1 - radius));
-				const lit = depth * Math.cos(phase * Math.PI / 4) + u * Math.sin(phase * Math.PI / 4) > 0;
-				const crater = ((x * 13 + y * 7 + x * y) % 19) < 4 ? 0.72 : 1;
-				const shade = (lit ? 225 : 24) * crater;
-				pixels.set([shade * 0.94, shade * 0.97, shade, radius < 0.88 ? 255 : 0], i);
-			}
-		}
-	}
-	return pixels;
-}
-
-/** Original branching fissures: each stage adds a branch to the same 16x16 pattern. */
-export function paintCracks(stage: number): Uint8Array {
-	if (!Number.isInteger(stage) || stage < 0 || stage > 9) throw new RangeError("crack stage");
-	const pixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
-	for (let branch = 0; branch <= stage; branch++) {
-		for (let step = 0; step < 9; step++) {
-			const x = (3 + branch * 5 + step + Math.floor(step / 3)) % TEX_SIZE;
-			const y = (1 + branch * 3 + step * (branch % 2 ? 2 : 1)) % TEX_SIZE;
-			const at = (y * TEX_SIZE + x) * 4;
-			pixels.set([28, 23, 31, 210], at);
-		}
-	}
-	return pixels;
 }

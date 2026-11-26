@@ -75,7 +75,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 
 ## 道具アイテム
 
-ホットバー、インベントリ、地面に落ちた非ブロックアイテムは、`items.toml` の `texture` で同じ16×16のドット絵を引く。道具の柄の傾きや素材ごとの色、インゴットの陰影などは統合版のアイテム画像を参考に描いている。[アイテムの描画コード](../apps/web/src/client/item-textures.ts)・[Bedrock Samples v1.26.60.5 のアイテム画像](https://github.com/Mojang/bedrock-samples/tree/v1.26.60.5/resource_pack/textures/items)
+ホットバー、インベントリ、地面に落ちた非ブロックアイテムは、`items.toml` の `texture` で、公式パックから取り出した同じ16×16の画像を参照する。アイテム画像用レイヤーの開始位置はクライアントの WASM が返す。[画像の対応付けと仮パックの追加手順](texture-packs.md#開発と検証)
 
 温帯の家畜のドロップと産卵には以下のキーを使う。今後アイテムを追加するときは、用意済みのキーを `items.toml` の `texture` に指定する。
 
@@ -117,7 +117,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 43 | stick | なし | stick | 64 |
 | 44 | crafting_table | 49 | 上・横・下の専用テクスチャ | 64 |
 
-作業台の各面は `textures.ts` で生成する。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0`。サバイバルの E はインベントリ画面を開く。2×2導入時のプロトコル6でクラフト枠・結果・カーソルを追加した。操作、追加レシピ、保存形式と接続時の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
+作業台の各面には公式パックで対応する画像を使う。作業台は `dig_ticks = 40`、`tool = "axe"`、`min_tier = 0`。サバイバルの E はインベントリ画面を開く。2×2導入時のプロトコル6でクラフト枠・結果・カーソルを追加した。操作、追加レシピ、保存形式と接続時の返却、現在の決定性ハッシュは [crafting.md](crafting.md) を参照。
 
 ## 作物
 
@@ -163,7 +163,7 @@ InventoryはWelcome直後、および選択枠を含む変更があったtickに
 | 57 | bucket（空のバケツ） | bucket | 16 |
 | 58 | water_bucket（水入りバケツ） | water_bucket | 1 |
 
-どちらも対応するブロックを持たず、絵は `item-textures.ts` で生成する。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
+どちらも公式パックのアイテム画像を参照する。空のバケツは鉄インゴット 3 個から作る。[バケツの操作とレシピ](water.md#バケツ)
 
 ## 溶岩と黒曜石
 
