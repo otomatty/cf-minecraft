@@ -26,6 +26,7 @@ import serverWasmUrl from "../wasm/server.wasm?url";
 import { advancePlayerFrame, type InventorySlot, type RayHit, ClientCore, PLAYER_TICK_SECONDS, S2C } from "./client-core.ts";
 import { ACTIONS, type Action, defaultSettings, keyLabel, duplicateKeys, effectiveKeyConflicts, implicitEnterOpensChat, implicitSlashOpensChat, keyOpensChat, LOCKABLE_CODES, loadSettings, matchesKey, mouseDegrees, saveSettings, sprintKey, validKey } from "./input-settings.ts";
 import { appendChatInput, appendChatLine, CHAT_VISIBLE_MS, formatChatLine, limitChatInput, recallChatInput, visibleChatLines, type ChatInputRecall, type TimedChatLine } from "./chat.ts";
+import { setupTexturePack } from "./texture-pack-settings.ts";
 import { durabilityBar, hotbarStates, iconTintChanged, pickBlockItem } from "./hotbar.ts";
 import { blockInteraction, bucketTarget, canTill, placementState, useEntityTarget, usesFluidSourceRay } from "./placement.ts";
 import { LightPool } from "./light-pool.ts";
@@ -540,6 +541,7 @@ async function main(): Promise<void> {
 	let selectedSlot = 0;
 	const icons = new Map<number, ImageData>();
 	const biomeIcons = new Map<number, ImageData>();
+	let packedGrassSide = false;
 	let iconTint: BlockItemTint | null = null;
 	let pendingSelectedSlot: number | null = null;
 	const eatProgress = $<HTMLProgressElement>("eat-progress");
@@ -573,7 +575,7 @@ async function main(): Promise<void> {
 		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
 		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint), ICON_SIZE, ICON_SIZE);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint, packedGrassSide), ICON_SIZE, ICON_SIZE);
 			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
@@ -743,9 +745,10 @@ async function main(): Promise<void> {
 		$("key-bindings").append(label);
 		bindingButtons.set(action, button);
 	}
-	const settingsTabs = ["keys", "mouse", "audio"] as const;
+	const settingsTabs = ["keys", "mouse", "audio", "textures"] as const;
 	function selectSettingsTab(tab: typeof settingsTabs[number]): void {
 		capturing = null;
+		$("settings-reset").hidden = tab === "textures";
 		refreshSettings();
 		for (const name of settingsTabs) {
 			$(name + "-tab").setAttribute("aria-selected", String(name === tab));
@@ -1004,6 +1007,15 @@ async function main(): Promise<void> {
 		button.addEventListener("click", () => { if (core.gameMode === "creative") transport.send(core.encodeCreativeSetSlot(selectedSlot, info.id, 1)); });
 		$("block-grid").append(button);
 		pickerButtons.push(button);
+	});
+	setupTexturePack($("textures-tab-panel"), textureNames, tiles => {
+		renderer.applyTexturePack(tiles);
+		packedGrassSide = tiles.has("grass_block_side");
+		icons.clear();
+		biomeIcons.clear();
+		paintHotbar(core.inventory);
+		paintInventoryScreen();
+		pickerButtons.forEach((button, i) => paintItemIcon(button.querySelector("canvas")!, items[i].id));
 	});
 	function openPicker(): void {
 		if (core.gameMode !== "creative") return;

@@ -6,9 +6,13 @@ export const ICON_SIZE = 40;
 const texel = (uv: number) => Math.max(0, Math.min(TEX_SIZE - 1, Math.floor(uv)));
 
 /** Orthographic inventory view of the same boxes and cropped faces used in the world. */
-export function blockIconPixels(info: BlockStateInfo, atlas: ReadonlyMap<string, Uint8Array>, tint?: BlockItemTint | null): Uint8ClampedArray<ArrayBuffer> {
+export function blockIconPixels(info: BlockStateInfo, atlas: ReadonlyMap<string, Uint8Array>, tint?: BlockItemTint | null, packedGrassSide = false): Uint8ClampedArray<ArrayBuffer> {
 	const icon = new Uint8ClampedArray(ICON_SIZE * ICON_SIZE * 4);
-	const tile = (face: number) => textureIconPixels(info.faces[face], atlas.get(info.faces[face])!, tint);
+	const tile = (face: number) => {
+		const name = info.faces[face];
+		// Only the built-in grass side has a separate fringe mask for biome colouring.
+		return textureIconPixels(name, atlas.get(name)!, packedGrassSide && name === "grass_block_side" ? undefined : tint);
+	};
 	if (info.model === "cross") {
 		const plant = tile(1);
 		for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {

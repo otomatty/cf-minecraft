@@ -17,6 +17,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@zip.js/zip.js':
+        specifier: ^2.25.0
+        version: 2.25.0
       better-auth:
         specifier: ^1.7.21
         version: 1.7.21
@@ -629,6 +632,10 @@ packages:
 
   '@webgpu/types@0.1.74':
     resolution: {integrity: sha512-lgiI4hbuLcI9unnm2cL/tvCaQU45dp0xcLWJh5uB/9MBGvIA4F8XIk7nSiBeg+K4xWGYwgZKn80LmERI5CxoTA==}
+
+  '@zip.js/zip.js@2.25.0':
+    resolution: {integrity: sha512-oNRqUuU1XFu6G5d7Z0jufJ9dS9WteO0xiU/PNxsUrb4itZCsSbn191jpJzU00Gmc6S680X3DPZeF5EV4zAEMAg==}
+    engines: {bun: '>=0.7.0', deno: '>=1.0.0', node: '>=18.0.0'}
 
   ansi-regex@6.6.0:
     resolution: {integrity: sha512-XZ5apbzreCbXSKwPjJstu8R0zOi247w3XYwWxtwBXgpZrCyc1Ka7p9/xY0A9/diMewmHbEKz+FIraWaEWjlN5g==}
@@ -1480,6 +1487,8 @@ snapshots:
     optional: true
 
   '@webgpu/types@0.1.74': {}
+
+  '@zip.js/zip.js@2.25.0': {}
 
   ansi-regex@6.6.0: {}
 

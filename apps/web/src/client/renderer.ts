@@ -436,6 +436,7 @@ export class Renderer {
 	private readonly firstWaterFrame: number;
 	private readonly firstFlameFrame: number;
 	private readonly firstExplosionFrame: number;
+	readonly applyTexturePack: (tiles: ReadonlyMap<string, Uint8Array>) => void;
 	/** Pixels of every texture layer, for UI thumbnails. */
 	readonly texturePixels = new Map<string, Uint8Array>();
 	lost: string | null = null;
@@ -503,17 +504,38 @@ export class Renderer {
 			mipLevelCount: MIP_LEVELS,
 			usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
 		});
-		// Upload the entire array in five writes, including the animation frames.
-		for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS && tiles.length; level++, size >>= 1) {
-			const tileBytes = size * size * 4;
-			const mip = new Uint8Array(tiles.length * tileBytes);
-			tiles.forEach((pixels, layer) => {
-				mip.set(pixels, layer * tileBytes);
-				if (size > 1) tiles[layer] = downsample(pixels, size, cutouts.has(layer));
-			});
-			device.queue.writeTexture({ texture, mipLevel: level }, mip,
-				{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, tiles.length]);
-		}
+		const defaults = new Map(this.texturePixels);
+		this.applyTexturePack = overrides => {
+			const layers = tiles.slice();
+			for (const [layer, name] of textureNames.entries()) {
+				const pixels = overrides.get(name);
+				this.texturePixels.set(name, pixels ?? defaults.get(name)!);
+				if (!pixels) continue;
+				layers[layer] = pixels;
+				if (name === "grass_block_side") {
+					// The grass shader uses alpha as an additive biome tint mask.
+					// A pack's finished RGB face needs a zero mask.
+					layers[layer] = pixels.slice();
+					for (let i = 3; i < pixels.length; i += 4) layers[layer][i] = 0;
+				}
+				if (name === "water" || name === "water_flow") {
+					const first = this.firstWaterFrame + (name === "water_flow" ? WATER_FRAME_COUNT : 0);
+					layers.fill(pixels, first, first + WATER_FRAME_COUNT);
+				}
+			}
+			// Upload the entire array in five writes, including the animation frames.
+			for (let level = 0, size = TEX_SIZE; level < MIP_LEVELS && layers.length; level++, size >>= 1) {
+				const tileBytes = size * size * 4;
+				const mip = new Uint8Array(layers.length * tileBytes);
+				layers.forEach((pixels, layer) => {
+					mip.set(pixels, layer * tileBytes);
+					if (size > 1) layers[layer] = downsample(pixels, size, cutouts.has(layer));
+				});
+				device.queue.writeTexture({ texture, mipLevel: level }, mip,
+					{ bytesPerRow: size * 4, rowsPerImage: size }, [size, size, layers.length]);
+			}
+		};
+		this.applyTexturePack(new Map());
 		const sampler = device.createSampler({
 			magFilter: "nearest",
 			minFilter: "nearest",

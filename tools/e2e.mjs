@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import puppeteer from "puppeteer-core";
+import { testTexturePacks } from "./e2e-texture-packs.mjs";
 import { bounded, diagnose, shouldDiagnoseRunFailure, watchForCrash } from "./e2e-diag.mjs";
 
 import { ServerCore } from "../apps/web/src/shared/server-core.ts";
@@ -3511,6 +3512,7 @@ async function creepers() {
 }
 
 try {
+	await testTexturePacks(browser, edge, shots);
 	await sectionCulling();
 	await biomeTints();
 	await inputs();
