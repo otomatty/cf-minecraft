@@ -10,6 +10,15 @@ const input = panel + " input";
 const selected = panel + " output";
 const notice = panel + " [role=status]";
 
+function assertPlayNext(titleUrl, playUrl) {
+	const title = new URL(titleUrl);
+	assert.equal(title.pathname, "/");
+	const next = title.searchParams.get("next");
+	const { search } = new URL(playUrl);
+	// The dev server can redirect /play.html to /play before the client runs.
+	assert(["/play.html" + search, "/play" + search].includes(next), `Unexpected next: ${JSON.stringify(next)}`);
+}
+
 async function openSettings(page) {
 	await page.bringToFront();
 	if (!await page.$eval("#settings-open", el => el.offsetWidth > 0)) {
@@ -118,7 +127,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				page.on("request", unauthenticated);
 				await page.goto(url, { waitUntil: "domcontentloaded" });
 				await page.waitForFunction(() => document.querySelector("#panel h2")?.textContent === "ログイン");
-				assert.equal(new URL(page.url()).searchParams.get("next"), new URL(url).pathname + new URL(url).search);
+				assertPlayNext(page.url(), url);
 				page.off("request", unauthenticated);
 				await page.setRequestInterception(false);
 				await page.goto(edge + "/", { waitUntil: "domcontentloaded" });
@@ -132,10 +141,10 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				for (const play of [edge + "/play.html", url]) {
 					await page.goto(play, { waitUntil: "domcontentloaded" });
 					await page.waitForSelector("#texture-drop");
-					assert.equal(new URL(page.url()).pathname, "/");
-					assert.equal(new URL(page.url()).searchParams.get("next"), new URL(play).pathname + new URL(play).search);
+					assertPlayNext(page.url(), play);
 					await assertLocked();
 				}
+				const returnUrl = new URL(new URL(page.url()).searchParams.get("next"), url).href;
 				await page.setViewport({ width: 320, height: 720 });
 				assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "install page fits a narrow viewport");
 				await page.setViewport({ width: 1280, height: 720 });
@@ -199,7 +208,7 @@ export async function testTexturePacks(browser, edge, shots, initialFixture) {
 				await page.waitForSelector(".pack-summary");
 				const returnLink = await page.waitForSelector('#panel a[href*="server=ws"]');
 				assert.equal(await returnLink.evaluate(link => link.textContent), "ゲームに戻る");
-				assert.equal(await returnLink.evaluate(link => link.href), url);
+				assert.equal(await returnLink.evaluate(link => link.href), returnUrl);
 				await Promise.all([page.waitForNavigation(), returnLink.click()]);
 			} else {
 				await installFixture(page, edge, initialFixture);
