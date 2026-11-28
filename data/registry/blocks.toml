@@ -13,6 +13,7 @@ textures = [
   "farmland_dry", "farmland_moist", "wheat_sprout", "wheat_shoot",
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
   "oak_leaves_dense", "gray_wool", "brown_wool", "black_wool",
+  "chest_top", "chest_side", "chest_front",
 ]
 legacy_count = 14
 
@@ -498,3 +499,14 @@ name = "black_wool"
 id = 84
 dig_ticks = 16
 texture = "black_wool"
+
+[[blocks]]
+name = "chest"
+id = 85
+tool = "axe"
+min_tier = 0
+dig_ticks = 50
+top = "chest_top"
+bottom = "chest_top"
+side = "chest_side"
+north = "chest_front"

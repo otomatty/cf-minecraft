@@ -118,7 +118,8 @@ mod tests {
         // changes the fingerprint from d36da50f11b5eb81.
         // The lava damage counter is zero in this script, but now contributes to the hash.
         // Sand placed by the script can now fall, changing the world and block updates.
-        assert_eq!(run(2026, 600), 0xc24992e95973fe13);
+        // Hashing the empty chest count changes the fingerprint from c24992e95973fe13.
+        assert_eq!(run(2026, 600), 0xfb44177a49e57629);
     }
 
     #[test]

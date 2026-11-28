@@ -567,11 +567,12 @@ export class ClientCore {
 	encodeUseBlock(x: number, y: number, z: number): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_block(x, y, z)); }
 	get selectedSlot(): number { return this.x.client_selected_slot(); }
 	get inventory(): Array<InventorySlot | null> { return this.inventorySlots.slice(0, 36); }
-	// Display indices 0..50 retain protocol 7 layout; 51..53 are furnace input/fuel/output.
+	// Display indices 51..53 are furnace input/fuel/output, followed by chest slots 54..80.
 	get furnace(): Array<InventorySlot | null> { return this.inventorySlots.slice(51, 54); }
+	get chest(): Array<InventorySlot | null> { return this.inventorySlots.slice(54, 81); }
 	get furnaceTimes(): number[] { return [0, 1, 2].map(i => this.x.client_furnace_time(i)); }
 	get inventorySlots(): Array<InventorySlot | null> {
-		return Array.from({ length: 54 }, (_, i) => {
+		return Array.from({ length: 81 }, (_, i) => {
 			const item = this.x.client_slot_item(i);
 			return item ? { item, count: this.x.client_slot_count(i), damage: this.x.client_slot_damage(i) } : null;
 		});

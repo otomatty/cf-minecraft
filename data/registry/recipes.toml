@@ -130,3 +130,9 @@ pattern = ["I I", " | "]
 key = { I = "iron_ingot", "|" = "stick" }
 table_only = true
 result = { item = "shears", count = 1 }
+
+[[recipes]]
+pattern = ["###", "# #", "###"]
+key = { "#" = "oak_planks" }
+table_only = true
+result = { item = "chest", count = 1 }

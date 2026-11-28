@@ -2057,7 +2057,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GameMode;
+    use crate::{GameMode, Stack};
     use protocol::{C2S, PROTOCOL_VERSION};
     use world::Chunk;
     use worldgen::Generator;
@@ -5071,6 +5071,29 @@ mod tests {
         other_ids.next_entity_id += 100;
         other_ids.apply_explosion(center);
         assert_eq!(loot(&server), loot(&other_ids));
+    }
+
+    #[test]
+    fn explosion_drops_chest_contents_in_both_modes() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut server, _) = combat(mode);
+            let pos = [5, 1, 6];
+            server
+                .world
+                .set_block(pos[0], pos[1], pos[2], blocks::CHEST);
+            let stack = Stack {
+                item: items::by_name("wooden_pickaxe").unwrap(),
+                count: 1,
+                damage: 28,
+            };
+            server.chests.entry(pos).or_default()[26] = Some(stack);
+            server.apply_explosion([5.5, 1.85, 5.5]);
+            assert_eq!(server.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
+            assert!(!server.chests.contains_key(&pos));
+            assert!(server.entities.values().any(|drop| {
+                (drop.item, drop.count, drop.damage) == stack.wire() && drop.pos == [5.5, 1.25, 6.5]
+            }));
+        }
     }
 
     #[test]

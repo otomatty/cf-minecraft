@@ -484,3 +484,9 @@ id = 82
 texture = "shears"
 max_stack = 1
 durability = 120
+
+[[items]]
+name = "chest"
+id = 83
+block = "chest"
+fuel = 320
