@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 
 use physics::{Aabb, BlockWorld, CollisionWorld};
 use protocol::S2C;
-use world::{blocks, Fnv64, World, HEIGHT, MIN_Y};
+use world::{Fnv64, World, HEIGHT, MIN_Y};
 
-use crate::{arrow::look_direction, inventory::Screen, mob::sample, GameMode, Server};
+use crate::{arrow::look_direction, inventory::Screen, lava_bounds, mob::sample, GameMode, Server};
 
 const RADIUS: f64 = 0.125;
 const LIFETIME: u8 = 100;
@@ -115,8 +115,8 @@ impl Egg {
                 }
                 // Fences can extend into the cell above their owner.
                 for y in (lo[1] - 1).max(MIN_Y)..=hi[1].min(MIN_Y + HEIGHT - 1) {
-                    if world.get_block(x, y, z).is_some_and(blocks::is_lava) {
-                        if let Some(time) = self.entry(Aabb::block(x, y, z), RADIUS) {
+                    if let Some(bounds) = lava_bounds(world, x, y, z) {
+                        if let Some(time) = self.entry(bounds, RADIUS) {
                             record(time, Impact::Vanish);
                         }
                     } else {
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::{mob::MobKind, Stack};
     use protocol::{C2S, PROTOCOL_VERSION};
-    use world::{items, Chunk};
+    use world::{blocks, items, Chunk};
     use worldgen::Generator;
 
     fn server() -> Server {
@@ -444,6 +444,32 @@ mod tests {
         assert!(s.eggs.contains_key(&misses));
         assert!(!s.eggs.contains_key(&unloaded));
         assert!(!s.eggs.contains_key(&below_world));
+    }
+
+    #[test]
+    fn horizontal_egg_sweep_checks_the_lava_surface_against_the_box() {
+        let level_three = blocks::FLOWING_LAVA + 2;
+        for (state, above, y, survives) in [
+            (level_three, blocks::AIR, 2.875, true),
+            (level_three, blocks::AIR, 2.75, true),
+            // The center clears the surface, but the bottom of the box enters it.
+            (level_three, blocks::AIR, 2.6875, false),
+            (level_three, blocks::AIR, 2.5, false),
+            (blocks::LAVA, blocks::AIR, 3.03125, true),
+            // The egg's top only grazes the upper cell. It hits the lower one.
+            (level_three, blocks::FLOWING_LAVA, 2.875, false),
+        ] {
+            let mut s = server();
+            s.world.set_block(3, 2, 3, state);
+            s.world.set_block(3, 3, 3, above);
+            let id = insert(&mut s, [2.25, y, 3.5], [2.0, 0.0, 0.0]);
+            s.tick_eggs();
+            assert_eq!(
+                s.eggs.contains_key(&id),
+                survives,
+                "state {state}, above {above}, center y {y}"
+            );
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use protocol::{DeathCause, PlayerVitals, MAX_AIR, MAX_FOOD, MAX_HEALTH};
 use world::{blocks, items, Fnv64, World, MIN_Y};
 
-use crate::{arrow::Arrow, inventory::Screen, Client, GameMode, Server};
+use crate::{arrow::Arrow, inventory::Screen, point_in_lava, Client, GameMode, Server};
 
 const FALL_DAMAGE_OFFSET: f64 = 3.0;
 pub(crate) const SUFFOCATION_INTERVAL: u8 = 10;
@@ -135,8 +135,9 @@ impl Health {
             }
         }
 
-        let in_lava = eye.is_some_and(blocks::is_lava)
-            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
+        let [x, y, z] = pos;
+        let in_lava = point_in_lava(world, [x, y + physics::EYE_HEIGHT, z])
+            || point_in_lava(world, [x, y + LAVA_FEET_OFFSET, z]);
         if interval(&mut self.lava_ticks, in_lava, LAVA_INTERVAL) {
             self.damage(LAVA_DAMAGE, DeathCause::Lava);
             if self.vitals.dead {
@@ -1391,6 +1392,26 @@ mod tests {
             assert!(crate::Inventory::from_bytes(&bytes).is_err());
             release_and_reconnect(&mut s);
             assert_eq!(vitals(&s), dead);
+        }
+    }
+
+    #[test]
+    fn lava_damage_requires_the_feet_or_eye_sample_to_be_below_the_surface() {
+        let mut s = joined(GameMode::Survival);
+        s.world.set_block(2, 80, 2, blocks::FLOWING_LAVA + 2);
+        for offset in [LAVA_FEET_OFFSET, physics::EYE_HEIGHT] {
+            for (sample_y, damage) in [(80.75, 0), (80.625, 0), (80.5, LAVA_DAMAGE)] {
+                let pos = [FEET[0], sample_y - offset, FEET[2]];
+                let mut health = Health::default();
+                for _ in 0..LAVA_INTERVAL {
+                    health.tick(&s.world, pos);
+                }
+                assert_eq!(
+                    health.vitals.health,
+                    MAX_HEALTH - damage,
+                    "offset {offset}, sample y {sample_y}"
+                );
+            }
         }
     }
 

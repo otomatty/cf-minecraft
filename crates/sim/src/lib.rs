@@ -2597,6 +2597,21 @@ impl Server {
     }
 }
 
+fn lava_bounds(world: &World, x: i32, y: i32, z: i32) -> Option<physics::Aabb> {
+    let state = world
+        .get_block(x, y, z)
+        .filter(|&state| blocks::is_lava(state))?;
+    let above = world.get_block(x, y + 1, z).unwrap_or(blocks::AIR);
+    let mut bounds = physics::Aabb::block(x, y, z);
+    bounds.max[1] = bounds.min[1] + blocks::fluid_surface_height(state, above)?;
+    Some(bounds)
+}
+
+fn point_in_lava(world: &World, point: [f64; 3]) -> bool {
+    let [x, y, z] = point.map(|axis| axis.floor() as i32);
+    lava_bounds(world, x, y, z).is_some_and(|bounds| point[1] < bounds.max[1])
+}
+
 fn crosses_lava(world: &World, previous: [f64; 3], current: [f64; 3]) -> bool {
     const MAX_CELLS: usize = 64;
     let is_lava = |[x, y, z]: [i32; 3]| {

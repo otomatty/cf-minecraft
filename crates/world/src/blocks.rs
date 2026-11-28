@@ -130,6 +130,26 @@ pub fn is_fluid(state: BlockState) -> bool {
     is_water(state) || is_lava(state)
 }
 
+/// Height of the fluid surface above the cell floor, in blocks.
+pub fn fluid_surface_height(state: BlockState, above: BlockState) -> Option<f64> {
+    let (source, first, falling, same_fluid_above) = if is_water(state) {
+        (WATER, FLOWING_WATER, FALLING_WATER, is_water(above))
+    } else if is_lava(state) {
+        (LAVA, FLOWING_LAVA, FALLING_LAVA, is_lava(above))
+    } else {
+        return None;
+    };
+
+    Some(if same_fluid_above {
+        1.0
+    } else if state == source || state == falling {
+        8.0 / 9.0
+    } else {
+        let level = f64::from(state - first + 1);
+        (16.0 - 2.0 * level) / 16.0
+    })
+}
+
 pub const MOIST_FARMLAND: BlockState = FARMLAND + 1;
 pub const RIPE_WHEAT: BlockState = WHEAT + 7;
 
