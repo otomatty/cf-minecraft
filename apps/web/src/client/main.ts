@@ -70,6 +70,7 @@ const overlay = $<HTMLDivElement>("overlay");
 const statusLine = $<HTMLParagraphElement>("status");
 const hotbar = $<HTMLDivElement>("hotbar");
 const deathScreen = $<HTMLDialogElement>("death-screen");
+const sleepOverlay = $("sleep-overlay");
 
 type MenuView = "start" | "menu" | "controls" | "settings";
 let failed = false;
@@ -94,6 +95,7 @@ function fail(message: string): void {
 	$("start-to-title").hidden = false;
 	$("block-picker").hidden = true;
 	deathScreen.close();
+	sleepOverlay.hidden = true;
 	if (document.pointerLockElement !== null) document.exitPointerLock();
 	showMenuView("start");
 	hud.textContent = message;
@@ -404,6 +406,7 @@ async function main(): Promise<void> {
 					sendPosition();
 				}
 				connection = "open";
+				syncSleepScreen();
 				timeSamples.length = 0;
 				if (!failed) {
 					$("start-to-title").hidden = true;
@@ -412,6 +415,8 @@ async function main(): Promise<void> {
 				}
 				if (!locked()) showMenuView(wasJoined ? "menu" : "start");
 				if (autopilot) overlay.hidden = true;
+			} else if (id === S2C.Sleeping) {
+				syncSleepScreen();
 			} else if (id === S2C.PlayerStatus) {
 				syncVitals();
 			} else if (id === S2C.PlayerKnockback) {
@@ -442,6 +447,7 @@ async function main(): Promise<void> {
 		},
 		onReconnecting: (info) => {
 			connection = "reconnecting";
+			syncSleepScreen();
 			closeChat(false);
 			endUsingItem();
 			picker.hidden = true;
@@ -574,6 +580,7 @@ async function main(): Promise<void> {
 	}
 	let dig = newDigState();
 	let heldInventory = "";
+	const bedHead = registry.find(info => info.stateName === "bed[facing=north,part=head]");
 	function paintIcon(c: HTMLCanvasElement, state: number, tint?: BlockItemTint | null): void {
 		c.width = c.height = ICON_SIZE;
 		c.title = "";
@@ -582,7 +589,7 @@ async function main(): Promise<void> {
 		const cache = tint && info.faces.some(name => blockItemTint(name)) ? biomeIcons : icons;
 		let icon = cache.get(state);
 		if (!icon) {
-			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint), ICON_SIZE, ICON_SIZE);
+			icon = new ImageData(blockIconPixels(info, renderer.texturePixels, tint, info.name === "bed" ? bedHead : undefined), ICON_SIZE, ICON_SIZE);
 			cache.set(state, icon);
 		}
 		c.getContext("2d")!.putImageData(icon, 0, 0);
@@ -714,6 +721,36 @@ async function main(): Promise<void> {
 		stopDig();
 		endUsingItem();
 	};
+	const wakeButton = $<HTMLButtonElement>("stop-sleeping");
+	let wakeRequested = false;
+	function requestWake(): void {
+		if (!core.sleeping || connection !== "open") return;
+		wakeRequested = true;
+		transport.send(core.encodeStopSleeping());
+	}
+	wakeButton.addEventListener("click", requestWake);
+	function syncSleepScreen(): void {
+		const sleeping = core.sleeping && connection === "open" && !failed;
+		if (sleepOverlay.hidden === !sleeping) return;
+		const resume = wakeRequested;
+		wakeRequested = false;
+		sleepOverlay.hidden = !sleeping;
+		clearInput();
+		if (sleeping) {
+			closeChat(false);
+			overlay.hidden = true;
+			if (locked()) document.exitPointerLock();
+			wakeButton.focus();
+			previousPosition = [...position];
+			movementTime = 0;
+			camera.x = position[0];
+			camera.y = position[1] + EYE_HEIGHT;
+			camera.z = position[2];
+		} else if (!locked() && !core.dead && connection === "open") {
+			showMenuView("menu");
+			if (resume) void requestPointerLock();
+		}
+	}
 	const warning = $<HTMLElement>("settings-warning");
 	let capturing: Action | null = null;
 	const labels: Record<Action, string> = { forward: "前進", backward: "後退", left: "左", right: "右", up: "ジャンプ / 上昇", down: "スニーク / 下降", sprint: "ダッシュ", fullscreen: "全画面", inventory: "ブロック選択", drop: "アイテムを捨てる", chat: "チャット" };
@@ -1088,7 +1125,7 @@ async function main(): Promise<void> {
 		}
 	}
 	async function requestPointerLock(): Promise<void> {
-		if (failed || core.dead || chatOpen) return;
+		if (failed || core.dead || core.sleeping || chatOpen) return;
 		try {
 			await (canvas.requestPointerLock as (options: { unadjustedMovement: boolean }) => Promise<void> | void)({ unadjustedMovement: true });
 		} catch {
@@ -1116,6 +1153,10 @@ async function main(): Promise<void> {
 			if (locked()) document.exitPointerLock();
 			return;
 		}
+		if (!sleepOverlay.hidden) {
+			overlay.hidden = true;
+			return;
+		}
 		if (chatOpen) {
 			overlay.hidden = true;
 			if (!locked()) chatInput.focus();
@@ -1127,7 +1168,8 @@ async function main(): Promise<void> {
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
-		if (!locked() || core.dead || chatOpen) return;
+		const draggingSleepView = e.target === sleepOverlay && (e.buttons & 1) !== 0;
+		if ((!locked() && !draggingSleepView) || core.dead || chatOpen) return;
 		const degrees = mouseDegrees(settings.sensitivity);
 		camera.yaw = (camera.yaw + e.movementX * degrees) % 360;
 		camera.pitch = Math.max(-90, Math.min(90, camera.pitch + e.movementY * degrees));
@@ -1142,6 +1184,13 @@ async function main(): Promise<void> {
 	chatInput.addEventListener("compositionend", limitInput);
 
 	window.addEventListener("keydown", (e) => {
+		if (!sleepOverlay.hidden) {
+			if (matchesKey(e.code, settings.keys.down)) {
+				e.preventDefault();
+				if (!e.repeat) requestWake();
+			} else if (e.code === "Tab") e.preventDefault();
+			return;
+		}
 		if (chatOpen) {
 			if (e.isComposing) return;
 			if (e.repeat && e.code === chatOpeningKey) {
@@ -1279,12 +1328,12 @@ async function main(): Promise<void> {
 	canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 	const sendPosition = () => {
-		if (autopilot || core.dead) return;
+		if (autopilot || core.dead || (core.sleeping && connection === "open")) return;
 		// Rendering may interpolate through a corner; report only resolved physics feet.
 		transport.send(core.encodePlayerPos(camera.yaw, camera.pitch));
 	};
 	const setBlock = (x: number, y: number, z: number, block: number): boolean => {
-		if (connection !== "open" || core.dead) return false;
+		if (connection !== "open" || core.dead || core.sleeping) return false;
 		if (core.gameMode === "survival") {
 			if (block === 0 || !hotbarBlocks[selectedSlot]) return false;
 		}
@@ -1298,7 +1347,7 @@ async function main(): Promise<void> {
 		return core.raycast([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), REACH, includeSources);
 	}
 	// Pointer lock can take effect before pointerlockchange hides the overlay.
-	const canInteract = () => locked() && joined && connection === "open" && !core.dead && !chatOpen && !failed
+	const canInteract = () => locked() && joined && connection === "open" && !core.dead && !core.sleeping && !chatOpen && !failed
 		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && chestScreen.hidden;
 	function aimedMobId(block: RayHit | null): number | null {
 		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderMobs, REACH, block);
@@ -1356,7 +1405,7 @@ async function main(): Promise<void> {
 				if (!repeat) {
 					heldButtons.delete(2);
 					sendPosition();
-					if (open) closePending = updateClosePending(closePending, { type: "use" });
+					if (open && block?.name !== "bed") closePending = updateClosePending(closePending, { type: "use" });
 					transport.send(core.encodeUseBlock(hit.x, hit.y, hit.z));
 				}
 				return;
@@ -1442,7 +1491,7 @@ async function main(): Promise<void> {
 	// ---- simulation of the camera ---------------------------------------
 	const spawnForAutopilot = () => core.spawn;
 	function move(dt: number, timeMs: number): void {
-		if (core.dead) return;
+		if (core.dead || (core.sleeping && connection === "open")) return;
 		if (autopilot) {
 			const [sx, sy, sz] = spawnForAutopilot();
 			if (joined && autopilotStartedAt === null && core.chunkCount >= (2 * core.viewDistance + 1) ** 2 && core.dirtyCount === 0) {
@@ -1810,6 +1859,7 @@ async function main(): Promise<void> {
 			health: core.health,
 			food: core.food,
 			dead: core.dead,
+			sleeping: core.sleeping,
 			screen: core.screen,
 			entities: core.entities,
 			mobs: core.mobs,

@@ -20,6 +20,20 @@
 
 ZIP は 256 MiB、32,768 項目、宣言された展開サイズの合計は 512 MiB までです。使用する JSON は各 2 MiB、画像は各 4 MiB までで、読み込む画像とエンティティ・モデル・パーティクルの定義は合計 32 MiB までです。画像の幅は 512 ピクセル、高さは 4,096 ピクセル、面積は 1,048,576 ピクセルまでです。読み出すファイルには無圧縮または Deflate 形式を使用します。
 
+## ベッドのテクスチャ
+
+Bedrock Samples の terrain atlas にはベッドの六つの面に対応するタイルがないため、`bed.entity.json` が参照する `resource_pack/textures/entity/bed/white.png` を読み込み時に切り出します。面別の画像がパックにあれば、その面には通常のブロック画像を優先します。底面はオークの板を使います。インストール済みのパックにベッドの面が含まれていない場合は、ZIP を入れ直すと切り出した面が使われます。[terrain atlas](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/textures/terrain_texture.json)・[ベッドの定義](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/entity/bed.entity.json)・[白いベッドの展開図](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/textures/entity/bed/white.png)
+
+`models/mobs.json` の `geometry.bed` では、64 × 64 の展開図に対し、マットレスの箱は 16 × 32 × 6、box UV は `[0, 0]` です。箱の UV から次の領域を使います。座標は左上からのピクセル数です。[Bedrock Samples のモデル定義](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/models/mobs.json#L1117-L1199)
+
+| 面 | 頭の領域 (x, y, 幅, 高さ) | 足の領域 (x, y, 幅, 高さ) |
+| --- | --- | --- |
+| 上 | (6, 6, 16, 16) | (6, 22, 16, 16) |
+| 長い側面 | (0, 6, 6, 16) | (0, 22, 6, 16) |
+| 端 | (6, 0, 16, 6) | (22, 0, 16, 6) |
+
+長い側面は 90° 回し、端は上下を返して木枠を下に置きます。側面と端は 6 行を最近傍で 9 行に伸ばし、高さ 9/16 の面で使うタイルの下 9 行に入れます。残りの行には上端の色を繰り返し、遠くから描画したときに黒が混ざるのを防ぎます。
+
 ## 画像が見つからない場合
 
 ゲームが使うブロックまたはアイテムの画像を1枚以上取り出せた場合は、残りの画像が欠けていてもインストールしてプレイできます。画像を収録していない `-min.zip` など、該当する画像を1枚も取り出せない ZIP はインストールできません。公式のリリースページで `-full.zip` を選び直してください。

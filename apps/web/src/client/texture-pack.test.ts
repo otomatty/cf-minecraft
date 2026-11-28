@@ -8,13 +8,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { deflateSync } from "node:zlib";
-import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixtureEntityEntries, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
+import { appleRGB, decodeFixtureArt, fixtureArtEntries, fixtureArtRGB, fixtureBedEntries, fixtureEntityEntries, fixturePack, packEntries, solidPng, testEntries, zipBytes } from "../../test/texture-pack-fixture.mjs";
 import { crackPaths, importTexturePack, isPackVersion, missingEntityArt, moonSheetOrder, packArtDimensions, packMissingNotice, pngTileWidth } from "./texture-pack.ts";
 import { installedPack } from "./texture-pack-settings.ts";
 import { ClientCore, gameTextureLayout } from "./client-core.ts";
 import { missingTile, textureIconPixels } from "./textures.ts";
 import { preparePackTextures } from "./renderer.ts";
 import { crc32 } from "./world-archive.ts";
+import { blockIconPixels, ICON_SIZE } from "./block-icon.ts";
 
 const file = async (entries = testEntries, name = "local.zip") => new File([await zipBytes(entries)], name);
 const versioned = (entries, prefix = "") => [
@@ -116,6 +117,32 @@ test("chest block faces use chest_inventory variants and conventional filenames"
 			async (_, width) => new Uint8Array(1024).fill(width));
 		assert.deepEqual(names.map(name => pack.tiles.get(name)?.[0]), [1, 2, 3]);
 	}
+});
+
+test("bed faces use the white entity sheet and the block icon draws both halves", async () => {
+	const names = ["bed_head_top", "bed_feet_top", "bed_head_side", "bed_feet_side", "bed_head_end", "bed_feet_end"];
+	const pack = await importTexturePack(await file([...packEntries(), ...fixtureBedEntries]), blocksOnly(names), undefined,
+		() => { throw new Error("Bed uses the native sheet decoder"); }, decodeFixtureArt);
+	const pixel = (name: string, x: number, y: number) => {
+		const offset = (y * 16 + x) * 4;
+		return [...pack.tiles.get(name)!.subarray(offset, offset + 4)];
+	};
+	assert.deepEqual(names.map((name, i) => pixel(name, 0, i < 2 ? 0 : 7)), [
+		[24, 24, 192, 255], [24, 88, 192, 255], [20, 24, 192, 255], [20, 88, 192, 255],
+		[24, 20, 192, 255], [88, 20, 192, 255],
+	]);
+	assert.deepEqual(pixel("bed_head_side", 15, 15), [0, 84, 192, 255]);
+	assert.deepEqual(pixel("bed_feet_end", 15, 15), [148, 0, 192, 255]);
+	assert.deepEqual(pixel("bed_feet_side", 0, 0), pixel("bed_feet_side", 0, 7));
+	const wasm = await readFile(new URL("../wasm/client.wasm", import.meta.url));
+	const { instance } = await WebAssembly.instantiate(wasm, {});
+	const registry = new ClientCore(instance).blockRegistry();
+	const foot = registry.find(state => state.stateName === "bed[facing=north,part=foot]")!;
+	const head = registry.find(state => state.stateName === "bed[facing=north,part=head]")!;
+	const icon = blockIconPixels(foot, pack.tiles, undefined, head);
+	const occupiedColumns = Array.from({ length: ICON_SIZE }, (_, x) =>
+		Array.from({ length: ICON_SIZE }, (_, y) => icon[(y * ICON_SIZE + x) * 4 + 3]).some(alpha => alpha > 0));
+	assert.equal(occupiedColumns.filter(Boolean).length, 38);
 });
 test("invalid JSON, PNG, ambiguous roots and unsupported packs fail atomically", async () => {
 	for (const entries of [

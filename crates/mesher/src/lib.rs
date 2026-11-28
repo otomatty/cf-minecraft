@@ -180,6 +180,7 @@ pub fn mesh_section_layers(
                     continue;
                 }
                 let info = blocks::info(state);
+                let bed = blocks::bed_facing_part(state);
                 let torch = info.model == blocks::Model::Torch;
                 let is_leaf = blocks::is_oak_leaves(state);
                 let backed_leaf_tex = if is_leaf && info.model == blocks::Model::Cube {
@@ -252,8 +253,14 @@ pub fn mesh_section_layers(
                         let same = state == neighbor
                             || joins_fluid
                             || (is_leaf && blocks::is_oak_leaves(neighbor));
+                        let joins_bed = bed.is_some_and(|(facing, head)| {
+                            let delta = blocks::bed_delta(facing);
+                            n == if head { delta.map(|v| -v) } else { delta }
+                                && neighbor == blocks::bed_state(facing, !head)
+                        });
                         if boundary
                             && (blocks::occludes(neighbor)
+                                || joins_bed
                                 || (same && info.cull_same && fluid_strip.is_none()))
                         {
                             continue;
@@ -311,7 +318,21 @@ pub fn mesh_section_layers(
                             if let Some(top) = edge {
                                 p[1] = top.y;
                             }
-                            let (u, mut v) = uv(f, p);
+                            let (mut u, mut v) = uv(f, p);
+                            if let Some((facing, _)) = bed {
+                                // Bed tiles are laid out with the head towards v = 0.
+                                if f == UP {
+                                    (u, v) = match facing {
+                                        1 => (16 - u, 16 - v),
+                                        2 => (16 - v, u),
+                                        3 => (v, 16 - u),
+                                        _ => (u, v),
+                                    };
+                                } else if f == [EAST, WEST, NORTH, SOUTH][facing] {
+                                    // Each long side reads from head to foot.
+                                    u = 16 - u;
+                                }
+                            }
                             if torch {
                                 // Caps sample the flame and wood at the ends of the side texture.
                                 match f {
@@ -1236,6 +1257,49 @@ mod tests {
                     // Top edge of the block (y = 1) maps to the top row of the texture (v = 0).
                     assert_eq!(v.uv.1, 1 - v.pos[1] as u32);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn beds_point_the_top_textures_toward_the_head_and_hide_the_join() {
+        let foot = [8, 8, 8];
+        for facing in 0..4 {
+            let [dx, _, dz] = blocks::bed_delta(facing);
+            let head = [foot[0] + dx, foot[1], foot[2] + dz];
+            let mut padded = vec![blocks::AIR; 18 * 18 * 18];
+            for ([x, y, z], is_head) in [(foot, false), (head, true)] {
+                padded[padded_index(x, y, z)] = blocks::bed_state(facing, is_head);
+            }
+            let mut out = Vec::new();
+            assert_eq!(mesh_section(&padded, &mut out), 10);
+            let quads = decode(&out);
+            for (cell, part) in [(foot, "feet"), (head, "head")] {
+                let top = format!("bed_{part}_top");
+                let quad = quads
+                    .iter()
+                    .find(|q| blocks::TEXTURES[q[0].layer as usize] == top)
+                    .unwrap();
+                for vertex in quad {
+                    let [x, _, z] = sub(vertex.pos, cell);
+                    assert_eq!(
+                        vertex.uv.1,
+                        match (dx, dz) {
+                            (0, -1) => z,
+                            (0, 1) => 1 - z,
+                            (-1, 0) => x,
+                            (1, 0) => 1 - x,
+                            _ => unreachable!(),
+                        } as u32,
+                    );
+                }
+                let end = format!("bed_{part}_end");
+                let quad = quads
+                    .iter()
+                    .find(|q| blocks::TEXTURES[q[0].layer as usize] == end)
+                    .unwrap();
+                let sign = if part == "head" { 1 } else { -1 };
+                assert_eq!(FACES[quad[0].face].normal, [sign * dx, 0, sign * dz]);
             }
         }
     }

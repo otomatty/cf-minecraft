@@ -383,10 +383,17 @@ fn bed_is_appended_with_mining_stack_and_table_recipe() {
     assert_eq!((bed.min_tier, bed.dig_ticks), (0, Some(10)));
     assert!(!bed.occludes && bed.solid && !bed.washes_away);
     assert_eq!(bed.opacity, 0);
-    assert!(bed
-        .tex
-        .iter()
-        .all(|index| TEXTURES[*index as usize] == "white_wool"));
+    assert_eq!(
+        bed.tex.map(|index| TEXTURES[index as usize]),
+        [
+            "oak_planks",
+            "bed_feet_top",
+            "bed_feet_side",
+            "bed_feet_end",
+            "bed_feet_side",
+            "bed_feet_side",
+        ]
+    );
     assert_eq!(items::by_name("bed"), Some(84));
     let item = items::info(84).unwrap();
     assert_eq!(

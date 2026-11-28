@@ -2102,6 +2102,95 @@ async function chestStorage() {
 	} finally { await page.close(); }
 }
 
+async function sleeping() {
+	const { page, errors } = await open(`server=local&world=e2e-sleep-${run}&mode=creative&gen=flat&seed=2026&view=2&time=18000`);
+	try {
+		// Start as soon as the spawn terrain arrives. Creative mobs do not pursue
+		// the player and hostiles spawn in a ring well outside the bed's range.
+		const ready = await page.waitForFunction(() => {
+			const api = window.__mc;
+			if (api?.error) throw new Error(api.error);
+			const stats = api?.stats();
+			if (!stats?.joined || !stats.chunks) return false;
+			const [x, y, z] = stats.spawn.map(Math.floor);
+			const state = api.stateId("grass_block");
+			return api.getBlock(x - 1, y - 1, z) === state && api.getBlock(x - 2, y - 1, z) === state ? stats : false;
+		}, { timeout: LOAD_TIMEOUT, polling: 50 });
+		const { gameMode, generatorName, spawn } = await ready.jsonValue();
+		await ready.dispose();
+		check(gameMode === "creative" && generatorName === "Flat", "sleep: Flat creative world");
+		await resumePointerLock(page, "sleep: initial pointer lock");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+		await page.click('#block-grid [data-block="bed"]');
+		await page.waitForFunction(() => document.querySelector("#hotbar canvas.selected")?.title === "bed");
+		check(true, "sleep: picker selects the bed");
+		await page.keyboard.press("KeyE");
+		await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+		await resumePointerLock(page, "sleep: resume after selecting the bed");
+
+		const [sx, y, z] = spawn.map(Math.floor);
+		const foot = [sx - 1, y, z];
+		const aim = async ground => {
+			await page.mouse.move(640, 360);
+			await page.evaluate(([x, y, z], ground) => {
+				const pitch = Math.atan2(ground ? 1.62 : 1.22, 1) * 180 / Math.PI;
+				window.__mc.setCamera(x + 1.5, y + 1.62, z + 0.5, 90, pitch);
+			}, foot, ground);
+			await page.waitForFunction(([x, y, z], ground) => {
+				const api = window.__mc;
+				const c = api.stats().camera, pitch = c.pitch * Math.PI / 180;
+				const hit = api.raycast([c.x, c.y, c.z], [-Math.cos(pitch), -Math.sin(pitch), 0], 6);
+				return hit?.x === x && hit?.y === (ground ? y - 1 : y) && hit?.z === z && (!ground || hit.face === 1);
+			}, {}, foot, ground);
+		};
+		const rightClick = () => page.mouse.click(640, 360, { button: "right" });
+		await aim(true);
+		await rightClick();
+		await page.waitForFunction(([x, y, z]) => {
+			const api = window.__mc;
+			return api.getBlock(x, y, z) === api.stateId("bed[facing=west,part=foot]")
+				&& api.getBlock(x - 1, y, z) === api.stateId("bed[facing=west,part=head]");
+		}, {}, foot);
+		check(true, "sleep: placement sets the foot and head");
+
+		const waitForSleep = () => page.waitForFunction(() => window.__mc.stats().sleeping === true
+			&& document.getElementById("sleep-overlay").offsetWidth > 0 && !document.pointerLockElement);
+		const waitForMessage = text => page.waitForFunction(text => [...document.querySelectorAll("#chat-log .chat-system")]
+			.some(line => line.textContent === text), {}, text);
+		await aim(false);
+		await rightClick();
+		await waitForMessage("リスポーン地点を設定しました");
+		await waitForSleep();
+		check(true, "sleep: right-click sets the respawn point and shows the sleep overlay");
+
+		await page.click("#stop-sleeping");
+		await page.waitForFunction(() => window.__mc.stats().sleeping === false && document.getElementById("sleep-overlay").hidden);
+		check(true, "sleep: wake button closes the overlay");
+
+		await resumePointerLock(page, "sleep: resume after waking");
+		await aim(false);
+		await rightClick();
+		await waitForSleep();
+		await page.waitForFunction(() => {
+			const { dayTime, sleeping } = window.__mc.stats();
+			return sleeping === false && dayTime >= 24000 && dayTime % 24000 < 400
+				&& document.getElementById("sleep-overlay").hidden;
+		}, { timeout: 20000 });
+		check(true, "sleep: sleeping advances the clock to morning and wakes the player");
+
+		await resumePointerLock(page, "sleep: resume in the morning");
+		await aim(false);
+		await rightClick();
+		await waitForMessage("夜にならないと眠れません");
+		check(true, "sleep: using the bed in daylight shows the system message");
+		check(errors.length === 0, "sleep: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "sleep", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function farming() {
 	const { page, errors } = await open(`server=local&world=e2e-farm-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -3676,6 +3765,7 @@ try {
 	await farming();
 	await furnaceSmelting();
 	await chestStorage();
+	await sleeping();
 	await dayNight();
 	await torches();
 	await undergroundLighting();

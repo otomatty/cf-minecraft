@@ -74,6 +74,10 @@ function rgbaPng(width, height, pixel) {
 		chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
 
+export const fixtureBedEntries = [
+	["resource_pack/textures/entity/bed/white.png", rgbaPng(64, 64, (x, y) => [x * 4, y * 4, 192, 255])],
+];
+
 function leafShade(x, y) {
 	return 145 + (x * 13 + y * 7) % 31;
 }
@@ -423,6 +427,7 @@ async function fixtureZip({ names, spriteStart }, { colors = {}, artVariant = fa
 	const itemNames = new Set(names.slice(spriteStart));
 	const terrain = {}, items = {}, images = [];
 	for (const name of names) {
+		if (/^bed_(head|feet)_(top|side|end)$/.test(name)) continue; // Supplied by the entity sheet.
 		const item = itemNames.has(name);
 		const atlas = item ? items : terrain;
 		const folder = `textures/${item ? "items" : "blocks"}/`;
@@ -438,7 +443,7 @@ async function fixtureZip({ names, spriteStart }, { colors = {}, artVariant = fa
 		images.push(["resource_pack/" + path + (tga ? ".tga" : ".png"),
 			tga ? fixtureTga(name, colors[name]) : fixturePng(name, item, colors[name])]);
 	}
-	const assets = [...images, ...fixtureArtEntries(artVariant), ...fixtureEntityEntries(), ...fixtureEffects()].filter(([path]) => !omit.includes(path));
+	const assets = [...images, ...fixtureBedEntries, ...fixtureArtEntries(artVariant), ...fixtureEntityEntries(), ...fixtureEffects()].filter(([path]) => !omit.includes(path));
 	return zipBytes([...packEntries({ terrain, items }), ...assets]);
 }
 

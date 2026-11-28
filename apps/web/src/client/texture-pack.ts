@@ -236,6 +236,35 @@ function sampleTile(image: NativeImage, x0: number, y0: number, width: number, h
 	return tile;
 }
 
+// The 16×32×6 mattress in Bedrock Samples' geometry.bed uses box UV [0, 0].
+const bedTexturePath = "textures/entity/bed/white";
+const bedFaces = [
+	["bed_head_top", 6, 6, "top"],
+	["bed_feet_top", 6, 22, "top"],
+	["bed_head_side", 0, 6, "side"],
+	["bed_feet_side", 0, 22, "side"],
+	["bed_head_end", 6, 0, "end"],
+	["bed_feet_end", 22, 0, "end"],
+] as const;
+
+function sampleBedFace(image: NativeImage, x0: number, y0: number, face: typeof bedFaces[number][3]): Uint8Array {
+	const tile = new Uint8Array(TEX_SIZE ** 2 * 4);
+	const height = face === "top" ? 16 : 9;
+	const scale = image.width / 64;
+	for (let y = 0; y < TEX_SIZE; y++) for (let x = 0; x < TEX_SIZE; x++) {
+		// Extend the upper edge into the unused rows so mipmaps keep its color.
+		const row = Math.max(0, y - (TEX_SIZE - height)) + 0.5;
+		// Rotate the long side and flip the ends to put the wood along the bottom.
+		const depth = 6 - row * 6 / height;
+		const sx = x0 + (face === "side" ? depth : x + 0.5);
+		const sy = y0 + (face === "side" ? x + 0.5 : face === "end" ? depth : row);
+		const src = (Math.floor(sy * scale) * image.width + Math.floor(sx * scale)) * 4;
+		const dst = (y * TEX_SIZE + x) * 4;
+		tile.set(image.pixels.subarray(src, src + 4), dst);
+	}
+	return tile;
+}
+
 type EffectName = "fire" | "explosion" | "smoke";
 export const effectNames = ["fire", "explosion", "smoke"] as const;
 export const MAX_EFFECT_FRAMES = 64;
@@ -377,7 +406,9 @@ export async function importTexturePack(
 		] as const;
 		const effectEntries = effectSources.filter(([name, path]) => name === "fire"
 			? files.has(resource + path + ".png") || files.has(resource + path + ".tga") : files.has(resource + path));
-		const total = images.size + artEntries.length + entityEntries.length + effectEntries.length;
+		const hasBedSheet = bedFaces.some(([name]) => wanted.has(name))
+			&& (files.has(resource + bedTexturePath + ".png") || files.has(resource + bedTexturePath + ".tga"));
+		const total = images.size + artEntries.length + entityEntries.length + effectEntries.length + Number(hasBedSheet);
 		onProgress?.(done, total);
 		for (const [entry, aliases] of images) {
 			const bytes = await readEntry(entry, 4 * MiB);
@@ -460,6 +491,20 @@ export async function importTexturePack(
 			if (image) nativeImages.set(path, image);
 			return image;
 		};
+		if (hasBedSheet) {
+			const missing = bedFaces.filter(([name]) => wanted.has(name) && !tiles.has(name));
+			if (missing.length) {
+				try {
+					const sheet = await readNative(bedTexturePath);
+					if (sheet && sheet.width === sheet.height && sheet.width % 64 === 0) {
+						for (const [name, x, y, face] of missing) tiles.set(name, sampleBedFace(sheet, x, y, face));
+					}
+				} catch {
+					// Unreadable optional images are treated as missing.
+				}
+			}
+			onProgress?.(++done, total);
+		}
 
 		const requests: { name: EntityAssetKey; id: string; texture: NativeImage }[] = [];
 		for (const { name, entry } of entityEntries) {

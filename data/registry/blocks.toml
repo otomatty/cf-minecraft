@@ -14,6 +14,7 @@ textures = [
   "wheat_green", "wheat_ripe", "lava", "obsidian", "white_wool", "torch",
   "oak_leaves_dense", "gray_wool", "brown_wool", "black_wool",
   "chest_top", "chest_side", "chest_front",
+  "bed_feet_top", "bed_head_top", "bed_feet_side", "bed_head_side", "bed_feet_end", "bed_head_end",
 ]
 legacy_count = 14
 
@@ -518,15 +519,14 @@ tool = "axe"
 min_tier = 0
 dig_ticks = 10
 model = "bed"
-texture = "white_wool"
+bottom = "oak_planks"
 states = [
-  { properties = [["facing", "north"], ["part", "foot"]] },
-  { properties = [["facing", "north"], ["part", "head"]] },
-  { properties = [["facing", "south"], ["part", "foot"]] },
-  { properties = [["facing", "south"], ["part", "head"]] },
-  { properties = [["facing", "west"], ["part", "foot"]] },
-  { properties = [["facing", "west"], ["part", "head"]] },
-  { properties = [["facing", "east"], ["part", "foot"]] },
-  { properties = [["facing", "east"], ["part", "head"]] },
+  { properties = [["facing", "north"], ["part", "foot"]], texture = "bed_feet_side", top = "bed_feet_top", south = "bed_feet_end" },
+  { properties = [["facing", "north"], ["part", "head"]], texture = "bed_head_side", top = "bed_head_top", north = "bed_head_end" },
+  { properties = [["facing", "south"], ["part", "foot"]], texture = "bed_feet_side", top = "bed_feet_top", north = "bed_feet_end" },
+  { properties = [["facing", "south"], ["part", "head"]], texture = "bed_head_side", top = "bed_head_top", south = "bed_head_end" },
+  { properties = [["facing", "west"], ["part", "foot"]], texture = "bed_feet_side", top = "bed_feet_top", east = "bed_feet_end" },
+  { properties = [["facing", "west"], ["part", "head"]], texture = "bed_head_side", top = "bed_head_top", west = "bed_head_end" },
+  { properties = [["facing", "east"], ["part", "foot"]], texture = "bed_feet_side", top = "bed_feet_top", west = "bed_feet_end" },
+  { properties = [["facing", "east"], ["part", "head"]], texture = "bed_head_side", top = "bed_head_top", east = "bed_head_end" },
 ]
-

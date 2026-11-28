@@ -110,6 +110,10 @@ struct State {
     texture: Option<String>,
     #[serde(alias = "up")]
     top: Option<String>,
+    north: Option<String>,
+    south: Option<String>,
+    west: Option<String>,
+    east: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +188,10 @@ impl Block {
             &self.east,
             &state.texture,
             &state.top,
+            &state.north,
+            &state.south,
+            &state.west,
+            &state.east,
         ]
         .into_iter()
         .flatten()
@@ -191,22 +199,17 @@ impl Block {
             self.texture_index(name, atlas);
         }
         [
-            &self.bottom,
-            if state.top.is_some() {
-                &state.top
-            } else {
-                &self.top
-            },
-            &self.north,
-            &self.south,
-            &self.west,
-            &self.east,
+            self.bottom.as_ref(),
+            state.top.as_ref().or(self.top.as_ref()),
+            state.north.as_ref().or(self.north.as_ref()),
+            state.south.as_ref().or(self.south.as_ref()),
+            state.west.as_ref().or(self.west.as_ref()),
+            state.east.as_ref().or(self.east.as_ref()),
         ]
         .into_iter()
         .enumerate()
         .map(|(i, face)| {
             let name = face
-                .as_ref()
                 .or(if i >= 2 { self.side.as_ref() } else { None })
                 .or(state.texture.as_ref())
                 .or(self.texture.as_ref())
