@@ -12,7 +12,7 @@ export interface ItemInfo { id: number; name: string; maxStack: number; block: n
 export interface InventorySlot { item: number; count: number; damage: number }
 
 export interface ItemEntity extends InventorySlot { id: number; position: [number, number, number]; previous: [number, number, number] }
-export type MobKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export type MobKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 export type WoolColor = 0 | 1 | 2 | 3;
 export interface EggEntity { id: number; position: [number, number, number]; previous: [number, number, number] }
 export interface ArrowEntity { id: number; position: [number, number, number]; previous: [number, number, number]; velocity: [number, number, number]; fresh: boolean }

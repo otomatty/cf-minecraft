@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 /// Item ID, count, and accumulated damage.
 pub type ItemStack = (u16, u8, u16);
 
@@ -61,6 +61,7 @@ pub enum MobKind {
     Zombie = 4,
     Skeleton = 5,
     Creeper = 6,
+    Spider = 7,
 }
 
 impl MobKind {
@@ -77,6 +78,7 @@ impl MobKind {
             4 => Ok(Self::Zombie),
             5 => Ok(Self::Skeleton),
             6 => Ok(Self::Creeper),
+            7 => Ok(Self::Spider),
             _ => Err(DecodeError),
         }
     }
@@ -116,6 +118,7 @@ pub enum DeathCause {
     Zombie = 6,
     Arrow = 7,
     Explosion = 8,
+    Spider = 9,
 }
 
 /// Fields shared by the status packet and the player save.
@@ -161,6 +164,7 @@ impl PlayerVitals {
             6 => DeathCause::Zombie,
             7 => DeathCause::Arrow,
             8 => DeathCause::Explosion,
+            9 => DeathCause::Spider,
             _ => return Err(DecodeError),
         };
         let food = if has_food { r.u8()? } else { MAX_FOOD };
@@ -1579,7 +1583,7 @@ mod tests {
         no_cause[1] = 0;
         no_cause[4] = 1;
         assert!(S2C::decode(&no_cause).is_err());
-        no_cause[5] = 9;
+        no_cause[5] = 10;
         assert!(S2C::decode(&no_cause).is_err());
     }
 
@@ -1807,7 +1811,7 @@ mod tests {
 
     #[test]
     fn protocol_32_stop_sleeping_and_sleeping_round_trip() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let stop = C2S::StopSleeping.encode();
         assert_eq!(stop, [0x14]);
         assert_eq!(C2S::decode(&stop), Ok(C2S::StopSleeping));
@@ -1826,7 +1830,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -1861,7 +1865,7 @@ mod tests {
             if tag == 0x0d {
                 assert_eq!(bytes[5], 0);
                 let mut bad = bytes.clone();
-                bad[5] = 7;
+                bad[5] = 8;
                 assert!(S2C::decode(&bad).is_err());
             }
             let mut trailing = bytes;
@@ -1928,7 +1932,7 @@ mod tests {
         let mut bytes = spawn.encode();
         assert_eq!((bytes.len(), bytes[5]), (34, 4));
         assert_eq!(S2C::decode(&bytes), Ok(spawn));
-        bytes[5] = 7;
+        bytes[5] = 8;
         assert!(S2C::decode(&bytes).is_err());
     }
 
@@ -2023,7 +2027,7 @@ mod tests {
         let mut bytes = spawn.encode();
         assert_eq!((bytes.len(), bytes[5]), (34, 6));
         assert_eq!(S2C::decode(&bytes), Ok(spawn));
-        bytes[5] = 7;
+        bytes[5] = 8;
         assert!(S2C::decode(&bytes).is_err());
 
         for ticks in [0, 1, 30] {
@@ -2050,13 +2054,48 @@ mod tests {
         let mut bytes = status.encode();
         assert_eq!(bytes[5], 8);
         assert_eq!(S2C::decode(&bytes), Ok(status));
-        bytes[5] = 9;
+        bytes[5] = 10;
         assert!(S2C::decode(&bytes).is_err());
     }
 
     #[test]
+    fn protocol_33_spider_spawn_and_death_round_trip_and_validate_fields() {
+        assert_eq!(PROTOCOL_VERSION, 33);
+        let spawn = S2C::MobSpawn {
+            id: 12,
+            kind: MobKind::Spider,
+            x: 4.5,
+            y: -60.0,
+            z: 8.5,
+            yaw: 180.0,
+        };
+        let mut bytes = spawn.encode();
+        assert_eq!((bytes.len(), bytes[5]), (34, 7));
+        assert_eq!(S2C::decode(&bytes), Ok(spawn));
+        for invalid in [8, u8::MAX] {
+            bytes[5] = invalid;
+            assert!(S2C::decode(&bytes).is_err());
+        }
+
+        let status = PlayerVitals {
+            health: 0,
+            dead: true,
+            cause: DeathCause::Spider,
+            ..PlayerVitals::default()
+        }
+        .packet();
+        let mut bytes = status.encode();
+        assert_eq!(bytes[5], 9);
+        assert_eq!(S2C::decode(&bytes), Ok(status));
+        for invalid in [0, 10, u8::MAX] {
+            bytes[5] = invalid;
+            assert!(S2C::decode(&bytes).is_err());
+        }
+    }
+
+    #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -2094,7 +2133,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -2118,7 +2157,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];
@@ -2433,7 +2472,7 @@ mod tests {
     }
     #[test]
     fn protocol_30_round_trips_use_entity_sheep_appearance_and_shear() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
         let id = 0x8000_0001;
         let use_entity = C2S::UseEntity { id };
         assert_eq!(use_entity.encode(), [0x13, 0x80, 0, 0, 1]);

@@ -124,6 +124,19 @@ const fn spec(kind: MobKind) -> &'static MobSpec {
             burns_in_sunlight: false,
             loot: items::CREEPER_LOOT,
         },
+        MobKind::Spider => &MobSpec {
+            width: 1.4,
+            height: 0.9,
+            head_offset: 0.6,
+            health: 16,
+            walk_forward: 0.625,
+            flee_forward: 0.0,
+            chase_forward: Some(0.75),
+            max_fall_speed: None,
+            takes_fall_damage: true,
+            burns_in_sunlight: false,
+            loot: items::SPIDER_LOOT,
+        },
     }
 }
 
@@ -156,9 +169,17 @@ const SKELETON_STOP_RANGE: f64 = 10.0;
 const SKELETON_INITIAL_SHOT_TICKS: u8 = 20;
 const SKELETON_SHOT_INTERVAL: u8 = 40;
 const HOSTILE_LOCAL_LIMIT: usize = 4;
+const HOSTILE_KINDS: [MobKind; 4] = [
+    MobKind::Zombie,
+    MobKind::Skeleton,
+    MobKind::Creeper,
+    MobKind::Spider,
+];
 const HOSTILE_TARGET_RANGE: f64 = 16.0;
 const ZOMBIE_ATTACK_RANGE: f64 = 0.8;
 const ZOMBIE_ATTACK_DAMAGE: u8 = 3;
+const SPIDER_ATTACK_DAMAGE: u8 = 2;
+const SPIDER_AGGRO_TICKS: u8 = 200;
 const ZOMBIE_ATTACK_INTERVAL: u8 = 20;
 const ZOMBIE_KNOCKBACK_HORIZONTAL: f64 = 0.4;
 const ZOMBIE_KNOCKBACK_VERTICAL: f64 = 0.36;
@@ -198,6 +219,7 @@ fn zombie_knockback(from: [f64; 3], to: [f64; 3]) -> [f64; 3] {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Hostile {
     attack_ticks: u8,
+    spider_aggro_ticks: u8,
     sunlight_ticks: u8,
     shot_ticks: Option<u8>,
     fuse: Option<u8>,
@@ -464,6 +486,9 @@ impl Mob {
         }
         self.health = self.health.saturating_sub(damage);
         self.hurt_ticks = HURT_TICKS;
+        if self.kind == MobKind::Spider {
+            self.hostile.as_mut().unwrap().spider_aggro_ticks = SPIDER_AGGRO_TICKS;
+        }
         true
     }
 
@@ -533,6 +558,7 @@ impl Mob {
     ) -> Option<DeathCause> {
         if let Some(hostile) = &mut self.hostile {
             hostile.attack_ticks = hostile.attack_ticks.saturating_sub(1);
+            hostile.spider_aggro_ticks = hostile.spider_aggro_ticks.saturating_sub(1);
             if let Some(ticks) = &mut hostile.shot_ticks {
                 *ticks = ticks.saturating_sub(1);
             }
@@ -567,11 +593,23 @@ impl Mob {
         if !spec(self.kind).burns_in_sunlight || self.hostile.is_none() {
             return false;
         }
+        daytime && self.exposed_to_sky(world)
+    }
+
+    fn exposed_to_sky(&self, world: &World) -> bool {
         let pos = self.pos();
-        daytime
-            && self.health != 0
+        self.health != 0
             && pos[1] >= VOID_Y
             && sees_sunlight(world, pos, spec(self.kind).head_offset)
+    }
+
+    fn can_target(&self, world: &World, night: bool) -> bool {
+        self.hostile.as_ref().is_some_and(|hostile| {
+            self.kind != MobKind::Spider
+                || night
+                || hostile.spider_aggro_ticks != 0
+                || !self.exposed_to_sky(world)
+        })
     }
 
     fn touches_lava(&self, world: &World) -> bool {
@@ -898,6 +936,9 @@ impl Mob {
         if let Some(hostile) = &self.hostile {
             h.u8(hostile.attack_ticks);
             h.u8(hostile.sunlight_ticks);
+            if self.kind == MobKind::Spider {
+                h.u8(hostile.spider_aggro_ticks);
+            }
             if let Some(ticks) = hostile.shot_ticks {
                 h.u8(ticks);
             }
@@ -1101,19 +1142,11 @@ pub(super) fn sample(seed: i64, id: u32, time: i64, salt: u64) -> u64 {
 }
 
 fn hostile_kind(seed: i64, player: u32, time: i64) -> MobKind {
-    match sample(seed, player, time, HOSTILE_KIND_SALT) % 3 {
-        0 => MobKind::Zombie,
-        1 => MobKind::Skeleton,
-        _ => MobKind::Creeper,
-    }
+    HOSTILE_KINDS[(sample(seed, player, time, HOSTILE_KIND_SALT) % 4) as usize]
 }
 
 fn hostile_dark_kind(seed: i64, player: u32, time: i64) -> MobKind {
-    match sample(seed, player, time, HOSTILE_DARK_KIND_SALT) % 3 {
-        0 => MobKind::Zombie,
-        1 => MobKind::Skeleton,
-        _ => MobKind::Creeper,
-    }
+    HOSTILE_KINDS[(sample(seed, player, time, HOSTILE_DARK_KIND_SALT) % 4) as usize]
 }
 
 fn spatial_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -1321,7 +1354,7 @@ fn grass_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     }
 }
 
-fn hostile_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
+fn hostile_surface(world: &World, kind: MobKind, x: i32, z: i32) -> Option<[f64; 3]> {
     let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
     let get = |y| chunk.get((x & 15) as usize, y, (z & 15) as usize);
     // Reaching a fluid before the ground means the column is covered.
@@ -1333,7 +1366,7 @@ fn hostile_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     if blocks::is_oak_leaves(state)
         || blocks::is_fluid(state)
         || get(ground + 1) != blocks::AIR
-        || get(ground + 2) != blocks::AIR
+        || (kind != MobKind::Spider && get(ground + 2) != blocks::AIR)
     {
         return None;
     }
@@ -1341,14 +1374,28 @@ fn hostile_surface(world: &World, x: i32, z: i32) -> Option<[f64; 3]> {
     mob_collisions(world).collision_boxes(x, ground, z, &mut |bounds| {
         full |= bounds == physics::Aabb::block(x, ground, z);
     });
-    full.then_some([
+    let feet = [
         f64::from(x) + 0.5,
         f64::from(ground + 1),
         f64::from(z) + 0.5,
-    ])
+    ];
+    (full && hostile_spawn_clear(world, kind, feet)).then_some(feet)
 }
 
-fn hostile_dark_feet(world: &World, x: i32, z: i32, start_y: i32) -> Option<[f64; 3]> {
+fn hostile_spawn_clear(world: &World, kind: MobKind, feet: [f64; 3]) -> bool {
+    // The original hostiles fit within the two air cells checked by each search.
+    kind != MobKind::Spider
+        || Player::with_size(feet, spec(kind).width, spec(kind).height)
+            .is_clear(&mob_collisions(world))
+}
+
+fn hostile_dark_feet(
+    world: &World,
+    kind: MobKind,
+    x: i32,
+    z: i32,
+    start_y: i32,
+) -> Option<[f64; 3]> {
     let chunk = world.chunks.get(&(x >> 4, z >> 4))?;
     let top = MIN_Y + HEIGHT - 1;
     let get = |y: i32| chunk.get((x & 15) as usize, y, (z & 15) as usize);
@@ -1364,21 +1411,24 @@ fn hostile_dark_feet(world: &World, x: i32, z: i32, start_y: i32) -> Option<[f64
         if !blocks::is_solid(state) || blocks::is_oak_leaves(state) || blocks::is_fluid(state) {
             continue;
         }
-        if solid_y + 2 > top || get(solid_y + 1) != blocks::AIR || get(solid_y + 2) != blocks::AIR {
+        if solid_y + 1 > top
+            || get(solid_y + 1) != blocks::AIR
+            || (kind != MobKind::Spider && (solid_y + 2 > top || get(solid_y + 2) != blocks::AIR))
+        {
             continue;
         }
         let mut full = false;
         mob_collisions(world).collision_boxes(x, solid_y, z, &mut |bounds| {
             full |= bounds == physics::Aabb::block(x, solid_y, z);
         });
-        if !full {
-            continue;
-        }
-        return Some([
+        let feet = [
             f64::from(x) + 0.5,
             f64::from(solid_y + 1),
             f64::from(z) + 0.5,
-        ]);
+        ];
+        if full && hostile_spawn_clear(world, kind, feet) {
+            return Some(feet);
+        }
     }
     None
 }
@@ -1584,7 +1634,8 @@ impl Server {
         let radius = 24.75 + ((roll >> 16) % 2251) as f64 / 100.0;
         let x = (pos[0] + dx * radius).floor() as i32;
         let z = (pos[2] + dz * radius).floor() as i32;
-        let Some(candidate) = hostile_surface(&self.world, x, z) else {
+        let kind = hostile_kind(self.seed, id, self.game_time);
+        let Some(candidate) = hostile_surface(&self.world, kind, x, z) else {
             return;
         };
         if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate))
@@ -1597,7 +1648,7 @@ impl Server {
         if self.world.local_block_light([x, candidate[1] as i32, z]) > 0 {
             return;
         }
-        self.spawn_mob(hostile_kind(self.seed, id, self.game_time), candidate);
+        self.spawn_mob(kind, candidate);
     }
 
     fn spawn_hostile_dark(&mut self, id: u32, pos: [f64; 3], players: &[(u32, [f64; 3])]) {
@@ -1616,7 +1667,8 @@ impl Server {
         let z = (pos[2] + dz * radius).floor() as i32;
         let feet_y = pos[1].floor() as i32;
         let start_y = feet_y + ((roll >> 32) % 33) as i32 - 16;
-        let Some(candidate) = hostile_dark_feet(&self.world, x, z, start_y) else {
+        let kind = hostile_dark_kind(self.seed, id, self.game_time);
+        let Some(candidate) = hostile_dark_feet(&self.world, kind, x, z, start_y) else {
             return;
         };
         if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate))
@@ -1630,7 +1682,7 @@ impl Server {
         if self.world.local_sky_light(feet) != 0 || self.world.local_block_light(feet) != 0 {
             return;
         }
-        self.spawn_mob(hostile_dark_kind(self.seed, id, self.game_time), candidate);
+        self.spawn_mob(kind, candidate);
     }
 
     pub(crate) fn tick_mobs(&mut self) {
@@ -1646,7 +1698,8 @@ impl Server {
             }
         }
         let day = self.day_time.rem_euclid(24000);
-        if (13000..23000).contains(&day) && self.game_time % HOSTILE_SPAWN_INTERVAL == 0 {
+        let night = (13000..23000).contains(&day);
+        if night && self.game_time % HOSTILE_SPAWN_INTERVAL == 0 {
             for &(id, pos) in &players {
                 self.spawn_hostile(id, pos, &players);
             }
@@ -1677,22 +1730,23 @@ impl Server {
                     wool_updates.push(id);
                 }
             }
-            let target = if mob.hostile.is_some() && self.game_mode == GameMode::Survival {
-                let pos = mob.pos();
-                self.clients
-                    .iter()
-                    .filter(|(_, client)| client.joined && !client.health.vitals.dead)
-                    .filter_map(|(&id, client)| {
-                        let dy = pos[1] - client.pos[1];
-                        let distance = distance_squared(pos, client.pos) + dy * dy;
-                        (distance <= HOSTILE_TARGET_RANGE * HOSTILE_TARGET_RANGE)
-                            .then_some((distance, id, client.pos))
-                    })
-                    .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-                    .map(|(_, id, pos)| (id, pos))
-            } else {
-                None
-            };
+            let target =
+                if self.game_mode == GameMode::Survival && mob.can_target(&self.world, night) {
+                    let pos = mob.pos();
+                    self.clients
+                        .iter()
+                        .filter(|(_, client)| client.joined && !client.health.vitals.dead)
+                        .filter_map(|(&id, client)| {
+                            let dy = pos[1] - client.pos[1];
+                            let distance = distance_squared(pos, client.pos) + dy * dy;
+                            (distance <= HOSTILE_TARGET_RANGE * HOSTILE_TARGET_RANGE)
+                                .then_some((distance, id, client.pos))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+                        .map(|(_, id, pos)| (id, pos))
+                } else {
+                    None
+                };
             let before = mob.pos();
             let before_fuse = mob.fuse_ticks();
             let damage = mob.tick(
@@ -1743,7 +1797,12 @@ impl Server {
                 } else if mob.attacks(pos) {
                     let velocity = zombie_knockback(mob.pos(), pos);
                     let health = &mut self.clients.get_mut(&player).unwrap().health;
-                    health.damage(ZOMBIE_ATTACK_DAMAGE, DeathCause::Zombie);
+                    let (damage, cause) = if mob.kind == MobKind::Spider {
+                        (SPIDER_ATTACK_DAMAGE, DeathCause::Spider)
+                    } else {
+                        (ZOMBIE_ATTACK_DAMAGE, DeathCause::Zombie)
+                    };
+                    health.damage(damage, cause);
                     if health.vitals.dead {
                         player_deaths.push(player);
                     } else {
@@ -3902,9 +3961,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 MobKind::Creeper,
-                MobKind::Zombie,
                 MobKind::Creeper,
                 MobKind::Skeleton,
+                MobKind::Zombie,
             ]
         );
 
@@ -3929,8 +3988,11 @@ mod tests {
     #[test]
     fn zombie_spawn_column_uses_the_highest_solid_and_requires_clearance() {
         let mut world = arena(16);
-        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
-        assert_eq!(hostile_surface(&world, 16, 5), None);
+        assert_eq!(
+            hostile_surface(&world, MobKind::Zombie, 5, 5),
+            Some([5.5, 1.0, 5.5])
+        );
+        assert_eq!(hostile_surface(&world, MobKind::Zombie, 16, 5), None);
         for state in [
             blocks::OAK_LEAVES,
             blocks::OAK_SLAB,
@@ -3938,13 +4000,20 @@ mod tests {
             blocks::LAVA,
         ] {
             world.set_block(5, 1, 5, state);
-            assert_eq!(hostile_surface(&world, 5, 5), None, "state {state}");
+            assert_eq!(
+                hostile_surface(&world, MobKind::Zombie, 5, 5),
+                None,
+                "state {state}"
+            );
         }
         world.set_block(5, 1, 5, blocks::AIR);
         world.set_block(5, 10, 5, blocks::GLASS);
-        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 11.0, 5.5]));
+        assert_eq!(
+            hostile_surface(&world, MobKind::Zombie, 5, 5),
+            Some([5.5, 11.0, 5.5])
+        );
         world.set_block(5, 12, 5, blocks::WATER);
-        assert_eq!(hostile_surface(&world, 5, 5), None);
+        assert_eq!(hostile_surface(&world, MobKind::Zombie, 5, 5), None);
 
         let mut server = joined(GameMode::Creative);
         let pos = server.spawn();
@@ -3959,10 +4028,183 @@ mod tests {
     #[test]
     fn zombie_spawn_column_rejects_fluids_above_the_clearance() {
         let mut world = arena(16);
-        assert_eq!(hostile_surface(&world, 5, 5), Some([5.5, 1.0, 5.5]));
+        assert_eq!(
+            hostile_surface(&world, MobKind::Zombie, 5, 5),
+            Some([5.5, 1.0, 5.5])
+        );
         for fluid in [blocks::WATER, blocks::LAVA] {
             world.set_block(5, 3, 5, fluid);
-            assert_eq!(hostile_surface(&world, 5, 5), None, "fluid {fluid}");
+            assert_eq!(
+                hostile_surface(&world, MobKind::Zombie, 5, 5),
+                None,
+                "fluid {fluid}"
+            );
+        }
+    }
+
+    #[test]
+    fn spider_spawn_clearance_uses_its_width_and_height() {
+        let mut world = arena(16);
+        let feet = [5.5, 1.0, 5.5];
+        assert_eq!(hostile_surface(&world, MobKind::Spider, 5, 5), Some(feet));
+
+        world.set_block(6, 1, 5, blocks::STONE);
+        assert_eq!(hostile_surface(&world, MobKind::Spider, 5, 5), None);
+        assert_eq!(hostile_surface(&world, MobKind::Zombie, 5, 5), Some(feet));
+
+        world.set_block(5, 2, 5, blocks::STONE);
+        assert_eq!(hostile_dark_feet(&world, MobKind::Spider, 5, 5, 0), None);
+        world.set_block(6, 1, 5, blocks::AIR);
+        assert_eq!(
+            hostile_dark_feet(&world, MobKind::Spider, 5, 5, 0),
+            Some(feet)
+        );
+        assert_eq!(hostile_dark_feet(&world, MobKind::Zombie, 5, 5, 0), None);
+    }
+
+    #[test]
+    fn spider_chases_at_night_and_attacks_with_zombie_cooldown_and_knockback() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let pos = server.mobs[&id].pos();
+        let spider = grounded(MobKind::Spider, pos);
+        assert_eq!(spider.health, 16);
+        assert_eq!(spider.bounds().min, [pos[0] - 0.7, pos[1], pos[2] - 0.7]);
+        assert_eq!(
+            spider.bounds().max,
+            [pos[0] + 0.7, pos[1] + 0.9, pos[2] + 0.7]
+        );
+        assert_eq!(spider.eye()[1], pos[1] + 0.6);
+        assert_eq!(
+            spec(MobKind::Spider).chase_forward,
+            spec(MobKind::Zombie)
+                .chase_forward
+                .map(|speed| speed * 1.25)
+        );
+        server.mobs.insert(id, spider);
+        server.set_time(0, 12999);
+        server.tick();
+        assert!(server.mobs[&id].pos()[0] < pos[0]);
+        for _ in 0..20 {
+            if server.clients[&1].health.vitals.health != 20 {
+                break;
+            }
+            server.tick();
+        }
+        assert_eq!(server.clients[&1].health.vitals.health, 18);
+        assert_eq!(knockback_packets(&mut server), [(1, [-0.4, 0.36, 0.0])]);
+        for _ in 1..ZOMBIE_ATTACK_INTERVAL {
+            server.tick();
+            assert_eq!(server.clients[&1].health.vitals.health, 18);
+        }
+
+        server.clients.get_mut(&1).unwrap().health.vitals.health = 2;
+        server.tick();
+        assert!(server.clients[&1].health.vitals.dead);
+        assert_eq!(server.clients[&1].health.vitals.cause, DeathCause::Spider);
+        assert!(decoded(&mut server)
+            .iter()
+            .any(|(player, packet)| *player == 1
+                && matches!(packet, S2C::PlayerStatus { cause: 9, .. })));
+    }
+
+    #[test]
+    fn spider_daytime_aggro_lasts_exactly_two_hundred_ticks_after_damage() {
+        let (mut server, id) = combat(GameMode::Survival);
+        let [x, y, z] = server.clients[&1].pos;
+        let pos = [x + 1.25, y, z];
+        server.mobs.insert(id, grounded(MobKind::Spider, pos));
+        server.set_time(0, 22999);
+        server.tick();
+        assert_eq!(server.mobs[&id].pos(), pos);
+        assert_eq!(server.clients[&1].health.vitals.health, 20);
+
+        let [bx, by, bz] = pos.map(|v| v.floor() as i32);
+        server.world.set_block(bx, by + 2, bz, blocks::STONE);
+        assert!(server.mobs[&id].can_target(&server.world, false));
+        server.world.set_block(bx, by + 2, bz, blocks::AIR);
+
+        attack(&mut server, id);
+        server.tick();
+        assert_eq!(server.mobs[&id].health, 15);
+        assert_eq!(server.clients[&1].health.vitals.health, 18);
+
+        let start = [x + 4.0, y, z];
+        for _ in 1..SPIDER_AGGRO_TICKS {
+            server.mobs.get_mut(&id).unwrap().body = grounded(MobKind::Spider, start).body;
+            server.tick();
+            assert!(server.mobs[&id].pos()[0] < start[0]);
+        }
+        let spider = server.mobs.get_mut(&id).unwrap();
+        spider.body = grounded(MobKind::Spider, pos).body;
+        assert!(!spider.can_target(&server.world, false));
+        server.tick();
+        assert_eq!(server.mobs[&id].pos(), pos);
+        assert_eq!(server.mobs[&id].hostile.as_ref().unwrap().attack_ticks, 0);
+    }
+
+    #[test]
+    fn spider_does_not_burn_in_daylight() {
+        let (mut server, id) = combat(GameMode::Creative);
+        let pos = server.mobs[&id].pos();
+        server.mobs.insert(id, grounded(MobKind::Spider, pos));
+        server.set_time(0, 6000);
+        for _ in 0..SUNLIGHT_INTERVAL * 2 {
+            server.tick();
+            let spider = &server.mobs[&id];
+            assert!(spider.exposed_to_sky(&server.world));
+            assert!(!spider.burning);
+            assert_eq!(spider.health, 16);
+        }
+    }
+
+    #[test]
+    fn spider_drops_zero_to_two_string_from_melee_or_lava_deaths() {
+        let item = items::by_name("string").unwrap();
+        let info = items::info(item).unwrap();
+        assert_eq!(
+            (item, info.texture, info.max_stack),
+            (85, Some("string"), 64)
+        );
+        assert_eq!(smelting::output(item), None);
+        for lava in [false, true] {
+            let (mut server, id) = combat(GameMode::Survival);
+            let pos = server.mobs[&id].pos();
+            if lava {
+                let [x, y, z] = pos.map(|v| v.floor() as i32);
+                server.world.set_block(x, y, z, blocks::LAVA);
+            }
+            for expected in 0..=2 {
+                let time = (1..)
+                    .find(|&t| sample(server.seed, id, t, LOOT_SALT) % 3 == expected)
+                    .unwrap();
+                let mut spider = grounded(MobKind::Spider, pos);
+                spider.health = 1;
+                spider.lava_ticks = LAVA_INTERVAL - 1;
+                server.mobs.insert(id, spider);
+                server.entities.clear();
+                if lava {
+                    server.set_time(time - 1, 6000);
+                    server.tick();
+                } else {
+                    server.set_time(time, 6000);
+                    attack(&mut server, id);
+                    server.tick();
+                }
+                assert!(
+                    !server.mobs.contains_key(&id),
+                    "lava={lava}, roll={expected}"
+                );
+                let drops: Vec<_> = server
+                    .entities
+                    .values()
+                    .map(|drop| (drop.item, drop.count))
+                    .collect();
+                if expected == 0 {
+                    assert!(drops.is_empty());
+                } else {
+                    assert_eq!(drops, [(item, expected as u8)]);
+                }
+            }
         }
     }
 
@@ -4486,55 +4728,34 @@ mod tests {
     }
 
     #[test]
-    fn hostile_selection_splits_three_ways_and_flat_spawns_are_fixed() {
-        let mut counts = [0_usize; 3];
+    fn hostile_selection_splits_four_ways_and_flat_spawns_are_fixed() {
+        let kinds = [
+            MobKind::Zombie,
+            MobKind::Skeleton,
+            MobKind::Creeper,
+            MobKind::Spider,
+        ];
+        let mut surface_counts = [0; 4];
+        let mut dark_counts = [0; 4];
         for time in 1..=4096 {
-            let roll = sample(2026, 1, time, HOSTILE_KIND_SALT) % 3;
-            let expected = match roll {
-                0 => MobKind::Zombie,
-                1 => MobKind::Skeleton,
-                _ => MobKind::Creeper,
-            };
-            assert_eq!(hostile_kind(2026, 1, time), expected);
-            counts[roll as usize] += 1;
+            let surface = (sample(2026, 1, time, HOSTILE_KIND_SALT) % 4) as usize;
+            let dark = (sample(2026, 1, time, HOSTILE_DARK_KIND_SALT) % 4) as usize;
+            assert_eq!(hostile_kind(2026, 1, time), kinds[surface]);
+            assert_eq!(hostile_dark_kind(2026, 1, time), kinds[dark]);
+            surface_counts[surface] += 1;
+            dark_counts[dark] += 1;
         }
-        assert_eq!(counts, [1301, 1369, 1426]);
-        let mut server = joined(GameMode::Survival);
-        let pos = server.clients[&1].pos;
-        let mut found = [None; 3];
-        for seed in 1..8000 {
-            if found.iter().all(Option::is_some) {
-                break;
-            }
-            server.seed = seed;
-            server.mobs.clear();
-            server.game_time = 200;
-            server.spawn_hostile(1, pos, &[(1, pos)]);
-            let Some(kind) = server.mobs.values().next().map(|mob| mob.kind) else {
-                continue;
-            };
-            let slot = match kind {
-                MobKind::Zombie => 0,
-                MobKind::Skeleton => 1,
-                MobKind::Creeper => 2,
-                _ => continue,
-            };
-            if found[slot].is_none() {
-                found[slot] = Some(seed);
-            }
-        }
-        assert_eq!(found, [Some(2), Some(5), Some(1)]);
-        for (seed, expected) in [
-            (2, MobKind::Zombie),
-            (5, MobKind::Skeleton),
-            (1, MobKind::Creeper),
-        ] {
+        assert_eq!(surface_counts, [1034, 1043, 955, 1064]);
+        assert_eq!(dark_counts, [1035, 1002, 1003, 1056]);
+
+        for (seed, expected) in [2, 11, 1, 5].into_iter().zip(kinds) {
             let mut server = joined_with_seed(GameMode::Survival, seed);
             server.set_time(199, 18199);
             server.tick();
             assert_eq!(
                 server.mobs.values().map(|mob| mob.kind).collect::<Vec<_>>(),
-                [expected]
+                [expected],
+                "seed {seed}"
             );
         }
     }
@@ -5896,7 +6117,13 @@ mod tests {
         if !column_in_ring(pos, x, z) {
             return false;
         }
-        let Some(candidate) = hostile_dark_feet(world, x, z, dark_start_y(roll, pos)) else {
+        let Some(candidate) = hostile_dark_feet(
+            world,
+            hostile_dark_kind(2026, id, time),
+            x,
+            z,
+            dark_start_y(roll, pos),
+        ) else {
             return false;
         };
         if !(24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(pos, candidate)) {
@@ -5924,32 +6151,41 @@ mod tests {
         world.chunks.insert((0, 0), Chunk::empty(0, 0));
         world.set_block(4, 20, 4, blocks::OAK_LEAVES);
         world.set_block(4, 18, 4, blocks::OAK_SLAB);
-        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), None);
+        assert_eq!(hostile_dark_feet(&world, MobKind::Zombie, 4, 4, 20), None);
         world.set_block(4, 14, 4, blocks::STONE);
-        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), Some([4.5, 15.0, 4.5]));
+        assert_eq!(
+            hostile_dark_feet(&world, MobKind::Zombie, 4, 4, 20),
+            Some([4.5, 15.0, 4.5])
+        );
         world.set_block(4, 15, 4, blocks::WATER);
-        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), None);
+        assert_eq!(hostile_dark_feet(&world, MobKind::Zombie, 4, 4, 20), None);
         world.set_block(4, 15, 4, blocks::AIR);
         world.set_block(4, 14, 4, blocks::GLASS);
-        assert_eq!(hostile_dark_feet(&world, 4, 4, 20), Some([4.5, 15.0, 4.5]));
+        assert_eq!(
+            hostile_dark_feet(&world, MobKind::Zombie, 4, 4, 20),
+            Some([4.5, 15.0, 4.5])
+        );
         world.set_block(4, 14, 4, blocks::AIR);
         world.set_block(6, 20 - 15, 6, blocks::STONE);
         assert_eq!(
-            hostile_dark_feet(&world, 6, 6, 20),
+            hostile_dark_feet(&world, MobKind::Zombie, 6, 6, 20),
             Some([6.5, f64::from(20 - 15 + 1), 6.5])
         );
         world.set_block(6, 20 - 15, 6, blocks::AIR);
         world.set_block(6, 20 - 16, 6, blocks::STONE);
-        assert_eq!(hostile_dark_feet(&world, 6, 6, 20), None);
+        assert_eq!(hostile_dark_feet(&world, MobKind::Zombie, 6, 6, 20), None);
 
         let top = MIN_Y + HEIGHT - 1;
         world.set_block(4, top - 2, 4, blocks::STONE);
         assert_eq!(
-            hostile_dark_feet(&world, 4, 4, top + 4),
+            hostile_dark_feet(&world, MobKind::Zombie, 4, 4, top + 4),
             Some([4.5, f64::from(top - 1), 4.5])
         );
-        assert_eq!(hostile_dark_feet(&world, 4, 4, MIN_Y - 4), None);
-        assert_eq!(hostile_dark_feet(&world, 32, 4, 20), None);
+        assert_eq!(
+            hostile_dark_feet(&world, MobKind::Zombie, 4, 4, MIN_Y - 4),
+            None
+        );
+        assert_eq!(hostile_dark_feet(&world, MobKind::Zombie, 32, 4, 20), None);
     }
 
     #[test]
@@ -5978,7 +6214,10 @@ mod tests {
         assert_eq!(hostiles(&server).len(), 1);
 
         server.world.set_block(x + 1, floor, z, blocks::LAVA);
-        assert!(hostile_dark_feet(&server.world, x, z, floor).is_some());
+        assert!(
+            hostile_dark_feet(&server.world, hostile_dark_kind(2026, 1, time), x, z, floor)
+                .is_some()
+        );
         assert_eq!(server.world.local_block_light(feet), 13);
         tick_spawn(&mut server, time, 6000);
         assert!(hostiles(&server).is_empty());
@@ -5986,7 +6225,10 @@ mod tests {
 
         for y in [floor, floor + 1] {
             let old = server.world.set_block(x, y, z, blocks::LAVA).unwrap();
-            assert_eq!(hostile_dark_feet(&server.world, x, z, floor), None);
+            assert_eq!(
+                hostile_dark_feet(&server.world, hostile_dark_kind(2026, 1, time), x, z, floor),
+                None
+            );
             tick_spawn(&mut server, time, 6000);
             assert!(hostiles(&server).is_empty());
             server.world.set_block(x, y, z, old);
@@ -6000,7 +6242,7 @@ mod tests {
         let pos = server.clients[&1].pos;
         let (time, x, floor, z) = (200..40_000)
             .step_by(200)
-            .filter(|time| time % 400 != 0)
+            .filter(|&time| time % 400 != 0 && hostile_dark_kind(2026, 1, time) == MobKind::Spider)
             .find_map(|time| {
                 let roll = sample(2026, 1, time, HOSTILE_DARK_COLUMN_SALT);
                 let (x, z) = ring_column(roll, pos);
@@ -6008,7 +6250,13 @@ mod tests {
                 if !column_in_ring(pos, x, z) || !(-60..=-46).contains(&floor) {
                     return None;
                 }
-                let natural = hostile_dark_feet(&server.world, x, z, floor)?;
+                let natural = hostile_dark_feet(
+                    &server.world,
+                    hostile_dark_kind(2026, 1, time),
+                    x,
+                    z,
+                    floor,
+                )?;
                 let sky = server.world.local_sky_light([x, natural[1] as i32, z]);
                 (sky > 0).then_some((time, x, floor, z))
             })
@@ -6024,7 +6272,7 @@ mod tests {
         tick_spawn(&mut server, time, 6000);
         let spawned = hostiles(&server);
         assert_eq!(spawned.len(), 1);
-        assert_eq!(spawned[0].0, hostile_dark_kind(2026, 1, time));
+        assert_eq!(spawned[0].0, MobKind::Spider);
         assert!(column_in_ring(pos, x, z));
         assert!((24.0 * 24.0..=48.0 * 48.0).contains(&distance_squared(spawned[0].1, pos)));
         let [mx, _, mz] = spawned[0].1.map(|v| v.floor() as i32);
@@ -6172,8 +6420,8 @@ mod tests {
         assert_ne!(dark.0, surface.0);
 
         server.mobs.clear();
-        for _ in 0..HOSTILE_LOCAL_LIMIT - 1 {
-            server.spawn_mob(MobKind::Zombie, pos);
+        for kind in [MobKind::Zombie, MobKind::Skeleton, MobKind::Spider] {
+            server.spawn_mob(kind, pos);
         }
         server.set_time(time - 1, 17999);
         server.tick();

@@ -194,7 +194,13 @@ async function main(): Promise<void> {
 
 	const camera: Camera = { x: 0.5, y: 80, z: 0.5, yaw: 0, pitch: 20 };
 	const audio = new GameAudio(camera);
-	const worldAudio = new WorldAudio(core, registry, audio);
+	const worldAudio = new WorldAudio(core, registry, {
+		play(sound, source) {
+			// Spider effects arrive with its assets. The audio engine expects a timbre for each forwarded kind.
+			if ("mob" in sound && sound.mob === 7) return;
+			audio.play(sound, source);
+		},
+	});
 	let position: [number, number, number] = [camera.x, camera.y - EYE_HEIGHT, camera.z];
 	let previousPosition = [...position];
 	let movementTime = 0;

@@ -286,7 +286,7 @@ function component(vertices: Float32Array, index: number, stride = 9) {
 }
 
 test("mobs stand on the ground at gameplay height and use the skin for their protocol kind", () => {
-	assert.deepEqual(mobNames, ["cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper"]);
+	assert.deepEqual(mobNames, ["cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper", "spider"]);
 	for (const kind of [0, 1, 2, 3, 4, 5, 6] as const) {
 		const mob: RenderMob = { kind, position: [0, 0, 0], yaw: 0, moving: false, hurt: false, light: [15, 3] };
 		const asset = fixtureMobs[kind];

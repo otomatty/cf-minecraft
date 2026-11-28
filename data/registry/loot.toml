@@ -57,3 +57,9 @@ mob = "creeper"
 item = "gunpowder"
 min = 0
 max = 2
+
+[[loot]]
+mob = "spider"
+item = "string"
+min = 0
+max = 2

@@ -1396,7 +1396,7 @@ mod tests {
             assert_eq!(bytes[256], 5);
             assert_eq!(bytes[258], 0);
             assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
-            bytes[256] = 9;
+            bytes[256] = 10;
             assert!(crate::Inventory::from_bytes(&bytes).is_err());
             release_and_reconnect(&mut s);
             assert_eq!(vitals(&s), dead);

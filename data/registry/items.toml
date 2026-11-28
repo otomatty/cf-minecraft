@@ -497,3 +497,9 @@ id = 84
 block = "bed"
 max_stack = 1
 
+
+[[items]]
+name = "string"
+id = 85
+texture = "string"
+max_stack = 64

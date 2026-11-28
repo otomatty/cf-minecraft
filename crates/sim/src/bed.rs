@@ -1,5 +1,5 @@
 //! Beds: paired halves, sleeping, and a respawn point.
-use protocol::{MobKind, S2C};
+use protocol::S2C;
 use world::{blocks, HEIGHT, MIN_Y};
 
 use crate::{GameMode, Server};
@@ -180,10 +180,8 @@ impl Server {
         let center_z = foot[2] as f64 + 0.5;
         let floor_y = foot[1] as f64;
         self.mobs.values().any(|mob| {
-            matches!(
-                mob.kind,
-                MobKind::Zombie | MobKind::Skeleton | MobKind::Creeper
-            ) && mob.health > 0
+            !mob.is_animal()
+                && mob.health > 0
                 && (mob.pos()[0] - center_x).abs() <= 8.0
                 && (mob.pos()[2] - center_z).abs() <= 8.0
                 && (mob.pos()[1] - floor_y).abs() <= 5.0
@@ -347,7 +345,7 @@ impl Server {
 mod tests {
     use super::*;
     use crate::{Server, Stack};
-    use protocol::{DeathCause, C2S, PROTOCOL_VERSION};
+    use protocol::{DeathCause, MobKind, C2S, PROTOCOL_VERSION};
     use world::items;
     use worldgen::Generator;
 
@@ -742,14 +740,16 @@ mod tests {
         assert_eq!(sleeping_flags(&mut server), [(1, true)]);
         server.wake(1);
 
-        server.spawn_mob(
-            MobKind::Zombie,
-            [foot[0] as f64 + 0.5 + 8.0, y as f64, foot[2] as f64 + 0.5],
-        );
-        use_at(&mut server, 1, foot);
-        assert!(server.clients[&1].sleep.is_none());
-        assert_eq!(texts(&mut server), ["近くに敵がいるので眠れません"]);
-        server.mobs.clear();
+        for kind in [MobKind::Zombie, MobKind::Spider] {
+            server.spawn_mob(
+                kind,
+                [foot[0] as f64 + 0.5 + 8.0, y as f64, foot[2] as f64 + 0.5],
+            );
+            use_at(&mut server, 1, foot);
+            assert!(server.clients[&1].sleep.is_none());
+            assert_eq!(texts(&mut server), ["近くに敵がいるので眠れません"]);
+            server.mobs.clear();
+        }
         server.spawn_mob(
             MobKind::Skeleton,
             [foot[0] as f64 + 0.5 + 8.1, y as f64, foot[2] as f64 + 0.5],

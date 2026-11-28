@@ -1,10 +1,12 @@
 import type { Vec3 } from "./model.ts";
 
 /** MobKind follows protocol order. The player and the sheared variant have their own pack assets. */
-export const mobNames = ["cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper"] as const;
-export const entityNames = [...mobNames, "player"] as const;
-export type EntityName = typeof entityNames[number];
-export type EntityAssetKey = EntityName | "sheep/sheared";
+const texturedMobs = ["cow", "pig", "chicken", "sheep", "zombie", "skeleton", "creeper"] as const;
+export const mobNames = [...texturedMobs, "spider"] as const;
+// The spider uses the existing hitbox marker until its pack asset is added.
+export const entityNames = [...texturedMobs, "player"] as const;
+export type EntityName = typeof mobNames[number] | "player";
+export type EntityAssetKey = typeof entityNames[number] | "sheep/sheared";
 export const entityAssetKeys = [...entityNames, "sheep/sheared"] as const;
 
 const quadrupedWalk = (pitch: number) => ({ leg0: pitch, leg1: -pitch, leg2: -pitch, leg3: pitch });
@@ -27,6 +29,7 @@ export const entityPoses: Readonly<Record<EntityName, Pose>> = {
 	},
 	skeleton: { walkPitch: humanoidWalk(30, 21), restRotation: { rightArm: [-18, 0, 0] } },
 	creeper: { walkPitch: quadrupedWalk(23) },
+	spider: { walkPitch: {} },
 	player: { walkPitch: humanoidWalk(25, 20) },
 };
 

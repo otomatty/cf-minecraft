@@ -275,12 +275,17 @@ mod tests {
         source.spawn_mob(MobKind::Pig, pos);
         source.spawn_mob(MobKind::Chicken, pos);
         source.spawn_mob(MobKind::Sheep, pos);
-        for kind in [MobKind::Zombie, MobKind::Skeleton, MobKind::Creeper] {
+        for kind in [
+            MobKind::Zombie,
+            MobKind::Skeleton,
+            MobKind::Creeper,
+            MobKind::Spider,
+        ] {
             source.spawn_mob(kind, pos);
         }
         source
             .arrows
-            .insert(9, crate::arrow::Arrow::aimed(pos, pos));
+            .insert(10, crate::arrow::Arrow::aimed(pos, pos));
         let bytes = save(&mut source);
 
         let restore = || {

@@ -721,7 +721,7 @@ mod tests {
             (155, 0),
             (155, 2),
             (156, 0),
-            (156, 9),
+            (156, 10),
             (157, 21),
         ] {
             for (data, offset) in [(&v5, offset), (&save, offset + 100)] {
@@ -1178,11 +1178,13 @@ mod crafting_tests {
     #[test]
     fn table_crafts_bow_and_arrows_from_their_ingredients() {
         let stick = stack(items::by_name("stick").unwrap(), 1);
-        let wool = stack(items::by_name("white_wool").unwrap(), 1);
+        let thread = stack(items::by_name("string").unwrap(), 1);
         let feather = stack(items::by_name("feather").unwrap(), 1);
         for (table, result, count) in [
             (
-                [None, stick, wool, stick, None, wool, None, stick, wool],
+                [
+                    None, stick, thread, stick, None, thread, None, stick, thread,
+                ],
                 "bow",
                 1,
             ),
@@ -1201,11 +1203,40 @@ mod crafting_tests {
             assert_eq!(inv.cursor, stack(items::by_name(result).unwrap(), count));
             assert_eq!(inv.table, [None; 9]);
         }
+        let wool = stack(items::by_name("white_wool").unwrap(), 1);
+        let old_bow = Inventory {
+            screen: Screen::CraftingTable { pos: [0; 3] },
+            table: [None, stick, wool, stick, None, wool, None, stick, wool],
+            ..Inventory::default()
+        };
+        assert_eq!(old_bow.result(), None);
         let inv = Inventory {
             crafting: [stick, None, feather, None],
             ..Inventory::default()
         };
         assert_eq!(inv.result(), None);
+    }
+
+    #[test]
+    fn four_string_craft_white_wool_in_both_grids() {
+        let thread = stack(items::by_name("string").unwrap(), 1);
+        let wool = stack(items::by_name("white_wool").unwrap(), 1);
+        let mut inv = Inventory {
+            crafting: [thread; 4],
+            ..Inventory::default()
+        };
+        inv.click(40, 0, false).unwrap();
+        assert_eq!(inv.cursor, wool);
+        assert_eq!(inv.crafting, [None; 4]);
+
+        let mut inv = Inventory {
+            screen: Screen::CraftingTable { pos: [0; 3] },
+            table: [thread, thread, None, thread, thread, None, None, None, None],
+            ..Inventory::default()
+        };
+        inv.click(50, 0, false).unwrap();
+        assert_eq!(inv.cursor, wool);
+        assert_eq!(inv.table, [None; 9]);
     }
 
     #[test]

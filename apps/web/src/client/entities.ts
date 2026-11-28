@@ -22,6 +22,7 @@ const mobHitboxes = [
 	{ width: 0.6, height: 1.95 },
 	{ width: 0.6, height: 1.99 },
 	{ width: 0.6, height: 1.7 },
+	{ width: 1.4, height: 0.9 },
 ] as const satisfies Record<MobKind, { width: number; height: number }>;
 
 interface MobPosition {
