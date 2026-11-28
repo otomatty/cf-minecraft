@@ -302,6 +302,11 @@ test("right-click opens a furnace unless Shift requests placement", () => {
     assert.equal(blockInteraction("furnace", true), "place");
 });
 
+test("right-click opens a chest unless Shift requests placement", () => {
+    assert.equal(blockInteraction("chest", false), "open");
+    assert.equal(blockInteraction("chest", true), "place");
+});
+
 test("wheat seeds require air above either farmland state and plant at age zero", () => {
 	const seed = core.itemRegistry().find(item => item.name === "wheat_seeds");
 	const wheat = id("wheat[age=0]");
@@ -371,7 +376,7 @@ test("filled bucket targets the adjacent air, flow, or short grass and respects 
 	for (const name of ["water", "glass", undefined]) {
 		assert.equal(bucketTarget("water_bucket", target, x => blockInfo(x === 0 ? "stone" : name), false), null);
 	}
-	for (const name of ["crafting_table", "furnace"]) {
+	for (const name of ["crafting_table", "furnace", "chest"]) {
 		const blockName = x => blockInfo(x === 0 ? name : "air");
 		assert.equal(bucketTarget("water_bucket", target, blockName, false), null);
 		assert.deepEqual(bucketTarget("water_bucket", target, blockName, true), [1, -2, 0]);

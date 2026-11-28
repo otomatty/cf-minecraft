@@ -51,11 +51,13 @@ const featuredColors = {
 	white_wool: [233, 233, 233], gray_wool: [110, 110, 110], brown_wool: [123, 76, 60], black_wool: [40, 40, 40],
 	farmland_dry: [130, 105, 83], farmland_moist: [74, 54, 40], wheat_ripe: [220, 177, 60],
 	oak_planks: [182, 119, 64], cobblestone: [112, 112, 112],
+	chest_top: [183, 123, 64], chest_side: [159, 101, 48], chest_front: [159, 101, 48],
 	glass: [192, 233, 250], water: [170, 170, 170], water_flow: [178, 178, 178],
 	red_flower: [242, 29, 36], yellow_flower: [238, 206, 35], short_grass: [168, 184, 84],
 	torch: [245, 171, 65],
 	lava: [242, 95, 22],
 };
+const chestFaces = ["chest_top", "chest_side", "chest_front"];
 
 function rgbaPng(width, height, pixel) {
 	const header = Buffer.alloc(13);
@@ -112,6 +114,10 @@ function fixturePng(name, item, color) {
 			return y === 12 ? [200, 130, 35, 255] : [25, 25, 25, 255];
 		}
 		let base = rgb;
+		if (chestFaces.includes(name) && !color) {
+			if (x === 0 || x === 15 || y === 0 || y === 15 || (name !== "chest_top" && y === 5)) base = [89, 52, 25];
+			if (name === "chest_front" && x >= 7 && x <= 8 && y >= 4 && y <= 7) base = [215, 184, 105];
+		}
 		if (name.endsWith("_flower") && y >= 8) base = [57, 151, 54];
 		if (name.startsWith("crafting_table_") && y < 2 && !color) base = [120, 120, 120];
 		if (ore && (x + 2 * y) % 11 === 0 && !color) {
@@ -425,6 +431,8 @@ async function fixtureZip({ names, spriteStart }, { colors = {}, artVariant = fa
 		if (name === "oak_leaves") {
 			atlas.oak_leaves = { textures: [path, folder + "leaves_oak_opaque"] };
 			images.push(["resource_pack/" + folder + "leaves_oak_opaque.png", fixturePng("oak_leaves_dense", false, colors.oak_leaves_dense)]);
+		} else if (chestFaces.includes(name)) {
+			terrain.chest_inventory ??= { textures: chestFaces.map(face => folder + face) };
 		} else atlas[name === "grass_block_side" ? "grass_side" : name] = { textures: path };
 		const tga = name === "grass_block_side" || name === "oak_leaves";
 		images.push(["resource_pack/" + path + (tga ? ".tga" : ".png"),

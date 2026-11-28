@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bindInventorySlot, containerScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
+import { bindInventorySlot, containerScreenVisible, updateClosePending, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, CHEST_ROWS, inventoryDisplayIndex, inventoryDisplay } from "./inventory-screen.ts";
 import { durabilityBar } from "./hotbar.ts";
 import { missingTile, textureIconPixels } from "./textures.ts";
 import { decodedFixturePack } from "../../test/texture-pack-fixture.mjs";
@@ -126,7 +126,7 @@ test("table display maps wire 41–50 without confusing materials, result and cu
 });
 
 
-for (const kind of [1, 2] as const) {
+for (const kind of [1, 2, 3] as const) {
 test(`container ${kind} reopens after close and use in one tick`, () => {
     let closePending = updateClosePending(false, { type: "close" });
     assert.equal(containerScreenVisible({ screen: kind, closePending }, kind), false);
@@ -188,6 +188,24 @@ test("furnace item and block textures are deterministic and distinct", () => {
         assert.notDeepEqual(pixels, missingTile);
         for (let j = 0; j < i; j++) assert.notDeepEqual(pixels, images[j]);
     }
+});
+
+test("chest display puts wire 54–80 above inventory and hotbar and keeps cursor separate", () => {
+    const slots = Array.from({ length: 81 }, (_, i) => ({ item: i + 1, count: 1, damage: i }));
+    const before = structuredClone(slots);
+    const view = inventoryDisplay(slots, 3);
+    const chestSlots = Array.from({ length: 27 }, (_, i) => i + 54);
+    assert.deepEqual(CHEST_ROWS, [chestSlots, INVENTORY_ROWS[0], INVENTORY_ROWS[1]]);
+    assert.deepEqual(view.groups.map(group => group.map(({ slot }) => slot)), CHEST_ROWS);
+    for (const { slot, stack } of view.groups.flat()) {
+        assert.equal(inventoryDisplayIndex(slot, 3), slot);
+        assert.deepEqual(stack, slots[slot]);
+    }
+    assert.deepEqual(view.cursor, slots[41]);
+    assert.deepEqual(slots, before);
+    assert.ok(inventoryDisplay([], 3).groups.flat().every(s => s.stack === null));
+    assert.equal(containerScreenVisible({ screen: 2, closePending: false }, 3), false);
+    assert.equal(containerScreenVisible({ screen: 3, closePending: false }, 2), false);
 });
 
 
