@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 /// Item ID, count, and accumulated damage.
 pub type ItemStack = (u16, u8, u16);
 
@@ -232,6 +232,8 @@ fn write_vitals(w: &mut Writer, health: u8, air: u16, dead: bool, cause: u8, foo
 
 /// Senders clamp furnace display timers to this value, and decoding rejects larger values.
 pub const MAX_FURNACE_DISPLAY_TICKS: u16 = 1600;
+pub const CHEST_SLOT_START: u8 = 54;
+pub const CHEST_SLOT_COUNT: usize = 27;
 
 /// Client to server.
 #[derive(Clone, Debug, PartialEq)]
@@ -419,6 +421,7 @@ pub enum S2C {
     },
     Inventory {
         furnace: [Option<ItemStack>; 3],
+        chest: Box<[Option<ItemStack>; CHEST_SLOT_COUNT]>,
         burn: u16,
         total: u16,
         progress: u16,
@@ -649,7 +652,7 @@ impl C2S {
             },
             id::C2S_CLICK_SLOT => {
                 let (slot, button, shift) = (r.u8()?, r.u8()?, r.u8()?);
-                if slot > 53 || button > 1 || shift > 1 {
+                if slot >= CHEST_SLOT_START + CHEST_SLOT_COUNT as u8 || button > 1 || shift > 1 {
                     return Err(DecodeError);
                 }
                 C2S::ClickSlot {
@@ -925,6 +928,7 @@ impl S2C {
 
             S2C::Inventory {
                 furnace,
+                chest,
                 burn,
                 total,
                 progress,
@@ -949,6 +953,9 @@ impl S2C {
                 w.u16(*burn);
                 w.u16(*total);
                 w.u16(*progress);
+                for &slot in chest.iter() {
+                    write_stack(&mut w, slot);
+                }
             }
 
             S2C::Welcome {
@@ -1200,7 +1207,7 @@ impl S2C {
                     *slot = read_stack(&mut r)?;
                 }
                 let screen = r.u8()?;
-                if screen > 2 {
+                if screen > 3 {
                     return Err(DecodeError);
                 }
                 let mut table = [None; 9];
@@ -1219,8 +1226,16 @@ impl S2C {
                 {
                     return Err(DecodeError);
                 }
+                let mut chest = Box::new([None; CHEST_SLOT_COUNT]);
+                for slot in chest.iter_mut() {
+                    *slot = read_stack(&mut r)?;
+                }
+                if screen != 3 && chest.iter().any(Option::is_some) {
+                    return Err(DecodeError);
+                }
                 S2C::Inventory {
                     furnace,
+                    chest,
                     burn,
                     total,
                     progress,
@@ -1639,6 +1654,7 @@ mod tests {
             S2C::EntityCount { id: 1, count: 3 },
             S2C::EntityRemove { id: 1 },
             S2C::Inventory {
+                chest: Box::default(),
                 furnace: [None; 3],
                 burn: 0,
                 total: 0,
@@ -1720,7 +1736,7 @@ mod tests {
             assert_eq!(C2S::decode(&packet.encode()), Ok(packet));
         }
         for bytes in [
-            vec![id::C2S_CLICK_SLOT, 54, 0, 0],
+            vec![id::C2S_CLICK_SLOT, 81, 0, 0],
             vec![id::C2S_CLICK_SLOT, 0, 2, 0],
             vec![id::C2S_CLICK_SLOT, 0, 0, 2],
             vec![id::C2S_CLOSE_INVENTORY, 0],
@@ -1728,6 +1744,7 @@ mod tests {
             assert!(C2S::decode(&bytes).is_err());
         }
         let packet = S2C::Inventory {
+            chest: Box::default(),
             furnace: [None; 3],
             burn: 0,
             total: 0,
@@ -1771,7 +1788,7 @@ mod tests {
 
     #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -2001,7 +2018,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -2039,7 +2056,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -2063,7 +2080,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];
@@ -2192,6 +2209,7 @@ mod tests {
             assert_eq!(C2S::decode(&p.encode()), Ok(p));
         }
         let p = S2C::Inventory {
+            chest: Box::default(),
             furnace: [None; 3],
             burn: 0,
             total: 0,
@@ -2206,7 +2224,7 @@ mod tests {
         };
         let bytes = p.encode();
         assert_eq!(S2C::decode(&bytes), Ok(p));
-        for screen in 3..=255 {
+        for screen in 4..=255 {
             let mut bad = bytes.clone();
             bad[213] = screen;
             assert!(S2C::decode(&bad).is_err());
@@ -2229,6 +2247,7 @@ mod tests {
     #[test]
     fn furnace_packet_checks_stacks_timers_and_inactive_payload() {
         let p = S2C::Inventory {
+            chest: Box::default(),
             furnace: [
                 Some((items_id("iron_ore"), 3, 0)),
                 None,
@@ -2264,8 +2283,57 @@ mod tests {
         }
     }
     #[test]
+    fn chest_packets_validate_slots_screen_damage_and_exact_length() {
+        for slot in 54..=80 {
+            let packet = C2S::ClickSlot {
+                slot,
+                button: 1,
+                shift: true,
+            };
+            assert_eq!(C2S::decode(&packet.encode()), Ok(packet));
+        }
+        assert!(C2S::decode(&[id::C2S_CLICK_SLOT, 81, 0, 0]).is_err());
+
+        let tool = world::items::by_name("wooden_pickaxe").unwrap();
+        let mut chest = [None; CHEST_SLOT_COUNT];
+        chest[0] = Some((1, 64, 0));
+        chest[26] = Some((tool, 1, 28));
+        let packet = S2C::Inventory {
+            chest: Box::new(chest),
+            furnace: [None; 3],
+            burn: 0,
+            total: 0,
+            progress: 0,
+            screen: 3,
+            table: [None; 9],
+            selected: 0,
+            slots: vec![None; 36],
+            crafting: [None; 4],
+            result: None,
+            cursor: None,
+        };
+        let bytes = packet.encode();
+        assert_eq!(bytes.len(), 280 + 27 * 5);
+        assert_eq!(&bytes[280..285], &[0, 1, 64, 0, 0]);
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 28]);
+        assert_eq!(S2C::decode(&bytes), Ok(packet));
+        for (offset, value) in [(213, 0), (213, 1), (213, 2), (213, 4), (282, 65), (414, 48)] {
+            let mut bad = bytes.clone();
+            bad[offset] = value;
+            assert!(S2C::decode(&bad).is_err(), "offset {offset}");
+        }
+        for end in 280..bytes.len() {
+            assert!(S2C::decode(&bytes[..end]).is_err());
+        }
+        let mut extra = bytes;
+        extra.push(0);
+        assert!(S2C::decode(&extra).is_err());
+    }
+
+    #[test]
     fn inventory_packet_rejects_malformed_lengths_and_values() {
         let p = S2C::Inventory {
+            chest: Box::default(),
             furnace: [None; 3],
             burn: 0,
             total: 0,
@@ -2289,6 +2357,7 @@ mod tests {
         assert!(S2C::decode(&bad).is_err());
         assert!(S2C::decode(&bytes[..bytes.len() - 1]).is_err());
         let p = S2C::Inventory {
+            chest: Box::default(),
             furnace: [None; 3],
             burn: 0,
             total: 0,
@@ -2303,6 +2372,7 @@ mod tests {
         };
         assert_eq!(S2C::decode(&p.encode()), Ok(p));
         let mut bad = S2C::Inventory {
+            chest: Box::default(),
             furnace: [None; 3],
             burn: 0,
             total: 0,
@@ -2325,7 +2395,7 @@ mod tests {
     }
     #[test]
     fn protocol_30_round_trips_use_entity_sheep_appearance_and_shear() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         let id = 0x8000_0001;
         let use_entity = C2S::UseEntity { id };
         assert_eq!(use_entity.encode(), [0x13, 0x80, 0, 0, 1]);
@@ -2364,6 +2434,7 @@ mod tests {
         let mut slots = vec![None; 36];
         slots[0] = stack;
         let inventory = |slots| S2C::Inventory {
+            chest: Box::default(),
             furnace: [stack, None, None],
             burn: 0,
             total: 0,

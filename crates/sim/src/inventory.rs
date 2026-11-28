@@ -1,5 +1,5 @@
 //! Deterministic player inventory. Slot order is also insertion order.
-use protocol::PlayerVitals;
+use protocol::{PlayerVitals, CHEST_SLOT_COUNT, CHEST_SLOT_START};
 use world::{
     io::{DecodeError, Reader, Writer},
     items,
@@ -66,6 +66,9 @@ pub enum Screen {
         pos: [i32; 3],
     },
     CraftingTable {
+        pos: [i32; 3],
+    },
+    Chest {
         pos: [i32; 3],
     },
 }
@@ -186,7 +189,7 @@ impl Inventory {
     }
 
     pub fn result(&self) -> Option<Stack> {
-        if matches!(self.screen, Screen::Furnace { .. }) {
+        if matches!(self.screen, Screen::Furnace { .. } | Screen::Chest { .. }) {
             return None;
         }
         matching_recipe(
@@ -228,7 +231,7 @@ impl Inventory {
         }
     }
     pub fn click(&mut self, slot: u8, button: u8, shift: bool) -> Result<(), DecodeError> {
-        if matches!(self.screen, Screen::Furnace { .. }) {
+        if matches!(self.screen, Screen::Furnace { .. } | Screen::Chest { .. }) {
             return Err(DecodeError);
         }
         let base = if self.screen == Screen::None { 36 } else { 41 };
@@ -305,34 +308,74 @@ impl Inventory {
             } else {
                 &mut self.table[index - 41]
             };
-            match (self.cursor, *target) {
-                (None, Some(s)) => {
-                    let count = if button == 0 {
-                        s.count
-                    } else {
-                        s.count.div_ceil(2)
-                    };
-                    self.cursor = Some(Stack { count, ..s });
-                    subtract(target, count);
-                }
-                (Some(c), t) if t.is_none_or(|s| s.matches_item_and_damage(c.item, c.damage)) => {
-                    let present = t.map_or(0, |s| s.count);
-                    let count = (items::info(c.item).unwrap().max_stack - present)
-                        .min(if button == 0 { c.count } else { 1 });
-                    if count > 0 {
-                        *target = Some(Stack {
-                            count: present + count,
-                            ..c
-                        });
-                        subtract(&mut self.cursor, count);
-                    }
-                }
-                (Some(_), Some(_)) => std::mem::swap(target, &mut self.cursor),
-                _ => {}
-            }
+            Self::click_stack(&mut self.cursor, target, button);
         }
         Ok(())
     }
+
+    fn click_stack(cursor: &mut Option<Stack>, target: &mut Option<Stack>, button: u8) {
+        match (*cursor, *target) {
+            (None, Some(s)) => {
+                let count = if button == 0 {
+                    s.count
+                } else {
+                    s.count.div_ceil(2)
+                };
+                *cursor = Some(Stack { count, ..s });
+                subtract(target, count);
+            }
+            (Some(c), t) if t.is_none_or(|s| s.matches_item_and_damage(c.item, c.damage)) => {
+                let present = t.map_or(0, |s| s.count);
+                let count = (items::info(c.item).unwrap().max_stack - present)
+                    .min(if button == 0 { c.count } else { 1 });
+                if count > 0 {
+                    *target = Some(Stack {
+                        count: present + count,
+                        ..c
+                    });
+                    subtract(cursor, count);
+                }
+            }
+            (Some(_), Some(_)) => std::mem::swap(target, cursor),
+            _ => {}
+        }
+    }
+
+    pub fn click_chest(
+        &mut self,
+        chest: &mut [Option<Stack>; CHEST_SLOT_COUNT],
+        slot: u8,
+        button: u8,
+        shift: bool,
+    ) -> Result<(), DecodeError> {
+        if button > 1 {
+            return Err(DecodeError);
+        }
+        let (source, destination) = if usize::from(slot) < SLOT_COUNT {
+            (&mut self.slots[usize::from(slot)], &mut chest[..])
+        } else {
+            let index = slot.checked_sub(CHEST_SLOT_START).ok_or(DecodeError)?;
+            (
+                chest.get_mut(usize::from(index)).ok_or(DecodeError)?,
+                &mut self.slots[..],
+            )
+        };
+        if shift {
+            if let Some(stack) = *source {
+                let remaining = add_slots(
+                    destination,
+                    stack.item,
+                    u32::from(stack.count),
+                    stack.damage,
+                );
+                subtract(source, stack.count - remaining as u8);
+            }
+        } else {
+            Self::click_stack(&mut self.cursor, source, button);
+        }
+        Ok(())
+    }
+
     pub fn click_furnace(
         &mut self,
         f: &mut crate::furnace::Furnace,
@@ -928,6 +971,24 @@ mod crafting_tests {
         })
     }
     #[test]
+    fn chest_recipe_consumes_eight_planks_and_only_fits_the_table() {
+        let plank = stack(items::by_name("oak_planks").unwrap(), 1);
+        let chest = stack(items::by_name("chest").unwrap(), 1);
+        let mut inv = Inventory {
+            crafting: [stack(plank.unwrap().item, 2); 4],
+            table: [plank; 9],
+            ..Inventory::default()
+        };
+        inv.table[4] = None;
+        assert_ne!(inv.result(), chest);
+        inv.screen = Screen::CraftingTable { pos: [0; 3] };
+        assert_eq!(inv.result(), chest);
+        inv.click(50, 0, false).unwrap();
+        assert_eq!(inv.cursor, chest);
+        assert_eq!(inv.table, [None; 9]);
+    }
+
+    #[test]
     fn matching_trims_offsets_shapeless_and_rejects_wrong_shapes() {
         for i in 0..4 {
             let mut grid = [None; 4];
@@ -1345,5 +1406,84 @@ mod furnace_click_tests {
         inv.click_furnace(&mut f, 53, 0, false).unwrap();
         assert_eq!(f.slots[2], None);
         assert_eq!(inv.cursor, stack("coal", 1));
+    }
+}
+
+#[cfg(test)]
+mod chest_click_tests {
+    use super::*;
+
+    fn stack(name: &str, count: u8) -> Option<Stack> {
+        Some(Stack {
+            item: items::by_name(name).unwrap(),
+            count,
+            damage: 0,
+        })
+    }
+
+    #[test]
+    fn chest_clicks_pick_place_split_and_swap() {
+        let mut inv = Inventory {
+            screen: Screen::Chest { pos: [0; 3] },
+            ..Inventory::default()
+        };
+        let mut chest = [None; CHEST_SLOT_COUNT];
+        chest[0] = stack("stone", 5);
+        inv.click_chest(&mut chest, 54, 1, false).unwrap();
+        assert_eq!(inv.cursor, stack("stone", 3));
+        assert_eq!(chest[0], stack("stone", 2));
+        inv.click_chest(&mut chest, 80, 1, false).unwrap();
+        assert_eq!(chest[26], stack("stone", 1));
+        assert_eq!(inv.cursor, stack("stone", 2));
+        inv.click_chest(&mut chest, 0, 0, false).unwrap();
+        assert_eq!(inv.slots[0], stack("stone", 2));
+        assert_eq!(inv.cursor, None);
+        inv.click_chest(&mut chest, 80, 0, false).unwrap();
+        assert_eq!(chest[26], None);
+        assert_eq!(inv.cursor, stack("stone", 1));
+        chest[26] = stack("dirt", 5);
+        inv.click_chest(&mut chest, 80, 0, false).unwrap();
+        assert_eq!(chest[26], stack("stone", 1));
+        assert_eq!(inv.cursor, stack("dirt", 5));
+        inv.click_chest(&mut chest, 79, 0, false).unwrap();
+        assert_eq!(chest[25], stack("dirt", 5));
+        assert_eq!(inv.cursor, None);
+    }
+
+    #[test]
+    fn chest_shift_merges_before_empty_slots_and_leaves_overflow_at_source() {
+        let mut inv = Inventory {
+            screen: Screen::Chest { pos: [0; 3] },
+            slots: [stack("dirt", 64); SLOT_COUNT],
+            ..Inventory::default()
+        };
+        let mut chest = [stack("dirt", 64); CHEST_SLOT_COUNT];
+        inv.slots[0] = stack("stone", 5);
+        inv.slots[9] = None;
+        inv.slots[35] = stack("stone", 63);
+        chest[0] = None;
+        chest[1] = None;
+        chest[26] = stack("stone", 62);
+        inv.click_chest(&mut chest, 0, 0, true).unwrap();
+        assert_eq!(chest[26], stack("stone", 64));
+        assert_eq!(chest[0], stack("stone", 3));
+        assert_eq!(chest[1], None);
+        assert_eq!(inv.slots[0], None);
+
+        inv.slots[0] = stack("dirt", 64);
+        inv.click_chest(&mut chest, 54, 0, true).unwrap();
+        assert_eq!(inv.slots[35], stack("stone", 64));
+        assert_eq!(inv.slots[9], stack("stone", 2));
+        assert_eq!(chest[0], None);
+
+        inv.click_chest(&mut chest, 80, 0, true).unwrap();
+        assert_eq!(inv.slots[9], stack("stone", 64));
+        assert_eq!(chest[26], stack("stone", 2));
+        chest[0] = stack("dirt", 64);
+        chest[1] = stack("dirt", 64);
+        chest[26] = stack("stone", 63);
+        inv.click_chest(&mut chest, 9, 0, true).unwrap();
+        assert_eq!(chest[26], stack("stone", 64));
+        assert_eq!(inv.slots[9], stack("stone", 63));
     }
 }

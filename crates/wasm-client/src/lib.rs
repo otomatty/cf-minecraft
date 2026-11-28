@@ -250,7 +250,7 @@ pub extern "C" fn client_new() {
         dead: false,
         death_cause: 0,
         selected: 0,
-        slots: vec![None; 54],
+        slots: vec![None; usize::from(protocol::CHEST_SLOT_START) + protocol::CHEST_SLOT_COUNT],
         screen: 0,
         furnace_times: [0; 3],
         seed: 0,
@@ -507,6 +507,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
 
         S2C::Inventory {
             furnace,
+            chest,
             burn,
             total,
             progress,
@@ -522,6 +523,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             slots.extend([result, cursor]);
             slots.extend(table);
             slots.extend(furnace);
+            slots.extend(*chest);
             st.furnace_times = [burn, total, progress];
             st.screen = screen;
             st.selected = selected;

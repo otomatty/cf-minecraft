@@ -647,6 +647,31 @@ mod tests {
     }
 
     #[test]
+    fn fluid_surface_height_matches_the_mesh_for_all_fluid_states() {
+        let mut p = empty();
+        let fluids = [blocks::WATER, blocks::LAVA]
+            .into_iter()
+            .chain(blocks::FLOWING_WATER..=blocks::FALLING_WATER)
+            .chain(blocks::FLOWING_LAVA..=blocks::FALLING_LAVA);
+        for state in fluids {
+            p[padded_index(5, 5, 5)] = state;
+            for above in [blocks::AIR, blocks::WATER, blocks::LAVA] {
+                p[padded_index(5, 6, 5)] = above;
+                let height = FluidTop::at(&p, 5, 5, 5, state).height();
+                assert_eq!(
+                    blocks::fluid_surface_height(state, above),
+                    Some(f64::from(height) / 144.0),
+                    "state {state}, above {above}"
+                );
+            }
+        }
+        assert_eq!(
+            blocks::fluid_surface_height(blocks::AIR, blocks::LAVA),
+            None
+        );
+    }
+
+    #[test]
     fn water_top_and_side_upper_edges_lower_to_eight_ninths_only_when_exposed() {
         let mut p = empty();
         p[padded_index(5, 5, 5)] = blocks::WATER;

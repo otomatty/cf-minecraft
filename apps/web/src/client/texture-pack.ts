@@ -44,6 +44,8 @@ const bindings = new Map<string, Binding>([
 	["yellow_flower", ["yellow_flower", "flower_dandelion"]], ["short_grass", ["tallgrass", "tallgrass"]],
 	["snow_block", ["snow", "snow"]], ["sandstone", ["sandstone_side", "sandstone_normal"]],
 	["coarse_dirt", ["coarse_dirt", "coarse_dirt"]], ["crafting_table_bottom", ["crafting_table_bottom", "planks_oak"]],
+	["chest_top", ["chest_inventory", "chest_top", 0]], ["chest_side", ["chest_inventory", "chest_side", 1]],
+	["chest_front", ["chest_inventory", "chest_front", 2]],
 	["furnace_front", ["furnace_front", "furnace_front_off"]], ["farmland_dry", ["farmland", "farmland_dry", 1]],
 	["farmland_moist", ["farmland", "farmland_wet"]], ["white_wool", ["wool", "wool_colored_white"]],
 	["gray_wool", ["wool_colored_gray", "wool_colored_gray"]],

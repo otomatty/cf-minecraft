@@ -1996,6 +1996,112 @@ async function furnaceSmelting() {
     } finally { await page.close(); }
 }
 
+async function chestStorage() {
+	const { page, errors } = await open(`server=local&world=e2e-chest-${run}&mode=creative&gen=flat&seed=2026&view=3&time=6000`);
+	try {
+		const { gameMode, generatorName, spawn } = await settle(page, "chest storage", chunksInView(3));
+		check(gameMode === "creative" && generatorName === "Flat", "chest: Flat creative world");
+		await resumePointerLock(page, "chest: initial pointer lock");
+		for (const [slot, name] of [[0, "chest"], [1, "iron_ore"]]) {
+			await page.keyboard.press(`Digit${slot + 1}`);
+			await page.waitForFunction(slot => window.__mc.stats().selectedSlot === slot, {}, slot);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => !document.getElementById("block-picker").hidden && !document.pointerLockElement);
+			await page.click(`#block-grid [data-block="${name}"]`);
+			await page.waitForFunction(name => document.querySelector("#hotbar canvas.selected")?.title === name, {}, name);
+			check(true, `chest: picker selects ${name}`);
+			await page.keyboard.press("KeyE");
+			await page.waitForFunction(() => document.getElementById("block-picker").hidden);
+			await resumePointerLock(page, `chest: resume after selecting ${name}`);
+		}
+		const target = await page.evaluate(([sx, sy, sz]) => {
+			const api = window.__mc;
+			for (let y = sy + 4; y >= sy - 8; y--) {
+				if (api.getBlock(sx - 1, y - 1, sz) !== 0 && api.getBlock(sx - 1, y, sz) === 0) return [sx - 1, y, sz];
+			}
+			throw new Error("chest: no ground in front of spawn");
+		}, spawn.map(Math.floor));
+		const aim = async ground => {
+			// Move the pointer before setting the camera so mouse movement cannot change the aim.
+			await page.mouse.move(640, 360);
+			await page.evaluate(([x, y, z], ground) => {
+				window.__mc.setCamera(x + 1.5, y + 1.62, z + 0.5, 90, Math.atan2(ground ? 2.12 : 1.12, 1) * 180 / Math.PI);
+			}, target, ground);
+			await page.waitForFunction(([x, y, z], ground) => {
+				const api = window.__mc;
+				const c = api.stats().camera, pitch = c.pitch * Math.PI / 180;
+				const hit = api.raycast([c.x, c.y, c.z], [-Math.cos(pitch), -Math.sin(pitch), 0], 6);
+				return hit?.x === x && hit?.y === (ground ? y - 1 : y) && hit?.z === z && (!ground || hit.face === 1);
+			}, {}, target, ground);
+		};
+		await page.keyboard.press("Digit1");
+		await page.waitForFunction(() => window.__mc.stats().selectedSlot === 0);
+		await aim(true);
+		await page.mouse.click(640, 360, { button: "right" });
+		await page.waitForFunction(target => window.__mc.getBlock(...target) === window.__mc.stateId("chest"), {}, target);
+		check(true, "chest: places chest on the ground");
+
+		const openChest = async () => {
+			await aim(false);
+			await page.mouse.click(640, 360, { button: "right" });
+			await page.waitForFunction(() => !document.getElementById("chest-screen").hidden
+				&& window.__mc.stats().screen === 3 && !document.pointerLockElement);
+		};
+		await openChest();
+		check(true, "chest: right-click opens chest screen");
+		check(await page.$eval("#chest-screen", screen => {
+			const groups = [...screen.querySelectorAll(".inventory-slots")];
+			const slots = groups.map(group => [...group.querySelectorAll("[data-slot]")].map(button => Number(button.dataset.slot)));
+			return screen.querySelector("h2")?.textContent === "チェスト" && groups.length === 3
+				&& getComputedStyle(groups[0]).gridTemplateColumns.split(" ").length === 9
+				&& [[54, 27], [9, 27], [0, 9]].every(([start, length], i) =>
+					slots[i].length === length && slots[i].every((slot, j) => slot === start + j));
+		}), "chest: shows 27 chest slots in nine columns above inventory and hotbar");
+		const slotButton = slot => `#chest-screen [data-slot="${slot}"]`;
+		const waitForSlot = (slot, count, name) => page.waitForFunction((selector, count, name) => {
+			const canvas = document.querySelector(selector);
+			return canvas?.dataset.count === String(count) && (!name || canvas.title === name);
+		}, {}, `${slotButton(slot)} canvas`, count, name);
+		await waitForSlot(1, 1, "iron_ore");
+		await page.click(slotButton(1));
+		await waitForSlot(1, 0);
+		await page.click(slotButton(54));
+		await waitForSlot(54, 1, "iron_ore");
+		check(true, "chest: moves iron ore from hotbar into slot 54");
+
+		const shiftClick = async slot => {
+			await page.keyboard.down("ShiftLeft");
+			try { await page.click(slotButton(slot)); }
+			finally { await page.keyboard.up("ShiftLeft"); }
+		};
+		await shiftClick(54);
+		await waitForSlot(54, 0);
+		const oreSlot = await page.waitForFunction(() => {
+			for (const button of document.querySelectorAll("#chest-screen [data-slot]")) {
+				const slot = Number(button.dataset.slot);
+				const canvas = button.querySelector("canvas");
+				if (slot < 36 && canvas.title === "iron_ore" && canvas.dataset.count === "1") return { slot };
+			}
+			return false;
+		});
+		check(true, "chest: shift-click moves iron ore back into inventory");
+		await shiftClick((await oreSlot.jsonValue()).slot);
+		await waitForSlot(54, 1, "iron_ore");
+
+		await page.click("#chest-screen > button:last-child");
+		await page.waitForFunction(() => document.getElementById("chest-screen").hidden && window.__mc.stats().screen === 0);
+		check(true, "chest: closes chest screen");
+		await resumePointerLock(page, "chest: resume after closing chest");
+		await openChest();
+		await waitForSlot(54, 1, "iron_ore");
+		check(true, "chest: iron ore remains in slot 54 after reopening");
+		check(errors.length === 0, "chest: no page errors", errors.join(" | "));
+	} catch (err) {
+		await diagnoseFailure(page, "chest", err);
+		throw err;
+	} finally { await page.close(); }
+}
+
 async function farming() {
 	const { page, errors } = await open(`server=local&world=e2e-farm-${run}&mode=creative&gen=flat&seed=2026&view=2&time=6000`);
 	try {
@@ -3569,6 +3675,7 @@ try {
 	await leafDecay();
 	await farming();
 	await furnaceSmelting();
+	await chestStorage();
 	await dayNight();
 	await torches();
 	await undergroundLighting();

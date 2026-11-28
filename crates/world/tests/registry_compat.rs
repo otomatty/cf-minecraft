@@ -57,12 +57,13 @@ fn registry_matches_pre_generation_snapshot() {
             GRAY_WOOL,
             BROWN_WOOL,
             BLACK_WOOL,
+            CHEST,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 83, 84, 85, 14
+            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 83, 84, 85, 86, 14
         ]
     );
     for state in 0..COUNT {
@@ -287,7 +288,7 @@ fn new_wool_and_shears_are_appended_to_the_registries() {
     use world::items;
 
     assert_eq!(
-        &TEXTURES[44..],
+        &TEXTURES[44..50],
         [
             "white_wool",
             "torch",
@@ -315,13 +316,16 @@ fn new_wool_and_shears_are_appended_to_the_registries() {
         assert_eq!(items::info(item).unwrap().max_stack, 64);
     }
     assert_eq!(items::by_name("torch"), Some(78));
-    let shears = items::ITEMS.last().unwrap();
+    let shears = items::info(82).unwrap();
     assert_eq!(
         (shears.name, shears.id, shears.max_stack, shears.durability),
         ("shears", 82, 1, Some(120))
     );
     assert_eq!((shears.texture, shears.tool), (Some("shears"), None));
-    let recipe = world::recipes::RECIPES.last().unwrap();
+    let recipe = world::recipes::RECIPES
+        .iter()
+        .find(|recipe| recipe.item == shears.id)
+        .unwrap();
     let iron = items::by_name("iron_ingot").unwrap();
     let stick = items::by_name("stick").unwrap();
     assert_eq!(
@@ -335,4 +339,34 @@ fn new_wool_and_shears_are_appended_to_the_registries() {
         (3, 2, true, 82, 1)
     );
     assert_eq!(recipe.ingredients, [iron, 0, iron, 0, stick, 0]);
+}
+
+#[test]
+fn chest_is_appended_with_its_mining_fuel_and_face_metadata() {
+    use world::items;
+
+    assert!(is_full_opaque_cube(CHEST));
+    assert_eq!(properties(CHEST), []);
+    let chest = info(CHEST);
+    assert_eq!(chest.tool, Some(items::ToolKind::Axe));
+    assert_eq!((chest.min_tier, chest.dig_ticks), (0, Some(50)));
+    assert_eq!(
+        chest.tex.map(|index| TEXTURES[index as usize]),
+        [
+            "chest_top",
+            "chest_top",
+            "chest_front",
+            "chest_side",
+            "chest_side",
+            "chest_side",
+        ]
+    );
+    assert_eq!(
+        &TEXTURES[50..53],
+        ["chest_top", "chest_side", "chest_front"]
+    );
+    assert_eq!(items::by_name("chest"), Some(83));
+    assert_eq!(items::mining_drop(CHEST), Some(83));
+    let item = items::info(83).unwrap();
+    assert_eq!((item.block, item.fuel), (Some(CHEST), Some(320)));
 }

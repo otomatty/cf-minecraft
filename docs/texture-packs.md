@@ -12,6 +12,7 @@
 
 - ZIP の直下、または直下の1つのフォルダーに `resource_pack/` が必要です。`manifest.json` の `header` には Bedrock Samples の UUID と、非負の整数3個の `min_engine_version` が必要です。`bedrock-samples-v…-full.zip` の版の先頭3要素が一致すればファイル名の版を表示し、プレビューの接尾辞も引き継ぎます。それ以外では `min_engine_version` を表示します。
 - `resource_pack/textures/` の `terrain_texture.json` と `item_texture.json` を使い、ゲームに対応するブロック面とアイテムの画像を取り出します。画像を取得するには `-full.zip` を選びます。
+- チェストのブロック面は `chest_inventory` の0番目（`chest_top`）、1番目（`chest_side`）、2番目（`chest_front`）を使います。アイテムのアイコンもブロックの面から描画します。
 - PNG を優先し、同じパスに PNG がなければカラーマップなしの32ビット TGA（非圧縮・RLE）を使います。ブロックとアイテムは画像の先頭の正方形を最近傍で 16 × 16 に変換します。水の縦並び画像は最大32コマを取り込み、元のコマ数に応じて繰り返します。草の側面はパックの土と草の重ね画像を合成し、バイオームの草色を使います。
 
 - エンティティのクライアント定義から画像のパスとモデルの識別子を取得する。スキンは元の寸法で保存する。モデルは `models/` の旧形式（継承を含む）と現行の `minecraft:geometry` の形式に対応する。[モブの描画アセット](entities.md#モブの描画アセット)

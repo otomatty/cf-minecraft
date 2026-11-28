@@ -1,4 +1,4 @@
-import { bindInventorySlot, containerScreenVisible, updateClosePending, inventoryDisplay, INVENTORY_ROWS, TABLE_ROWS, FURNACE_ROWS, type InventoryScreenKind } from "./inventory-screen.ts";
+import { bindInventorySlot, containerScreenVisible, updateClosePending, inventoryDisplay, SCREEN_ROWS, type InventoryScreenKind } from "./inventory-screen.ts";
 import { GameAudio } from "./audio/engine.ts";
 import { VOLUME_CONTROLS } from "./audio/events.ts";
 import { WorldAudio } from "./audio/world-audio.ts";
@@ -343,11 +343,11 @@ async function main(): Promise<void> {
 			if (id === S2C.Inventory) {
 				syncInventory();
 				closePending = updateClosePending(closePending, { type: "inventory", screen: core.screen });
-				const kind = !core.dead && ([1, 2] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
+				const kind = !core.dead && ([1, 2, 3] as const).find(kind => containerScreenVisible({ screen: core.screen, closePending }, kind));
 				if (kind) {
-					const view = kind === 1 ? tableView : furnaceView;
+					const view = kind === 3 ? chestView : kind === 2 ? furnaceView : tableView;
 					if (view.screen.hidden) openInventoryScreen(kind);
-				} else if (!tableScreen.hidden || !furnaceScreen.hidden) closeInventoryScreen(false);
+				} else if (!tableScreen.hidden || !furnaceScreen.hidden || !chestScreen.hidden) closeInventoryScreen(false);
 			}
 			if (id === S2C.BlockUpdate) {
 				const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -854,25 +854,37 @@ async function main(): Promise<void> {
 
 	function createInventoryScreen(kind: InventoryScreenKind) {
 		const screen = document.createElement("section");
-		screen.id = kind === 2 ? "furnace-screen" : kind === 1 ? "crafting-table-screen" : "inventory-screen";
+		screen.id = ["inventory-screen", "crafting-table-screen", "furnace-screen", "chest-screen"][kind];
 		screen.className = "inventory-screen";
 		screen.setAttribute("role", "dialog");
 		screen.setAttribute("aria-modal", "true");
-		screen.setAttribute("aria-label", kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリとクラフト");
+		const title = ["インベントリ / クラフト", "作業台", "かまど", "チェスト"][kind];
+		screen.setAttribute("aria-label", kind === 0 ? "インベントリとクラフト" : title);
 		screen.hidden = true;
 		const heading = document.createElement("h2");
-		heading.textContent = kind === 2 ? "かまど" : kind === 1 ? "作業台" : "インベントリ / クラフト";
+		heading.textContent = title;
 		screen.append(heading);
 		const buttons = new Map<number, { canvas: HTMLCanvasElement; count: HTMLSpanElement }>();
-		const rows = kind === 2 ? FURNACE_ROWS : kind === 1 ? TABLE_ROWS : INVENTORY_ROWS;
+		const labels = kind === 3 ? ["チェスト", "所持品", "ホットバー"]
+			: ["所持品", "ホットバー", kind === 2 ? "かまど（入力・燃料）" : "クラフト", "結果"];
 		const craftingRow = document.createElement("div");
 		craftingRow.className = "inventory-crafting";
-		for (const [index, row] of rows.entries()) {
+		for (const [index, row] of SCREEN_ROWS[kind].entries()) {
 			const group = document.createElement("div");
-			const label = ["所持品", "ホットバー", kind === 2 ? "かまど（入力・燃料）" : "クラフト", "結果"][index];
+			const label = labels[index];
+			const chestSlots = kind === 3 && index === 0;
+			const inputs = kind !== 3 && index === 2;
+			const result = kind !== 3 && index === 3;
 			group.setAttribute("aria-label", label);
-			group.className = `inventory-slots${index === 2 ? ` inventory-crafting-grid${kind === 2 ? " inventory-furnace-grid" : kind === 1 ? " inventory-table-grid" : ""}` : index === 3 ? " inventory-result" : ""}`;
-			if (index !== 3) {
+			group.className = "inventory-slots";
+			if (chestSlots) group.classList.add("inventory-chest-grid");
+			if (inputs) {
+				group.classList.add("inventory-crafting-grid");
+				if (kind === 2) group.classList.add("inventory-furnace-grid");
+				if (kind === 1) group.classList.add("inventory-table-grid");
+			}
+			if (result) group.classList.add("inventory-result");
+			if (!result && !chestSlots) {
 				const title = document.createElement("h3");
 				title.textContent = label;
 				screen.append(title);
@@ -894,10 +906,10 @@ async function main(): Promise<void> {
 				buttons.set(slot,{canvas,count});
 				group.append(button);
 			}
-			if (index === 2) {
+			if (inputs) {
 				craftingRow.append(group);
 				screen.append(craftingRow);
-			} else if (index === 3) {
+			} else if (result) {
 				const arrow = document.createElement("span");
 				arrow.textContent = "→";
 				arrow.setAttribute("aria-hidden", "true");
@@ -937,6 +949,8 @@ async function main(): Promise<void> {
 	const tableScreen = tableView.screen;
 	const furnaceView = createInventoryScreen(2);
 	const furnaceScreen = furnaceView.screen;
+	const chestView = createInventoryScreen(3);
+	const chestScreen = chestView.screen;
 	const cursorIcon = document.createElement("div");
 	cursorIcon.style.cssText = "position:fixed;pointer-events:none;z-index:30;color:white;text-shadow:1px 1px black";
 	const cursorCanvas = document.createElement("canvas");
@@ -950,7 +964,7 @@ async function main(): Promise<void> {
 		cursorIcon.style.top = `${event.clientY+12}px`;
 	});
 	function paintInventoryScreen(): void {
-		const active = !furnaceScreen.hidden ? furnaceView : !tableScreen.hidden ? tableView : inventoryView;
+		const active = !chestScreen.hidden ? chestView : !furnaceScreen.hidden ? furnaceView : !tableScreen.hidden ? tableView : inventoryView;
 		const display = inventoryDisplay(core.inventorySlots, active.kind);
 		for (const group of display.groups) for (const {slot,stack} of group) {
 			const view = active.buttons.get(slot)!;
@@ -970,7 +984,7 @@ async function main(): Promise<void> {
 		}
 		paintItemIcon(cursorCanvas, display.cursor?.item, display.cursor?.damage, iconTint);
 		cursorCount.textContent = display.cursor && display.cursor.count >= 2 ? String(display.cursor.count) : "";
-		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden) || !display.cursor;
+		cursorIcon.hidden = (inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && chestScreen.hidden) || !display.cursor;
 	}
 	function openInventoryScreen(kind: InventoryScreenKind = 0): void {
 		closeChat(false);
@@ -978,6 +992,7 @@ async function main(): Promise<void> {
 		inventoryScreen.hidden = kind !== 0;
 		tableScreen.hidden = kind !== 1;
 		furnaceScreen.hidden = kind !== 2;
+		chestScreen.hidden = kind !== 3;
 		picker.hidden = true;
 		overlay.hidden = true;
 		paintInventoryScreen();
@@ -987,6 +1002,7 @@ async function main(): Promise<void> {
 		inventoryScreen.hidden = true;
 		tableScreen.hidden = true;
 		furnaceScreen.hidden = true;
+		chestScreen.hidden = true;
 		cursorIcon.hidden = true;
 	}
 	function closeInventoryScreen(send = true): void {
@@ -1087,7 +1103,7 @@ async function main(): Promise<void> {
 		else $("menu-message").textContent = "少し待ってから、もう一度押してください。";
 	}
 	overlay.addEventListener("click", event => {
-		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
+		if (joined && !closed && !failed && connection === "open" && picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && chestScreen.hidden && (menuView === "start" || event.target === overlay)) void requestPointerLock();
 	});
 	document.addEventListener("pointerlockchange", () => {
 		if (!locked()) clearInput();
@@ -1107,7 +1123,7 @@ async function main(): Promise<void> {
 		}
 		if (locked()) { $("menu-message").textContent = ""; overlay.hidden = true; return; }
 		if (autopilot) { overlay.hidden = true; return; }
-		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) { overlay.hidden = true; return; }
+		if (!picker.hidden || !inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden || !chestScreen.hidden) { overlay.hidden = true; return; }
 		showMenuView(joined && !closed && connection === "open" ? "menu" : "start");
 	});
 	document.addEventListener("mousemove", (e) => {
@@ -1175,7 +1191,7 @@ async function main(): Promise<void> {
 			}
 			return;
 		}
-		if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) {
+		if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden || !chestScreen.hidden) {
 			if (matchesKey(e.code, settings.keys.inventory) || e.code === "Escape") {
 				e.preventDefault();
 				if (!e.repeat) closeInventoryScreen();
@@ -1283,7 +1299,7 @@ async function main(): Promise<void> {
 	}
 	// Pointer lock can take effect before pointerlockchange hides the overlay.
 	const canInteract = () => locked() && joined && connection === "open" && !core.dead && !chatOpen && !failed
-		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden;
+		&& picker.hidden && inventoryScreen.hidden && tableScreen.hidden && furnaceScreen.hidden && chestScreen.hidden;
 	function aimedMobId(block: RayHit | null): number | null {
 		return mobBeforeBlock([camera.x, camera.y, camera.z], forward(camera.yaw, camera.pitch), renderMobs, REACH, block);
 	}
@@ -1717,7 +1733,7 @@ async function main(): Promise<void> {
 			iconTint = nextIconTint;
 			biomeIcons.clear();
 			paintHotbar(core.inventory);
-			if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden) paintInventoryScreen();
+			if (!inventoryScreen.hidden || !tableScreen.hidden || !furnaceScreen.hidden || !chestScreen.hidden) paintInventoryScreen();
 		}
 		const renderArrows = core.arrows.map(arrow => ({
 			position: interpolateEntity(arrow.previous, arrow.position, now - (entityReceivedAt.get(arrow.id) ?? now)),

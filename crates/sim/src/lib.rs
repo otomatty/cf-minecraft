@@ -40,7 +40,7 @@ pub enum GameMode {
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use protocol::{ChatKind, C2S, MAX_FURNACE_DISPLAY_TICKS, S2C};
+use protocol::{ChatKind, C2S, CHEST_SLOT_COUNT, MAX_FURNACE_DISPLAY_TICKS, S2C};
 use world::io::Reader;
 use world::{blocks, items, Chunk, Fnv64, World, HEIGHT, MIN_Y};
 use worldgen::Generator;
@@ -290,9 +290,12 @@ pub struct Stats {
     pub chunks_loaded_from_storage: u64,
 }
 
+type ChestSlots = [Option<Stack>; CHEST_SLOT_COUNT];
+
 struct SavedChunk {
     chunk: Chunk,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
+    chests: BTreeMap<[i32; 3], ChestSlots>,
     scheduled_blocks: Vec<(u16, [i32; 3])>,
     entities: Vec<entity_storage::SavedEntity>,
 }
@@ -301,6 +304,7 @@ pub struct Server {
     scheduled_blocks: BTreeSet<(i64, [i32; 3])>,
     scheduled_block_times: BTreeMap<[i32; 3], i64>,
     furnaces: BTreeMap<[i32; 3], furnace::Furnace>,
+    chests: BTreeMap<[i32; 3], ChestSlots>,
     entities: BTreeMap<u32, entity::Entity>,
     mobs: BTreeMap<u32, mob::Mob>,
     arrows: BTreeMap<u32, arrow::Arrow>,
@@ -343,6 +347,7 @@ impl Server {
             scheduled_blocks: BTreeSet::new(),
             scheduled_block_times: BTreeMap::new(),
             furnaces: BTreeMap::new(),
+            chests: BTreeMap::new(),
             entities: BTreeMap::new(),
             mobs: BTreeMap::new(),
             arrows: BTreeMap::new(),
@@ -393,9 +398,15 @@ impl Server {
         } else {
             furnace::Furnace::default()
         };
+        let chest = if let inventory::Screen::Chest { pos } = client.inventory.screen {
+            self.chests.get(&pos).copied().unwrap_or_default()
+        } else {
+            ChestSlots::default()
+        };
         self.outbox.push((
             id,
             S2C::Inventory {
+                chest: Box::new(chest.map(|s| s.map(Stack::wire))),
                 furnace: f.slots.map(|s| s.map(Stack::wire)),
                 burn: f.burn.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
                 total: f.total.min(u32::from(MAX_FURNACE_DISPLAY_TICKS)) as u16,
@@ -404,6 +415,7 @@ impl Server {
                     inventory::Screen::None => 0,
                     inventory::Screen::CraftingTable { .. } => 1,
                     inventory::Screen::Furnace { .. } => 2,
+                    inventory::Screen::Chest { .. } => 3,
                 },
                 table: client.inventory.table.map(|s| s.map(Stack::wire)),
                 crafting: client.inventory.crafting.map(|s| s.map(Stack::wire)),
@@ -1354,7 +1366,7 @@ impl Server {
                     self.stats.packets_rejected += 1;
                     return;
                 }
-                if !self.table_screen_valid(client) {
+                if !self.container_screen_valid(client) {
                     self.return_crafting(id);
                     self.stats.packets_rejected += 1;
                     return;
@@ -1365,7 +1377,15 @@ impl Server {
                     let before = f.clone();
                     let result = client.inventory.click_furnace(f, slot, button, shift);
                     if *f != before {
-                        self.furnace_changed(pos);
+                        self.container_changed(pos, inventory::Screen::Furnace { pos });
+                    }
+                    result
+                } else if let inventory::Screen::Chest { pos } = client.inventory.screen {
+                    let chest = self.chests.entry(pos).or_default();
+                    let before = *chest;
+                    let result = client.inventory.click_chest(chest, slot, button, shift);
+                    if *chest != before {
+                        self.container_changed(pos, inventory::Screen::Chest { pos });
                     }
                     result
                 } else {
@@ -1393,6 +1413,10 @@ impl Server {
                 let client = self.clients.get_mut(&id).unwrap();
                 client.inventory_dirty = true;
                 match target {
+                    Some(blocks::CHEST) => {
+                        self.chests.entry(pos).or_default();
+                        client.inventory.screen = inventory::Screen::Chest { pos };
+                    }
                     Some(blocks::FURNACE) => {
                         self.furnaces.entry(pos).or_default();
                         client.inventory.screen = inventory::Screen::Furnace { pos };
@@ -1541,11 +1565,15 @@ impl Server {
     fn change_block(&mut self, id: u32, [x, y, z]: [i32; 3], state: u16, drops: bool) {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
-                if old == blocks::FURNACE {
-                    self.drop_furnace_contents([x, y, z]);
-                }
-                if state == blocks::FURNACE {
-                    self.furnaces.insert([x, y, z], furnace::Furnace::default());
+                self.drop_block_contents([x, y, z], old);
+                match state {
+                    blocks::FURNACE => {
+                        self.furnaces.insert([x, y, z], furnace::Furnace::default());
+                    }
+                    blocks::CHEST => {
+                        self.chests.insert([x, y, z], ChestSlots::default());
+                    }
+                    _ => {}
                 }
 
                 self.abort_digs_at([x, y, z]);
@@ -1565,20 +1593,38 @@ impl Server {
         }
     }
 
-    fn drop_furnace_contents(&mut self, [x, y, z]: [i32; 3]) {
-        if let Some(furnace) = self.furnaces.remove(&[x, y, z]) {
-            for stack in furnace.slots.into_iter().flatten() {
-                self.spawn_item_stack(
-                    stack,
-                    [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
-                    [0.0, 0.1, 0.0],
-                    10,
-                );
+    fn drop_block_contents(&mut self, pos: [i32; 3], old: u16) {
+        match old {
+            blocks::FURNACE => {
+                if let Some(furnace) = self.furnaces.remove(&pos) {
+                    self.drop_container_slots(pos, furnace.slots);
+                }
             }
+            blocks::CHEST => {
+                if let Some(chest) = self.chests.remove(&pos) {
+                    self.drop_container_slots(pos, chest);
+                }
+            }
+            _ => {}
         }
     }
 
-    /// Break a block the way a survival dig does, including furnace contents,
+    fn drop_container_slots(
+        &mut self,
+        [x, y, z]: [i32; 3],
+        slots: impl IntoIterator<Item = Option<Stack>>,
+    ) {
+        for stack in slots.into_iter().flatten() {
+            self.spawn_item_stack(
+                stack,
+                [x as f64 + 0.5, y as f64 + 0.25, z as f64 + 0.5],
+                [0.0, 0.1, 0.0],
+                10,
+            );
+        }
+    }
+
+    /// Break a block as a survival dig would, including its container contents,
     /// without taking an item from a player's hand.
     fn break_exploded_block(&mut self, [x, y, z]: [i32; 3], drops: bool) {
         let Some(old) = self.world.set_block(x, y, z, blocks::AIR) else {
@@ -1587,9 +1633,7 @@ impl Server {
         if old == blocks::AIR {
             return;
         }
-        if old == blocks::FURNACE {
-            self.drop_furnace_contents([x, y, z]);
-        }
+        self.drop_block_contents([x, y, z], old);
         self.abort_digs_at([x, y, z]);
         if drops {
             self.spawn_mining_drops([x, y, z], old, true);
@@ -1973,9 +2017,13 @@ impl Server {
         dx * dx + dy * dy + dz * dz <= MAX_REACH * MAX_REACH
     }
 
-    fn table_screen_valid(&self, client: &Client) -> bool {
+    fn container_screen_valid(&self, client: &Client) -> bool {
         match client.inventory.screen {
             inventory::Screen::None => true,
+            inventory::Screen::Chest { pos: [x, y, z] } => {
+                self.world.get_block(x, y, z) == Some(blocks::CHEST)
+                    && self.within_reach(client.pos, [x, y, z])
+            }
             inventory::Screen::Furnace { pos: [x, y, z] } => {
                 self.world.get_block(x, y, z) == Some(blocks::FURNACE)
                     && self.within_reach(client.pos, [x, y, z])
@@ -1987,12 +2035,12 @@ impl Server {
         }
     }
 
-    fn furnace_changed(&mut self, pos: [i32; 3]) {
+    fn container_changed(&mut self, pos: [i32; 3], screen: inventory::Screen) {
         if let Some(c) = self.world.chunks.get_mut(&(pos[0] >> 4, pos[2] >> 4)) {
             c.dirty = true;
         }
         for c in self.clients.values_mut() {
-            if c.inventory.screen == (inventory::Screen::Furnace { pos }) {
+            if c.inventory.screen == screen {
                 c.inventory_dirty = true;
             }
         }
@@ -2011,14 +2059,14 @@ impl Server {
             }
         }
         for pos in changed {
-            self.furnace_changed(pos);
+            self.container_changed(pos, inventory::Screen::Furnace { pos });
         }
     }
     fn tick_screens(&mut self) {
         let close: Vec<_> = self
             .clients
             .iter()
-            .filter_map(|(&id, c)| (!self.table_screen_valid(c)).then_some(id))
+            .filter_map(|(&id, c)| (!self.container_screen_valid(c)).then_some(id))
             .collect();
         for id in close {
             self.return_crafting(id);
@@ -2126,9 +2174,13 @@ impl Server {
         }
         match Self::read_saved_chunk(cx, cz, bytes) {
             Ok(SavedChunk {
-                chunk, furnaces, ..
+                chunk,
+                furnaces,
+                chests,
+                ..
             }) => {
                 self.furnaces.extend(furnaces);
+                self.chests.extend(chests);
                 self.world.insert_chunk(chunk);
                 self.stats.chunks_generated += 1;
                 self.stats.chunks_generated_externally += 1;
@@ -2273,6 +2325,8 @@ impl Server {
             self.world.remove_chunk(cx, cz);
             self.furnaces
                 .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
+            self.chests
+                .retain(|p, _| (p[0] >> 4, p[2] >> 4) != (cx, cz));
             self.entities.retain(|_, e| e.chunk() != (cx, cz));
             self.mobs.retain(|_, mob| mob.chunk() != (cx, cz));
             self.arrows.retain(|_, arrow| arrow.chunk() != (cx, cz));
@@ -2313,6 +2367,7 @@ impl Server {
             Ok(SavedChunk {
                 chunk,
                 furnaces,
+                chests,
                 scheduled_blocks,
                 entities,
             }) if entities.len() as u64 <= self.remaining_entity_ids() => {
@@ -2320,6 +2375,7 @@ impl Server {
                     self.queue_scheduled_tick(pos, self.game_time.saturating_add(i64::from(delay)));
                 }
                 self.furnaces.extend(furnaces);
+                self.chests.extend(chests);
                 self.world.insert_chunk(chunk);
                 for entity in entities {
                     let id = self.allocate_entity_id().unwrap();
@@ -2394,6 +2450,20 @@ impl Server {
         }
         let c = (cx, cz);
         self.write_saved_entities(c, &mut w);
+        let chests: Vec<_> = self
+            .chests
+            .iter()
+            .filter(|(p, _)| (p[0] >> 4, p[2] >> 4) == c)
+            .collect();
+        w.varint(chests.len() as u32);
+        for (&[x, y, z], slots) in chests {
+            w.u8((x & 15) as u8);
+            w.i32(y);
+            w.u8((z & 15) as u8);
+            for &slot in slots {
+                Stack::write_slot(slot, &mut w, true);
+            }
+        }
         self.entity_changes.remove(&c);
         self.entity_dirty.remove(&c);
         if self.entity_unloads.remove(&c) && !players_keep_chunk(&self.clients, cx, cz) {
@@ -2470,11 +2540,45 @@ impl Server {
                 scheduled_blocks.push((delay, pos));
             }
         }
+        let entities = entity_storage::read_saved_entities((cx, cz), &mut r)?;
+        let mut chests = BTreeMap::new();
+        if r.remaining() > 0 {
+            const RECORD_LEN: usize = 6 + CHEST_SLOT_COUNT * 5;
+            let count = r.varint()? as usize;
+            if count > 16 * 16 * HEIGHT as usize || r.remaining() != count * RECORD_LEN {
+                return Err(DecodeError);
+            }
+            for _ in 0..count {
+                let x = r.u8()?;
+                let y = r.i32()?;
+                let z = r.u8()?;
+                if x >= 16
+                    || z >= 16
+                    || !(MIN_Y..MIN_Y + HEIGHT).contains(&y)
+                    || chunk.get(usize::from(x), y, usize::from(z)) != blocks::CHEST
+                {
+                    return Err(DecodeError);
+                }
+                let pos = [
+                    cx.wrapping_mul(16).wrapping_add(i32::from(x)),
+                    y,
+                    cz.wrapping_mul(16).wrapping_add(i32::from(z)),
+                ];
+                let mut slots = ChestSlots::default();
+                for slot in &mut slots {
+                    *slot = Stack::read_slot(&mut r, true)?;
+                }
+                if chests.insert(pos, slots).is_some() {
+                    return Err(DecodeError);
+                }
+            }
+        }
         Ok(SavedChunk {
             chunk,
             furnaces,
             scheduled_blocks,
-            entities: entity_storage::read_saved_entities((cx, cz), &mut r)?,
+            entities,
+            chests,
         })
     }
     pub fn dirty_chunks(&self) -> usize {
@@ -2522,9 +2626,11 @@ impl Server {
                 inventory::Screen::None => 0,
                 inventory::Screen::CraftingTable { .. } => 1,
                 inventory::Screen::Furnace { .. } => 2,
+                inventory::Screen::Chest { .. } => 3,
             });
-            if let inventory::Screen::CraftingTable { pos } | inventory::Screen::Furnace { pos } =
-                client.inventory.screen
+            if let inventory::Screen::CraftingTable { pos }
+            | inventory::Screen::Furnace { pos }
+            | inventory::Screen::Chest { pos } = client.inventory.screen
             {
                 for v in pos {
                     h.bytes(&v.to_be_bytes());
@@ -2567,6 +2673,17 @@ impl Server {
             f.write(&mut w, true);
             h.bytes(&w.finish());
         }
+        h.i64(self.chests.len() as i64);
+        for (pos, slots) in &self.chests {
+            for &v in pos {
+                h.i32(v);
+            }
+            let mut w = world::io::Writer::new();
+            for &slot in slots {
+                Stack::write_slot(slot, &mut w, true);
+            }
+            h.bytes(&w.finish());
+        }
         h.i64(self.scheduled_blocks.len() as i64);
         for (time, pos) in &self.scheduled_blocks {
             h.i64(*time);
@@ -2595,6 +2712,21 @@ impl Server {
         self.world.hash_into(&mut h);
         h.finish()
     }
+}
+
+fn lava_bounds(world: &World, x: i32, y: i32, z: i32) -> Option<physics::Aabb> {
+    let state = world
+        .get_block(x, y, z)
+        .filter(|&state| blocks::is_lava(state))?;
+    let above = world.get_block(x, y + 1, z).unwrap_or(blocks::AIR);
+    let mut bounds = physics::Aabb::block(x, y, z);
+    bounds.max[1] = bounds.min[1] + blocks::fluid_surface_height(state, above)?;
+    Some(bounds)
+}
+
+fn point_in_lava(world: &World, point: [f64; 3]) -> bool {
+    let [x, y, z] = point.map(|axis| axis.floor() as i32);
+    lava_bounds(world, x, y, z).is_some_and(|bounds| point[1] < bounds.max[1])
 }
 
 fn crosses_lava(world: &World, previous: [f64; 3], current: [f64; 3]) -> bool {
@@ -6932,7 +7064,7 @@ mod furnace_server_tests {
         let mut restored = Server::new(5, Generator::Flat);
         assert!(restored.load_chunk(chunk.0, chunk.1, &bytes));
         assert_eq!(restored.furnaces[&pos].slots[0], Some(tool));
-        restored.drop_furnace_contents(pos);
+        restored.drop_block_contents(pos, blocks::FURNACE);
         let entity = restored.entities.values().next().unwrap();
         assert_eq!((entity.item, entity.count, entity.damage), tool.wire());
     }
@@ -7056,5 +7188,294 @@ mod furnace_server_tests {
             expected.sort();
             assert_eq!(contents, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod chest_server_tests {
+    use super::*;
+    use crate::inventory::Screen;
+    use protocol::CHEST_SLOT_START;
+
+    const POS: [i32; 3] = [3, 80, 2];
+
+    fn setup() -> Server {
+        let mut server = Server::new(2026, Generator::Flat);
+        server.world.insert_chunk(Chunk::empty(0, 0));
+        for id in 1..=2 {
+            server.connect_at(id, true, Some([2.5, 80.0, 2.5]), None);
+            server.handle_packet(
+                id,
+                &C2S::Hello {
+                    protocol: protocol::PROTOCOL_VERSION,
+                    view_distance: 0,
+                }
+                .encode(),
+            );
+        }
+        server.tick();
+        for client in server.clients.values_mut() {
+            client.inventory = Inventory::default();
+        }
+        server.change_block(1, POS, blocks::CHEST, false);
+        server.take_outbox();
+        server
+    }
+
+    fn use_block([x, y, z]: [i32; 3]) -> C2S {
+        C2S::UseBlock { x, y, z }
+    }
+
+    fn click(slot: u8, shift: bool) -> C2S {
+        C2S::ClickSlot {
+            slot,
+            button: 0,
+            shift,
+        }
+    }
+
+    fn inventory_updates(server: &mut Server) -> Vec<(u32, u8, ChestSlots)> {
+        server
+            .take_outbox()
+            .into_iter()
+            .filter_map(|(id, bytes)| match S2C::decode(&bytes).unwrap() {
+                S2C::Inventory { screen, chest, .. } => Some((
+                    id,
+                    screen,
+                    chest.map(|slot| {
+                        slot.map(|(item, count, damage)| Stack {
+                            item,
+                            count,
+                            damage,
+                        })
+                    }),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn send(server: &mut Server, id: u32, packet: C2S) -> Vec<(u32, u8, ChestSlots)> {
+        server.handle_packet(id, &packet.encode());
+        server.tick();
+        inventory_updates(server)
+    }
+
+    fn tool() -> Stack {
+        Stack {
+            item: items::by_name("wooden_pickaxe").unwrap(),
+            count: 1,
+            damage: 28,
+        }
+    }
+
+    #[test]
+    fn shares_same_tick_updates_closes_and_resends_after_rejection() {
+        let mut server = setup();
+        let empty = ChestSlots::default();
+        let mut contents = empty;
+        contents[0] = Some(tool());
+        assert_eq!(server.chests[&POS], empty);
+        server.chests.remove(&POS); // A legacy chunk can have no saved entry.
+        let far = [POS[0] + 30, POS[1], POS[2]];
+        assert_eq!(send(&mut server, 1, use_block(far)), [(1, 0, empty)]);
+        assert_eq!(server.stats.packets_rejected, 1);
+        assert_eq!(send(&mut server, 1, use_block(POS)), [(1, 3, empty)]);
+        assert_eq!(send(&mut server, 2, use_block(POS)), [(2, 3, empty)]);
+
+        let adjacent = [POS[0], POS[1], POS[2] + 1];
+        server.change_block(1, adjacent, blocks::CHEST, false);
+        while server.take_dirty().is_some() {}
+        server
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .inventory
+            .set(0, Some(tool()))
+            .unwrap();
+        assert_eq!(
+            send(&mut server, 1, click(0, true)),
+            [(1, 3, contents), (2, 3, contents)]
+        );
+        assert_eq!(server.chests[&adjacent], empty);
+        assert!(server.world.chunks[&(0, 0)].dirty);
+
+        for slot in 36..CHEST_SLOT_START {
+            assert_eq!(send(&mut server, 1, click(slot, true)), [(1, 3, contents)]);
+        }
+        assert_eq!(server.stats.packets_rejected, 19);
+        server.clients.get_mut(&1).unwrap().inventory.cursor = Some(tool());
+        assert_eq!(send(&mut server, 1, C2S::CloseInventory), [(1, 0, empty)]);
+        let inv = &server.clients[&1].inventory;
+        assert_eq!(inv.slots()[0], Some(tool()));
+        assert_eq!(inv.cursor, None);
+        assert_eq!(server.chests[&POS], contents);
+
+        let pos = server.clients[&2].pos;
+        server.clients.get_mut(&2).unwrap().pos[0] += 30.0;
+        server.tick();
+        assert_eq!(inventory_updates(&mut server), [(2, 0, empty)]);
+        server.clients.get_mut(&2).unwrap().pos = pos;
+        assert_eq!(send(&mut server, 2, use_block(POS)), [(2, 3, contents)]);
+        server.clients.get_mut(&2).unwrap().pos[0] += 30.0;
+        assert_eq!(
+            send(&mut server, 2, click(CHEST_SLOT_START, true)),
+            [(2, 0, empty)]
+        );
+        assert_eq!(server.stats.packets_rejected, 20);
+        assert_eq!(server.chests[&POS], contents);
+
+        assert_eq!(send(&mut server, 1, use_block(POS)), [(1, 3, contents)]);
+        server.change_block(1, POS, blocks::AIR, false);
+        assert_eq!(
+            send(&mut server, 1, click(CHEST_SLOT_START, true)),
+            [(1, 0, empty)]
+        );
+        assert_eq!(server.stats.packets_rejected, 21);
+        assert!(!server.chests.contains_key(&POS));
+    }
+
+    #[test]
+    fn chest_slots_are_rejected_on_other_screens() {
+        let mut server = setup();
+        for (block, screen) in [
+            (blocks::AIR, 0),
+            (blocks::CRAFTING_TABLE, 1),
+            (blocks::FURNACE, 2),
+        ] {
+            server.change_block(1, POS, block, false);
+            if screen != 0 {
+                send(&mut server, 1, use_block(POS));
+            }
+            for slot in CHEST_SLOT_START..CHEST_SLOT_START + CHEST_SLOT_COUNT as u8 {
+                assert_eq!(
+                    send(&mut server, 1, click(slot, false)),
+                    [(1, screen, ChestSlots::default())]
+                );
+            }
+            send(&mut server, 1, C2S::CloseInventory);
+        }
+        assert_eq!(server.stats.packets_rejected, 3 * CHEST_SLOT_COUNT as u64);
+    }
+
+    #[test]
+    fn breaking_drops_contents_in_both_modes() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let mut server = setup();
+            server.set_game_mode(mode);
+            server.chests.get_mut(&POS).unwrap()[26] = Some(tool());
+            let [x, y, z] = POS;
+            if mode == GameMode::Survival {
+                server.handle_packet(1, &C2S::DigStart { x, y, z }.encode());
+                let (ticks, _) = items::mining(blocks::CHEST, None).unwrap();
+                for _ in 0..=ticks {
+                    server.tick();
+                }
+            } else {
+                server.handle_packet(
+                    1,
+                    &C2S::SetBlock {
+                        x,
+                        y,
+                        z,
+                        state: blocks::AIR,
+                    }
+                    .encode(),
+                );
+                server.tick();
+            }
+            assert_eq!(server.get_block(x, y, z), Some(blocks::AIR));
+            assert!(!server.chests.contains_key(&POS));
+            assert!(server
+                .entities
+                .values()
+                .any(|drop| { (drop.item, drop.count, drop.damage) == tool().wire() }));
+        }
+    }
+
+    #[test]
+    fn death_drops_carried_items_and_leaves_chest_contents() {
+        let mut server = setup();
+        server.set_game_mode(GameMode::Survival);
+        server.chests.get_mut(&POS).unwrap()[26] = Some(tool());
+        send(&mut server, 1, use_block(POS));
+        let client = server.clients.get_mut(&1).unwrap();
+        assert_eq!(client.inventory.screen, Screen::Chest { pos: POS });
+        client
+            .inventory
+            .set(
+                0,
+                Some(Stack {
+                    damage: 1,
+                    ..tool()
+                }),
+            )
+            .unwrap();
+        server.finish_player_death(1);
+        assert_eq!(server.clients[&1].inventory, Inventory::default());
+        assert_eq!(server.chests[&POS][26], Some(tool()));
+        assert_eq!(server.entities.len(), 1);
+        assert_eq!(server.entities.values().next().unwrap().damage, 1);
+    }
+
+    #[test]
+    fn saves_restores_and_unloads_contents_and_rejects_corrupt_records() {
+        let mut server = Server::new(2026, Generator::Flat);
+        let (cx, cz) = (-2, -3);
+        let pos = [cx * 16 + 3, 80, cz * 16 + 2];
+        let [x, y, z] = pos;
+        server.world.insert_chunk(Chunk::empty(cx, cz));
+        server.change_block(1, pos, blocks::CHEST, false);
+        let before = server.state_hash();
+        server.chests.get_mut(&pos).unwrap()[0] = Some(tool());
+        assert_ne!(server.state_hash(), before);
+        let expected = server.chests[&pos];
+        let prefix_len = server.world.chunks[&(cx, cz)].to_bytes().len();
+        let (_, _, bytes) = server.take_dirty().unwrap();
+        let tail = prefix_len + 3; // Empty furnace, scheduled block and entity counts.
+        assert_eq!(&bytes[tail..tail + 7], &[1, 3, 0, 0, 0, 80, 2]);
+        let record_len = 6 + CHEST_SLOT_COUNT * 5;
+        assert_eq!(bytes.len(), tail + 1 + record_len);
+
+        server.unload_far_chunks();
+        assert!(server.chests.is_empty());
+        assert!(server.load_chunk(cx, cz, &bytes));
+        assert_eq!(server.chests[&pos], expected);
+        let mut legacy = Server::new(2026, Generator::Flat);
+        assert!(legacy.load_chunk(cx, cz, &bytes[..tail]));
+        assert_eq!(legacy.get_block(x, y, z), Some(blocks::CHEST));
+        assert!(legacy.chests.is_empty());
+
+        let reject = |bytes: &[u8]| {
+            let mut target = Server::new(2026, Generator::Flat);
+            target.set_stored([(cx, cz)]);
+            assert!(!target.load_chunk(cx, cz, bytes));
+            assert!(target.world.chunks.is_empty());
+            assert!(target.chests.is_empty());
+            assert!(target.ensure_chunk((cx, cz)));
+            assert_eq!(target.get_block(x, y, z), Some(blocks::AIR));
+        };
+        for (offset, value) in [
+            (0, 2), // Count/length mismatch.
+            (1, 16),
+            (1, 4), // Valid coordinate without a chest block.
+            (2, 127),
+            (6, 16),
+            (7, 255), // Unknown item.
+            (9, 0),
+            (9, 2), // A tool cannot have a stack count greater than one.
+        ] {
+            let mut bad = bytes.clone();
+            bad[tail + offset] = value;
+            reject(&bad);
+        }
+        reject(&bytes[..bytes.len() - 1]);
+        let mut duplicate = bytes.clone();
+        duplicate[tail] = 2;
+        duplicate.extend_from_slice(&bytes[tail + 1..]);
+        reject(&duplicate);
+        let mut extra = bytes;
+        extra.push(0);
+        reject(&extra);
     }
 }

@@ -50,29 +50,25 @@ pub(super) fn read_saved_entities(
     chunk: ChunkPos,
     r: &mut Reader,
 ) -> Result<Vec<SavedEntity>, DecodeError> {
-    let bytes = r.rest();
-    if bytes.is_empty() {
+    if r.remaining() == 0 {
         return Ok(Vec::new());
     }
-    let mut r = Reader::new(bytes);
+    // Read exactly the entity records so the following chest tail stays in the reader.
     let count = r.varint()? as usize;
-    let oversized_count = bytes.len() - r.remaining() == 5 && bytes[4] > 0x0f;
-    if oversized_count || count > r.remaining() / MIN_RECORD_BYTES {
+    if count > r.remaining() / MIN_RECORD_BYTES {
         return Err(DecodeError);
     }
     let mut entities = Vec::new();
     for _ in 0..count {
         entities.push(match r.u8()? {
-            tag @ (ANIMAL | SHEEP) => {
-                SavedEntity::Animal(Mob::read_saved(chunk, &mut r, tag == SHEEP)?)
-            }
+            tag @ (ANIMAL | SHEEP) => SavedEntity::Animal(Mob::read_saved(chunk, r, tag == SHEEP)?),
             tag @ (ITEM | DAMAGED_ITEM) => {
                 let item = r.u16()?;
                 let count = r.u8()?;
                 if count == 0 || items::info(item).is_none_or(|info| count > info.max_stack) {
                     return Err(DecodeError);
                 }
-                let (pos, velocity) = read_motion(chunk, &mut r)?;
+                let (pos, velocity) = read_motion(chunk, r)?;
                 SavedEntity::Item(Entity {
                     kind: EntityKind::Item,
                     item,
@@ -91,9 +87,6 @@ pub(super) fn read_saved_entities(
             }
             _ => return Err(DecodeError),
         });
-    }
-    if r.remaining() != 0 {
-        return Err(DecodeError);
     }
     Ok(entities)
 }
@@ -363,8 +356,8 @@ mod tests {
         assert_eq!(restore(&bytes), (item, 28));
 
         let mut invalid = bytes;
-        let damage = invalid.len() - 2;
-        invalid[damage..].copy_from_slice(&u16::MAX.to_be_bytes());
+        let damage = invalid.len() - 3; // The empty chest count follows damage.
+        invalid[damage..damage + 2].copy_from_slice(&u16::MAX.to_be_bytes());
         assert_eq!(restore(&invalid), (item, 47));
         let stone = items::by_name("stone").unwrap();
         invalid[tag + 1..tag + 3].copy_from_slice(&stone.to_be_bytes());
@@ -377,9 +370,18 @@ mod tests {
         let prefix = source.world.chunks[&(0, 0)].to_bytes();
         source.schedule_tick([3, 80, 3], 7);
         let bytes = save(&mut source);
-        assert_eq!(&bytes[prefix.len()..], &[0, 1, 3, 0, 0, 0, 80, 3, 0, 7, 0]);
+        assert_eq!(
+            &bytes[prefix.len()..],
+            &[0, 1, 3, 0, 0, 0, 80, 3, 0, 7, 0, 0]
+        );
 
-        for end in [prefix.len(), prefix.len() + 1, bytes.len() - 1, bytes.len()] {
+        for end in [
+            prefix.len(),
+            prefix.len() + 1,
+            bytes.len() - 2,
+            bytes.len() - 1,
+            bytes.len(),
+        ] {
             let mut target = Server::new(5, Generator::Flat);
             assert!(target.load_chunk(0, 0, &bytes[..end]));
             assert!(target.mobs.is_empty());
@@ -445,7 +447,7 @@ mod tests {
             bad[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
             reject(&bad);
         }
-        for end in [animal, item, bytes.len() - 1] {
+        for end in [animal, item, bytes.len() - 2] {
             reject(&bytes[..end]);
         }
         let mut oversized_count = bytes.clone();

@@ -106,6 +106,17 @@ test("item variants, including material-specific indices and safe local referenc
 		["stone_pickaxe", "iron_pickaxe", "apple", "stick"], 0);
 	assert.deepEqual([...pack.tiles.keys()], ["iron_pickaxe"]);
 });
+
+test("chest block faces use chest_inventory variants and conventional filenames", async () => {
+	const names = ["chest_top", "chest_side", "chest_front"];
+	const paths = names.map(name => `textures/blocks/${name}`);
+	const images = paths.map((path, index) => [`resource_pack/${path}.png`, solidPng([0, 0, 0], { width: index + 1, height: index + 1 })]);
+	for (const terrain of [{ chest_inventory: { textures: paths } }, {}]) {
+		const pack = await importTexturePack(await file([...packEntries({ terrain }), ...images]), blocksOnly(names), undefined,
+			async (_, width) => new Uint8Array(1024).fill(width));
+		assert.deepEqual(names.map(name => pack.tiles.get(name)?.[0]), [1, 2, 3]);
+	}
+});
 test("invalid JSON, PNG, ambiguous roots and unsupported packs fail atomically", async () => {
 	for (const entries of [
 		testEntries.map(([path, data]) => [path, path.endsWith("item_texture.json") ? "{" : data]),
@@ -426,7 +437,14 @@ test("missing, malformed, wrong-size and undecodable art fall back independently
 
 test("generated browser fixture covers every registry name through the importer", async () => {
 	const { instance } = await WebAssembly.instantiate(await readFile(new URL("../wasm/client.wasm", import.meta.url)), {});
-	const layout = gameTextureLayout(new ClientCore(instance));
+	const core = new ClientCore(instance);
+	const layout = gameTextureLayout(core);
+	const chest = core.itemRegistry().find(item => item.name === "chest");
+	assert.ok(chest);
+	assert.ok(chest.block !== null);
+	assert.equal(core.blockRegistry()[chest.block].name, "chest");
+	assert.equal(chest.texture, null);
+	for (const name of ["chest_top", "chest_side", "chest_front"]) assert.ok(layout.names.slice(0, layout.spriteStart).includes(name));
 	const names = new Set(layout.names);
 	const pack = await importTexturePack(new File([await fixturePack()], "fixture.zip"), layout, undefined, async (_, width) => {
 		assert.ok(width === 16 || width === 32);

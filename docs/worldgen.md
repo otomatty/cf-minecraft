@@ -185,7 +185,7 @@ pnpm check:determinism
 cargo run --release -p noise --example bench
 ```
 
-既存の台本の既定値 (seed=2026、600 ticks) は `88d6e0e1abd58ec4` のまま。
+台本の現在の参照値 (seed=2026、600 ticks) は `fb44177a49e57629`。チェストの件数と内容をstate_hashに追加したことで変わった。
 ノイズの `fingerprint(seed)` は別の FNV-1a 値で、既定シードでは `d5166400c68a1c45`。
 2つのシード、正負と格子境界をまたぐ座標、2D/3D と fBm の f64 ビット列を little-endian で取り込む。
 `native-server noise [seed]` と WASM の `server_noise_fingerprint` が同じプローブを使う。
@@ -854,7 +854,7 @@ fmt / clippy (workspace・全ターゲット・警告をエラー化) / `cargo t
 `pnpm check:determinism` で台本・ノイズ・地形の3指紋がnative / Node v22.23.4 (WASM) で一致した。
 
 現在の `terrain_fingerprint(2026)` は **`8a5f7c2e7b0aa3dc`**。
-現在の台本は `c24992e95973fe13` (この変更の時点では `88d6e0e1abd58ec4`)。ノイズ `d5166400c68a1c45` は維持する。
+この変更の時点の台本は `88d6e0e1abd58ec4`。ノイズ `d5166400c68a1c45` は維持する。
 Flat / DebugHills の生成処理は変更せず、既存の全ブロック指紋テストで検証する。
 3シードの純粋な洞窟判定と生成結果の照合に加え、坑道のブロック一覧を独立した広い区画範囲から
 逆順で配置した参照結果と `generate` の全ブロックを比較する。チャンクの生成順も反転する。
@@ -980,7 +980,7 @@ cx/cz=-32〜32を8チャンク間隔で採る81チャンク、全列・全地下
 地形が低いシードではy>=0の石が少なく、石炭の割合が下がる。
 
 現在の `terrain_fingerprint(2026)` は **`8a5f7c2e7b0aa3dc`**。
-native / Node v22.23.4 (WASM) で一致し、ノイズ `d5166400c68a1c45` は維持した。現在の台本は `c24992e95973fe13` (この変更の時点では `88d6e0e1abd58ec4`)。
+native / Node v22.23.4 (WASM) で一致し、ノイズ `d5166400c68a1c45` は維持した。この変更の時点の台本は `88d6e0e1abd58ec4`。
 
 性能は2026-11-16、native x86-64 release (opt-level=3、LTO)、seed=2026、
 625チャンク (cx/cz=-12..=12)、初期化を除く `terrain_bench`。
@@ -1052,7 +1052,7 @@ TypeScript は `ServerCore` の薄いラッパーと、同じ WASM モジュー�
 
 外部生成が無効なら従来どおりの同期生成で、決定性は変わらない。
 新しい統計はシナリオハッシュに含めない。seed 2026 の現在の参照値は
-シナリオ `c24992e95973fe13`、ノイズ `d5166400c68a1c45`、地形 `8a5f7c2e7b0aa3dc`。
+シナリオ `fb44177a49e57629`、ノイズ `d5166400c68a1c45`、地形 `8a5f7c2e7b0aa3dc`。チェストの件数と内容がstate_hashに入るようになり、シナリオの値が変わった。
 外部生成では到着時刻によってチャンク送信の tick が変わるが、同じ seed・generator・座標の内容は一致する。
 
 ### ホストからの外部生成

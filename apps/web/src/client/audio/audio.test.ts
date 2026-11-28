@@ -137,7 +137,7 @@ test("only nearby partial pickups count toward inventory gains and play pickup s
 	drop(2, near);
 	drop(3, otherNear);
 	assert.deepEqual(played, []);
-	const inventory = new Uint8Array(3 + 42 * 5 + 1 + 12 * 5 + 6);
+	const inventory = new Uint8Array(3 + 42 * 5 + 1 + 12 * 5 + 6 + 27 * 5);
 	inventory.set([S2C.Inventory, 0, 36, 0, 1, 2]);
 	packet(inventory);
 	assert.deepEqual(played, [

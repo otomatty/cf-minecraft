@@ -14,7 +14,7 @@ use crate::{
         block_at, hash_height, interval, track_fall, LAVA_DAMAGE, LAVA_FEET_OFFSET, LAVA_INTERVAL,
         SUFFOCATION_DAMAGE, SUFFOCATION_INTERVAL, VOID_Y,
     },
-    GameMode, Server, MAX_REACH,
+    point_in_lava, GameMode, Server, MAX_REACH,
 };
 
 struct MobSpec {
@@ -575,9 +575,8 @@ impl Mob {
     }
 
     fn touches_lava(&self, world: &World) -> bool {
-        let pos = self.pos();
-        block_at(world, pos, spec(self.kind).head_offset).is_some_and(blocks::is_lava)
-            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava)
+        let [x, y, z] = self.pos();
+        point_in_lava(world, self.eye()) || point_in_lava(world, [x, y + LAVA_FEET_OFFSET, z])
     }
 
     /// Same sunlight exposure as `sunlight_hit`, or the lava contact used for damage.
@@ -665,8 +664,7 @@ impl Mob {
             }
         }
 
-        let in_lava = head.is_some_and(blocks::is_lava)
-            || block_at(world, pos, LAVA_FEET_OFFSET).is_some_and(blocks::is_lava);
+        let in_lava = self.touches_lava(world);
         if !in_lava && grounded && has_loot_support(world, &collisions, pos) {
             self.last_dry_pos = pos;
         }
@@ -2059,7 +2057,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GameMode;
+    use crate::{GameMode, Stack};
     use protocol::{C2S, PROTOCOL_VERSION};
     use world::Chunk;
     use worldgen::Generator;
@@ -3370,6 +3368,33 @@ mod tests {
             block_at(&world, cow.pos(), spec(MobKind::Cow).head_offset),
             Some(blocks::AIR)
         );
+    }
+
+    #[test]
+    fn lava_damage_and_burning_require_the_feet_or_head_sample_below_the_surface() {
+        let mut world = arena(0);
+        world.set_block(2, 2, 2, blocks::FLOWING_LAVA + 2);
+        let cow_spec = spec(MobKind::Cow);
+        for offset in [LAVA_FEET_OFFSET, cow_spec.head_offset] {
+            // Keep the other sample point outside the lava cell.
+            for (sample_y, damage) in [(2.6875, 0), (2.625, 0), (2.5, LAVA_DAMAGE)] {
+                let pos = [2.5, sample_y - offset, 2.5];
+                let mut cow = Mob::cow(pos);
+                assert_eq!(
+                    cow.burning_now(&world, false),
+                    damage != 0,
+                    "offset {offset}, sample y {sample_y}"
+                );
+                for _ in 0..LAVA_INTERVAL {
+                    cow.environment_damage(&world, pos);
+                }
+                assert_eq!(
+                    cow.health,
+                    cow_spec.health - damage,
+                    "offset {offset}, sample y {sample_y}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5046,6 +5071,29 @@ mod tests {
         other_ids.next_entity_id += 100;
         other_ids.apply_explosion(center);
         assert_eq!(loot(&server), loot(&other_ids));
+    }
+
+    #[test]
+    fn explosion_drops_chest_contents_in_both_modes() {
+        for mode in [GameMode::Survival, GameMode::Creative] {
+            let (mut server, _) = combat(mode);
+            let pos = [5, 1, 6];
+            server
+                .world
+                .set_block(pos[0], pos[1], pos[2], blocks::CHEST);
+            let stack = Stack {
+                item: items::by_name("wooden_pickaxe").unwrap(),
+                count: 1,
+                damage: 28,
+            };
+            server.chests.entry(pos).or_default()[26] = Some(stack);
+            server.apply_explosion([5.5, 1.85, 5.5]);
+            assert_eq!(server.get_block(pos[0], pos[1], pos[2]), Some(blocks::AIR));
+            assert!(!server.chests.contains_key(&pos));
+            assert!(server.entities.values().any(|drop| {
+                (drop.item, drop.count, drop.damage) == stack.wire() && drop.pos == [5.5, 1.25, 6.5]
+            }));
+        }
     }
 
     #[test]
