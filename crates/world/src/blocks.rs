@@ -34,6 +34,10 @@ const TORCH_BOX: Box16 = Box16 {
     min: [7, 0, 7],
     max: [9, 10, 9],
 };
+const BED_BOX: [Box16; 1] = [Box16 {
+    min: [0, 0, 0],
+    max: [16, 9, 16],
+}];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
@@ -207,6 +211,36 @@ pub enum ShapePurpose {
 // keeps prediction, server validation and padded-section meshing in agreement.
 // Rules: https://minecraft.wiki/w/Stairs and https://minecraft.wiki/w/Fence
 const CARDINAL: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+
+pub fn is_bed(state: BlockState) -> bool {
+    bed_offset(state).is_some()
+}
+
+fn bed_offset(state: BlockState) -> Option<u16> {
+    state.checked_sub(BED).filter(|offset| *offset < 8)
+}
+
+/// Facing index is north, south, west, east. The bool is the head half.
+pub fn bed_facing_part(state: BlockState) -> Option<(usize, bool)> {
+    let offset = bed_offset(state)?;
+    Some(((offset / 2) as usize, offset % 2 == 1))
+}
+
+pub fn bed_state(facing: usize, head: bool) -> BlockState {
+    BED + facing as u16 * 2 + u16::from(head)
+}
+
+pub fn bed_delta(facing: usize) -> [i32; 3] {
+    let (dx, dz) = CARDINAL[facing];
+    [dx, 0, dz]
+}
+
+pub fn bed_partner(pos: [i32; 3], state: BlockState) -> Option<[i32; 3]> {
+    let (facing, head) = bed_facing_part(state)?;
+    let [dx, _, dz] = bed_delta(facing);
+    let sign = if head { -1 } else { 1 };
+    Some([pos[0] + dx * sign, pos[1], pos[2] + dz * sign])
+}
 
 /// Outward normals in face order: down, up, north, south, west, east.
 pub const FACE_NORMALS: [[i32; 3]; 6] = [
@@ -538,7 +572,7 @@ mod tests {
 
     #[test]
     fn torch_states_emit_light_and_have_only_selection_bounds() {
-        assert_eq!((TORCH, WALL_TORCH, COUNT), (77, 78, 86));
+        assert_eq!((TORCH, WALL_TORCH, COUNT), (77, 78, 94));
         assert_eq!(block(TORCH).unwrap().count, 1);
         assert_eq!(block(WALL_TORCH).unwrap().count, 4);
         assert_eq!(torch_for_face(0), None);
@@ -572,6 +606,43 @@ mod tests {
             assert_eq!(properties(state), &[("facing", facing)]);
             assert_eq!(boxes_at(state, &[]), vec![Box16 { min, max }]);
         }
+    }
+
+    #[test]
+    fn bed_is_a_nine_sixteenth_box_with_eight_facing_parts() {
+        assert_eq!((BED, COUNT), (86, 94));
+        assert_eq!(block(BED).unwrap().count, 8);
+        for (facing, name) in ["north", "south", "west", "east"].into_iter().enumerate() {
+            for (head, part) in [(false, "foot"), (true, "head")] {
+                let state = bed_state(facing, head);
+                assert_eq!(
+                    (properties(state), bed_facing_part(state)),
+                    (
+                        &[("facing", name), ("part", part)][..],
+                        Some((facing, head))
+                    )
+                );
+                let bed = info(state);
+                assert_eq!(
+                    (
+                        bed.model,
+                        bed.occludes,
+                        bed.solid,
+                        bed.washes_away,
+                        bed.opacity
+                    ),
+                    (Model::Boxes(&BED_BOX), false, true, false, 0)
+                );
+                assert_eq!(
+                    (bed.tool, bed.min_tier, bed.dig_ticks),
+                    (Some(crate::items::ToolKind::Axe), 0, Some(10))
+                );
+                assert_eq!(collision_boxes(state, |_, _, _| AIR), vec![BED_BOX[0]]);
+                assert_eq!(selection_boxes(state, |_, _, _| AIR), vec![BED_BOX[0]]);
+            }
+        }
+        assert_eq!(bed_partner([1, 2, 3], bed_state(3, false)), Some([2, 2, 3]));
+        assert_eq!(bed_partner([2, 2, 3], bed_state(3, true)), Some([1, 2, 3]));
     }
 
     #[test]

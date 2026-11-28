@@ -23,6 +23,7 @@ export interface BlockStateInfo {
  * an exact boundary chooses the next quadrant as yaw increases. Yaw wraps.
  * The high step faces away from the player. Bottom faces place top stairs;
  * top faces place bottom stairs; side hits at local Y >= 0.5 place top stairs.
+ * A bed uses the same yaw quadrants and returns the foot state.
  */
 export function placementState(
 	registry: readonly BlockStateInfo[], selected: number, hit: RayHit, yaw: number,
@@ -34,7 +35,8 @@ export function placementState(
 	if (!block || block.name === "air" || !normal || !Number.isFinite(hit.hitY)) return null;
 	const slab = block.count === 3;
 	const stairs = block.model === "stairs";
-	if (stairs && !Number.isFinite(yaw)) return null;
+	const bed = block.name === "bed";
+	if ((stairs || bed) && !Number.isFinite(yaw)) return null;
 	const target = getBlock(hit.x, hit.y, hit.z);
 	if (slab && registry[target]?.first === block.first
 		&& ((target === block.first && hit.face === 1) || (target === block.first + 1 && hit.face === 0))) {
@@ -49,9 +51,9 @@ export function placementState(
 		return state ? { x, y, z, state } : null;
 	}
 	let state = block.first;
-	if (stairs) {
+	if (stairs || bed) {
 		const normalized = ((yaw % 360) + 360) % 360;
-		// State offsets for south, west, north, east; each owns bottom then top.
+		// State offsets for south, west, north, east; stairs then own bottom and top.
 		state += [2, 4, 0, 6][Math.floor((normalized + 45) / 90) % 4];
 	}
 	if (slab || stairs) state += hit.face === 0 || (hit.face > 1 && hit.hitY >= 0.5) ? 1 : 0;
@@ -69,9 +71,9 @@ export function placementState(
 	return { x, y, z, state };
 }
 
-/** Right-click uses a crafting table, furnace, or chest before attempting placement, including with an empty hand. */
+/** Right-click uses a crafting table, furnace, chest, or bed before attempting placement, including with an empty hand. */
 export function blockInteraction(blockName: string | undefined, shift: boolean): "open" | "place" {
-    return (blockName === "crafting_table" || blockName === "furnace" || blockName === "chest") && !shift ? "open" : "place";
+    return (blockName === "crafting_table" || blockName === "furnace" || blockName === "chest" || blockName === "bed") && !shift ? "open" : "place";
 }
 
 export function canTill(heldName: string | undefined, blockName: string | undefined, aboveName: string | undefined): boolean {

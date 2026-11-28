@@ -8,7 +8,7 @@
 use world::io::{DecodeError, Reader, Writer};
 use world::BlockState;
 
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 /// Item ID, count, and accumulated damage.
 pub type ItemStack = (u16, u8, u16);
 
@@ -306,6 +306,7 @@ pub enum C2S {
         z: i32,
         state: BlockState,
     },
+    StopSleeping,
 }
 
 /// Server to client.
@@ -481,6 +482,9 @@ pub enum S2C {
     PlayerRemove {
         id: u32,
     },
+    Sleeping {
+        sleeping: bool,
+    },
 }
 
 pub mod id {
@@ -494,6 +498,7 @@ pub mod id {
     pub const C2S_CANCEL_USING_ITEM: u8 = 0x11;
     pub const C2S_CHAT: u8 = 0x12;
     pub const C2S_USE_ENTITY: u8 = 0x13;
+    pub const C2S_STOP_SLEEPING: u8 = 0x14;
     pub const C2S_CLICK_SLOT: u8 = 0x09;
     pub const C2S_CLOSE_INVENTORY: u8 = 0x0a;
     pub const C2S_DIG_START: u8 = 0x07;
@@ -520,6 +525,7 @@ pub mod id {
     pub const S2C_SHEAR: u8 = 0x1c;
     pub const S2C_EGG_SPAWN: u8 = 0x1d;
     pub const S2C_EGG_SOUND: u8 = 0x1e;
+    pub const S2C_SLEEPING: u8 = 0x1f;
     pub const S2C_PLAYER_REMOVE: u8 = 0x19;
     pub const S2C_ENTITY_REMOVE: u8 = 0x0a;
     pub const C2S_SELECT_SLOT: u8 = 0x04;
@@ -588,6 +594,7 @@ impl C2S {
                 w.u8(id::C2S_USE_ENTITY);
                 w.i32(entity as i32);
             }
+            C2S::StopSleeping => w.u8(id::C2S_STOP_SLEEPING),
             C2S::DropItem { dir } => {
                 w.u8(id::C2S_DROP_ITEM);
                 for v in dir {
@@ -688,6 +695,7 @@ impl C2S {
             id::C2S_USE_ENTITY => C2S::UseEntity {
                 id: r.i32()? as u32,
             },
+            id::C2S_STOP_SLEEPING => C2S::StopSleeping,
             id::C2S_DROP_ITEM => {
                 let dir = [r.f32()?, r.f32()?, r.f32()?];
                 if !dir.iter().all(|v| v.is_finite()) {
@@ -1042,6 +1050,10 @@ impl S2C {
                 w.u8(id::S2C_PLAYER_REMOVE);
                 w.i32(*player as i32);
             }
+            S2C::Sleeping { sleeping } => {
+                w.u8(id::S2C_SLEEPING);
+                w.u8(u8::from(*sleeping));
+            }
         }
         w.finish()
     }
@@ -1328,6 +1340,13 @@ impl S2C {
             }
             id::S2C_PLAYER_REMOVE => S2C::PlayerRemove {
                 id: entity_id(&mut r)?,
+            },
+            id::S2C_SLEEPING => S2C::Sleeping {
+                sleeping: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError),
+                },
             },
             _ => return Err(DecodeError),
         };
@@ -1787,8 +1806,27 @@ mod tests {
     }
 
     #[test]
+    fn protocol_32_stop_sleeping_and_sleeping_round_trip() {
+        assert_eq!(PROTOCOL_VERSION, 32);
+        let stop = C2S::StopSleeping.encode();
+        assert_eq!(stop, [0x14]);
+        assert_eq!(C2S::decode(&stop), Ok(C2S::StopSleeping));
+        assert!(C2S::decode(&[]).is_err());
+        assert!(C2S::decode(&[0x14, 0]).is_err());
+        for sleeping in [false, true] {
+            let packet = S2C::Sleeping { sleeping };
+            let bytes = packet.encode();
+            assert_eq!(bytes, [0x1f, u8::from(sleeping)]);
+            assert_eq!(S2C::decode(&bytes), Ok(packet));
+        }
+        assert!(S2C::decode(&[0x1f]).is_err());
+        assert!(S2C::decode(&[0x1f, 2]).is_err());
+        assert!(S2C::decode(&[0x1f, 0, 0]).is_err());
+    }
+
+    #[test]
     fn protocol_13_mob_packets_round_trip_and_validate_fields() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let spawn = S2C::MobSpawn {
             id: u32::MAX,
             kind: MobKind::Cow,
@@ -2018,7 +2056,7 @@ mod tests {
 
     #[test]
     fn protocol_25_knockback_and_mob_burning_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let packet = S2C::PlayerKnockback {
             velocity: [0.4, 0.36, -0.2],
         };
@@ -2056,7 +2094,7 @@ mod tests {
 
     #[test]
     fn protocol_26_explosion_round_trips_and_rejects_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let packet = S2C::Explosion {
             center: [4.5, 1.85, -8.25],
         };
@@ -2080,7 +2118,7 @@ mod tests {
 
     #[test]
     fn protocol_27_player_packets_round_trip_and_reject_invalid_values() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let name = "🙂".repeat(16);
         assert_eq!(name.len(), 64);
         let pos = [12.25, -60.0, -8.75];
@@ -2395,7 +2433,7 @@ mod tests {
     }
     #[test]
     fn protocol_30_round_trips_use_entity_sheep_appearance_and_shear() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
         let id = 0x8000_0001;
         let use_entity = C2S::UseEntity { id };
         assert_eq!(use_entity.encode(), [0x13, 0x80, 0, 0, 1]);

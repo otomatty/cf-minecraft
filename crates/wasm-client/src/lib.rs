@@ -99,6 +99,7 @@ struct State {
     view_distance: u32,
     game_time: i64,
     day_time: i64,
+    sleeping: bool,
     out: Vec<u8>,
     padded: Vec<u16>,
     padded_lights: Vec<u8>,
@@ -258,6 +259,7 @@ pub extern "C" fn client_new() {
         view_distance: 0,
         game_time: 0,
         day_time: 0,
+        sleeping: false,
         out: Vec::new(),
         padded: vec![blocks::AIR; PADDED_LEN],
         padded_lights: Vec::new(),
@@ -529,6 +531,9 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.selected = selected;
             st.slots = slots;
         }
+        S2C::Sleeping { sleeping } => {
+            st.sleeping = sleeping;
+        }
         S2C::Welcome {
             seed,
             game_time,
@@ -544,6 +549,7 @@ pub unsafe extern "C" fn client_packet(ptr: *const u8, len: usize) -> u32 {
             st.game_time = game_time;
             st.spawn = spawn;
             st.view_distance = view_distance as u32;
+            st.sleeping = false;
         }
         S2C::PlayerStatus {
             health,
@@ -1432,6 +1438,11 @@ pub extern "C" fn client_enc_respawn() -> usize {
 }
 
 #[no_mangle]
+pub extern "C" fn client_enc_stop_sleeping() -> usize {
+    emit(state(), C2S::StopSleeping.encode())
+}
+
+#[no_mangle]
 pub extern "C" fn client_enc_use_item() -> usize {
     emit(state(), C2S::UseItem.encode())
 }
@@ -1617,6 +1628,11 @@ pub extern "C" fn client_air() -> u32 {
 #[no_mangle]
 pub extern "C" fn client_dead() -> u32 {
     u32::from(state().dead)
+}
+
+#[no_mangle]
+pub extern "C" fn client_sleeping() -> u32 {
+    u32::from(state().sleeping)
 }
 
 #[no_mangle]

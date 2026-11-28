@@ -487,9 +487,9 @@ impl Inventory {
             .flatten()
     }
 
-    pub fn to_bytes(&self, vitals: PlayerVitals) -> Vec<u8> {
+    pub fn to_bytes(&self, vitals: PlayerVitals, respawn: Option<[i32; 3]>) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u8(6);
+        w.u8(7);
         w.u8(self.selected);
         for slot in self
             .slots
@@ -501,12 +501,21 @@ impl Inventory {
             Stack::write_slot(slot, &mut w, true);
         }
         vitals.write(&mut w);
+        match respawn {
+            None => w.u8(0),
+            Some([x, y, z]) => {
+                w.u8(1);
+                w.i32(x);
+                w.i32(y);
+                w.i32(z);
+            }
+        }
         w.finish()
     }
-    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, PlayerVitals), DecodeError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, PlayerVitals, Option<[i32; 3]>), DecodeError> {
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 1..=6) {
+        if !matches!(version, 1..=7) {
             return Err(DecodeError);
         }
         let mut result = Self::default();
@@ -524,14 +533,23 @@ impl Inventory {
             *slot = Stack::read_slot(&mut r, version >= 6)?;
         }
         let vitals = match version {
-            5 | 6 => PlayerVitals::read(&mut r)?,
+            5..=7 => PlayerVitals::read(&mut r)?,
             4 => PlayerVitals::read_v4(&mut r)?,
             _ => PlayerVitals::default(),
+        };
+        let respawn = if version >= 7 {
+            match r.u8()? {
+                0 => None,
+                1 => Some([r.i32()?, r.i32()?, r.i32()?]),
+                _ => return Err(DecodeError),
+            }
+        } else {
+            None
         };
         if r.remaining() != 0 {
             return Err(DecodeError);
         }
-        Ok((result, vitals))
+        Ok((result, vitals, respawn))
     }
 }
 pub(crate) fn valid(s: Stack) -> bool {
@@ -612,30 +630,33 @@ mod tests {
             damage: 0,
         });
         let vitals = PlayerVitals::default();
-        let bytes = inv.to_bytes(vitals);
-        assert_eq!(bytes.len(), 258);
-        assert_eq!(bytes[0], 6);
-        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv.clone(), vitals)));
+        let bytes = inv.to_bytes(vitals, None);
+        assert_eq!(bytes.len(), 259);
+        assert_eq!(bytes[0], 7);
+        assert_eq!(
+            Inventory::from_bytes(&bytes),
+            Ok((inv.clone(), vitals, None))
+        );
         let v5 = v5_save(&inv, vitals);
-        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals)));
+        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals, None)));
         let mut v4 = v5[..157].to_vec();
         v4[0] = 4;
-        assert_eq!(Inventory::from_bytes(&v4), Ok((inv.clone(), vitals)));
+        assert_eq!(Inventory::from_bytes(&v4), Ok((inv.clone(), vitals, None)));
         let mut v3 = v5[..152].to_vec();
         v3[0] = 3;
-        assert_eq!(Inventory::from_bytes(&v3), Ok((inv.clone(), vitals)));
+        assert_eq!(Inventory::from_bytes(&v3), Ok((inv.clone(), vitals, None)));
         let mut v2 = v5[..125].to_vec();
         v2[0] = 2;
         let mut expected_v2 = inv.clone();
         expected_v2.table = [None; 9];
-        assert_eq!(Inventory::from_bytes(&v2), Ok((expected_v2, vitals)));
+        assert_eq!(Inventory::from_bytes(&v2), Ok((expected_v2, vitals, None)));
         let mut legacy = v5[..110].to_vec();
         legacy[0] = 1;
         let mut expected = inv.clone();
         expected.crafting = [None; 4];
         expected.cursor = None;
         expected.table = [None; 9];
-        assert_eq!(Inventory::from_bytes(&legacy), Ok((expected, vitals)));
+        assert_eq!(Inventory::from_bytes(&legacy), Ok((expected, vitals, None)));
         for data in [&bytes, &v5, &v4, &v3, &v2, &legacy] {
             for length in 0..data.len() {
                 assert!(Inventory::from_bytes(&data[..length]).is_err());
@@ -668,26 +689,30 @@ mod tests {
             cause: DeathCause::Void,
             food: 9,
         };
-        let save = inv.to_bytes(vitals);
-        assert_eq!(&save[252..], &[0, 0, 42, 1, 4, 9]);
-        assert_eq!(Inventory::from_bytes(&save), Ok((inv.clone(), vitals)));
+        let save = inv.to_bytes(vitals, None);
+        assert_eq!(&save[252..258], &[0, 0, 42, 1, 4, 9]);
+        assert_eq!(save[258], 0);
+        assert_eq!(
+            Inventory::from_bytes(&save),
+            Ok((inv.clone(), vitals, None))
+        );
         let explosion = PlayerVitals {
             cause: DeathCause::Explosion,
             ..vitals
         };
-        let explosion_save = inv.to_bytes(explosion);
+        let explosion_save = inv.to_bytes(explosion, None);
         assert_eq!(explosion_save[256], 8);
         assert_eq!(
             Inventory::from_bytes(&explosion_save),
-            Ok((inv.clone(), explosion))
+            Ok((inv.clone(), explosion, None))
         );
         let v5 = v5_save(&inv, vitals);
-        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals)));
+        assert_eq!(Inventory::from_bytes(&v5), Ok((inv.clone(), vitals, None)));
         let mut v4 = v5[..157].to_vec();
         v4[0] = 4;
         assert_eq!(
             Inventory::from_bytes(&v4),
-            Ok((inv, PlayerVitals { food: 20, ..vitals }))
+            Ok((inv, PlayerVitals { food: 20, ..vitals }, None))
         );
         for (offset, value) in [
             (152, 1),
@@ -721,13 +746,16 @@ mod tests {
         inv.table[8] = Some(tool);
 
         let vitals = PlayerVitals::default();
-        let bytes = inv.to_bytes(vitals);
-        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv.clone(), vitals)));
+        let bytes = inv.to_bytes(vitals, None);
+        assert_eq!(
+            Inventory::from_bytes(&bytes),
+            Ok((inv.clone(), vitals, None))
+        );
         let v5 = v5_save(&inv, vitals);
         assert_eq!(v5.len(), 158);
         assert_eq!(&v5[2..4], &item.to_be_bytes());
         assert_eq!(v5[4], 1);
-        let (legacy, _) = Inventory::from_bytes(&v5).unwrap();
+        let (legacy, _, _) = Inventory::from_bytes(&v5).unwrap();
         assert_eq!(legacy.slots[0], Some(Stack { damage: 0, ..tool }));
         assert_eq!(legacy.crafting[3].unwrap().damage, 0);
         assert_eq!(legacy.cursor.unwrap().damage, 0);
@@ -736,7 +764,7 @@ mod tests {
         let mut corrupt = bytes;
         corrupt[5..7].copy_from_slice(&u16::MAX.to_be_bytes());
         corrupt[10..12].copy_from_slice(&1u16.to_be_bytes());
-        let (restored, _) = Inventory::from_bytes(&corrupt).unwrap();
+        let (restored, _, _) = Inventory::from_bytes(&corrupt).unwrap();
         let max = items::info(item).unwrap().durability.unwrap();
         assert_eq!(
             restored.slots[0],
@@ -872,9 +900,9 @@ mod tests {
         let mut inv = Inventory::creative();
         inv.select(8).unwrap();
         let vitals = PlayerVitals::default();
-        let bytes = inv.to_bytes(vitals);
-        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv, vitals)));
-        for (at, value) in [(0, 7), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
+        let bytes = inv.to_bytes(vitals, None);
+        assert_eq!(Inventory::from_bytes(&bytes), Ok((inv, vitals, None)));
+        for (at, value) in [(0, 8), (1, 9), (2, 255), (4, 0), (4, 65), (3, 0)] {
             let mut bad = bytes.clone();
             bad[at] = value;
             assert!(Inventory::from_bytes(&bad).is_err(), "{at} {value}");
@@ -882,6 +910,35 @@ mod tests {
         assert!(Inventory::from_bytes(&bytes[..bytes.len() - 1]).is_err());
         let mut bad = bytes;
         bad.push(0);
+        assert!(Inventory::from_bytes(&bad).is_err());
+    }
+
+    #[test]
+    fn persistence_v7_stores_respawn_and_v6_has_none() {
+        let inv = Inventory::default();
+        let vitals = PlayerVitals::default();
+        let none = inv.to_bytes(vitals, None);
+        assert_eq!((none.len(), none[0], none[258]), (259, 7, 0));
+        assert_eq!(
+            Inventory::from_bytes(&none),
+            Ok((inv.clone(), vitals, None))
+        );
+        let point = [-3, -64, 12];
+        let some = inv.to_bytes(vitals, Some(point));
+        assert_eq!(some.len(), 271);
+        assert_eq!(some[258], 1);
+        assert_eq!(
+            Inventory::from_bytes(&some),
+            Ok((inv.clone(), vitals, Some(point)))
+        );
+        let mut v6 = none;
+        v6[0] = 6;
+        v6.pop();
+        assert_eq!(v6.len(), 258);
+        assert_eq!(Inventory::from_bytes(&v6), Ok((inv, vitals, None)));
+        assert!(Inventory::from_bytes(&some[..270]).is_err());
+        let mut bad = some;
+        bad[258] = 2;
         assert!(Inventory::from_bytes(&bad).is_err());
     }
 }
@@ -1192,7 +1249,8 @@ mod crafting_tests {
         }
         assert!(inv.click(51, 0, false).is_err());
         inv.table[8] = stack(8, 3);
-        let (restored, _) = Inventory::from_bytes(&inv.to_bytes(PlayerVitals::default())).unwrap();
+        let (restored, _, _) =
+            Inventory::from_bytes(&inv.to_bytes(PlayerVitals::default(), None)).unwrap();
         assert_eq!(restored.screen, Screen::None);
         assert_eq!(restored.table, inv.table);
         inv.slots = [stack(1, 64); 36];

@@ -17,6 +17,7 @@
 //! the same state. `state_hash` makes that checkable.
 
 mod arrow;
+mod bed;
 mod egg;
 pub mod entity;
 mod entity_storage;
@@ -200,6 +201,9 @@ struct Client {
     horizontal_budget: f64,
     vertical_budget: f64,
     correction_tick: Option<i64>,
+    respawn: Option<[i32; 3]>,
+    sleep: Option<bed::BedRest>,
+    pending_wake: bool,
 }
 
 impl Client {
@@ -321,6 +325,8 @@ pub struct Server {
     spawn: [f64; 3],
     game_time: i64,
     day_time: i64,
+    /// Consecutive ticks in which every joined living player is asleep.
+    sleep_ticks: u32,
     world: World,
     clients: BTreeMap<u32, Client>,
     pending: Vec<(u32, C2S)>,
@@ -364,6 +370,7 @@ impl Server {
             spawn: [x as f64 + 0.5, y as f64, z as f64 + 0.5],
             game_time: 0,
             day_time: 0,
+            sleep_ticks: 0,
             // The simulation does not use lighting.
             world: World::with_lighting(false),
             clients: BTreeMap::new(),
@@ -387,7 +394,7 @@ impl Server {
     pub fn inventory_data(&self, id: u32) -> Option<Vec<u8>> {
         self.clients
             .get(&id)
-            .map(|c| c.inventory.to_bytes(c.health.vitals))
+            .map(|c| c.inventory.to_bytes(c.health.vitals, c.respawn))
     }
 
     fn send_inventory(&mut self, id: u32) {
@@ -780,14 +787,14 @@ impl Server {
         let pos = position
             .filter(|p| valid_position(*p))
             .unwrap_or_else(|| self.spawn());
-        let (inventory, vitals) = inventory
+        let (inventory, vitals, respawn) = inventory
             .and_then(|bytes| Inventory::from_bytes(bytes).ok())
             .unwrap_or_else(|| {
                 let inventory = match self.game_mode {
                     GameMode::Creative => Inventory::creative(),
                     GameMode::Survival => Inventory::default(),
                 };
-                (inventory, protocol::PlayerVitals::default())
+                (inventory, protocol::PlayerVitals::default(), None)
             });
         self.clients.insert(
             id,
@@ -819,6 +826,9 @@ impl Server {
                 horizontal_budget: HORIZONTAL_PER_TICK * MOVEMENT_RESERVE,
                 vertical_budget: VERTICAL_PER_TICK * MOVEMENT_RESERVE,
                 correction_tick: None,
+                respawn,
+                sleep: None,
+                pending_wake: false,
             },
         );
         self.return_crafting(id);
@@ -1249,6 +1259,7 @@ impl Server {
         for id in changed {
             self.send_inventory(id);
         }
+        self.tick_sleep();
     }
 
     fn apply(&mut self, id: u32, packet: C2S) {
@@ -1291,10 +1302,13 @@ impl Server {
         if before != after {
             self.abort_dig(id);
         }
-        let client = self.clients.get_mut(&id).unwrap();
-        if before != after || client.inventory.screen != inventory::Screen::None {
-            client.health.bow = None;
+        {
+            let client = self.clients.get_mut(&id).unwrap();
+            if before != after || client.inventory.screen != inventory::Screen::None {
+                client.health.bow = None;
+            }
         }
+        self.flush_pending_wakes();
     }
 
     fn apply_packet(&mut self, id: u32, packet: C2S) {
@@ -1399,17 +1413,25 @@ impl Server {
             }
             C2S::UseBucket { x, y, z } => self.use_bucket(id, [x, y, z]),
             C2S::UseBlock { x, y, z } => {
-                let client = &self.clients[&id];
+                let (_allowed, target, held_tool) = {
+                    let client = &self.clients[&id];
+                    let pos = [x, y, z];
+                    let allowed = client.joined
+                        && client.inventory.screen == inventory::Screen::None
+                        && self.within_reach(client.pos, pos);
+                    let target = allowed.then(|| self.world.get_block(x, y, z)).flatten();
+                    let held_tool = client
+                        .inventory
+                        .selected_stack()
+                        .and_then(|stack| items::info(stack.item))
+                        .and_then(|item| item.tool);
+                    (allowed, target, held_tool)
+                };
+                if target.is_some_and(blocks::is_bed) {
+                    self.use_bed(id, [x, y, z]);
+                    return;
+                }
                 let pos = [x, y, z];
-                let allowed = client.joined
-                    && client.inventory.screen == inventory::Screen::None
-                    && self.within_reach(client.pos, pos);
-                let target = allowed.then(|| self.world.get_block(x, y, z)).flatten();
-                let held_tool = client
-                    .inventory
-                    .selected_stack()
-                    .and_then(|stack| items::info(stack.item))
-                    .and_then(|item| item.tool);
                 let client = self.clients.get_mut(&id).unwrap();
                 client.inventory_dirty = true;
                 match target {
@@ -1531,6 +1553,7 @@ impl Server {
             C2S::Teleport { x, y, z } => {
                 self.move_player(id, [x, y, z], None);
             }
+            C2S::StopSleeping => self.stop_sleeping(id),
             C2S::SetBlock { x, y, z, state } => {
                 let old = self.world.get_block(x, y, z);
                 let survival_ok = self.game_mode == GameMode::Creative
@@ -1557,12 +1580,28 @@ impl Server {
                     self.correct_block(id, x, y, z);
                     return;
                 }
+                if blocks::is_bed(state) {
+                    self.place_bed(id, [x, y, z], state);
+                    return;
+                }
                 self.change_block(id, [x, y, z], state, true);
             }
         }
     }
 
-    fn change_block(&mut self, id: u32, [x, y, z]: [i32; 3], state: u16, drops: bool) {
+    fn change_block(&mut self, id: u32, pos: [i32; 3], state: u16, drops: bool) {
+        self.edit_block(id, pos, state, drops, true, true);
+    }
+
+    fn edit_block(
+        &mut self,
+        id: u32,
+        [x, y, z]: [i32; 3],
+        state: u16,
+        drops: bool,
+        consume: bool,
+        clear_pair: bool,
+    ) {
         if let Some(old) = self.world.set_block(x, y, z, state) {
             if old != state {
                 self.drop_block_contents([x, y, z], old);
@@ -1582,11 +1621,14 @@ impl Server {
                         if drops {
                             self.spawn_mining_drops([x, y, z], old, false);
                         }
-                    } else {
+                    } else if consume {
                         let client = self.clients.get_mut(&id).unwrap();
                         client.inventory.take_selected();
                         client.inventory_dirty = true;
                     }
+                }
+                if clear_pair && blocks::is_bed(old) {
+                    self.on_bed_removed([x, y, z], old, false);
                 }
                 self.finish_block_change([x, y, z], state, false);
             }
@@ -1637,6 +1679,9 @@ impl Server {
         self.abort_digs_at([x, y, z]);
         if drops {
             self.spawn_mining_drops([x, y, z], old, true);
+        }
+        if blocks::is_bed(old) {
+            self.on_bed_removed([x, y, z], old, true);
         }
         self.finish_block_change([x, y, z], blocks::AIR, true);
     }
@@ -1926,15 +1971,21 @@ impl Server {
     }
 
     fn respawn(&mut self, id: u32) {
-        let spawn = self.spawn();
-        let client = self.clients.get_mut(&id).unwrap();
-        if !client.joined || !client.health.vitals.dead {
+        if !self
+            .clients
+            .get(&id)
+            .is_some_and(|client| client.joined && client.health.vitals.dead)
+        {
             self.stats.packets_rejected += 1;
             return;
         }
+        let spawn = self.resolve_respawn(id);
+        let client = self.clients.get_mut(&id).unwrap();
         let last_sent = client.health.last_sent;
         client.health = health::Health::new(protocol::PlayerVitals::default(), spawn[1]);
         client.health.last_sent = last_sent;
+        client.sleep = None;
+        client.pending_wake = false;
         client.relocate(spawn, self.game_time);
         self.correct_position(id);
     }
@@ -1967,6 +2018,10 @@ impl Server {
         let survival = self.game_mode == GameMode::Survival;
         if finite && view.is_none() && client.allow_teleport {
             client.relocate(pos, self.game_time);
+            if bed::left_bed(client, pos) {
+                client.sleep = None;
+                client.pending_wake = true;
+            }
             return;
         }
         if let Some([yaw, pitch]) = view.filter(|_| {
@@ -1997,6 +2052,10 @@ impl Server {
                 if survival {
                     client.health.observe_fall(&self.world, prev, pos);
                     client.health.walk(horizontal);
+                }
+                if bed::left_bed(client, pos) {
+                    client.sleep = None;
+                    client.pending_wake = true;
                 }
                 return;
             }
@@ -2663,7 +2722,23 @@ impl Server {
                 h.u8(dig.stage.unwrap_or(255));
                 h.u8(u8::from(dig.drops));
             }
+            h.u8(u8::from(client.respawn.is_some()));
+            if let Some(point) = client.respawn {
+                for v in point {
+                    h.i32(v);
+                }
+            }
+            h.u8(u8::from(client.sleep.is_some()));
+            if let Some(rest) = client.sleep {
+                for v in rest.foot {
+                    h.i32(v);
+                }
+                for v in rest.origin {
+                    h.bytes(&v.to_bits().to_be_bytes());
+                }
+            }
         }
+        h.bytes(&self.sleep_ticks.to_be_bytes());
         h.i64(self.furnaces.len() as i64);
         for (pos, f) in &self.furnaces {
             for v in pos {
@@ -6651,13 +6726,14 @@ mod crafting_server_tests {
             let before = s.clients[&1].inventory.clone();
             let hash = s.state_hash();
             let dirty = s.clients[&1].inventory_dirty;
-            let (snapshot, vitals) = Inventory::from_bytes(&s.inventory_data(1).unwrap()).unwrap();
+            let (snapshot, vitals, _) =
+                Inventory::from_bytes(&s.inventory_data(1).unwrap()).unwrap();
             assert_eq!(s.clients[&1].inventory, before);
             assert_eq!(s.state_hash(), hash);
             assert_eq!(s.clients[&1].inventory_dirty, dirty);
             assert!(s.entities.is_empty());
             assert_eq!(snapshot, before);
-            assert_eq!(s.inventory_data(1), Some(snapshot.to_bytes(vitals)));
+            assert_eq!(s.inventory_data(1), Some(snapshot.to_bytes(vitals, None)));
         }
     }
     #[test]
@@ -6766,7 +6842,7 @@ mod crafting_server_tests {
         s.return_crafting(1);
         let position = s.client_position(1);
         let saved = s.inventory_data(1).unwrap();
-        let (inv, _) = Inventory::from_bytes(&saved).unwrap();
+        let (inv, _, _) = Inventory::from_bytes(&saved).unwrap();
         assert_eq!(inv.crafting, [None; 4]);
         assert_eq!(inv.cursor, None);
         assert_eq!(s.entities.len(), 3);

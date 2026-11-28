@@ -136,3 +136,10 @@ pattern = ["###", "# #", "###"]
 key = { "#" = "oak_planks" }
 table_only = true
 result = { item = "chest", count = 1 }
+
+[[recipes]]
+pattern = ["WWW", "PPP"]
+key = { W = "white_wool", P = "oak_planks" }
+table_only = true
+result = { item = "bed", count = 1 }
+

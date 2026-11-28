@@ -510,3 +510,23 @@ top = "chest_top"
 bottom = "chest_top"
 side = "chest_side"
 north = "chest_front"
+
+[[blocks]]
+name = "bed"
+id = 86
+tool = "axe"
+min_tier = 0
+dig_ticks = 10
+model = "bed"
+texture = "white_wool"
+states = [
+  { properties = [["facing", "north"], ["part", "foot"]] },
+  { properties = [["facing", "north"], ["part", "head"]] },
+  { properties = [["facing", "south"], ["part", "foot"]] },
+  { properties = [["facing", "south"], ["part", "head"]] },
+  { properties = [["facing", "west"], ["part", "foot"]] },
+  { properties = [["facing", "west"], ["part", "head"]] },
+  { properties = [["facing", "east"], ["part", "foot"]] },
+  { properties = [["facing", "east"], ["part", "head"]] },
+]
+

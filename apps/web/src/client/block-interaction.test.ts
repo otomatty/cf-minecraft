@@ -94,8 +94,13 @@ const world = (target = stone, adjacent = air, support = stone) => (x: number, y
 };
 
 test("WASM registry exposes contiguous state ranges, names, defaults and occlusion", () => {
-	assert.equal(registry.length, 86);
+	assert.equal(registry.length, 94);
 	assert.equal(id("chest"), 85);
+	assert.equal(id("bed"), 86);
+	assert.equal(registry[id("bed")].count, 8);
+	assert.equal(registry[id("bed")].model, "boxes");
+	assert.equal(registry[id("bed")].occludes, false);
+	assert.deepEqual(registry[id("bed")].boxes, [[[0, 0, 0], [16, 9, 16]]]);
 	assert.equal(id("water"), 13);
 	for (const [i, level] of [1, 2, 3, 4, 5, 6, 7, "falling"].entries()) {
 		const state = id(`flowing_water[level=${level}]`);
@@ -305,6 +310,31 @@ test("right-click opens a furnace unless Shift requests placement", () => {
 test("right-click opens a chest unless Shift requests placement", () => {
     assert.equal(blockInteraction("chest", false), "open");
     assert.equal(blockInteraction("chest", true), "place");
+});
+
+test("right-click uses a bed unless Shift requests placement", () => {
+    assert.equal(blockInteraction("bed", false), "open");
+    assert.equal(blockInteraction("bed", true), "place");
+});
+
+test("bed facing follows yaw and always returns the foot", () => {
+	const bed = id("bed");
+	const cases: [number, string][] = [
+		[0, "south"], [90, "west"], [180, "north"], [270, "east"],
+		[45 - 0.000001, "south"], [45, "west"], [45 + 0.000001, "west"],
+		[135 - 0.000001, "west"], [135, "north"], [135 + 0.000001, "north"],
+		[225 - 0.000001, "north"], [225, "east"], [225 + 0.000001, "east"],
+		[315 - 0.000001, "east"], [315, "south"], [315 + 0.000001, "south"],
+	];
+	for (const [yaw, facing] of cases) for (const turns of [-2, -1, 0, 1, 2]) {
+		for (const face of [1, 2, 3, 4, 5]) {
+			const edit = placementState(registry, bed, hit(face, 0.9), yaw + turns * 360, world());
+			assert.equal(edit?.state, id(`bed[facing=${facing},part=foot]`), `yaw=${yaw + turns * 360} face=${face}`);
+		}
+	}
+	for (const yaw of [NaN, Infinity, -Infinity]) {
+		assert.equal(placementState(registry, bed, hit(1), yaw, world()), null);
+	}
 });
 
 test("wheat seeds require air above either farmland state and plant at age zero", () => {

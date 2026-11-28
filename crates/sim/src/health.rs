@@ -55,6 +55,8 @@ pub(crate) struct Health {
     starve_ticks: u8,
     eating: Option<EatState>,
     pub bow: Option<BowDraw>,
+    /// Set when health falls. Cleared after sleepers are woken.
+    pub(crate) hurt: bool,
 }
 
 impl Health {
@@ -169,7 +171,12 @@ impl Health {
     }
 
     pub(crate) fn damage(&mut self, amount: u8, cause: DeathCause) {
+        let before = self.vitals.health;
+        let was_dead = self.vitals.dead;
         self.vitals.health = self.vitals.health.saturating_sub(amount);
+        if amount > 0 && (self.vitals.health < before || (self.vitals.health == 0 && !was_dead)) {
+            self.hurt = true;
+        }
         if self.vitals.health == 0 {
             self.cancel_using_item();
             self.vitals.dead = true;
@@ -409,6 +416,7 @@ impl Server {
     }
 
     pub(crate) fn finish_player_death(&mut self, id: u32) {
+        self.wake(id);
         self.abort_dig(id);
         let client = self.clients.get_mut(&id).unwrap();
         client.inventory_dirty = true;
@@ -1384,11 +1392,11 @@ mod tests {
             assert!(statuses(packets(&mut s)).contains(&dead.packet()));
 
             let mut bytes = s.inventory_data(1).unwrap();
-            assert_eq!(bytes[0], 6);
-            assert_eq!(bytes[bytes.len() - 2], 5);
+            assert_eq!(bytes[0], 7);
+            assert_eq!(bytes[256], 5);
+            assert_eq!(bytes[258], 0);
             assert_eq!(crate::Inventory::from_bytes(&bytes).unwrap().1, dead);
-            let cause = bytes.len() - 2;
-            bytes[cause] = 9;
+            bytes[256] = 9;
             assert!(crate::Inventory::from_bytes(&bytes).is_err());
             release_and_reconnect(&mut s);
             assert_eq!(vitals(&s), dead);

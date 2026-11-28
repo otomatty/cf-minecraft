@@ -97,8 +97,8 @@ test("inventory and game mode cross the server/client ABI and survive reconnect"
 	server.packet(1, client.encodeCreativeSetSlot(35, slab.id, 17)); server.tick();
 	assert.equal(server.takeOutbox().filter(p => p.data[0] === 6).length, 1);
 	const saved = server.inventoryData(1)!;
-	assert.equal(saved[0], 6);
-	assert.equal(saved.length, 258);
+	assert.equal(saved[0], 7);
+	assert.equal(saved.length, 259);
 	server.disconnect(1);
 	assert.equal(server.inventoryData(1), undefined);
 	join(saved);
@@ -114,9 +114,9 @@ test("a worn tool survives the WASM player save and inventory packet", () => {
 	server.setGameMode("survival");
 	const item = client.itemRegistry().find(i => i.name === "iron_pickaxe")!.id;
 	const damage = 217;
-	const save = new Uint8Array(258);
+	const save = new Uint8Array(259);
 	const view = new DataView(save.buffer);
-	save[0] = 6;
+	save[0] = 7;
 	view.setUint16(2, item);
 	save[4] = 1;
 	view.setUint16(5, damage);
@@ -143,7 +143,7 @@ test("returnCrafting clears transient stacks before taking a multiplayer snapsho
 	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(202), 5);
 	server.returnCrafting(1);
 	const saved = server.inventoryData(1)!;
-	assert.equal(saved[0], 6);
+	assert.equal(saved[0], 7);
 	assert.ok(saved.slice(182, 252).every(byte => byte === 0));
 	server.disconnect(1);
 	server.connect(1, false, undefined, saved);
@@ -169,7 +169,7 @@ test("crafting table screen and grid cross the WASM ABI and return before multip
 	assert.deepEqual(client.table[8], { item: 8, count: 1, damage: 0 });
 	assert.deepEqual(client.craftingResult, { item: 5, count: 4, damage: 0 });
 	const before = server.inventoryData(1)!;
-	assert.equal(before[0], 6);
+	assert.equal(before[0], 7);
 	assert.equal(new DataView(before.buffer, before.byteOffset).getUint16(247), 8);
 	server.returnCrafting(1);
 	const saved = server.inventoryData(1)!;

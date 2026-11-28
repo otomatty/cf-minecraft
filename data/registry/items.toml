@@ -490,3 +490,10 @@ name = "chest"
 id = 83
 block = "chest"
 fuel = 320
+
+[[items]]
+name = "bed"
+id = 84
+block = "bed"
+max_stack = 1
+

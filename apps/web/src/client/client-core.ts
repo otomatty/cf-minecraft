@@ -37,8 +37,10 @@ export interface ClientExports {
 	client_air(): number;
 	client_food(): number;
 	client_dead(): number;
+	client_sleeping(): number;
 	client_death_cause(): number;
 	client_enc_respawn(): number;
+	client_enc_stop_sleeping(): number;
 	client_enc_use_item(): number;
 	client_enc_stop_using_item(): number;
 	client_enc_cancel_using_item(): number;
@@ -119,7 +121,7 @@ export interface ClientExports {
 }
 
 /** Server-to-client packet ids (crates/protocol). */
-export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25, ToolBreak: 26, SheepAppearance: 27, Shear: 28, EggSpawn: 29, EggSound: 30 } as const;
+export const S2C = { Welcome: 0, ChunkData: 1, UnloadChunk: 2, BlockUpdate: 3, TimeUpdate: 4, PlayerCorrect: 5, Inventory: 6, EntitySpawn: 7, EntityMove: 8, EntityCount: 9, EntityRemove: 10, DigProgress: 11, PlayerStatus: 12, MobSpawn: 13, MobMove: 14, MobHurt: 15, ArrowSpawn: 16, ArrowMove: 17, MobFuse: 18, Chat: 19, PlayerKnockback: 20, MobBurning: 21, Explosion: 22, PlayerSpawn: 23, PlayerMove: 24, PlayerRemove: 25, ToolBreak: 26, SheepAppearance: 27, Shear: 28, EggSpawn: 29, EggSound: 30, Sleeping: 31 } as const;
 
 export const WORDS_PER_QUAD = 8;
 export const LIGHT_FRAME_BUDGET_MS = 2;
@@ -555,8 +557,10 @@ export class ClientCore {
 	get air(): number { return this.x.client_air(); }
 	get food(): number { return this.x.client_food(); }
 	get dead(): boolean { return this.x.client_dead() !== 0; }
+	get sleeping(): boolean { return this.x.client_sleeping() !== 0; }
 	get deathCause(): number { return this.x.client_death_cause(); }
 	encodeRespawn(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_respawn()); }
+	encodeStopSleeping(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_stop_sleeping()); }
 	encodeUseItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_use_item()); }
 	encodeStopUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_stop_using_item()); }
 	encodeCancelUsingItem(): Uint8Array<ArrayBuffer> { return this.out(this.x.client_enc_cancel_using_item()); }

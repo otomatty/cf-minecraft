@@ -58,12 +58,13 @@ fn registry_matches_pre_generation_snapshot() {
             BROWN_WOOL,
             BLACK_WOOL,
             CHEST,
+            BED,
             COUNT,
             LEGACY_COUNT
         ],
         [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17, 20, 21, 22, 23, 31, 39, 51, 52,
-            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 83, 84, 85, 86, 14
+            54, 62, 69, 70, 71, 74, 75, 76, 77, 78, 82, 83, 84, 85, 86, 94, 14
         ]
     );
     for state in 0..COUNT {
@@ -369,4 +370,45 @@ fn chest_is_appended_with_its_mining_fuel_and_face_metadata() {
     assert_eq!(items::mining_drop(CHEST), Some(83));
     let item = items::info(83).unwrap();
     assert_eq!((item.block, item.fuel), (Some(CHEST), Some(320)));
+}
+
+#[test]
+fn bed_is_appended_with_mining_stack_and_table_recipe() {
+    use world::items;
+
+    assert_eq!(BED, 86);
+    assert_eq!(block(BED).unwrap().count, 8);
+    let bed = info(BED);
+    assert_eq!(bed.tool, Some(items::ToolKind::Axe));
+    assert_eq!((bed.min_tier, bed.dig_ticks), (0, Some(10)));
+    assert!(!bed.occludes && bed.solid && !bed.washes_away);
+    assert_eq!(bed.opacity, 0);
+    assert!(bed
+        .tex
+        .iter()
+        .all(|index| TEXTURES[*index as usize] == "white_wool"));
+    assert_eq!(items::by_name("bed"), Some(84));
+    let item = items::info(84).unwrap();
+    assert_eq!(
+        (item.block, item.max_stack, item.fuel),
+        (Some(BED), 1, None)
+    );
+    for state in BED..BED + 8 {
+        assert_eq!(items::mining_drop(state), Some(84));
+        assert_eq!(items::for_block(state), Some(84));
+    }
+    let recipe = world::recipes::RECIPES
+        .iter()
+        .find(|recipe| recipe.item == 84)
+        .unwrap();
+    let wool = items::by_name("white_wool").unwrap();
+    let planks = items::by_name("oak_planks").unwrap();
+    assert_eq!(
+        (recipe.width, recipe.height, recipe.table_only, recipe.count),
+        (3, 2, true, 1)
+    );
+    assert_eq!(
+        recipe.ingredients,
+        [wool, wool, wool, planks, planks, planks]
+    );
 }

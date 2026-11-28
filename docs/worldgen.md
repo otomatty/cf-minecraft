@@ -185,7 +185,7 @@ pnpm check:determinism
 cargo run --release -p noise --example bench
 ```
 
-台本の現在の参照値 (seed=2026、600 ticks) は `fb44177a49e57629`。チェストの件数と内容をstate_hashに追加したことで変わった。
+台本の現在の参照値 (seed=2026、600 ticks) は `22f20ce1258b182d`。チェストの件数と内容をstate_hashに追加した時点は `fb44177a49e57629`。そこから、ベッドのリスポーン地点、寝ている状態、朝までの数えをstate_hashに加えたことで変わった。この台本ではいずれも 0。
 ノイズの `fingerprint(seed)` は別の FNV-1a 値で、既定シードでは `d5166400c68a1c45`。
 2つのシード、正負と格子境界をまたぐ座標、2D/3D と fBm の f64 ビット列を little-endian で取り込む。
 `native-server noise [seed]` と WASM の `server_noise_fingerprint` が同じプローブを使う。
@@ -1052,7 +1052,7 @@ TypeScript は `ServerCore` の薄いラッパーと、同じ WASM モジュー�
 
 外部生成が無効なら従来どおりの同期生成で、決定性は変わらない。
 新しい統計はシナリオハッシュに含めない。seed 2026 の現在の参照値は
-シナリオ `fb44177a49e57629`、ノイズ `d5166400c68a1c45`、地形 `8a5f7c2e7b0aa3dc`。チェストの件数と内容がstate_hashに入るようになり、シナリオの値が変わった。
+シナリオ `22f20ce1258b182d`、ノイズ `d5166400c68a1c45`、地形 `8a5f7c2e7b0aa3dc`。チェストの件数と内容を加えた時点は `fb44177a49e57629`。ベッドのリスポーン地点、寝ている状態、朝までの数えをstate_hashに加えたことで、シナリオの値が変わった。
 外部生成では到着時刻によってチャンク送信の tick が変わるが、同じ seed・generator・座標の内容は一致する。
 
 ### ホストからの外部生成

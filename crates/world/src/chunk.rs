@@ -328,8 +328,8 @@ mod tests {
     #[test]
     fn chunk_palettes_round_trip_appended_torch_states() {
         let mut chunk = Chunk::empty(3, -7);
-        for (x, state) in (blocks::TORCH..blocks::COUNT).enumerate() {
-            chunk.set(x, 0, 0, state);
+        for (i, state) in (blocks::TORCH..blocks::COUNT).enumerate() {
+            chunk.set(i % 16, 0, i / 16, state);
         }
         chunk.set(5, 0, 0, blocks::WHITE_WOOL);
         let bytes = chunk.to_bytes();

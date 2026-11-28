@@ -1280,7 +1280,7 @@ fn explosion_spares(state: u16) -> bool {
     }
 }
 
-fn explosion_drops(seed: i64, time: i64, [x, y, z]: [i32; 3]) -> bool {
+pub(crate) fn explosion_drops(seed: i64, time: i64, [x, y, z]: [i32; 3]) -> bool {
     let bits = (seed as u64)
         ^ (time as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
         ^ (x as u32 as u64).wrapping_mul(0xd1b5_4a32_d192_ed03)
@@ -1918,7 +1918,7 @@ impl Server {
         }
     }
 
-    fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
+    pub(crate) fn apply_explosion(&mut self, center: [f64; 3]) -> Vec<u32> {
         let existing_items: Vec<_> = self.entities.keys().copied().collect();
         self.send_explosion(center);
 
